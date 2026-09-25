@@ -75,7 +75,7 @@ async def _load(session: AsyncSession, operation: NebiusApplicationOperation,
                 or any(type(envelope["identity"][key]) is not type(value) for key, value in identity.items())):
             raise ValueError("wrong material identity")
         return _validate(envelope["material"], operation)
-    except (SecretStoreError, ValueError, TypeError, KeyError):
+    except (SecretStoreError, ValueError, TypeError, KeyError, RecursionError):
         raise ManagementError("application_material_unavailable", 503) from None
 
 
