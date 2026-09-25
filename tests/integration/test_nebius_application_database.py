@@ -303,3 +303,19 @@ def test_raw_manager_calls_cannot_use_stale_snapshots_or_leak_secrets(database_a
         with pytest.raises(ApplicationDatabaseAccessError, match="credential") as error:
             access.grant(app, incarnation, 1, token_urlsafe(48))
         assert secret not in str(error.value)
+
+
+@pytest.mark.parametrize("grant", ["schema", "private_table", "membership"])
+def test_installer_refuses_manager_authority_outside_routine_interface(database_access, grant):
+    admin, url, _, data_id = database_access
+    manager = make_url(url).username
+    if grant == "schema":
+        admin.execute(sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(manager)))
+    elif grant == "private_table":
+        admin.execute(sql.SQL("GRANT UPDATE ON loom_application_access.applications TO {}").format(sql.Identifier(manager)))
+    else:
+        role = "extra_" + uuid4().hex
+        admin.execute(sql.SQL("CREATE ROLE {} NOLOGIN; GRANT {} TO {}").format(
+            sql.Identifier(role), sql.Identifier(role), sql.Identifier(manager)))
+    with pytest.raises(ApplicationDatabaseAccessError, match=r"manager_identity|private_authority"):
+        install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)

@@ -259,7 +259,16 @@ def install_application_database_access(
         with connection.transaction():
             if connection.execute("SELECT current_user=session_user AND rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user").fetchone() != (True,):
                 raise ApplicationDatabaseAccessError("application_database_administrator_required")
-            if connection.execute("SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND rolcanlogin FROM pg_catalog.pg_roles WHERE rolname=%s", (manager_role,)).fetchone() != (True,):
+            if connection.execute("""
+                SELECT NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole
+                    AND NOT r.rolreplication AND NOT r.rolbypassrls AND r.rolcanlogin
+                    AND NOT pg_catalog.has_schema_privilege(r.oid,'public','CREATE')
+                    AND NOT pg_catalog.has_database_privilege(r.oid,current_database(),'CREATE')
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid OR roleid=r.oid)
+                    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace='public'::regnamespace
+                        AND c.relkind IN ('r','p','v','m') AND pg_catalog.has_table_privilege(r.oid,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRIGGER,TRUNCATE,REFERENCES'))
+                FROM pg_catalog.pg_roles r WHERE r.rolname=%s
+            """, (manager_role,)).fetchone() != (True,):
                 raise ApplicationDatabaseAccessError("application_database_manager_identity")
             expected = (data_environment_id, manager_role, runtime)
             namespace = connection.execute("SELECT pg_catalog.to_regnamespace(%s)", (_SCHEMA,)).fetchone()
@@ -287,6 +296,7 @@ def install_application_database_access(
                     connection.execute(sql.SQL("CREATE FUNCTION {}.{}({}) RETURNS {} LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS {}").format(
                         sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(arguments), sql.SQL(result), sql.Literal(body)))
                 connection.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM PUBLIC")
+                connection.execute(sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM {}").format(sql.Identifier(manager_role)))
                 connection.execute(sql.SQL("GRANT USAGE ON SCHEMA loom_application_access TO {}").format(sql.Identifier(manager_role)))
                 for name in ("grant_access", "revoke_access", "drain_access"):
                     arguments = "uuid,uuid,uuid,bigint" + (",text" if name == "grant_access" else "")
@@ -295,6 +305,12 @@ def install_application_database_access(
             observed = connection.execute("SELECT data_environment_id,manager_role,runtime_role FROM loom_application_access.binding WHERE manager_oid=pg_catalog.to_regrole(manager_role)::oid AND runtime_oid=pg_catalog.to_regrole(runtime_role)::oid AND database_oid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database()) AND system_identifier=(SELECT system_identifier::text FROM pg_catalog.pg_control_system())").fetchone()
             if observed != expected:
                 raise ApplicationDatabaseAccessError("application_database_binding")
+            if connection.execute("""
+                SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c,
+                    LATERAL pg_catalog.aclexplode(c.relacl) a
+                    WHERE c.relnamespace='loom_application_access'::regnamespace AND a.grantee<>c.relowner)
+            """).fetchone() != (False,):
+                raise ApplicationDatabaseAccessError("application_database_private_authority")
             for name, (_, _, body) in _ROUTINES.items():
                 if connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace=pg_catalog.to_regnamespace(%s) AND proname=%s", (_SCHEMA, name)).fetchall() != [(body, True, ["search_path=pg_catalog, pg_temp"])]:
                     raise ApplicationDatabaseAccessError("application_database_installation_drift")
