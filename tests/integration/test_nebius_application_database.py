@@ -319,3 +319,30 @@ def test_installer_refuses_manager_authority_outside_routine_interface(database_
             sql.Identifier(role), sql.Identifier(role), sql.Identifier(manager)))
     with pytest.raises(ApplicationDatabaseAccessError, match=r"manager_identity|private_authority"):
         install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+
+
+def test_raw_sql_drain_requires_committed_retirement_before_irreversible_termination(database_access):
+    admin, url, access, data_id = database_access
+    app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
+    role = access.grant(app, incarnation, 1, password)
+    arguments = (data_id, app, incarnation, 1)
+    with login(url, role, password) as existing, psycopg.connect(url, autocommit=True) as manager:
+        existing.execute("INSERT INTO public.shared_records(value) VALUES ('retained')")
+        with pytest.raises(psycopg.errors.RaiseException, match="retirement_uncommitted"):
+            with manager.transaction():
+                manager.execute("SELECT loom_application_access.revoke_access(%s,%s,%s,%s)", arguments)
+                manager.execute("SELECT loom_application_access.drain_access(%s,%s,%s,%s)", arguments)
+        # Failed proof must not kill a client, and the failed transaction rolls
+        # back its credential changes. It never emits a successful drain result.
+        assert existing.execute("SELECT value FROM public.shared_records").fetchall() == [("retained",)]
+        assert admin.execute("SELECT retired_through FROM loom_application_access.applications WHERE application_id=%s", (app,)).fetchone() == (0,)
+        access.revoke(app, incarnation, 1)  # Commit in an earlier transaction.
+        manager.execute("BEGIN")
+        assert manager.execute("SELECT loom_application_access.drain_access(%s,%s,%s,%s)", arguments).fetchone() == (True,)
+        manager.execute("ROLLBACK")  # Cannot undo the earlier revocation.
+        with pytest.raises(psycopg.OperationalError):
+            existing.execute("SELECT 1")
+        with pytest.raises(psycopg.OperationalError):
+            login(url, role, password)
+        with pytest.raises(ApplicationDatabaseAccessError, match="retired"):
+            access.grant(app, incarnation, 1, password)
