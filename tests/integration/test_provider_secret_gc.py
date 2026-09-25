@@ -206,12 +206,31 @@ def test_migration_downgrade_upgrade_and_reference_inventory(isolated_migration_
                 SELECT tgrelid::regclass::text FROM pg_trigger
                 WHERE tgname LIKE '%_provider_secret_attachment'
             """)).scalars())
-        expected = {table.name for table in Base.metadata.tables.values()
-                    if any(c.name.endswith("secret_ref") or c.name == "secret_refs"
-                           or c.name == "encrypted_api_key_ref" for c in table.columns)}
-        assert actual == expected
+        # This is migration0156's historical inventory, not today's ORM schema.
+        assert actual == {"provider_connections", "dev_instances", "task_image_build_projections",
+                          "task_image_build_session_generations", "pipeline_stage_runs"}
         indexes = {index["name"] for index in inspect(engine).get_indexes("secrets")}
         assert "secrets_provider_retired_idx" in indexes
+    finally:
+        engine.dispose()
+
+
+def test_current_secret_consumers_have_attachment_integrity(isolated_migration_postgres_url):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.connect() as connection:
+            guarded = {(table, field.decode()) for table, args in connection.execute(text("""
+                SELECT tgrelid::regclass::text, tgargs FROM pg_trigger
+                WHERE tgname LIKE '%_provider_secret_attachment'
+            """)) for field in bytes(args).split(b"\0") if field}
+        inspector = inspect(engine)
+        for table in Base.metadata.tables.values():
+            for constraint in inspector.get_foreign_keys(table.name):
+                if constraint["referred_table"] == "secrets" and constraint["referred_columns"] == ["ref"]:
+                    guarded.update((table.name, column) for column in constraint["constrained_columns"])
+        expected = {(table.name, column.name) for table in Base.metadata.tables.values() for column in table.columns
+                    if column.name.endswith("secret_ref") or column.name in {"secret_refs", "encrypted_api_key_ref"}}
+        assert guarded == expected
     finally:
         engine.dispose()
 

@@ -382,7 +382,9 @@ the existing management `LocalEncryptedSecretStore` before a trusted lifecycle
 caller prepares or dispatches external grants or Kubernetes Secret delivery.
 Migration0163 atomically links each operation to its unique encrypted record;
 foreign keys retain both the operation and ciphertext, and downgrade refuses to
-erase material history. Plans and public operation progress contain neither raw
+erase material history. Provider-secret collection recognizes these references,
+preserving any referenced retired key without aborting unrelated collection.
+Plans and public operation progress contain neither raw
 material nor secret references. Management's encryption key remains separate from
 the shared-development keyring delivered to APIs.
 
