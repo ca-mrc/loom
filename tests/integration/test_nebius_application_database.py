@@ -96,6 +96,8 @@ def test_retirement_fences_delayed_grants_and_retires_only_own_connections(datab
             access.grant(app, incarnation, 1, password)
         with pytest.raises(psycopg.OperationalError):
             login(url, role, password)
+        with pytest.raises(ApplicationDatabaseAccessError, match="previous_access_active"):
+            access.grant(app, incarnation, 2, token_urlsafe(48))
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             old.execute("INSERT INTO public.shared_records(value) VALUES ('late')")
         assert access.drain(app, incarnation, 1)
@@ -235,3 +237,22 @@ def test_retirement_does_not_adopt_replaced_generation_role(database_access):
         access.revoke(app, incarnation, 1)
     assert admin.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (role,)).fetchone() == (True,)
     assert admin.execute("SELECT retired_through FROM loom_application_access.applications WHERE application_id=%s", (app,)).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("permission", ["table", "column", "schema", "runtime_owner"])
+def test_retirement_never_proves_a_login_with_residual_data_privileges_is_safe(database_access, permission):
+    admin, _, access, _ = database_access
+    app, incarnation = uuid4(), uuid4()
+    role = access.grant(app, incarnation, 1, token_urlsafe(48))
+    target = role
+    if permission == "runtime_owner":
+        target = admin.execute("SELECT runtime_role FROM loom_application_access.binding").fetchone()[0]
+    statement = {
+        "table": "GRANT SELECT ON public.shared_records TO {}",
+        "column": "GRANT SELECT (value) ON public.shared_records TO {}",
+        "schema": "GRANT CREATE ON SCHEMA public TO {}",
+        "runtime_owner": "ALTER TABLE public.shared_records OWNER TO {}",
+    }[permission]
+    admin.execute(sql.SQL(statement).format(sql.Identifier(target)))
+    with pytest.raises(ApplicationDatabaseAccessError, match="role_identity"):
+        access.revoke(app, incarnation, 1)
