@@ -56,6 +56,15 @@ DECLARE v_binding loom_application_access.binding%ROWTYPE; v_incarnation uuid;
 BEGIN
     SELECT * INTO STRICT v_binding FROM loom_application_access.binding;
     IF session_user<>v_binding.manager_role OR p_data IS DISTINCT FROM v_binding.data_environment_id
+       OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE oid=v_binding.manager_oid
+                      AND rolname=session_user AND NOT rolsuper AND NOT rolcreatedb
+                      AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls)
+       OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_authid WHERE oid=v_binding.runtime_oid
+                      AND rolname=v_binding.runtime_role AND NOT rolcanlogin AND rolpassword IS NULL
+                      AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole
+                      AND NOT rolreplication AND NOT rolbypassrls AND NOT rolinherit)
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members
+                  WHERE member IN (v_binding.runtime_oid,v_binding.manager_oid))
        OR v_binding.database_oid<>(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database())
        OR v_binding.system_identifier<>(SELECT system_identifier::text FROM pg_catalog.pg_control_system())
        OR p_app IS NULL OR p_incarnation IS NULL OR p_generation IS NULL OR p_generation<1
@@ -239,7 +248,8 @@ def install_application_database_access(
                     CREATE TABLE loom_application_access.binding(
                         singleton boolean PRIMARY KEY DEFAULT true CHECK(singleton),
                         data_environment_id uuid NOT NULL, manager_role text NOT NULL,
-                        runtime_role text NOT NULL, database_oid oid NOT NULL, system_identifier text NOT NULL);
+                        manager_oid oid NOT NULL, runtime_role text NOT NULL, runtime_oid oid NOT NULL,
+                        database_oid oid NOT NULL, system_identifier text NOT NULL);
                     CREATE TABLE loom_application_access.applications(
                         application_id uuid PRIMARY KEY, incarnation uuid UNIQUE NOT NULL,
                         retired_through bigint NOT NULL DEFAULT 0 CHECK(retired_through>=0));
@@ -249,7 +259,7 @@ def install_application_database_access(
                         role_oid oid UNIQUE NOT NULL, password_sha256 text NOT NULL, verifier_sha256 text NOT NULL,
                         retired boolean NOT NULL DEFAULT false, PRIMARY KEY(application_id,generation));
                 """)
-                connection.execute("INSERT INTO loom_application_access.binding(data_environment_id,manager_role,runtime_role,database_oid,system_identifier) SELECT %s,%s,%s,d.oid,s.system_identifier::text FROM pg_catalog.pg_database d CROSS JOIN pg_catalog.pg_control_system() s WHERE d.datname=current_database()", expected)
+                connection.execute("INSERT INTO loom_application_access.binding(data_environment_id,manager_role,runtime_role,manager_oid,runtime_oid,database_oid,system_identifier) SELECT %s,%s,%s,pg_catalog.to_regrole(%s)::oid,pg_catalog.to_regrole(%s)::oid,d.oid,s.system_identifier::text FROM pg_catalog.pg_database d CROSS JOIN pg_catalog.pg_control_system() s WHERE d.datname=current_database()", (*expected, manager_role, runtime))
                 for name, (arguments, result, body) in _ROUTINES.items():
                     connection.execute(sql.SQL("CREATE FUNCTION {}.{}({}) RETURNS {} LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS {}").format(
                         sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(arguments), sql.SQL(result), sql.Literal(body)))
@@ -259,7 +269,7 @@ def install_application_database_access(
                     arguments = "uuid,uuid,uuid,bigint" + (",text" if name == "grant_access" else "")
                     connection.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {}.{}({}) TO {}").format(
                         sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(arguments), sql.Identifier(manager_role)))
-            observed = connection.execute("SELECT data_environment_id,manager_role,runtime_role FROM loom_application_access.binding WHERE database_oid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database()) AND system_identifier=(SELECT system_identifier::text FROM pg_catalog.pg_control_system())").fetchone()
+            observed = connection.execute("SELECT data_environment_id,manager_role,runtime_role FROM loom_application_access.binding WHERE manager_oid=pg_catalog.to_regrole(manager_role)::oid AND runtime_oid=pg_catalog.to_regrole(runtime_role)::oid AND database_oid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database()) AND system_identifier=(SELECT system_identifier::text FROM pg_catalog.pg_control_system())").fetchone()
             if observed != expected:
                 raise ApplicationDatabaseAccessError("application_database_binding")
             for name, (_, _, body) in _ROUTINES.items():
