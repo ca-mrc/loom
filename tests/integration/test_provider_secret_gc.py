@@ -21,6 +21,7 @@ from loom_service.provider_secret_gc import (
     retire_provider_secret,
     run_loop,
 )
+from tests.integration.test_nebius_application_effect_migration import operation
 
 KEY = bytes(range(32))
 OLD = datetime.now(UTC) - timedelta(days=2)
@@ -213,6 +214,25 @@ def test_migration_downgrade_upgrade_and_reference_inventory(isolated_migration_
         assert "secrets_provider_retired_idx" in indexes
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retired_secret_with_application_material_reference_is_retained(factory):
+    from loom.db.schema import NebiusApplicationMaterial
+
+    async with factory.begin() as session:
+        ref, _ = await seed(session, retired=OLD, deleted=True)
+        owner = await (await session.connection()).run_sync(operation)
+        session.add(NebiusApplicationMaterial(operation_id=owner, secret_ref=ref))
+    # Native FK protection alone prevents deletion but would abort every GC pass.
+    # The collector must recognize this consumer and still reclaim another key.
+    async with factory.begin() as session:
+        unreferenced, _ = await seed(session, retired=OLD, deleted=True)
+    async with factory.begin() as session:
+        assert await collect_provider_secrets(session) == 1
+    async with factory() as session:
+        assert await session.get(Secret, ref) is not None
+        assert await session.get(Secret, unreferenced) is None
 
 
 @pytest.mark.asyncio
