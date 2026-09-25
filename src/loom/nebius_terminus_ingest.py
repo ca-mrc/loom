@@ -188,9 +188,11 @@ def adapt_bundle_for_nebius_terminus(
         environment.get("network_policies_supported") != ["gateway-only"]
         or environment.get("baseline_network_policy") != {"kind": "gateway-only"}
     )
-    if (environment.get("baseline_network_policy") or {}).get("kind") == "web-allowlist":
-        # Admission validates the exact destinations; preparation must retain
-        # the declared network requirement for the runtime profile to enforce.
+    if (environment.get("baseline_network_policy") or {}).get("kind") in {
+        "web-allowlist", "public-web",
+    }:
+        # Admission validates the declared dialer policy. Do not replace an
+        # exact host list or explicit public HTTP(S) with gateway-only.
         network_forced = False
     else:
         environment["network_policies_supported"] = ["gateway-only"]

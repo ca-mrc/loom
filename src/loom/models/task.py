@@ -354,7 +354,7 @@ class TaskConfig(BaseModel):
                 or self.environment.service_lifecycle is not None
                 or any(sidecar.fixture for sidecar in self.environment.sidecars)
                 or self.environment.preserve_acls
-                or self.environment.baseline_network_policy.kind == "web-allowlist"):
+                or self.environment.baseline_network_policy.kind in {"web-allowlist", "public-web"}):
             raise ValueError("declared sandbox capabilities require automatic native execution")
 
         from loom.execution_contract import workload_requirements_from_task

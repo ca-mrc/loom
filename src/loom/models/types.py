@@ -27,7 +27,9 @@ MultiStepRewardStrategy = Literal["mean", "min", "weighted", "final"]
 ResourceMode = Literal["auto", "limit", "guarantee"]
 
 # Capability-axis tag for NetworkPolicy. Matches NetworkPolicy subclass `kind` field.
-NetworkPolicyKind = Literal["public", "no-network", "gateway-only", "allowlist", "web-allowlist"]
+NetworkPolicyKind = Literal[
+    "public", "no-network", "gateway-only", "allowlist", "web-allowlist", "public-web",
+]
 
 # Logging level (spec §7.2).
 LogLevel = Literal["debug", "info", "warn", "error", "fatal"]

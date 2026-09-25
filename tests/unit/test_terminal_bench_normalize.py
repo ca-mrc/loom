@@ -114,6 +114,7 @@ class TestNormalizeMapping:
         assert cfg.environment.environment == {
             "NATIVE_ENV": "preserve-supported-values",
         }
+        assert cfg.environment.baseline_network_policy.kind == "public-web"
         assert cfg.agent.name == "oracle"
         assert cfg.agent.timeout_sec == 900.0
         assert cfg.verifier.name == "script"
@@ -229,6 +230,36 @@ class TestNormalizeMapping:
 
         assert cfg.environment.network_policies_supported == frozenset({"no-network"})
         assert cfg.environment.baseline_network_policy.kind == "no-network"
+
+    def test_native_tb21_maps_public_network_mode_to_public_web(self) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "task": {"name": "terminal-bench/online"},
+            "environment": {
+                "docker_image": "example/tb21:rev6",
+                "network_mode": "public",
+            },
+        }
+        cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
+        assert cfg.environment.baseline_network_policy.kind == "public-web"
+        assert cfg.environment.network_policies_supported == frozenset({"public-web"})
+
+    def test_native_tb21_keeps_an_explicit_web_allowlist(self) -> None:
+        raw = {
+            "schema_version": "1.1",
+            "task": {"name": "terminal-bench/packages"},
+            "environment": {
+                "docker_image": "example/tb21:rev6",
+                "allow_internet": True,
+                "network_policies_supported": ["web-allowlist"],
+                "baseline_network_policy": {
+                    "kind": "web-allowlist",
+                    "destinations": [{"host": "registry.npmjs.org", "protocol": "https"}],
+                },
+            },
+        }
+        cfg = TaskConfig.model_validate(normalize_terminal_bench_task_toml(raw))
+        assert cfg.environment.baseline_network_policy.kind == "web-allowlist"
 
     def test_native_tb21_appends_verifier_artifact_glob_without_replacing_source_patterns(
         self,

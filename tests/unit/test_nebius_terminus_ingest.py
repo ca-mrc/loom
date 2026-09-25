@@ -231,6 +231,9 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     adapted, stats = adapt_bundle_for_nebius_terminus(staged, normalized)
     assert adapted["verifier"]["args"]["script_path"] == VERIFIER_SCRIPT_PATH
     assert adapted["environment"]["cpu_arch"] == "x86_64"
+    assert adapted["environment"]["baseline_network_policy"] == {"kind": "public-web"}
+    assert adapted["environment"]["network_policies_supported"] == ["public-web"]
+    assert not stats.network_forced_gateway_only
     assert adapted["environment"]["user"] == "root"
     assert adapted["verifier"]["user"] == "root"
     assert stats.cpu_arch_forced
@@ -239,6 +242,34 @@ def test_adapt_after_normalize_fixes_absolute_verifier_path(tmp_path: Path) -> N
     assert adapted.get("steps") == [{"name": "main"}]
     reasons = preflight_nebius_terminus_admission(adapted, _SEI)
     assert reasons == ()
+
+
+def test_adapt_keeps_no_internet_off_the_dialer(tmp_path: Path) -> None:
+    staged = tmp_path / "bundle"
+    staged.mkdir()
+    _write_runtime_inputs(staged)
+    raw = {
+        "schema_version": "1.1",
+        "task": {"name": "terminal-bench/offline"},
+        "environment": {
+            "dockerfile": "environment/Dockerfile",
+            "docker_build_context": "environment",
+            "cpus": 1,
+            "memory_mb": 2048,
+            "storage_mb": 4096,
+            "user": "root",
+            "allow_internet": False,
+        },
+        "verifier": {"timeout_sec": 100.0, "user": "root"},
+        "agent": {"timeout_sec": 100.0},
+    }
+    adapted, stats = adapt_bundle_for_nebius_terminus(
+        staged, normalize_terminal_bench_task_toml(raw),
+    )
+    assert adapted["environment"]["baseline_network_policy"] == {"kind": "gateway-only"}
+    assert stats.network_forced_gateway_only
+    assert "public-web" not in str(adapted["environment"])
+    assert preflight_nebius_terminus_admission(adapted, _SEI) == ()
 
 
 def test_preflight_rejects_unadapted_harbor_config(tmp_path: Path) -> None:

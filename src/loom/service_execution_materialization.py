@@ -46,7 +46,7 @@ from loom.execution_runtime_contract import (
     SidecarContainerV1,
     TaskExecutionResourceRequestsV1,
 )
-from loom.models.networking import WebAllowlist
+from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
@@ -411,7 +411,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist"}:
+    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
         (set(env.environment) - ({"HOME"} if terminus else set()))
@@ -536,7 +536,7 @@ def compile_service_execution_plan(
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     terminus = trial.agent_name == "terminus-2"
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
@@ -642,11 +642,10 @@ def compile_service_execution_plan(
             required=True,
         ),
     )
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         output_declarations = (TASK_EGRESS_OUTPUT, *output_declarations)
     return ExecutionRuntimePlanV1(
-        task_egress=(task.environment.baseline_network_policy
-                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
         candidate_sha=profile.candidate_sha,
         task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity,
@@ -768,7 +767,7 @@ def runtime_profile_rejections(
             return ("guest_runtime_volume_too_small",)
         if not profile.supports_task_identity:
             return ("task_identity_runtime_unavailable",)
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         return ("task_egress_runtime_unavailable",)
     if trial.agent_version is not None and (
         trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
@@ -903,7 +902,7 @@ def _compile_terminus_plan(
             ))
     if task_image_materialization_id is None:
         published_refs.add(env.docker_image)
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         outputs.insert(0, TASK_EGRESS_OUTPUT)
     controller_resources = (ContainerResourcesV1(
         cpu_millis=profile.controller_resources.cpu_millis,
@@ -926,8 +925,7 @@ def _compile_terminus_plan(
                 }),
             })
     return ExecutionRuntimePlanV1(
-        task_egress=(task.environment.baseline_network_policy
-                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=(nebius_guest_execution_class(
             supports_task_web_egress=profile.supports_task_web_egress,

@@ -137,7 +137,7 @@ type nodeResourceAllocation struct {
 
 type plan struct {
 	NodeResourceAllocation     *nodeResourceAllocation    `json:"node_resource_allocation,omitempty"`
-	TaskEgress                 *webAllowlist              `json:"task_egress,omitempty"`
+	TaskEgress                 *storedTaskEgress          `json:"task_egress,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
 	TaskRevisionSHA256         string                     `json:"task_revision_sha256"`

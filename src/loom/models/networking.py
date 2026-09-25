@@ -68,7 +68,27 @@ class WebAllowlist(_BasePolicy):
         return self
 
 
+class PublicWeb(_BasePolicy):
+    """Public HTTP and HTTPS through the gateway dialer.
+
+    This is not Docker ``Public``. The execution pod still has no route to
+    the public internet; the gateway dials port 80 or 443 after the public
+    address checks.
+    """
+
+    kind: Literal["public-web"] = "public-web"
+
+
 NetworkPolicy = Annotated[
-    Public | NoNetwork | GatewayOnly | Allowlist | WebAllowlist,
+    Public | NoNetwork | GatewayOnly | Allowlist | WebAllowlist | PublicWeb,
     Field(discriminator="kind"),
 ]
+
+TaskHttpEgress = Annotated[WebAllowlist | PublicWeb, Field(discriminator="kind")]
+
+
+def hosted_http_egress(policy: NetworkPolicy) -> WebAllowlist | PublicWeb | None:
+    """Return the dialer policy for a hosted task, or None when downloads stay off."""
+    if isinstance(policy, (WebAllowlist, PublicWeb)):
+        return policy
+    return None

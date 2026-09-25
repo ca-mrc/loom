@@ -243,20 +243,26 @@ def _declared_runtime_requirements(raw: dict[str, Any], report: TaskCompatibilit
                   "service_lifecycle_ready")
     policy = env.get("baseline_network_policy")
     preserved_web = isinstance(policy, dict) and policy.get("kind") == "web-allowlist" and env.get("allow_internet") is not False
-    if env.get("allow_internet") is True and not preserved_web:
-        add("runtime_egress", "environment.allow_internet",
-            "Unrestricted internet access is declared; this preparation path only retains an explicit web-allowlist or Gateway networking.", 2048)
+    declared_public_web = (
+        (isinstance(policy, dict) and policy.get("kind") == "public-web")
+        or env.get("allow_internet") is True
+        or env.get("network_mode") == "public"
+    ) and env.get("allow_internet") is not False and not (isinstance(policy, dict) and policy.get("kind") == "no-network")
     if env.get("allow_internet") is False:
         add("network_policy_change", "environment.allow_internet", "No-network is declared; profile enables Gateway networking.", 2048)
     if preserved_web:
         readiness("runtime_egress", "environment.baseline_network_policy",
                   "The exact HTTP/HTTPS destination allowlist is preserved; runtime enforcement needs deployment qualification.",
                   "supports_task_web_egress")
+    elif declared_public_web:
+        readiness("runtime_egress", "environment.allow_internet",
+                  "Public HTTP and HTTPS stay on the gateway dialer; runtime enforcement needs deployment qualification.",
+                  "supports_task_web_egress")
     elif isinstance(policy, dict) and policy.get("kind") != "gateway-only":
         add("runtime_egress", "environment.baseline_network_policy",
             "This network policy has no supported preparation mapping; adaptation would replace it with Gateway networking.", 2048)
     policies = env.get("network_policies_supported")
-    if isinstance(policies, list) and policies != ["gateway-only"] and not preserved_web:
+    if isinstance(policies, list) and policies != ["gateway-only"] and not preserved_web and not declared_public_web:
         add("network_policy_change", "environment.network_policies_supported", "Profile replaces the declared supported policies.", 2048)
     if env.get("cpu_arch", env.get("architecture", "x86_64")) not in ("x86_64", "amd64", "any"):
         add("architecture", "environment.cpu_arch", "Declared architecture differs from this x86_64 execution profile.", 2051)

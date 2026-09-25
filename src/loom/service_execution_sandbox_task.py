@@ -29,7 +29,7 @@ from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.models.capabilities import Capabilities
-from loom.models.networking import WebAllowlist
+from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
@@ -108,7 +108,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         from urllib.parse import urlsplit
 
         proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
@@ -123,7 +123,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
             os="linux", cpu_arch="x86_64", gpu_vendor="none",
-            network_policies=frozenset({"gateway-only", "web-allowlist"}), dynamic_network_policy=False,
+            network_policies=frozenset({"gateway-only", "web-allowlist", "public-web"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
         network_policy=task.environment.baseline_network_policy,
