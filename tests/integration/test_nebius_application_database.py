@@ -146,14 +146,25 @@ def test_grant_replay_does_not_rotate_unknown_or_changed_credentials(database_ac
     assert access.drain(app, incarnation, 1)
 
 
-def test_concurrent_grant_replay_has_one_role_and_revocation_wins(database_access):
+def test_concurrent_grant_replay_has_one_role_and_revocation_wins(database_access, monkeypatch):
+    from loom import nebius_application_database as implementation
+    original_failure = implementation._failure
+    diagnostics = []
+    def diagnose(exc):
+        diagnostics.append((type(exc).__name__, exc.sqlstate, exc.diag.constraint_name))
+        return original_failure(exc)
+    monkeypatch.setattr(implementation, "_failure", diagnose)
     _, url, access, data_id = database_access
     app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
     def grant():
         with psycopg.connect(url, autocommit=True) as connection:
             return ApplicationDatabaseAccess(connection, data_id).grant(app, incarnation, 1, password)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        roles = list(pool.map(lambda _: grant(), range(2)))
+        results = [pool.submit(grant) for _ in range(2)]
+        for result in results:
+            if result.exception() is not None:
+                pytest.fail(f"concurrent grant failed: {diagnostics}", pytrace=False)
+        roles = [result.result() for result in results]
     assert roles[0] == roles[1]
     def revoke():
         with psycopg.connect(url, autocommit=True) as connection:
@@ -189,3 +200,38 @@ def test_install_replay_preserves_credentials_and_rejects_wrong_binding(database
     assert access.grant(app, incarnation, 1, password) == role
     with pytest.raises(ApplicationDatabaseAccessError, match="binding"):
         install_application_database_access(admin, data_environment_id=uuid4(), manager_role=manager)
+
+
+@pytest.mark.parametrize("drift", ["runtime_privilege", "runtime_replacement", "manager_replacement"])
+def test_provider_rejects_replaced_or_privileged_shared_identities(database_access, drift):
+    admin, url, access, data_id = database_access
+    runtime = admin.execute("SELECT runtime_role FROM loom_application_access.binding").fetchone()[0]
+    if drift == "runtime_privilege":
+        admin.execute(sql.SQL("ALTER ROLE {} CREATEDB").format(sql.Identifier(runtime)))
+    elif drift == "runtime_replacement":
+        admin.execute(sql.SQL("DROP OWNED BY {}; DROP ROLE {}; CREATE ROLE {} NOLOGIN NOINHERIT").format(
+            *[sql.Identifier(runtime)] * 3))
+    else:
+        manager = make_url(url).username
+        admin.execute(sql.SQL("DROP OWNED BY {}; DROP ROLE {}; CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+            *[sql.Identifier(manager)] * 3, sql.Literal(make_url(url).password)))
+        admin.execute(sql.SQL("GRANT USAGE ON SCHEMA loom_application_access TO {}; GRANT EXECUTE ON FUNCTION loom_application_access.grant_access(uuid,uuid,uuid,bigint,text) TO {}").format(
+            *[sql.Identifier(manager)] * 2))
+        with psycopg.connect(url, autocommit=True) as replacement:
+            with pytest.raises(ApplicationDatabaseAccessError, match="identity"):
+                ApplicationDatabaseAccess(replacement, data_id).grant(uuid4(), uuid4(), 1, token_urlsafe(48))
+        return
+    with pytest.raises(ApplicationDatabaseAccessError, match="identity"):
+        access.grant(uuid4(), uuid4(), 1, token_urlsafe(48))
+
+
+def test_retirement_does_not_adopt_replaced_generation_role(database_access):
+    admin, _, access, _ = database_access
+    app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
+    role = access.grant(app, incarnation, 1, password)
+    admin.execute(sql.SQL("DROP OWNED BY {}; DROP ROLE {}; CREATE ROLE {} LOGIN").format(
+        *[sql.Identifier(role)] * 3))
+    with pytest.raises(ApplicationDatabaseAccessError, match="role_identity"):
+        access.revoke(app, incarnation, 1)
+    assert admin.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (role,)).fetchone() == (True,)
+    assert admin.execute("SELECT retired_through FROM loom_application_access.applications WHERE application_id=%s", (app,)).fetchone() == (0,)
