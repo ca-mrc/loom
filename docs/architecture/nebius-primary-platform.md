@@ -340,6 +340,39 @@ CREATE has no namespace-UID precondition: readback detects namespace replacement
 but does not claim to fence a privileged external administrator replacing it.
 The application manager itself has no namespace replacement/delete authority.
 
+### Shared application database access
+
+`loom.nebius_application_database` supplies a protected shared-side credential
+interface, not an installed lifecycle worker. Its administrator-installed private
+SQL schema binds one development data UUID, database identity and dedicated manager
+login. That ordinary manager can invoke the credential routines but cannot perform
+general role/schema administration or write the private records directly.
+
+Each application incarnation/access generation gets a separate ordinary login.
+PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
+and `ADMIN FALSE`; the login cannot assume the common runtime role. The common
+role has no schema ownership/DDL or migration-head writes. It is separate from
+the historical service role. Protected shared migrations must reapply its grants
+for new tables. Developer-controlled APIs remain trusted development code with
+shared-data DML, not mutually adversarial database tenants.
+
+Grant/revoke serialize on a private application row. A committed monotonic
+revocation record prevents an earlier delayed grant from reopening retired access,
+including a generation that had never finished provisioning. Revocation removes
+LOGIN, password and membership without deleting users, tasks or data. A separate
+committed call terminates existing connections and checks their absence; successor
+access waits for predecessor connections to disappear. `NOLOGIN` alone is never
+retirement evidence. An authentication already in flight may outlive a backend
+snapshot, but after revocation it has no shared runtime membership or data grants.
+
+The interface preserves exact role OIDs, rejects role replacement/privilege drift,
+and never rotates an unknown credential on replay. PUBLIC data privileges that
+would defeat revocation are rejected. Private records retain only credential
+fingerprints, not raw passwords. The protected caller must generate high-entropy
+credentials and retain them in protected material for retry. This code has no
+live installation/dispatch entry point and does not retire object-store keys,
+close Pods, qualify application schema compatibility, or release capacity.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

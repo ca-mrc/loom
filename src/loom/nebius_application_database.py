@@ -75,6 +75,17 @@ BEGIN
     IF pg_catalog.current_setting('transaction_isolation')<>'read committed' THEN
         RAISE EXCEPTION 'application_database_isolation';
     END IF;
+    IF pg_catalog.has_schema_privilege(v_binding.runtime_oid,'public','CREATE')
+       OR pg_catalog.has_database_privilege(v_binding.runtime_oid,current_database(),'CREATE')
+       OR pg_catalog.has_table_privilege(v_binding.runtime_oid,'public.alembic_version','INSERT,UPDATE,DELETE')
+       OR pg_catalog.has_any_column_privilege(v_binding.runtime_oid,'public.alembic_version','INSERT,UPDATE')
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace='public'::regnamespace
+                  AND (c.relowner=v_binding.runtime_oid OR c.relkind IN ('r','p','v','m')
+                       AND pg_catalog.has_table_privilege(v_binding.runtime_oid,c.oid,'TRIGGER,TRUNCATE,REFERENCES')))
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_proc WHERE pronamespace='public'::regnamespace AND proowner=v_binding.runtime_oid)
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_type WHERE typnamespace='public'::regnamespace AND typowner=v_binding.runtime_oid) THEN
+        RAISE EXCEPTION 'application_database_role_identity';
+    END IF;
     INSERT INTO loom_application_access.applications(application_id,incarnation)
         VALUES(p_app,p_incarnation) ON CONFLICT DO NOTHING;
     SELECT incarnation INTO v_incarnation FROM loom_application_access.applications

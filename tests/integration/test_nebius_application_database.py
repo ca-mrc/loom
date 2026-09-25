@@ -204,7 +204,8 @@ def test_install_replay_preserves_credentials_and_rejects_wrong_binding(database
         install_application_database_access(admin, data_environment_id=uuid4(), manager_role=manager)
 
 
-@pytest.mark.parametrize("drift", ["runtime_privilege", "runtime_replacement", "manager_replacement"])
+@pytest.mark.parametrize("drift", ["runtime_privilege", "runtime_replacement", "manager_replacement",
+                                  "runtime_owner", "runtime_schema", "runtime_ddl", "runtime_migration"])
 def test_provider_rejects_replaced_or_privileged_shared_identities(database_access, drift):
     admin, url, access, data_id = database_access
     runtime = admin.execute("SELECT runtime_role FROM loom_application_access.binding").fetchone()[0]
@@ -213,7 +214,7 @@ def test_provider_rejects_replaced_or_privileged_shared_identities(database_acce
     elif drift == "runtime_replacement":
         admin.execute(sql.SQL("DROP OWNED BY {}; DROP ROLE {}; CREATE ROLE {} NOLOGIN NOINHERIT").format(
             *[sql.Identifier(runtime)] * 3))
-    else:
+    elif drift == "manager_replacement":
         manager = make_url(url).username
         admin.execute(sql.SQL("DROP OWNED BY {}; DROP ROLE {}; CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
             *[sql.Identifier(manager)] * 3, sql.Literal(make_url(url).password)))
@@ -223,6 +224,14 @@ def test_provider_rejects_replaced_or_privileged_shared_identities(database_acce
             with pytest.raises(ApplicationDatabaseAccessError, match="identity"):
                 ApplicationDatabaseAccess(replacement, data_id).grant(uuid4(), uuid4(), 1, token_urlsafe(48))
         return
+    else:
+        statement = {
+            "runtime_owner": "ALTER TABLE public.shared_records OWNER TO {}",
+            "runtime_schema": "GRANT CREATE ON SCHEMA public TO {}",
+            "runtime_ddl": "GRANT TRUNCATE ON public.shared_records TO {}",
+            "runtime_migration": "GRANT UPDATE ON public.alembic_version TO {}",
+        }[drift]
+        admin.execute(sql.SQL(statement).format(sql.Identifier(runtime)))
     with pytest.raises(ApplicationDatabaseAccessError, match="identity"):
         access.grant(uuid4(), uuid4(), 1, token_urlsafe(48))
 
@@ -256,3 +265,41 @@ def test_retirement_never_proves_a_login_with_residual_data_privileges_is_safe(d
     admin.execute(sql.SQL(statement).format(sql.Identifier(target)))
     with pytest.raises(ApplicationDatabaseAccessError, match="role_identity"):
         access.revoke(app, incarnation, 1)
+
+
+def test_actual_application_schema_supports_shared_reads_without_migration_authority(isolated_migration_postgres_url):
+    admin_url = make_url(isolated_migration_postgres_url).set(drivername="postgresql")
+    manager, manager_password, data_id = "mgr_" + uuid4().hex, token_urlsafe(48), uuid4()
+    manager_url = admin_url.set(username=manager, password=manager_password).render_as_string(hide_password=False)
+    with psycopg.connect(admin_url.render_as_string(hide_password=False), autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(
+            sql.Identifier(manager), sql.Literal(manager_password)))
+        install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+        with psycopg.connect(manager_url, autocommit=True) as manager_connection:
+            access = ApplicationDatabaseAccess(manager_connection, data_id)
+            password, app, incarnation = token_urlsafe(48), uuid4(), uuid4()
+            role = access.grant(app, incarnation, 1, password)
+            with login(manager_url, role, password) as client:
+                assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0162",)
+                for table in ("teams", "users", "tasks", "trials", "tokens", "secrets"):
+                    assert client.execute(sql.SQL("SELECT count(*) FROM public.{}").format(sql.Identifier(table))).fetchone() is not None
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    client.execute("UPDATE public.alembic_version SET version_num='forbidden'")
+            access.revoke(app, incarnation, 1)
+            assert access.drain(app, incarnation, 1)
+
+
+def test_raw_manager_calls_cannot_use_stale_snapshots_or_leak_secrets(database_access):
+    _, url, _, data_id = database_access
+    app, incarnation, secret = uuid4(), uuid4(), token_urlsafe(48)
+    with psycopg.connect(url, autocommit=True) as connection:
+        access = ApplicationDatabaseAccess(connection, data_id)
+        connection.execute("SET default_transaction_isolation='repeatable read'")
+        with pytest.raises(ApplicationDatabaseAccessError, match="isolation") as error:
+            access.grant(app, incarnation, 1, secret)
+        assert secret not in str(error.value)
+        connection.execute("SET default_transaction_isolation='read committed'")
+        access.grant(app, incarnation, 1, secret)
+        with pytest.raises(ApplicationDatabaseAccessError, match="credential") as error:
+            access.grant(app, incarnation, 1, token_urlsafe(48))
+        assert secret not in str(error.value)
