@@ -375,6 +375,33 @@ credentials and retain them in protected material for retry. This code has no
 live installation/dispatch entry point and does not retire object-store keys,
 close Pods, qualify application schema compatibility, or release capacity.
 
+### Recoverable application credential material
+
+The internal application registry persists a generation's credential bundles in
+the existing management `LocalEncryptedSecretStore` before a trusted lifecycle
+caller prepares or dispatches external grants or Kubernetes Secret delivery.
+Migration0163 atomically links each operation to its unique encrypted record;
+foreign keys retain both the operation and ciphertext, and downgrade refuses to
+erase material history. Plans and public operation progress contain neither raw
+material nor secret references. Management's encryption key remains separate from
+the shared-development keyring delivered to APIs.
+
+`ensure_material` validates the current operation lease and serializes competing
+callers. Its synchronous, side-effect-free factory runs only when no committed
+material exists; retries and lease takeover decrypt the original material without
+rotating credentials. Factory/transaction failure leaves no partial reference.
+New credentials require an active create/update/resume with exactly its frozen
+generation-specific DB, storage and auth Secret targets. Historical fixed-name
+plans and stop operations cannot generate new material. `load_material` requires
+a current lease even to read earlier operations of the same application, allowing
+retirement without granting sibling/future access. Missing or corrupted material
+fails closed rather than generating a replacement.
+
+This is encrypted persistence, not semantic validation of a password, CA, cloud
+key or shared keyring. The trusted lifecycle provider still must qualify those
+values, protect delivery and coordinate revocation; no credential provisioning,
+runtime activation, readiness or capacity release is enabled by this journal.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

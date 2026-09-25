@@ -280,7 +280,7 @@ def test_actual_application_schema_supports_shared_reads_without_migration_autho
             password, app, incarnation = token_urlsafe(48), uuid4(), uuid4()
             role = access.grant(app, incarnation, 1, password)
             with login(manager_url, role, password) as client:
-                assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0162",)
+                assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0163",)
                 for table in ("teams", "users", "tasks", "trials", "tokens", "secrets"):
                     assert client.execute(sql.SQL("SELECT count(*) FROM public.{}").format(sql.Identifier(table))).fetchone() is not None
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):

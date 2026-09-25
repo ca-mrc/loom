@@ -41,6 +41,9 @@ from loom.db.base import Base
 from loom.db.nebius_application_effect_schema import (
     NebiusApplicationEffect as NebiusApplicationEffect,
 )
+from loom.db.nebius_application_material_schema import (
+    NebiusApplicationMaterial as NebiusApplicationMaterial,
+)
 from loom.db.nebius_application_operation_schema import (
     NebiusApplicationOperation as NebiusApplicationOperation,
 )

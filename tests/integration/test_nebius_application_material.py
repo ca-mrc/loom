@@ -80,9 +80,9 @@ async def test_takeover_recovers_original_and_stale_lease_cannot_read_or_generat
         pytest.fail("a retry must not regenerate credentials")
 
     assert await registry.ensure_material(current, forbidden) == first
-    for action in (registry.ensure_material(lease, forbidden), registry.load_material(lease)):
+    for action in (lambda: registry.ensure_material(lease, forbidden), lambda: registry.load_material(lease)):
         with pytest.raises(ManagementError, match="stale_operation_lease"):
-            await action
+            await action()
 
 
 @pytest.mark.parametrize("action", ["suspend", "destroy_retained"])
@@ -101,13 +101,21 @@ async def test_stop_reads_own_predecessor_only_and_cannot_generate(applications,
         await registry.load_material(lease)
 
 
-async def test_update_material_is_distinct_but_history_is_available(applications, platform_inputs):
+@pytest.mark.parametrize("action", ["update", "resume"])
+async def test_successor_material_is_distinct_but_history_is_available(applications, platform_inputs, action):
     registry, factory, alice, plan, first, lease = await started(applications)
     old = await registry.ensure_material(lease, material)
     await _observed_complete(factory, first.operation_id)
-    newer = _next_plan(plan, platform_inputs)
+    if action == "resume":
+        stop = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+            action="suspend", expected_generation=1)
+        await _observed_complete(factory, stop.operation_id)
+    generation = 3 if action == "resume" else 2
+    newer = _next_plan(plan, platform_inputs, new_release=action == "update",
+                       deployment_generation=generation, access_generation=generation)
     changed = await registry.transition(first.application_id, principal=alice, idempotency_key="update",
-        action="update", expected_generation=1, release_id=newer["release"].release_id, **newer)
+        action=action, expected_generation=generation - 1,
+        release_id=newer["release"].release_id if action == "update" else None, **newer)
     current = await registry.claim(changed.operation_id)
     new = await registry.ensure_material(current, material)
     assert set(old).isdisjoint(new)
@@ -197,10 +205,10 @@ async def test_unreadable_material_is_bounded_and_never_regenerated(applications
                 value="not-json" if damage == "json" else json.dumps(envelope))
             await session.execute(text("UPDATE nebius_application_material SET secret_ref=:ref WHERE operation_id=:op"),
                                   {"ref": new_ref, "op": operation.operation_id})
-    for attempt in (registry.load_material(lease),
-                    registry.ensure_material(lease, lambda _: pytest.fail("corruption must not regenerate"))):
+    for attempt in (lambda: registry.load_material(lease),
+                    lambda: registry.ensure_material(lease, lambda _: pytest.fail("corruption must not regenerate"))):
         with pytest.raises(ManagementError) as error:
-            await attempt
+            await attempt()
         assert error.value.code == "application_material_unavailable"
         assert str(error.value) == "application_material_unavailable"
         assert error.value.status_code == 503
