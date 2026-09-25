@@ -185,7 +185,8 @@ BEGIN
     END LOOP;
     UPDATE loom_application_access.generations SET retired=true
         WHERE application_id=p_app AND generation<=p_generation;
-    UPDATE loom_application_access.applications SET retired_through=greatest(retired_through,p_generation)
+    UPDATE loom_application_access.applications
+        SET retired_through=greatest(retired_through,p_generation),retirement_xid=pg_catalog.pg_current_xact_id()
         WHERE application_id=p_app;
 END
 """
@@ -196,6 +197,13 @@ BEGIN
     PERFORM loom_application_access.lock_application(p_data,p_app,p_incarnation,p_generation);
     IF (SELECT retired_through FROM loom_application_access.applications WHERE application_id=p_app)<p_generation THEN
         RAISE EXCEPTION 'application_database_not_retired';
+    END IF;
+    -- Termination is irreversible even if the caller rolls back. Require the
+    -- tombstone/role changes from an EARLIER committed transaction, including
+    -- when the ordinary manager invokes SQL without our autocommit wrapper.
+    IF (SELECT retirement_xid FROM loom_application_access.applications WHERE application_id=p_app)
+        =pg_catalog.pg_current_xact_id() THEN
+        RAISE EXCEPTION 'application_database_retirement_uncommitted';
     END IF;
 """ + _PUBLIC_SAFE + """
     SELECT pg_catalog.to_regrole(runtime_role)::oid INTO STRICT v_runtime FROM loom_application_access.binding;
@@ -284,7 +292,10 @@ def install_application_database_access(
                         database_oid oid NOT NULL, system_identifier text NOT NULL);
                     CREATE TABLE loom_application_access.applications(
                         application_id uuid PRIMARY KEY, incarnation uuid UNIQUE NOT NULL,
-                        retired_through bigint NOT NULL DEFAULT 0 CHECK(retired_through>=0));
+                        retired_through bigint NOT NULL DEFAULT 0 CHECK(retired_through>=0),
+                        retirement_xid xid8,
+                        CHECK ((retired_through=0 AND retirement_xid IS NULL)
+                            OR (retired_through>0 AND retirement_xid IS NOT NULL)));
                     CREATE TABLE loom_application_access.generations(
                         application_id uuid NOT NULL REFERENCES loom_application_access.applications,
                         generation bigint NOT NULL CHECK(generation>0), role_name text UNIQUE NOT NULL,

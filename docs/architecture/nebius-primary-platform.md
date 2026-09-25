@@ -361,7 +361,9 @@ revocation record prevents an earlier delayed grant from reopening retired acces
 including a generation that had never finished provisioning. Revocation removes
 LOGIN, password and membership without deleting users, tasks or data. A separate
 committed call terminates existing connections and checks their absence; successor
-access waits for predecessor connections to disappear. `NOLOGIN` alone is never
+access waits for predecessor connections to disappear. The SQL routine itself
+rejects a retirement made in its current transaction before terminating anything;
+rolling back a later drain cannot undo the prior revocation. `NOLOGIN` alone is never
 retirement evidence. An authentication already in flight may outlive a backend
 snapshot, but after revocation it has no shared runtime membership or data grants.
 
