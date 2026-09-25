@@ -91,7 +91,16 @@ BEGIN
         AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication
         AND NOT rolbypassrls AND NOT rolinherit)
        OR EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE roleid=p_oid
-                  OR member=p_oid AND (roleid<>p_runtime OR admin_option OR set_option OR NOT inherit_option)) THEN
+                  OR member=p_oid AND (roleid<>p_runtime OR admin_option OR set_option OR NOT inherit_option))
+       OR pg_catalog.has_schema_privilege(p_oid,'public','CREATE')
+       OR pg_catalog.has_database_privilege(p_oid,current_database(),'CREATE')
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+                  WHERE n.nspname='public' AND c.relowner IN (p_oid,p_runtime))
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace,
+                  LATERAL pg_catalog.aclexplode(c.relacl) a WHERE n.nspname='public' AND a.grantee=p_oid)
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_attribute t JOIN pg_catalog.pg_class c ON c.oid=t.attrelid
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace,
+                  LATERAL pg_catalog.aclexplode(t.attacl) a WHERE n.nspname='public' AND a.grantee=p_oid) THEN
         RAISE EXCEPTION 'application_database_role_identity';
     END IF;
 END
@@ -127,7 +136,10 @@ BEGIN
         END IF;
         RETURN v_access.role_name;
     END IF;
-    IF EXISTS (SELECT 1 FROM loom_application_access.generations WHERE application_id=p_app AND NOT retired) THEN
+    PERFORM pg_catalog.pg_stat_clear_snapshot();
+    IF EXISTS (SELECT 1 FROM loom_application_access.generations WHERE application_id=p_app AND NOT retired)
+       OR EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a JOIN loom_application_access.generations g
+                  ON g.role_oid=a.usesysid WHERE g.application_id=p_app) THEN
         RAISE EXCEPTION 'application_database_previous_access_active';
     END IF;
     v_role := 'lap_' || replace(p_incarnation::text,'-','') || '_g' || p_generation::text;
