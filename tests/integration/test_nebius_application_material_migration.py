@@ -10,10 +10,10 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
 from loom.db.schema import Secret
 from tests.integration.test_nebius_application_effect_migration import operation
-from tests.integration.test_nebius_application_registry import migrate
 from tests.integration.test_nebius_application_registry import (
     application_database as application_database,
 )
+from tests.integration.test_nebius_application_registry import migrate
 
 
 def test_empty_material_downgrade_preserves_operations_and_orm_shape(application_database):

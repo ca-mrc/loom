@@ -10,9 +10,11 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DBAPIError
 
 from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
 from loom.db.schema import Secret
+from loom.security.secret_store import LocalEncryptedSecretStore, parse_ref
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_effects import expire, started
 from tests.integration.test_nebius_application_operations import _next_plan, _observed_complete
@@ -168,3 +170,73 @@ async def test_old_fixed_name_plan_cannot_generate_new_credentials(applications)
     lease = await registry.claim(first.operation_id)
     with pytest.raises(ManagementError, match="invalid_application_material_operation"):
         await registry.ensure_material(lease, lambda _: pytest.fail("historical activation is forbidden"))
+
+
+@pytest.mark.parametrize("damage", ["ciphertext", "namespace", "identity", "identity-type", "shape", "json", "key"])
+async def test_unreadable_material_is_bounded_and_never_regenerated(applications, monkeypatch, damage):
+    registry, factory, _, _, operation, lease = await started(applications)
+    await registry.ensure_material(lease, material)
+    async with factory.begin() as session:
+        secret = (await session.scalars(select(Secret))).one()
+        if damage == "ciphertext":
+            secret.ciphertext = b"deliberately-invalid-test-ciphertext"
+        elif damage == "key":
+            monkeypatch.setenv("LOOM_SECRET_STORE_MASTER_KEY", base64.b64encode(b"k" * 32).decode())
+        else:
+            store = LocalEncryptedSecretStore(session)
+            plaintext = await store.get(secret.ref)
+            envelope = json.loads(plaintext)
+            if damage == "identity":
+                envelope["identity"]["data_environment_id"] = str(uuid4())
+            elif damage == "identity-type":
+                envelope["identity"]["access_generation"] = True
+            elif damage == "shape":
+                envelope["material"] = {"loom-admin": {"key": "test-only"}}
+            new_ref = await store.put(
+                namespace="wrong-namespace" if damage == "namespace" else parse_ref(secret.ref).namespace,
+                value="not-json" if damage == "json" else json.dumps(envelope))
+            await session.execute(text("UPDATE nebius_application_material SET secret_ref=:ref WHERE operation_id=:op"),
+                                  {"ref": new_ref, "op": operation.operation_id})
+    for attempt in (registry.load_material(lease),
+                    registry.ensure_material(lease, lambda _: pytest.fail("corruption must not regenerate"))):
+        with pytest.raises(ManagementError) as error:
+            await attempt
+        assert error.value.code == "application_material_unavailable"
+        assert str(error.value) == "application_material_unavailable"
+        assert error.value.status_code == 503
+
+
+async def test_reference_insert_failure_rolls_back_ciphertext_too(applications):
+    registry, factory, _, _, _, lease = await started(applications)
+    async with factory.begin() as session:
+        await session.execute(text("""
+            CREATE FUNCTION reject_test_material() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'synthetic material commit failure'; END $$
+        """))
+        await session.execute(text("""
+            CREATE TRIGGER reject_test_material BEFORE INSERT ON nebius_application_material
+            FOR EACH ROW EXECUTE FUNCTION reject_test_material()
+        """))
+    with pytest.raises(DBAPIError, match="synthetic material commit failure"):
+        await registry.ensure_material(lease, material)
+    async with factory.begin() as session:
+        assert await session.scalar(select(func.count()).select_from(Secret)) == 0
+        assert await session.scalar(text("SELECT count(*) FROM nebius_application_material")) == 0
+        await session.execute(text("DROP TRIGGER reject_test_material ON nebius_application_material"))
+        await session.execute(text("DROP FUNCTION reject_test_material()"))
+    expected = material(await registry.frozen_plan(lease))
+    assert await registry.ensure_material(lease, material) == expected
+
+
+async def test_factory_failure_is_bounded_and_commits_nothing(applications):
+    registry, factory, _, _, _, lease = await started(applications)
+
+    def broken(_):
+        raise RuntimeError("must-not-expose-sensitive-material")
+
+    with pytest.raises(ManagementError) as error:
+        await registry.ensure_material(lease, broken)
+    assert str(error.value) == "application_material_generation_failed"
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Secret)) == 0
+    assert await registry.ensure_material(lease, material) == material(await registry.frozen_plan(lease))
