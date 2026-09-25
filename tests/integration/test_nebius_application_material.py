@@ -180,7 +180,7 @@ async def test_old_fixed_name_plan_cannot_generate_new_credentials(applications)
         await registry.ensure_material(lease, lambda _: pytest.fail("historical activation is forbidden"))
 
 
-@pytest.mark.parametrize("damage", ["ciphertext", "namespace", "identity", "identity-type", "shape", "json", "key"])
+@pytest.mark.parametrize("damage", ["ciphertext", "namespace", "identity", "identity-type", "shape", "json", "deep-json", "key"])
 async def test_unreadable_material_is_bounded_and_never_regenerated(applications, monkeypatch, damage):
     registry, factory, _, _, operation, lease = await started(applications)
     await registry.ensure_material(lease, material)
@@ -202,7 +202,8 @@ async def test_unreadable_material_is_bounded_and_never_regenerated(applications
                 envelope["material"] = {"loom-admin": {"key": "test-only"}}
             new_ref = await store.put(
                 namespace="wrong-namespace" if damage == "namespace" else parse_ref(secret.ref).namespace,
-                value="not-json" if damage == "json" else json.dumps(envelope))
+                value="not-json" if damage == "json" else "[" * 2000 + "0" + "]" * 2000 if damage == "deep-json"
+                else json.dumps(envelope))
             await session.execute(text("UPDATE nebius_application_material SET secret_ref=:ref WHERE operation_id=:op"),
                                   {"ref": new_ref, "op": operation.operation_id})
     for attempt in (lambda: registry.load_material(lease),
