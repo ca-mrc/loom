@@ -136,15 +136,17 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade",
-    [pytest.param(False, False, False, False, False, False, False, id="direct"),
-     pytest.param(True, False, False, False, False, False, False, id="terminus"),
-     pytest.param(True, True, False, False, False, False, False, id="accounting-repair"),
-     pytest.param(True, True, True, False, False, False, False, id="prepared-snapshot"),
-     pytest.param(True, False, False, True, False, False, False, id="typed-failure"),
-     pytest.param(True, False, False, False, True, False, False, id="verifier-archive"),
-     pytest.param(True, False, False, False, True, True, False, id="verifier-archive-corrupt"),
-     pytest.param(True, False, False, False, True, False, True, id="verifier-archive-history-upgrade")],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade,usage_recovery",
+    [pytest.param(False, False, False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, False, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, False, False, id="verifier-archive-corrupt"),
+     pytest.param(True, False, False, False, True, False, True, False, id="verifier-archive-history-upgrade"),
+     pytest.param(True, False, False, False, False, False, False, True, id="usage-archive"),
+     pytest.param(True, False, False, False, False, True, False, True, id="usage-archive-corrupt")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
@@ -154,6 +156,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     archival_recovery: bool,
     corrupt_recovery: bool,
     archival_history_upgrade: bool,
+    usage_recovery: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
@@ -342,7 +345,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             config, _, native, ledger = _case()
             native = [event.model_copy(update={"trial_id": trial_id}) for event in native]
             payloads["trajectory/events.jsonl"] = b"\n".join(event.model_dump_json().encode() for event in native)
-            payloads["accounting/usage.json"] = canonical_document(terminus_usage(native, config))
+            retained_usage = terminus_usage(native, config)
+            if usage_recovery:
+                import math
+                retained_usage["totals"]["cost_usd"] = math.nextafter(retained_usage["totals"]["cost_usd"], math.inf)
+            payloads["accounting/usage.json"] = canonical_document(retained_usage)
             async with sessions() as session:
                 trial = await session.get(Trial, trial_id)
                 trial.config = config.model_dump(mode="json")
@@ -518,23 +525,26 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
 
         original_outcome = None
         original_execution = None
-        if archival_recovery:
+        if archival_recovery or usage_recovery:
             from loom_control_plane import service_execution_materializer as materializer_module
 
             original_builder = materializer_module.build_canonical_events
+            error_code = "usage_output_identity_drift" if usage_recovery else "verifier_reward_drift"
+            retry = (materializer().retry_usage_roundoff_archive if usage_recovery
+                     else materializer().retry_legacy_verifier_archive)
 
             def old_reward_projection(**kwargs):
-                raise MaterializationIntegrityError("verifier_reward_drift")
+                raise MaterializationIntegrityError(error_code)
 
             with monkeypatch.context() as legacy:
-                legacy.setattr(materializer_module, "build_canonical_events", old_reward_projection)
+                legacy.setattr(materializer_module, "validate_usage_accounting" if usage_recovery else "build_canonical_events", old_reward_projection)
                 assert await materializer().run_once(lease_id=lease.id)
             assert materializer_module.build_canonical_events is original_builder
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
                 trial = await session.get(Trial, trial_id)
                 assert current.materialization_state == "unavailable"
-                assert current.materialization_error_code == "verifier_reward_drift"
+                assert current.materialization_error_code == error_code
                 original_outcome = copy.deepcopy((trial.state, trial.result, trial.finished_at,
                                                   trial.failure_reason, trial.failure_message, trial.attempt_count))
                 original_execution = (current.desired_state, current.observed_state, current.deleted_at,
@@ -546,7 +556,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                         "materialization_next_attempt_at=now() WHERE id=:id"), {"id": lease.id})
                 await session.rollback()
             assert not await materializer().run_once(lease_id=lease.id)
-            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=uuid4())
+            assert not await retry(lease_id=lease.id, team_id=uuid4())
             async with sessions() as session:
                 histories_before = {
                     item.id: (item.snapshot_json, item.snapshot_sha256, item.changed_at)
@@ -556,7 +566,7 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             if archival_history_upgrade:
                 await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
             requeues = await asyncio.gather(*(
-                materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+                retry(lease_id=lease.id, team_id=lease.team_id)
                 for _ in range(2)
             ))
             assert sorted(requeues) == [False, True]
@@ -578,12 +588,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     await session.execute(text("UPDATE execution_leases SET materialization_recovery_requested_at=NULL "
                         "WHERE id=:id"), {"id": lease.id})
                 await session.rollback()
-            assert not await materializer().retry_legacy_verifier_archive(lease_id=lease.id, team_id=lease.team_id)
+            assert not await retry(lease_id=lease.id, team_id=lease.team_id)
 
         if corrupt_recovery:
             verifier_key = next(key for key in source_keys if key.endswith("/verifier/output.json"))
             await source_store.put_object(bucket="artifacts", key=verifier_key,
-                                          body=payloads["verifier/output.json"].replace(b"0.0", b"1.0"))
+                                          body=payloads["verifier/output.json"].replace(b"1.0", b"0.0") if usage_recovery else payloads["verifier/output.json"].replace(b"0.0", b"1.0"))
             assert await materializer().run_once(lease_id=lease.id)
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id)
@@ -619,12 +629,18 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
             assert current.materialization_state == "committed"
-            assert current.materialization_attempts == 3 + archival_recovery
+            assert current.materialization_attempts == 3 + archival_recovery + usage_recovery
             assert current.source_cleanup_state == "retained"
             assert trial.state == ("failed" if typed_failure or archival_recovery else "succeeded")
             if archival_recovery:
                 assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
                         trial.failure_message, trial.attempt_count) == original_outcome
+                assert (current.desired_state, current.observed_state, current.deleted_at,
+                        current.finalized_at, current.output_manifest_sha256, current.output_marker_sha256) == original_execution
+            if usage_recovery:
+                assert trial.result == original_outcome[1]
+                assert trial.attempt_count == original_outcome[-1] == 1
+                assert trial.failure_reason is None and trial.state == "succeeded"
                 assert (current.desired_state, current.observed_state, current.deleted_at,
                         current.finalized_at, current.output_manifest_sha256, current.output_marker_sha256) == original_execution
             if typed_failure:
@@ -638,6 +654,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                     )
                 )
             ).one()
+            if usage_recovery:
+                audit = artifact.artifact_metadata["usage_roundoff_archival_recovery"]
+                assert audit["error_code"] == "usage_output_identity_drift"
+                assert audit["previous_trial_state"] == "failed"
+                assert audit["previous_failure_reason"] == "output_unavailable"
             assert artifact.lifecycle_authority_id is not None
             files = artifact.storage["files"]
             evidence = artifact.storage["source_evidence"]

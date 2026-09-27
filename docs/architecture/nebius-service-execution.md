@@ -577,8 +577,17 @@ new snapshot time records the later observation, not an earlier recovery event. 
 reopenings or changes to execution identity/state. Normal claim fencing, source
 validation and canonical acknowledgement still apply. Recovery, including a
 failed recovery, preserves the Trial's original outcome, failure and finish time.
-The recovered bundle can be downloadable while the historical Trial still reports
+The legacy recovered bundle can be downloadable while the historical Trial still reports
 `output_unavailable`; its archive state separately reports `committed`.
+
+Migration `0163` additionally permits one storage-only retry for successful
+Terminus executions rejected by `usage_output_identity_drift` due to floating-point
+summation. Only cost and duration permit a call-count-bounded ULP difference;
+identities and token counts remain exact. Successful publication repairs the
+archival `output_unavailable` Trial state to the retained runtime's `succeeded`
+outcome, recording the previous state and failure in Artifact audit metadata.
+Runtime results, rewards and attempt counts remain unchanged. Timeouts and
+model/verifier failures cannot enter this recovery path.
 
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple

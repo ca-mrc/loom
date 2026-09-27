@@ -64,6 +64,7 @@ from loom.pipeline.artifact_commit import (
 )
 from loom.pipeline.keys import canonical_document
 from loom.service_execution_terminus_trace import (
+    matches_terminus_usage,
     parse_terminus_events,
     reconcile_terminus_ledger,
     terminus_usage,
@@ -240,7 +241,7 @@ def validate_usage_accounting(
             events = parse_terminus_events(trace_body, trial=trial_config)
         except ValueError as exc:
             raise MaterializationIntegrityError("trajectory_invalid") from exc
-        if document != terminus_usage(events, trial_config):
+        if not matches_terminus_usage(document, terminus_usage(events, trial_config)):
             raise MaterializationIntegrityError("usage_output_identity_drift")
         return
     calls = _parse_trace_calls(trace_body)
@@ -554,6 +555,15 @@ class ServiceExecutionMaterializer:
 
     async def retry_legacy_verifier_archive(self, *, lease_id: UUID, team_id: UUID) -> bool:
         """Requeue one diagnosed historical archive, without rerunning its execution."""
+        return await self._retry_archive(lease_id=lease_id, team_id=team_id, usage_roundoff=False)
+
+    async def retry_usage_roundoff_archive(self, *, lease_id: UUID, team_id: UUID) -> bool:
+        """Recover retained successful native output after #2199, with no execution."""
+        return await self._retry_archive(lease_id=lease_id, team_id=team_id, usage_roundoff=True)
+
+    async def _retry_archive(self, *, lease_id: UUID, team_id: UUID, usage_roundoff: bool) -> bool:
+        error_code = "usage_output_identity_drift" if usage_roundoff else "verifier_reward_drift"
+        audit_key = "usage_roundoff_archival_recovery" if usage_roundoff else "legacy_verifier_archival_recovery"
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             lease = await session.get(ServiceExecutionLease, lease_id, with_for_update=True)
@@ -569,7 +579,7 @@ class ServiceExecutionMaterializer:
                 or lease.output_commit_state != "committed"
                 or lease.output_generation != lease.resource_generation
                 or lease.materialization_state != "unavailable"
-                or lease.materialization_error_code != "verifier_reward_drift"
+                or lease.materialization_error_code != error_code
                 or lease.materialization_recovery_requested_at is not None
                 or lease.canonical_trajectory_sha256 is not None or lease.canonical_atif_sha256 is not None
                 or lease.source_cleanup_state != "not_ready"
@@ -579,7 +589,10 @@ class ServiceExecutionMaterializer:
                 runtime = ExecutionRuntimeResultV1.model_validate((trial.result or {}).get("runtime_result"))
             except ValidationError:
                 return False
-            if not _legacy_verifier_reward_projection(runtime):
+            if usage_roundoff:
+                if runtime.status != "succeeded" or trial.config.get("agent_name") != "terminus-2":
+                    return False
+            elif not _legacy_verifier_reward_projection(runtime):
                 return False
             artifact = await session.scalar(select(Artifact).where(
                 Artifact.control_producer_kind == "service_execution",
@@ -588,11 +601,15 @@ class ServiceExecutionMaterializer:
             if artifact is None or artifact.team_id != team_id or artifact.trial_id != trial.id:
                 return False
             metadata = artifact.artifact_metadata or {}
-            if "legacy_verifier_archival_recovery" in metadata:
+            if audit_key in metadata:
                 return False
             artifact.artifact_metadata = {
                 **metadata,
-                "legacy_verifier_archival_recovery": {
+                audit_key: {
+                    "previous_trial_state": trial.state,
+                    "previous_failure_reason": trial.failure_reason,
+                    "previous_failure_message": trial.failure_message,
+                    "previous_finished_at": trial.finished_at.isoformat() if trial.finished_at else None,
                     "requested_at": now.isoformat(),
                     "error_code": lease.materialization_error_code,
                     "error_message": lease.materialization_error_message,
@@ -1232,7 +1249,13 @@ class ServiceExecutionMaterializer:
                     created_at=artifact.created_at,
                 )
             if result.final_trial_state == "succeeded":
-                if trial.state not in {"materializing", "succeeded"}:
+                recovered_usage = (
+                    lease.materialization_recovery_requested_at is not None
+                    and "usage_roundoff_archival_recovery" in (artifact.artifact_metadata or {})
+                    and trial.state == "failed" and trial.failure_reason == "output_unavailable"
+                    and (trial.result or {}).get("runtime_result", {}).get("status") == "succeeded"
+                )
+                if trial.state not in {"materializing", "succeeded"} and not recovered_usage:
                     raise MaterializationIntegrityError("terminal_trial_state_drift")
                 trial.state = "succeeded"
                 trial.finished_at = now

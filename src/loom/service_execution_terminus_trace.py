@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 from uuid import UUID
 
@@ -61,10 +62,33 @@ def terminus_usage(events: list[TrajectoryEvent], trial: TrialConfig) -> dict[st
         "gateway_request_ids": [call.gateway_request_id for call in calls],
         "totals": {
             **{name: sum(getattr(call, name) for call in calls) for name in _COUNTERS},
-            "cost_usd": sum(call.cost_usd_snapshot for call in calls),
-            "duration_sec": sum(call.duration_sec for call in calls),
+            "cost_usd": math.fsum(call.cost_usd_snapshot for call in calls),
+            "duration_sec": math.fsum(call.duration_sec for call in calls),
         },
     }
+
+
+def matches_terminus_usage(document: Any, expected: dict[str, Any]) -> bool:
+    """Accept historical float summation roundoff, never identity/token drift.
+
+    Older runtimes used builtin sum, whose algorithm differs across Python
+    versions. Bound compatibility by one ULP per addition, with no fixed dollar
+    tolerance. New producers use fsum; retained source documents stay untouched.
+    """
+    if not isinstance(document, dict) or not isinstance(document.get("totals"), dict):
+        return False
+    totals = dict(document["totals"])
+    for name in ("cost_usd", "duration_sec"):
+        actual, target = totals.get(name), expected["totals"][name]
+        if (isinstance(actual, bool) or not isinstance(actual, (int, float))
+                or not math.isfinite(actual) or not math.isfinite(target)
+                or actual < 0 or target < 0):
+            return False
+        bound = max(math.ulp(actual), math.ulp(target)) * max(1, expected["call_count"])
+        if abs(actual - target) > bound:
+            return False
+        totals[name] = target
+    return {**document, "totals": totals} == expected
 
 
 def reconcile_terminus_ledger(

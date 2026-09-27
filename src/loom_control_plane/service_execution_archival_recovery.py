@@ -1,4 +1,4 @@
-"""Request one audited retry for an unavailable legacy verifier archive."""
+"""Request one audited storage-only retry for a diagnosed unavailable archive."""
 from __future__ import annotations
 
 import argparse
@@ -33,7 +33,9 @@ async def _main(args: argparse.Namespace) -> None:
             artifacts_bucket=settings.artifacts_bucket,
             trajectories_bucket=settings.trajectories_bucket,
         )
-        queued = await materializer.retry_legacy_verifier_archive(lease_id=args.lease_id, team_id=args.team_id)
+        retry = (materializer.retry_usage_roundoff_archive if args.reason == "usage-roundoff"
+                 else materializer.retry_legacy_verifier_archive)
+        queued = await retry(lease_id=args.lease_id, team_id=args.team_id)
         print(json.dumps({"status": "requeued" if queued else "not_eligible",
                           "lease_id": str(args.lease_id), "team_id": str(args.team_id)}))
     finally:
@@ -44,6 +46,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lease-id", type=UUID, required=True)
     parser.add_argument("--team-id", type=UUID, required=True)
+    parser.add_argument("--reason", choices=("legacy-verifier", "usage-roundoff"), default="legacy-verifier")
     parser.add_argument("--apply", action="store_true", required=True,
                         help="request the one-use retry; does not rerun the task")
     asyncio.run(_main(parser.parse_args()))

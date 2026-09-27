@@ -40,6 +40,8 @@ def test_empty_effect_downgrade_and_upgrade_preserve_frozen_operation_and_orm_sh
 
 @pytest.mark.parametrize("phase", ["prepared", "dispatched", "observed", "rejected"])
 def test_every_effect_phase_blocks_destructive_downgrade(application_database, phase):
+    # Exercise this historical revision independently of later transactional migrations.
+    migrate(application_database, "downgrade", "0162")
     with application_database.begin() as connection:
         owner = operation(connection)
         connection.execute(insert(NebiusApplicationEffect).values(

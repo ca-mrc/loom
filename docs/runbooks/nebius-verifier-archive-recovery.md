@@ -1,4 +1,37 @@
-# Recover a legacy failed verifier archive
+# Recover a retained failed archive
+
+## Native usage roundoff (#2199)
+
+Deploy the compatible Control Plane with migration `0163` before using
+`--reason usage-roundoff`. This is a storage-only recovery for a current-attempt,
+deleted, finalized Terminus execution whose immutable runtime outcome succeeded
+but whose canonical publication failed with `usage_output_identity_drift`.
+
+```sh
+python -m loom_control_plane.service_execution_archival_recovery \
+  --lease-id LEASE_UUID --team-id TEAM_UUID --reason usage-roundoff --apply
+```
+
+Inspect the retained source first. Cost and duration are now summed with `fsum`;
+historical totals allow only floating-point roundoff, bounded by one ULP per
+model call. Call identity, model/provider, token counters, and all other fields
+remain exact. A genuine accounting difference still fails recovery. Source
+bytes and the original execution result are never rewritten.
+
+The existing one-use archival queue, claim fencing, integrity verification and
+canonical acknowledgement apply. Once the archive commits, its erroneous
+`output_unavailable` Trial state becomes `succeeded`, matching the retained
+successful runtime outcome. Artifact metadata records the original Trial state,
+failure, finish time and archive failure under `usage_roundoff_archival_recovery`.
+No new attempt or model call is created. Timeouts, model errors and verifier
+errors are ineligible; a failed recovery retains the original Trial failure.
+
+Download the recovered bundle and check the original runtime result, reward,
+trace, call IDs, token accounting and unchanged attempt number before accepting
+the repair. A queued retry alone is not acceptance. Migration `0163` downgrade
+removes admission for usage recovery while preserving existing recovery history.
+
+## Legacy verifier projection
 
 Use this operation only for a deleted, finalized current-attempt execution whose
 committed source failed canonical publication with `verifier_reward_drift` because

@@ -238,6 +238,24 @@ raw-Harbor TB2 profiles pack only allowlisted, indexed verifier files after
 hash, indexed/runtime size, metadata, share-status, pair, and secret checks.
 Multiple-step deliveries scope otherwise duplicate verifier names by step.
 
+## Native service-execution audit in TB2 v2 delivery
+
+Native attempts use their committed attempt-bound file index, rather than the
+legacy workspace channel above. `raw-harbor-tb2-v2` includes the original
+`verifier/output.json`, `verifier/NN-verifier.stdout`,
+`verifier/NN-verifier.stderr`, and `verifier/runtime-result.json` (the source
+`result.json`). `NN` is the actual verifier phase ordinal. A captured, declared
+CTRF report is included as `verifier/ctrf.json` when present.
+
+The runtime result provides the phase return code, duration, truncation and
+stream hashes; no synthetic `script.log.meta.json` is generated. Export binds
+every file to the owning team, Trial, attempt and single canonical bundle,
+checks indexed bytes against runtime evidence and persisted outcome, and keeps
+sharing blocks, bounded reads and secret scanning. Missing or inconsistent
+evidence still rejects the export. Legacy log/meta pairs retain their existing
+validation. Scored timeouts keep their original failed outcome and score;
+export does not promote them to successful executions.
+
 ## Why each lives where it does
 
 | Concern            | Verifier's job?  | Driver's job? | Trajectory's job? |
