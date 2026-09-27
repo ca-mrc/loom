@@ -382,6 +382,12 @@ Use `raw-harbor-tb2-v2` only when selected trials contain typed checkpoint
 events and hash-verified native artifacts. Use `raw-harbor-tb2-v1` when the
 source trial has only provider-log-based execution data.
 
+Native verifier evidence is delivered under `verifier/`: original output,
+phase stdout/stderr, and `runtime-result.json` containing exit status, timing
+and truncation metadata. Legacy verifier log/metadata pairs remain supported.
+Missing or inconsistent evidence rejects the export. Scored timeouts preserve
+their original failed state; exporting them does not change their outcome.
+
 Use `--mode openhands-export` when selected trials ran with the `openhands-sdk`
 agent and the trajectory contains `openhands_sdk_*` typed events plus a
 hash-verified native artifact at `native/openhands_sdk_events.json`. This mode

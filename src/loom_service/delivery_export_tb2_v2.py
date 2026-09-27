@@ -581,7 +581,7 @@ def resolve_native_artifacts(
 
 @dataclass(frozen=True)
 class VerifierDeliveryArtifact:
-    """One workspace verifier file packed into a raw-harbor delivery bundle (#865)."""
+    """One native or legacy verifier file packed into a raw-harbor delivery bundle."""
 
     archive_path: str
     data: bytes
@@ -876,7 +876,7 @@ def resolve_verifier_artifacts(
     client: Any,
     artifacts_bucket: str,
 ) -> list[VerifierDeliveryArtifact]:
-    """Fetch indexed ``.loom/verifier/**`` artifacts for delivery packing (#865).
+    """Fetch native phase evidence or legacy indexed verifier files for delivery.
 
     Fail-closed when indexed verifier artifacts are missing, unreadable,
     hash-mismatched, share-blocked, or contain secret-like content.
@@ -885,6 +885,12 @@ def resolve_verifier_artifacts(
     indexed verifier audit artifacts; agent-only trajectories still pack.
     """
     indexed = _index_artifacts(trial)
+    if any("relative_path" in item for item in indexed) and not _trial_skipped_verifier(trial):
+        from loom_service.delivery_export_native_verifier import resolve_native_verifier_artifacts
+
+        return resolve_native_verifier_artifacts(
+            trial, indexed=indexed, client=client, artifacts_bucket=artifacts_bucket,
+        )
     candidates = [
         item
         for item in indexed

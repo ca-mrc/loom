@@ -111,7 +111,7 @@ def native_binary(tmp_path_factory):
 
 
 @pytest.fixture
-async def sandboxes(native_binary, tmp_path):
+async def sandboxes(native_binary, tmp_path, request):
     import docker
 
     client = docker.from_env()
@@ -125,7 +125,7 @@ async def sandboxes(native_binary, tmp_path):
             # Model the setgid socket emptyDir with the controller's fsGroup.
             directory.chmod(0o2777)
             container = client.containers.run(
-                "python:3.11-slim", ["--socket", "/socket/sandbox.sock"], detach=True,
+                getattr(request, "param", "python:3.11-slim"), ["--socket", "/socket/sandbox.sock"], detach=True,
                 entrypoint="/loom/bin/loom-sandbox-runtime", user=f"{uid}:{gid}",
                 network_mode="none", cap_drop=["ALL"],
                 cap_add=list(ROOT_INSTALL_CAPABILITIES) if uid == 0 else [],

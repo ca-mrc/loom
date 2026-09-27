@@ -2069,7 +2069,9 @@ async def test_raw_harbor_tb2_v2_export_rejects_legacy_runtime_stream(
     assert response.json()["detail"]["code"] == "legacy_runtime_stream"
 
 
+@pytest.mark.parametrize("native_verifier", [False, True])
 async def test_raw_harbor_tb2_v2_export_from_typed_events(
+    native_verifier: bool,
     delivery_setup: dict[str, object],
     postgres_url: str,
 ) -> None:
@@ -2104,6 +2106,19 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
                     trial_id=trial_id,
                     task_id=task_id,
                 )
+                if native_verifier:
+                    from tests.unit.test_native_delivery_acceptance import native_trial
+                    native_trial_row, native_store = native_trial(identity=trial_id, team=team_id, reward=1)
+                    existing_index = conn.execute(select(Trial.trajectory_index).where(Trial.id == trial_id)).scalar_one()
+                    existing_result = conn.execute(select(Trial.result).where(Trial.id == trial_id)).scalar_one()
+                    artifact_rows = [row for row in existing_index["artifacts"] if "/.loom/verifier/" not in row["key"]]
+                    artifact_rows.extend(native_trial_row.trajectory_index["artifacts"])
+                    fake_s3.objects.update(native_store._objects)
+                    conn.execute(update(Trial).where(Trial.id == trial_id).values(
+                        attempt_count=1,
+                        trajectory_index={**existing_index, "attempt": 1, "artifacts": artifact_rows},
+                        result={**existing_result, "runtime_result": native_trial_row.result["runtime_result"]},
+                    ))
                 if index != 1:
                     continue
                 conn.execute(
@@ -2186,6 +2201,10 @@ async def test_raw_harbor_tb2_v2_export_from_typed_events(
         assert f"agent_runs/{first_task}/{first_trial}/terminal_transcript.jsonl" in names
         assert f"agent_runs/{first_task}/{first_trial}/native/harbor_trajectory.json" in names
         assert f"agent_runs/{first_task}/{first_trial}/verifier/output.json" in names
+        if native_verifier:
+            assert f"agent_runs/{first_task}/{first_trial}/verifier/02-verifier.stdout" in names
+            assert f"agent_runs/{first_task}/{first_trial}/verifier/runtime-result.json" in names
+            assert f"agent_runs/{first_task}/{first_trial}/verifier/script.log.meta.json" not in names
         trajectory = json.load(
             tar.extractfile(f"agent_runs/{first_task}/{first_trial}/trajectory.json")  # type: ignore[arg-type]
         )
