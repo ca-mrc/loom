@@ -10,12 +10,15 @@ from uuid import uuid4
 import httpx
 import psycopg
 import pytest
+from psycopg import sql
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from sqlalchemy.engine import make_url
 
+from loom.db.schema import TeamMembership
+from loom.nebius_application_database import ApplicationDatabaseAccess, install_application_database_access
 from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material
@@ -25,9 +28,8 @@ from loom_service.environment_management.provider import (
     ProviderWaitingError,
 )
 from loom_service.environment_management.registry import ManagementError
+from tests.integration.conftest import _isolated_migration_database
 from tests.integration.test_nebius_application_cloud_provider import Cloud
-from tests.integration.test_nebius_application_database import access_postgres as access_postgres
-from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_database import login
 from tests.integration.test_nebius_application_effects import expire
 from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
@@ -45,6 +47,23 @@ def shared_ca():
     return generate_material(namespace="loom-dev", tls_secret_name="test-tls")["loom-platform-db"]["ca.crt"]
 
 
+@pytest.fixture
+def database_access(migration_template_postgres_url):
+    """A second migrated DB, never the management fixture's database instance."""
+    template = make_url(migration_template_postgres_url).database
+    for database in _isolated_migration_database(migration_template_postgres_url, template_name=template,
+                                                prepare_template=False):
+        url = make_url(database).set(drivername="postgresql")
+        manager, password, data_id = "mgr_" + uuid4().hex, "m" * 48, uuid4()
+        manager_url = url.set(username=manager, password=password).render_as_string(hide_password=False)
+        with psycopg.connect(url.render_as_string(hide_password=False), autocommit=True) as admin:
+            admin.execute(sql.SQL("CREATE ROLE {} LOGIN NOINHERIT PASSWORD {}").format(sql.Identifier(manager), sql.Literal(password)))
+            admin.execute("CREATE TABLE public.shared_records(id bigserial PRIMARY KEY,value text NOT NULL)")
+            install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+            with psycopg.connect(manager_url, autocommit=True) as manager_connection:
+                yield admin, manager_url, ApplicationDatabaseAccess(manager_connection, data_id), data_id
+
+
 async def setup(applications, platform_inputs, database_access, shared_ca, *, slug="alice", cloud=None, authority=None):
     from loom_service.application_management.credentials import (
         ApplicationCredentialProvider,
@@ -53,13 +72,16 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     from loom_service.application_management.database import AsyncApplicationDatabaseAccess
 
     registry, factory, (alice, _), _, _, _ = applications
+    async with factory.begin() as session:
+        if await session.get(TeamMembership, (alice.team_id, alice.user_id)) is None:
+            session.add(TeamMembership(team_id=alice.team_id, user_id=alice.user_id, role="member"))
     _, manager_url, _, data_id = database_access
     row, release, shared, foundation = inputs(platform_inputs, slug)
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
-    release = release.model_copy(update={"schema_revision": "test_revision"})
-    shared = shared.model_copy(update={"schema_revision": "test_revision"})
+    release = release.model_copy(update={"schema_revision": "0166"})
+    shared = shared.model_copy(update={"schema_revision": "0166"})
     prepared = render_application(row, release, shared, foundation, authority=authority)
     operation = await registry.create(principal=alice, idempotency_key=slug,
                                       prepared=prepared, release=release, shared=shared)
@@ -161,7 +183,7 @@ async def test_stop_retires_database_generation_without_breaking_sibling(
         with pytest.raises(psycopg.OperationalError):
             login(database_access[1], first.username, first.password)
         with pytest.raises(ProviderBlockedError, match="application_database_retired"):
-            await provider.database.grant(lease, first.password, schema_revision="test_revision")
+            await provider.database.grant(lease, first.password, schema_revision="0166")
     assert len(cloud.mutations) == 8  # SQL-only retirement does not claim S3 denial.
 
 
