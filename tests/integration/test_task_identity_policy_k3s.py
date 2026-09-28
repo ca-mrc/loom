@@ -303,6 +303,23 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
             *policies,
         ])
         assert result.exit_code == 0, result.output.decode()
+        # Admission can evaluate a new policy before its asynchronous static
+        # type-checking status is published. Deployment requires that status.
+        deadline = time.monotonic() + 30
+        while True:
+            observed = container.exec([
+                "kubectl", "get", "validatingadmissionpolicy",
+                policies[0]["metadata"]["name"], "-o", "json",
+            ])
+            assert observed.exit_code == 0, observed.output.decode()
+            policy = json.loads(observed.output)
+            status = policy.get("status", {})
+            if (status.get("observedGeneration") == policy["metadata"]["generation"]
+                    and "typeChecking" in status):
+                break
+            assert time.monotonic() < deadline, "policy type checking did not finish"
+            time.sleep(0.2)
+        assert not status["typeChecking"].get("expressionWarnings"), status
         guest = _guest_pod(namespace)
         for _ in range(60):
             result = apply([guest], dry_run=True)
@@ -311,9 +328,7 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
             time.sleep(0.2)
         assert result.exit_code == 0, result.output.decode()
         assert apply([_pod(namespace)], dry_run=True).exit_code == 0
-        status = container.exec(["kubectl", "get", "validatingadmissionpolicy", policies[0]["metadata"]["name"], "-o", "json"])
-        assert not json.loads(status.output).get("status", {}).get("typeChecking", {}).get("expressionWarnings")
-        for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "shell", "probe", "host-sysctl"):
+        for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "unbounded-state", "memory-state", "shell", "probe", "host-sysctl"):
             changed = deepcopy(guest)
             sidecar = next(c for c in changed["spec"]["initContainers"] if c["name"] == "task-sandbox")
             if damage.endswith("target"):
@@ -329,6 +344,12 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
                 volume = next(v for v in changed["spec"]["volumes"] if v["name"] == "task-sandbox-guest-state")
                 volume.pop("emptyDir")
                 volume["hostPath"] = {"path": "/"}
+            elif damage in {"unbounded-state", "memory-state"}:
+                volume = next(v for v in changed["spec"]["volumes"] if v["name"] == "task-sandbox-guest-state")
+                if damage == "unbounded-state":
+                    volume["emptyDir"].pop("sizeLimit")
+                else:
+                    volume["emptyDir"]["medium"] = "Memory"
             elif damage == "shell":
                 sidecar["command"] = ["/bin/sh", "-c", "sleep 1000"]
             elif damage == "probe":
@@ -337,5 +358,37 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
                 changed["spec"]["securityContext"]["sysctls"] = [{"name": "kernel.core_pattern", "value": "x"}]
             result = apply([changed], dry_run=True)
             assert result.exit_code != 0, damage
+        # A warning followed by a clean update can omit the now-empty
+        # typeChecking parent from the server-side-applied status. Exercise
+        # actual recovery through the same gate used by protected rollout.
+        broken = deepcopy(policies)
+        broken[0]["spec"]["validations"].append({
+            "expression": "has(object.spec.undefinedField)",
+            "message": "Deliberate type-checking failure for recovery qualification.",
+        })
+        assert apply(broken).exit_code == 0
+        deadline = time.monotonic() + 30
+        while True:
+            observed = container.exec([
+                "kubectl", "get", "validatingadmissionpolicy",
+                policies[0]["metadata"]["name"], "-o", "json",
+            ])
+            policy = json.loads(observed.output)
+            status = policy.get("status", {})
+            if status.get("observedGeneration") == policy["metadata"]["generation"]:
+                assert status.get("typeChecking", {}).get("expressionWarnings")
+                break
+            assert time.monotonic() < deadline, "deliberate warning was not observed"
+            time.sleep(0.2)
+        from scripts.ops.deploy_nebius_platform import Kubectl, install_task_identity_policy
+
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output.decode().replace(
+            "https://127.0.0.1:6443", f"https://127.0.0.1:{container.get_exposed_port(6443)}",
+        ))
+        subprocess.run(["kubectl", "--kubeconfig", str(kubeconfig), "config", "rename-context", "default", "loom-rollout"],
+                       check=True, capture_output=True)
+        (tmp_path / "00-task-identity-policy.yaml").write_text(yaml.safe_dump_all(policies))
+        install_task_identity_policy(Kubectl(kubeconfig), {"execution_namespace": namespace}, tmp_path)
     finally:
         container.stop()
