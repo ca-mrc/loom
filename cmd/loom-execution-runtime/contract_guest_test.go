@@ -10,6 +10,10 @@ func guestPlanPayload(t *testing.T) map[string]any {
 	p := preparedTaskPlan()
 	p.RuntimeVolumeMiB = 1024
 	p.ExecutionClassID = "linux-amd64-cpu-guest-v1"
+	p.VerifierExecution = "in_attempt"
+	verifier := p.Main
+	verifier.Role = "verifier"
+	p.Verifier = &verifier
 	p.TaskResources = resources{CPUMillis: 1000, MemoryMiB: 1024, EphemeralStorageMiB: 2048}
 	controller := p.TaskResources
 	controller.EphemeralStorageMiB += p.RuntimeVolumeMiB
@@ -59,13 +63,19 @@ func TestGuestPlanStrictRoundTripAndOrdinaryOmission(t *testing.T) {
 }
 
 func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
-	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image"} {
+	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image", "skipped_verifier", "separate_verifier"} {
 		t.Run(damage, func(t *testing.T) {
 			p := guestPlanPayload(t)
 			sides := p["sidecars"].([]any)
 			s := sides[0].(map[string]any)
 			g := s["guest_execution"].(map[string]any)
 			switch damage {
+			case "skipped_verifier":
+				p["verifier_execution"] = "skipped"
+				p["verifier"] = nil
+			case "separate_verifier":
+				p["verifier_execution"] = "separate_execution"
+				p["verifier"] = nil
 			case "missing_controller":
 				delete(p, "controller_resources")
 			case "storage_unreserved":

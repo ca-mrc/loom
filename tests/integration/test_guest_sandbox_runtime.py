@@ -23,7 +23,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
 @contextlib.contextmanager
-def guest(*, docker: bool = False) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
+def guest(*, docker: bool = False, plugin_layout: str | None = None) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
     configured = os.environ.get("LOOM_GUEST_PAYLOAD")
     if configured is None:
         if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -43,6 +43,14 @@ def guest(*, docker: bool = False) -> Iterator[tuple[httpx.Client, subprocess.Po
             (root / "bin" / applet).symlink_to("busybox")
         # Standard distro absolute link must resolve inside the task root.
         (root / "var/run").symlink_to("/run")
+        if plugin_layout:
+            plugins = root / "usr/local/lib/docker/cli-plugins"
+            plugins.parent.mkdir(parents=True)
+            if plugin_layout == "symlink":
+                (root / "opt/task-plugins").mkdir(parents=True)
+                plugins.symlink_to("/opt/task-plugins")
+            else:
+                plugins.mkdir()
         socket = directory / "sandbox.sock"
         state = directory / "state"
         command = [
@@ -220,3 +228,10 @@ def test_guest_docker_registry_traffic_uses_outer_allowlist_proxy() -> None:
         proxy.shutdown()
         proxy.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("layout", ["directory", "symlink"])
+def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None:
+    with guest(docker=True, plugin_layout=layout) as (client, _, _):
+        assert "v0.36.1" in execute(client, "docker buildx version")
+        assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
