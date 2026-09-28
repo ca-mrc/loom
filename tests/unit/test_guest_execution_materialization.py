@@ -8,7 +8,9 @@ from fastapi import HTTPException
 
 from loom.execution_contract import workload_requirements_from_task
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
+from loom.execution_resource_allocation import allocate_node_resources
 from loom.execution_runtime_contract import (
+    ContainerResourcesV1,
     ExecutionRuntimePlanV1,
     runtime_pod_resources,
     validate_runtime_plan_requirements,
@@ -16,6 +18,7 @@ from loom.execution_runtime_contract import (
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
+    ControllerComputeResourcesV1,
     ServiceExecutionRuntimeProfileV1,
     automatic_service_execution_rejections,
     compile_service_execution_plan,
@@ -111,7 +114,7 @@ def test_profile_readiness_cannot_be_granted_by_task_or_prepared_image(change, r
     ("verifier", {"user": "1001:1001"}, "guest_root_identity_required"),
     ("environment", {"cpus": 0.5}, "guest_cpu_limit_too_small"),
     ("environment", {"memory_mb": 511}, "guest_memory_limit_too_small"),
-    ("environment", {"storage_mb": 127}, "guest_ephemeral_storage_limit_too_small"),
+    ("environment", {"storage_mb": 159}, "guest_ephemeral_storage_limit_too_small"),
 ])
 def test_guest_prerequisites_are_checked_before_admission(section, change, reason):
     task, trial, _ = _guest_inputs()
@@ -132,9 +135,39 @@ def test_guest_requires_terminus_and_external_requirements_remain_rejected():
         _compile(task, trial, profile)
 
 
+@pytest.mark.parametrize("explicit_controller", [False, True])
+@pytest.mark.parametrize("request_override", [False, True])
+def test_guest_payload_storage_is_reserved_in_controller_and_node_share(explicit_controller, request_override):
+    task, trial, profile = _guest_inputs()
+    if explicit_controller:
+        profile = profile.model_copy(update={
+            "controller_resources": ControllerComputeResourcesV1(cpu_millis=500, memory_mib=512),
+        })
+    if request_override:
+        profile = ServiceExecutionRuntimeProfileV1.model_validate({
+            **profile.model_dump(mode="json"), "task_resource_requests": {
+                "guest": {"task_revision_sha256": _REVISION, "requests": {
+                    "controller": {"cpu_millis": 100, "memory_mib": 128, "ephemeral_storage_mib": 128},
+                }},
+            },
+        })
+    plan = _compile(task, trial, profile, task_id="guest")
+    assert plan.controller_resources.ephemeral_storage_mib == task.environment.storage_mb + 1024
+    expected_request = (128 if request_override else task.environment.storage_mb) + 1024
+    assert plan.container_request("execution").ephemeral_storage_mib == expected_request
+    assert runtime_pod_resources(plan).ephemeral_storage_mib == expected_request + 2 * task.environment.storage_mb
+    # A node that fits only the task allocations cannot hide the shared payload.
+    with pytest.raises(ValueError, match="exceeds_node_allocatable"):
+        allocate_node_resources(plan, target_id="too-small", usable_node=ContainerResourcesV1(
+            cpu_millis=4000, memory_mib=8192,
+            ephemeral_storage_mib=expected_request + 2 * task.environment.storage_mb - 1,
+        ))
+
+
 @pytest.mark.parametrize("damage", [
     "ordinary_class", "missing_guest", "one_guest", "empty_caps", "external_cap",
     "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_resources",
+    "duplicate_caps", "unsorted_caps", "long_timeout", "unreserved_payload",
 ])
 def test_guest_runtime_shape_rejects_partial_or_unsafe_launches(damage):
     task, trial, profile = _guest_inputs()
@@ -155,6 +188,13 @@ def test_guest_runtime_shape_rejects_partial_or_unsafe_launches(damage):
         raw["sidecars"][0]["argv"][2] = "/tmp/foreign.sock"
     elif damage == "wrong_probe":
         raw["sidecars"][0]["startup_probe"]["argv"][2] = "/tmp/foreign.sock"
+    elif damage in {"duplicate_caps", "unsorted_caps"}:
+        raw["sidecars"][0]["guest_execution"]["capabilities"] = [
+            "nested_docker", "nested_docker" if damage == "duplicate_caps" else "isolated_kernel_settings"]
+    elif damage == "long_timeout":
+        raw["sidecars"][0]["argv"][-1] = "86401"
+    elif damage == "unreserved_payload":
+        raw["controller_resources"] = None
     else:
         raw["sidecars"][0]["resources"]["memory_mib"] = 511
     with pytest.raises(ValueError):
@@ -180,10 +220,15 @@ def test_runtime_binding_rejects_drift_from_frozen_workload(damage):
 
 
 @pytest.mark.parametrize("capability", ["nested_docker", "isolated_kernel_settings"])
-def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capability):
+@pytest.mark.parametrize("allocated", [False, True])
+def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capability, allocated):
     task, trial, profile = _guest_inputs(capability)
     plan = _compile(task, trial, profile)
     lease = _lease()
+    if allocated:
+        plan = allocate_node_resources(plan, target_id=lease.target_id, usable_node=ContainerResourcesV1(
+            cpu_millis=16_000, memory_mib=240 * 1024, ephemeral_storage_mib=512 * 1024,
+        ))
     lease.execution_class_id = plan.execution_class_id
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
@@ -194,8 +239,9 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
     ))["spec"]["template"]["spec"]
     volumes = {item["name"]: item for item in pod["volumes"]}
     total = runtime_pod_resources(plan)
-    assert total.cpu_millis == plan.task_resources.cpu_millis * 3
-    assert total.ephemeral_storage_mib == plan.task_resources.ephemeral_storage_mib * 3
+    assert total.cpu_millis == plan.execution_resources.cpu_millis + plan.task_resources.cpu_millis * 2
+    assert total.ephemeral_storage_mib == (
+        plan.execution_resources.ephemeral_storage_mib + plan.task_resources.ephemeral_storage_mib * 2)
     for container in pod["initContainers"][1:]:
         role = container["name"]
         assert container["command"] == [
@@ -213,14 +259,15 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
         assert container["securityContext"] == {
             "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
             "runAsNonRoot": False, "runAsUser": 0, "runAsGroup": 0,
-            "capabilities": {"drop": ["ALL"], "add": [
-                "CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL"]},
+            "capabilities": {"drop": ["ALL"], "add": ["DAC_OVERRIDE"]},
         }
         assert {"name": "runtime", "mountPath": "/loom/runtime", "readOnly": True} in container["volumeMounts"]
         assert {"name": f"{role}-guest-state", "mountPath": "/loom/guest-state"} in container["volumeMounts"]
-        assert volumes[f"{role}-guest-state"]["emptyDir"] == {"sizeLimit": "2048Mi"}
+        assert volumes[f"{role}-guest-state"]["emptyDir"] == {
+            "sizeLimit": f"{plan.task_resources.ephemeral_storage_mib}Mi"}
         assert container["startupProbe"]["exec"]["command"] == [
             "/loom/bin/loom-sandbox-runtime", "--check-socket", f"/loom/sandboxes/{role}/sandbox.sock"]
+        assert container["startupProbe"]["failureThreshold"] == 60
         mounted = {item["name"] for item in container["volumeMounts"]}
         assert mounted == {"runtime", f"{role}-socket", f"{role}-guest-state"}
     assert all("guest-state" not in mount["name"] for container in [
