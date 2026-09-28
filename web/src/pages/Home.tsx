@@ -9,11 +9,11 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
-  api,
+  overviewApi as api,
   type OverviewAction,
   type OverviewStatus,
   type OverviewSummary,
-} from "../api";
+} from "../api/overview";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";

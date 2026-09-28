@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "./fixtures/guardedTest";
 
@@ -5,9 +6,12 @@ test.use({ contextOptions: { reducedMotion: "reduce" } });
 
 for (const sourceKind of ["input_import", "recipe_input_materialization"] as const) {
   test(`${sourceKind} lineage opens scoped source metadata and returns to the downstream result`, async ({ apiHarness, browserHarness, page }, testInfo) => {
+    const chunks = JSON.parse(readFileSync("dist/.vite/manifest.json", "utf8")) as Record<string, { file: string }>;
+    const scripts = new Set<string>();
+    page.on("request", request => scripts.add(new URL(request.url()).pathname));
     const parentPath = "/pipelines/run-lineage/stages/stage-lineage/artifacts/output-lineage";
     await apiHarness.install({ role: "user", overrides: [
-      { name: "downstream artifact lineage", method: "GET", path: "/api/v1/pipeline-runs/run-lineage/stages/stage-lineage/artifacts/output-lineage", response: { kind: "json", status: 200, body: {
+      { name: "downstream artifact lineage", count: 2, method: "GET", path: "/api/v1/pipeline-runs/run-lineage/stages/stage-lineage/artifacts/output-lineage", response: { kind: "json", status: 200, body: {
         id: "output-lineage", name: "Evaluation result", artifact_type: "custom.result.v1",
         content_sha256: `sha256:${"a".repeat(64)}`, manifest_sha256: `sha256:${"b".repeat(64)}`,
         stored_size_bytes: 1024, file_count: 0, safety_state: "verified_internal", share_status: "pending_scan", visibility: "team", access_class: "team_runtime",
@@ -33,5 +37,8 @@ for (const sourceKind of ["input_import", "recipe_input_materialization"] as con
     await page.getByRole("link", { name: "Back to results" }).click();
     await expect(page).toHaveURL(`${browserHarness.baseURL}${parentPath}`);
     await expect(page.getByRole("heading", { name: "Evaluation result" })).toBeVisible();
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "Evaluation result" })).toBeVisible();
+    expect(scripts.has(`${browserHarness.routePrefix}/${chunks["src/components/artifacts/BehaviorRolloutViewer.tsx"].file}`)).toBe(false);
   });
 }

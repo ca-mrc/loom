@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures/guardedTest";
 
@@ -17,6 +18,10 @@ const source = {
 // All fixtures are closed and read-only. No provider tests, uploads, rate
 // publication, token creation, or external model requests are performed.
 test("provider readiness and quoted CLI remain readable and keyboard operable", async ({ apiHarness, browserHarness, page }) => {
+  const chunks = JSON.parse(readFileSync("dist/.vite/manifest.json", "utf8")) as Record<string, { file: string }>;
+  const modelChunk = `${browserHarness.routePrefix}/${chunks["src/components/providers/ModelsTab.tsx"].file}`;
+  const scripts = new Set<string>();
+  page.on("request", request => scripts.add(new URL(request.url()).pathname));
   const provider = { id: "provider-1", name: "Team's API", type: "openai-compatible", status: "valid", base_url: "https://api.example.test/v1", last_validated_at: "2026-09-20T12:00:00Z", allowed_models: null };
   const fixture = await apiHarness.install({ role: "admin", overrides: [
     { name: "provider list", method: "GET", path: "/api/v1/provider-connections", response: { kind: "json", status: 200, body: { items: [provider] } } },
@@ -28,8 +33,11 @@ test("provider readiness and quoted CLI remain readable and keyboard operable", 
   await expect(page.getByText(/Tested .* days ago/)).toBeVisible();
   await noPageOverflow(page);
   await page.getByRole("link", { name: "Team's API", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Models", exact: true })).toBeVisible();
+  expect(scripts.has(modelChunk)).toBe(false);
   await page.getByRole("tab", { name: "Models", exact: true }).click();
   await expect(page.getByText("Not tested", { exact: true })).toBeVisible();
+  expect(scripts.has(modelChunk)).toBe(true);
   const help = page.getByRole("button", { name: "Model help and CLI" });
   await help.click();
   await expect(page.getByRole("dialog")).toContainText(`loom providers models 'Team'"'"'s API' --refresh`);

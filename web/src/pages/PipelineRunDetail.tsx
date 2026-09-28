@@ -73,7 +73,7 @@ export default function PipelineRunDetailPage(): JSX.Element {
     <Card><Card.Header title="Budget ledger" headingLevel="h2" /><Card.Body><PipelineBudgetSummary budget={run.budget} /></Card.Body></Card>
     {run.retry_of_pipeline_run_id ? <p>Replay of <Link state={context} className="text-accent" to={`/pipelines/${run.retry_of_pipeline_run_id}${run.retry_from_stage_run_id ? `?stage=${run.retry_from_stage_run_id}` : ""}`}>{run.retry_of_pipeline_run_id}</Link></p> : null}
     </div></details>
-    <PipelineStageDrawer stage={linkedStageId ? linkedStage.data ?? drawer : null} events={poller.events} onClose={closeStage} onRetry={(stage) => { closeStage(); setRetryStage(stage); }} /><RetryDialog stage={retryStage} run={run} onClose={() => setRetryStage(null)} />
+    {linkedStageId && (linkedStage.data ?? drawer) ? <PipelineStageDrawer stage={linkedStageId ? linkedStage.data ?? drawer : null} events={poller.events} onClose={closeStage} onRetry={(stage) => { closeStage(); setRetryStage(stage); }} /> : null}<RetryDialog stage={retryStage} run={run} onClose={() => setRetryStage(null)} />
     <DestructiveActionDialog open={cancelOpen} title="Cancel PipelineRun" target={run.display_name ?? run.id} consequence="Cancellation stops new work; committed Artifacts remain immutable." confirmLabel="Request cancellation" pendingLabel="Requesting…" confirmation={{ type: "simple" }} pending={cancelMutation.isPending} error={cancelMutation.error} confirmDisabled={!validReason(reason)} onClose={() => setCancelOpen(false)} onConfirm={async () => { await cancelMutation.mutateAsync(); }}><label className="text-sm">Reason (1..500 UTF-8 bytes)<Textarea required value={reason} onChange={(e) => setReason(e.target.value)} /></label></DestructiveActionDialog>
   </div>;
 }

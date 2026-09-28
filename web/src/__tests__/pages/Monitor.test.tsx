@@ -563,6 +563,7 @@ describe("Monitor human-readable labels", () => {
     // Worker-capacity ("3 / 12") loads from a separate fetch than the health
     // header, so await it rather than reading synchronously — otherwise the
     // assertion races the capacity render (flaky under the full-suite run).
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText("3 / 12")).toBeInTheDocument();
     expect(screen.getByText("Concurrent tasks")).toBeInTheDocument();
     expect(screen.getByText("2 active workers")).toBeInTheDocument();
@@ -641,6 +642,7 @@ describe("Monitor human-readable labels", () => {
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=trials" });
 
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText("3 queued")).toBeInTheDocument();
     expect(screen.getByText("4 waiting for 9 free slots.")).toBeInTheDocument();
     expect(screen.getByText("2 protected pending")).toBeInTheDocument();
@@ -692,6 +694,7 @@ describe("Monitor human-readable labels", () => {
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=trials" });
 
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText("3 queued")).toBeInTheDocument();
   });
 
@@ -708,6 +711,7 @@ describe("Monitor human-readable labels", () => {
       },
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText(/occupied unknown · draining unknown/)).toBeInTheDocument();
   });
 
@@ -728,6 +732,7 @@ describe("Monitor human-readable labels", () => {
       },
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText("Inactive regions")).toBeInTheDocument();
     expect(screen.queryByText("blocked/stale")).not.toBeInTheDocument();
     expect(screen.getAllByText("Unknown")).toHaveLength(3);
@@ -770,6 +775,7 @@ describe("Monitor human-readable labels", () => {
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
 
+    await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
     expect(await screen.findByText("blocked/stale")).toBeInTheDocument();
     expect(screen.getByText("Blockers: provider_quota_exhausted")).toBeInTheDocument();
     expect(screen.getByText(/Capacity is unknown because/)).toBeInTheDocument();

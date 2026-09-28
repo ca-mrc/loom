@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -48,9 +49,9 @@ function renderVersionInfo() {
     defaultOptions: { queries: { retry: false, refetchOnWindowFocus: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
       <VersionInfo environmentLabel="Development" />
-    </QueryClientProvider>,
+    </QueryClientProvider></MemoryRouter>,
   );
 }
 
@@ -79,9 +80,9 @@ describe("VersionInfo (#2009)", () => {
       defaultOptions: { queries: { retry: false } },
     });
     render(
-      <QueryClientProvider client={queryClient}>
+      <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
         <VersionInfo environmentLabel="Nebius integration with a very long source ref label" />
-      </QueryClientProvider>,
+      </QueryClientProvider></MemoryRouter>,
     );
 
     const revisionLine = screen.getByTestId("sidebar-build-revision");
@@ -104,7 +105,7 @@ describe("VersionInfo (#2009)", () => {
     );
 
     expect(
-      screen.getByRole("dialog", { name: "Deployed version" }),
+      await screen.findByRole("dialog", { name: "Deployed version" }),
     ).toBeInTheDocument();
     // CopyableId's accessible name is its truncated display text; the full
     // value lives in its `title` tooltip instead.
@@ -153,7 +154,7 @@ describe("VersionInfo (#2009)", () => {
     );
 
     expect(
-      screen.getByText("A newer frontend build is available."),
+      await screen.findByText("A newer frontend build is available."),
     ).toBeInTheDocument();
     // Present, but never auto-invoked — refreshing is the user's call.
     expect(
@@ -174,20 +175,14 @@ describe("VersionInfo (#2009)", () => {
     expect(screen.queryByTitle("A newer build is available")).toBeNull();
   });
 
-  it("issues no request for the served build on mount, only the backend's own version", async () => {
-    // Pins the fix itself: a fresh page load must fetch
-    // `/api/v1/version` (backend) but not re-fetch
-    // `loom-frontend-config.json` (served frontend build) a second time.
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(jsonResponse({ buildRevision: null, buildTime: null }));
-    renderVersionInfo();
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
-    expect(requestedUrls.some((url) => url.includes("loom-frontend-config.json"))).toBe(
-      false,
+  it("defers backend version requests until the user opens details", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ buildRevision: null, buildTime: null }),
     );
-    expect(requestedUrls.some((url) => url.includes("/api/v1/version"))).toBe(true);
+    renderVersionInfo();
+    expect(fetchMock).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Deployed version details" }));
+    await screen.findByRole("dialog", { name: "Deployed version" });
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/v1/version"))).toBe(true));
   });
 });

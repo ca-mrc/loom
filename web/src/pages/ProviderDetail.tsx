@@ -1,3 +1,4 @@
+import { lazyRoute } from "../lib/lazyRoute";
 import type { ProviderPricing } from "../api/providers";
 import { HelpButton } from "../components/HelpButton";
 import { queryKeys } from "../api/queryKeys";
@@ -6,7 +7,7 @@ import { queryKeys } from "../api/queryKeys";
  * Models tab implemented in T6.
  */
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import {
   Link,
   useNavigate,
@@ -18,12 +19,7 @@ import { api } from "../api";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import LoadingState from "../components/LoadingState";
-import DeleteConnectionModal from "../components/providers/DeleteConnectionModal";
-import ModelsTab from "../components/providers/ModelsTab";
-import ProviderForm, {
-  type ProviderFormValues,
-} from "../components/providers/ProviderForm";
-import RotateKeyModal from "../components/providers/RotateKeyModal";
+import type { ProviderFormValues } from "../components/providers/ProviderForm";
 import { StatusPill } from "../components/StatusPill";
 import { Tabs, type TabItem } from "../components/Tabs";
 import {
@@ -38,6 +34,11 @@ import {
   providerTestAge,
 } from "../lib/providerDisplay";
 import { formatLocalDateTime } from "../lib/dateTime";
+
+const DeleteConnectionModal = lazyRoute(() => import("../components/providers/DeleteConnectionModal"));
+const ModelsTab = lazyRoute(() => import("../components/providers/ModelsTab"));
+const ProviderForm = lazyRoute(() => import("../components/providers/ProviderForm"));
+const RotateKeyModal = lazyRoute(() => import("../components/providers/RotateKeyModal"));
 
 type TabName = "overview" | "models" | "settings";
 type TestResult = {
@@ -153,7 +154,7 @@ export default function ProviderDetail(): JSX.Element {
                     </span>
                   </div>
                 ) : null}
-                <ModelsTab id={id} connectionName={conn.name} />
+                <Suspense fallback={<LoadingState label="Loading models…" />}><ModelsTab id={id} connectionName={conn.name} /></Suspense>
               </>
             );
           }
@@ -361,7 +362,7 @@ function SettingsTab({
           <h2 className="text-lg font-semibold">Edit</h2>
           {edit.isError && <p role="alert">{String((edit.error as {detail?: string})?.detail ?? "Could not save provider settings")}</p>}
           {edit.isSuccess && <p role="status">Provider settings saved.</p>}
-          <ProviderForm
+          <Suspense fallback={<LoadingState label="Loading provider settings…" />}><ProviderForm
             mode="edit"
             discoveredModels={
               models.data?.items?.map((model) => model.model_id) ?? []
@@ -379,7 +380,7 @@ function SettingsTab({
             }}
             pending={edit.isPending}
             onSubmit={handleEdit}
-          />
+          /></Suspense>
         </Card.Body>
       </Card>
       <Card>
@@ -415,7 +416,7 @@ function SettingsTab({
         </Card.Body>
       </Card>
       {showRotate && (
-        <RotateKeyModal
+        <Suspense fallback={<LoadingState label="Loading dialog…" />}><RotateKeyModal
           connectionName={conn.name}
           pending={rotate.isPending}
           error={rotate.error}
@@ -424,10 +425,10 @@ function SettingsTab({
             setShowRotate(false);
           }}
           onSubmit={handleRotate}
-        />
+        /></Suspense>
       )}
       {showDelete && (
-        <DeleteConnectionModal
+        <Suspense fallback={<LoadingState label="Loading dialog…" />}><DeleteConnectionModal
           connectionName={conn.name}
           pending={del.isPending}
           error={del.error}
@@ -436,7 +437,7 @@ function SettingsTab({
             setShowDelete(false);
           }}
           onSubmit={handleDelete}
-        />
+        /></Suspense>
       )}
     </div>
   );

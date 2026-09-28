@@ -714,7 +714,7 @@ describe("NewBatch", () => {
     const summary = screen.getByText("Advanced trial settings");
     const details = summary.closest("details")!;
     await user.click(summary);
-    const timeout = screen.getByRole("spinbutton", { name: "Agent timeout override (s)" });
+    const timeout = await screen.findByRole("spinbutton", { name: "Agent timeout override (s)" });
     await user.type(timeout, "-1");
     await user.click(summary);
     expect(details.open).toBe(false);
@@ -1112,7 +1112,9 @@ describe("NewBatch", () => {
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
-    const maxAttempts = screen.getByLabelText(/Max attempts/i);
+    await user.click(screen.getByText(/Advanced trial settings/i));
+    await screen.findByLabelText(/Max attempts/i);
+    const maxAttempts = await screen.findByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
     await user.click(
@@ -1147,6 +1149,8 @@ describe("NewBatch", () => {
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
+    await user.click(screen.getByText(/Advanced trial settings/i));
+    await screen.findByLabelText(/Max attempts/i);
     await user.click(
       screen.getByRole("checkbox", { name: /Force rebuild env image/i }),
     );
@@ -1170,6 +1174,8 @@ describe("NewBatch", () => {
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
+    await user.click(screen.getByText(/Advanced trial settings/i));
+    await screen.findByLabelText(/Max attempts/i);
     expect(
       screen.queryByRole("checkbox", { name: /Skip verifier/i }),
     ).toBeNull();
@@ -1187,6 +1193,8 @@ describe("NewBatch", () => {
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
+    await user.click(screen.getByText(/Advanced trial settings/i));
+    await screen.findByLabelText(/Max attempts/i);
     const prio = screen.getByLabelText(/Submit priority/i);
     await user.clear(prio);
     await user.type(prio, "300");
@@ -1223,7 +1231,7 @@ describe("NewBatch", () => {
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
     await user.click(screen.getByText(/Advanced trial settings/i));
-    const maxAttempts = screen.getByLabelText(/Max attempts/i);
+    const maxAttempts = await screen.findByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "5");
     await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
@@ -1258,7 +1266,9 @@ describe("NewBatch", () => {
     await pickBenchmark();
     await pickDefaultModel(user);
     await screen.findByText(/12 tasks match across 1 benchmark/i);
-    const maxAttempts = screen.getByLabelText(/Max attempts/i);
+    await user.click(screen.getByText(/Advanced trial settings/i));
+    await screen.findByLabelText(/Max attempts/i);
+    const maxAttempts = await screen.findByLabelText(/Max attempts/i);
     await user.clear(maxAttempts);
     await user.type(maxAttempts, "3");
     await user.click(

@@ -217,3 +217,10 @@ fault injection. The local recovery matrix continues to own injected failures;
 normal-login browser acceptance does not replace it. Credentials must come from
 approved environment/file secret references, and the temporary browser session
 must be logged out and closed after the run.
+
+Production route imports use `lazyRoute`: only a rejected module import becomes
+a fixed-copy `LazyRouteLoadError`, without retaining its raw diagnostic. The
+existing route boundary stores a boolean reload requirement alongside the safe
+reference; this automatically removes Retry for the cached rejection. Ordinary
+render errors still retain Retry. Location changes reset both states. The same
+boundary contains failures in lazily opened help and version details.

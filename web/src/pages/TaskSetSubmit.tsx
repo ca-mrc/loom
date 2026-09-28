@@ -1,4 +1,4 @@
-import { reviewTaskSetManifest, type TaskSetManifestReview } from "../lib/taskSetManifestReview";
+import type { TaskSetManifestReview } from "../lib/taskSetManifestReview";
 import { repositoryDocUrl } from "../lib/repositoryDocs";
 import { HelpButton } from "../components/HelpButton";
 import { useMutation } from "@tanstack/react-query";
@@ -48,7 +48,13 @@ export default function TaskSetSubmit(): JSX.Element {
 
     setReviewing(true);
     try {
-      const summary = reviewTaskSetManifest(await manifestFile.text());
+      const [manifest, { reviewTaskSetManifest }] = await Promise.all([
+        manifestFile.text(),
+        import("../lib/taskSetManifestReview").catch(() => {
+          throw new Error("Could not load manifest review. Reload Loom and try again.");
+        }),
+      ]);
+      const summary = reviewTaskSetManifest(manifest);
       if (revision !== inputRevision.current) return;
       setManifestSummary(summary);
     } catch (err) {

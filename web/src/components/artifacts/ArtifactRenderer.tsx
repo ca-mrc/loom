@@ -1,8 +1,11 @@
-import type { ComponentType } from "react";
+import { Suspense, type ComponentType } from "react";
 
 import type { PipelineArtifactDetail } from "../../api";
-import BehaviorRolloutViewer from "./BehaviorRolloutViewer";
+import LoadingState from "../LoadingState";
+import { lazyRoute } from "../../lib/lazyRoute";
 import GenericArtifactViewer from "./GenericArtifactViewer";
+
+const BehaviorRolloutViewer = lazyRoute(() => import("./BehaviorRolloutViewer"));
 
 export type ArtifactViewerProps = { artifact: PipelineArtifactDetail };
 
@@ -14,5 +17,5 @@ export const ARTIFACT_RENDERERS: Readonly<
 
 export default function ArtifactRenderer(props: ArtifactViewerProps): JSX.Element {
   const Renderer = ARTIFACT_RENDERERS[props.artifact.artifact_type] ?? GenericArtifactViewer;
-  return <Renderer {...props} />;
+  return <Suspense fallback={<LoadingState label="Loading artifact viewer…" />}><Renderer {...props} /></Suspense>;
 }
