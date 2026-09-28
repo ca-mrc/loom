@@ -419,6 +419,18 @@ class ApplicationRuntimeProvider:
                             uid=metadata["uid"], resource_version=metadata["resourceVersion"])
                 except KubernetesEffectRejectedError:
                     raise ProviderWaitingError("application_workloads_retirement_pending") from None
+        return await self.read_retired(lease)
+
+    async def read_retired(self, lease: ApplicationLease) -> ApplicationWorkloadRetirement:
+        """Observe closed admission and exited processes without changing either.
+
+        In particular, a prepared activation DELETE must not re-enter quota
+        closing or resend retirement writes while prerequisites are refreshed.
+        """
+        await self._fence(lease)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        documents = [doc for docs in plan["files"].values() for doc in docs]
         # Separate live evidence from historical success. A controller can lag
         # behind its accepted scale-down; terminating Pods still run processes.
         deployments: list[ApplicationDeploymentRetirement] = []
@@ -455,7 +467,14 @@ class ApplicationRuntimeProvider:
         namespace_source = next(item for item in await self.registry.effect_history(lease)
             if item.intent.kind == "Namespace" and item.intent.action == "create"
             and item.phase == "observed" and item.observed_uid == actual_namespace["metadata"]["uid"])
-        fence = await self.close_admission(lease)
+        actual_fence = await self._read(lease, namespace)
+        if actual_fence is None:
+            raise ProviderBlockedError("application_pod_fence_conflict")
+        fence_source = await self._identity(lease, actual_fence, await self._history(lease))
+        if (fence_source.operation_id != lease.operation_id
+                or actual_fence.get("status", {}).get("hard", {}).get("pods") != "0"):
+            raise ProviderWaitingError("application_pod_fence_pending")
+        fence = _observation(actual_fence, fence_source)
         await self.registry.frozen_plan(lease)
         return ApplicationWorkloadRetirement(
             identity=ApplicationRetirementIdentity.for_lease(lease, UUID(plan["registration"]["data_environment_id"])),
