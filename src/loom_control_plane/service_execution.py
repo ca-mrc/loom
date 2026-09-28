@@ -64,7 +64,10 @@ from loom_control_plane.execution_capacity import (
     _CAPACITY_MUTATION_LOCK,
     reserve_execution_provisioning,
 )
-from loom_control_plane.execution_capacity_targets import validate_capacity_owner
+from loom_control_plane.execution_capacity_targets import (
+    resolve_capacity_targets,
+    validate_capacity_owner,
+)
 from loom_control_plane.execution_finance import (
     ExecutionFinanceBlockedError,
     reserve_execution_cost,
@@ -311,6 +314,9 @@ async def persist_execution_catalog(
                 if owner is None:
                     raise ValueError("capacity owner is unavailable")
                 validate_capacity_owner(target, ExecutionTargetV1.model_validate(owner.spec_json))
+                family = await resolve_capacity_targets(session, owner.id)
+                if target.target_id not in family.target_ids and len(family.target_ids) >= 64:
+                    raise ValueError("capacity family cannot contain more than 64 targets")
             except ValueError as exc:
                 raise ServiceExecutionConflict(str(exc)) from exc
         target_json = target.model_dump(mode="json")
