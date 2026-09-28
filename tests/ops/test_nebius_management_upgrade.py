@@ -37,6 +37,7 @@ class UpgradeAPI:
         self.switch = SwitchAPI(ManagementSwitchRequest(setup, original), target)
         self.authority = False
         self.public_ready = False
+        self.workload_ready = True
         self.preflight_failure = False
         self.events = []
 
@@ -61,8 +62,11 @@ class UpgradeAPI:
 
     def verify_public(self, request, state_dir):
         self.events.append('public')
+        if not self.workload_ready:
+            return False
         if not self.public_ready:
             raise RuntimeError('private-public-failure')
+        return True
 
     def complete(self, prefix):
         for row in self.store.resources.values():
@@ -257,3 +261,20 @@ def test_failed_management_migration_keeps_old_worker_stopped_and_never_activate
             run(upgrade, tmp_path)
     assert len(api.store.creates) == before and api.switch.calls == ['retire']
     assert api.switch.document['spec']['replicas'] == 0
+
+
+def test_new_deployment_availability_is_pending_not_upgrade_success(upgrade, tmp_path):
+    to_retirement(upgrade, tmp_path)
+    api = upgrade[1]
+    api.switch.processes = False
+    assert run(upgrade, tmp_path)['phase'] == 'migration'
+    api.complete('loom-management-migrate-')
+    api.public_ready = True
+    api.workload_ready = False
+    pending = run(upgrade, tmp_path)
+    assert pending['status'] == 'pending' and pending['phase'] == 'service'
+    assert api.switch.calls == ['retire', 'activate']
+    assert run(upgrade, tmp_path) == pending
+    api.workload_ready = True
+    assert run(upgrade, tmp_path)['status'] == 'management_upgraded'
+    assert api.switch.calls == ['retire', 'activate']

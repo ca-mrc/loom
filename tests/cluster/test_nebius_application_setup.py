@@ -34,8 +34,12 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
         application_setup_ready,
         stage_application_setup,
     )
+    from scripts.ops.nebius_management_bootstrap import BootstrapBinding
+    from scripts.ops.nebius_management_install import ManagementInstallRequest
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_stage import ManagementStageError
+    from scripts.ops.nebius_management_upgrade import ManagementUpgradeRequest
+    from scripts.ops.nebius_management_upgrade_live import HTTPSManagementUpgradeAPI
 
     from loom_service.environment_management.deployment import ManagementDeployment
     from tests.unit.test_nebius_management_render import ROOT
@@ -92,6 +96,33 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
         assert len(bindings) == 1
         assert bindings[0].subjects[0].name == 'loom-application-provisioner'
         assert bindings[0].subjects[0].namespace == deployment.namespace
+        # Exercise the exact installed adapter: an operator mTLS connection issues
+        # one short-lived token, then clean trust-only TLS authenticates the new SA.
+        # Its dry-runs/reviews must not create a personal probe namespace or grant.
+        legacy = copy.deepcopy(raw)
+        legacy['installation'].pop('applications')
+        legacy['installation']['provider_runtime'] = {'kubernetes': application.runtime.kubernetes.model_dump(mode='json'),
+            'cloud_credentials_file': '/var/run/loom-management-cloud/credentials.json'}
+        original = ManagementInstallRequest(BootstrapBinding(binding.installation_id, binding.namespace, binding.kube_system_uid),
+            ManagementDeployment.model_validate(legacy), candidate, profile, {})
+        upgrade = ManagementUpgradeRequest(original, request, tmp_path / 'original', tmp_path / 'original-anchor')
+
+        class UnusedPrerequisites:
+            def preflight(self, request):
+                pytest.fail('this test qualifies only the installed application subject')
+
+            def public_route(self, request):
+                pytest.fail('no public route is installed in this fixture')
+
+        before = {row.metadata.name for row in core.list_namespace().items}
+        with HTTPSManagementUpgradeAPI(request=upgrade, api_server=endpoint, ssl_context=trust,
+            runtime_ca_pem=base64.b64decode(config['clusters'][0]['cluster']['certificate-authority-data']).decode(),
+            checks=UnusedPrerequisites()) as api:
+            deadline = time.monotonic() + 20
+            while not api.qualify_authority(request, tmp_path):
+                assert time.monotonic() < deadline, 'application runtime authority did not become effective'
+                time.sleep(0.1)
+        assert {row.metadata.name for row in core.list_namespace().items} == before
         wrong = replace(request, shared_namespace_uid=str(uuid4()))
         with HTTPSApplicationSetupAPI(request=wrong, phase='network', api_server=endpoint,
                                        ssl_context=trust) as api:
