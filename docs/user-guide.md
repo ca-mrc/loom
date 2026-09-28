@@ -1535,7 +1535,7 @@ storage instead of relying on a shared worker fixture mount:
 # Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
 # Do not pass credential values through argv; publish-local reads these env vars.
 loom datasets validate-local ./team-evals
-loom datasets publish-local ./team-evals --bucket loom-benchmarks
+loom datasets publish ./team-evals --bucket loom-benchmarks
 
 loom datasets audit team-evals
 ```

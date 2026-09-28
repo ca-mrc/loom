@@ -638,8 +638,8 @@ def main() -> None:
             )
             sys.stderr.write(
                 "seed:   to populate: "
-                "`python -m loom_benchmark_tool publish <slug>` "
-                "(needs HF write token for the target org)\n"
+                "`loom datasets publish --benchmark <slug>` "
+                "(uses the target database and object-store environment)\n"
             )
 
     # Opt-in: local-import path for air-gapped deploys. Slower + needs

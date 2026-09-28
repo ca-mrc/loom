@@ -11,7 +11,7 @@ Two sources are supported:
 
 - `source="object-store"`: reads the manifest straight from
   `s3://{bucket}/{benchmark_id}/{revision}/manifest.json` — the layout
-  produced by `publish --target=object-store`. Task rows point at
+  produced by the retired direct publisher. Task rows point at
   `s3://{bucket}/{benchmark_id}/{revision}/{hf_path}` with no HF hop or
   mirror step, because the bytes are already where the worker will
   materialize them.
@@ -84,7 +84,7 @@ def _object_store_source_url(
 ) -> str:
     """Canonical `s3://` source URL for the direct-publish layout.
 
-    Matches the key prefix `publish_cmd._publish_to_object_store`
+    Matches the key prefix the historical direct publisher
     writes under and the `s3://{bucket}/{prefix}` shape the worker's
     S3Materializer parses."""
     return f"s3://{bucket}/{benchmark_id}/{revision}/{hf_path}"
@@ -556,6 +556,45 @@ def task_config_from_manifest_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def validate_profile_registration(
+    manifest: dict[str, Any], *, source: RegisterSource, mirror_to_object_store: bool,
+) -> None:
+    """Preserve the physical-profile admission contract for every producer."""
+    manifest_tasks = list(manifest["tasks"])
+    profile_provenance = dict(manifest.get("benchmark_profile_provenance") or {})
+    if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
+        if source == "hf" and not mirror_to_object_store:
+            raise ValueError(
+                "TB2.1 HF registration requires mirror_to_object_store; "
+                "use source='object-store' for a direct publish",
+            )
+        if not tb21_workspace_policy_isolated(
+            profile_provenance.get("workspace_staging_policy"),
+        ):
+            raise ValueError("TB2.1 profile is missing private workspace isolation provenance")
+        for task in manifest_tasks:
+            task_provenance = task.get("source_provenance")
+            if not isinstance(task_provenance, dict) or not tb21_workspace_policy_isolated(
+                task_provenance.get("workspace_staging_policy"),
+            ):
+                raise ValueError("TB2.1 task is missing private workspace isolation provenance")
+            verifier_asset = task_provenance.get("verifier_asset")
+            if (
+                not isinstance(verifier_asset, dict)
+                or not isinstance(verifier_asset.get("script_path"), str)
+                or not verifier_asset["script_path"].startswith("/")
+                or not isinstance(verifier_asset.get("sha256"), str)
+                or not verifier_asset["sha256"].startswith("sha256:")
+                or verifier_asset.get("mode") != "0755"
+                or not isinstance(
+                    task_provenance.get("bundle_file_metadata_sha256"),
+                    str,
+                )
+                or not task_provenance["bundle_file_metadata_sha256"].startswith("sha256:")
+            ):
+                raise ValueError("TB2.1 task is missing verifier asset provenance")
+
+
 async def run_register(
     *,
     benchmark: str,
@@ -636,37 +675,9 @@ async def run_register(
     # submit-able: only the fresh object-store audit in `datasets activate`
     # promotes the row and its public alias together.
     execution_state = "pending" if manifest.get("benchmark_id") == _TB21_PROFILE_ID else "runnable"
-    if manifest.get("benchmark_id") == _TB21_PROFILE_ID:
-        if source == "hf" and not mirror_to_object_store:
-            raise ValueError(
-                "TB2.1 HF registration requires mirror_to_object_store; "
-                "use source='object-store' for a direct publish",
-            )
-        if not tb21_workspace_policy_isolated(
-            profile_provenance.get("workspace_staging_policy"),
-        ):
-            raise ValueError("TB2.1 profile is missing private workspace isolation provenance")
-        for task in manifest_tasks:
-            task_provenance = task.get("source_provenance")
-            if not isinstance(task_provenance, dict) or not tb21_workspace_policy_isolated(
-                task_provenance.get("workspace_staging_policy"),
-            ):
-                raise ValueError("TB2.1 task is missing private workspace isolation provenance")
-            verifier_asset = task_provenance.get("verifier_asset")
-            if (
-                not isinstance(verifier_asset, dict)
-                or not isinstance(verifier_asset.get("script_path"), str)
-                or not verifier_asset["script_path"].startswith("/")
-                or not isinstance(verifier_asset.get("sha256"), str)
-                or not verifier_asset["sha256"].startswith("sha256:")
-                or verifier_asset.get("mode") != "0755"
-                or not isinstance(
-                    task_provenance.get("bundle_file_metadata_sha256"),
-                    str,
-                )
-                or not task_provenance["bundle_file_metadata_sha256"].startswith("sha256:")
-            ):
-                raise ValueError("TB2.1 task is missing verifier asset provenance")
+    validate_profile_registration(
+        manifest, source=source, mirror_to_object_store=mirror_to_object_store,
+    )
 
     snapshot_root: Path | None = None
     mirrored = 0
