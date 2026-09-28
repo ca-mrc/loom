@@ -19,8 +19,8 @@ def test_empty_cloud_migration_preserves_operation_and_model(application_databas
     with application_database.begin() as connection:
         operation(connection)
         before = connection.execute(select(NebiusApplicationOperation)).mappings().all()
-    migrate(application_database, "downgrade", "0163")
-    migrate(application_database, "upgrade", "0164")
+    migrate(application_database, "downgrade", "0164")
+    migrate(application_database, "upgrade", "0165")
     with application_database.connect() as connection:
         assert connection.execute(select(NebiusApplicationOperation)).mappings().all() == before
     assert {column["name"] for column in inspect(application_database).get_columns("nebius_application_cloud_effects")} == set(
@@ -31,7 +31,7 @@ def test_empty_cloud_migration_preserves_operation_and_model(application_databas
 def test_cloud_migration_refuses_loss_of_every_dispatch_phase(application_database, phase):
     from loom.db.schema import NebiusApplicationCloudEffect
 
-    migrate(application_database, "downgrade", "0164")
+    migrate(application_database, "downgrade", "0165")
     with application_database.begin() as connection:
         owner = operation(connection)
         connection.execute(insert(NebiusApplicationCloudEffect).values(
@@ -40,7 +40,7 @@ def test_cloud_migration_refuses_loss_of_every_dispatch_phase(application_databa
             observed_resource_id="owned-account" if phase == "observed" else None))
         before = connection.execute(select(NebiusApplicationCloudEffect)).mappings().all()
     with pytest.raises(DBAPIError, match="cannot remove application cloud history"):
-        migrate(application_database, "downgrade", "0163")
+        migrate(application_database, "downgrade", "0164")
     with application_database.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0164"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0165"
         assert connection.execute(select(NebiusApplicationCloudEffect)).mappings().all() == before

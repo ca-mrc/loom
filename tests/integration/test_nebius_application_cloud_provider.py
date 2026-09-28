@@ -6,7 +6,12 @@ import copy
 
 import pytest
 
-from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError, ProviderWaitingError
+from loom_service.environment_management.provider import (
+    ProviderBlockedError,
+    ProviderRetryError,
+    ProviderWaitingError,
+)
+from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_effects import binding
 from tests.integration.test_nebius_application_effects import expire, started
 from tests.integration.test_nebius_application_material import management_key as management_key
@@ -29,8 +34,8 @@ class Cloud:
         for actual_kind, value in self.resources.values():
             if actual_kind != kind or value["metadata"]["parent_id"] != expected["metadata"]["parent_id"]:
                 continue
-            if (kind == "membership" and value["spec"]["member_id"] == expected["spec"]["member_id"]
-                    or kind != "membership" and value["metadata"]["name"] == expected["metadata"]["name"]):
+            if ((kind == "membership" and value["spec"]["member_id"] == expected["spec"]["member_id"])
+                    or (kind != "membership" and value["metadata"]["name"] == expected["metadata"]["name"])):
                 return copy.deepcopy(value)
         return None
 
@@ -167,3 +172,74 @@ async def test_uncertain_delete_only_reconciles_exact_retained_identity(applicat
     deleted = await worker.delete(current, first.operation_id, "account")
     assert deleted.phase == "observed" and deleted.observed_resource_id == "resource-1"
     assert len(cloud.mutations) == 2
+
+
+async def test_matching_but_unrecorded_resource_is_not_adopted(applications):
+    worker, cloud, registry, _, _, plan, _, lease = await provider(applications)
+    planned = await registry.prepare_cloud_create(lease, "account", binding(plan))
+    unrecorded = copy.deepcopy(planned.expected)
+    unrecorded["metadata"]["id"] = "not-dispatched-by-this-journal"
+    cloud.resources[unrecorded["metadata"]["id"]] = "service_account", unrecorded
+    with pytest.raises(ProviderBlockedError, match="application_cloud_unrecorded_resource"):
+        await worker.create(lease, "account", binding(plan))
+    assert cloud.mutations == []
+    assert (await registry.cloud_history(lease))[0].phase == "prepared"
+
+
+async def test_stale_dispatch_response_keeps_uncertainty_for_successor(applications):
+    worker, cloud, registry, factory, _, plan, first, lease = await provider(applications)
+    create = cloud.create
+
+    async def expire_before_reply(*args, **kwargs):
+        value = await create(*args, **kwargs)
+        await expire(factory, lease)
+        return value
+
+    cloud.create = expire_before_reply
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await worker.create(lease, "account", binding(plan))
+    current = await registry.claim(first.operation_id)
+    assert (await registry.cloud_history(current))[0].phase == "dispatched"
+    assert (await worker.reconcile(current, first.operation_id, "account")).observed_resource_id == "resource-1"
+    assert len(cloud.mutations) == 1
+
+
+@pytest.mark.parametrize("damage", ["labels", "id", "stale-lease"])
+async def test_delete_checks_ownership_and_current_lease_before_dispatch(applications, damage):
+    worker, cloud, registry, factory, alice, plan, first, lease = await provider(applications)
+    await worker.create(lease, "account", binding(plan))
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    read = cloud.get_resource
+
+    async def corrupted_read(*args):
+        value = await read(*args)
+        if damage == "stale-lease":
+            await expire(factory, current)
+        elif damage == "labels":
+            value["metadata"]["labels"]["loom-incarnation"] = "not-ours"
+        else:
+            value["metadata"]["id"] = "replacement"
+        return value
+
+    cloud.get_resource = corrupted_read
+    with pytest.raises(ManagementError if damage == "stale-lease" else ProviderBlockedError):
+        await worker.delete(current, first.operation_id, "account")
+    assert len(cloud.mutations) == 1
+    assert "resource-1" in cloud.resources
+
+
+@pytest.mark.parametrize("value", [{}, {"access-key": "one"}, {"access-key": "one", "secret-key": ""},
+                                  {"access-key": "one", "secret-key": "x" * 4097}])
+async def test_invalid_cloud_material_cannot_escape_provider(applications, value):
+    worker, cloud, _, _, _, plan, _, lease = await provider(applications)
+    await worker.create(lease, "account", binding(plan))
+    await worker.create(lease, "key", binding(plan))
+
+    async def invalid(_):
+        return value
+
+    cloud.access_key_secret = invalid
+    with pytest.raises(ProviderBlockedError, match="application_cloud_material_invalid"):
+        await worker.key_material(lease)

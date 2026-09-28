@@ -112,6 +112,32 @@ class NebiusSdkEnvironmentApi:
             raise ProviderBlockedError("nebius_access_key_secret_unavailable")
         return {"access-key": str(response.aws_access_key_id), "secret-key": str(response.secret)}
 
+    def _application_iam(self, kind: str) -> tuple[Any, str]:
+        if kind not in {"service_account", "membership", "access_key"}:
+            raise ValueError("unsupported application IAM kind")
+        return self.bindings[kind]
+
+    async def get_resource(self, kind: str, identity: str) -> dict[str, Any] | None:
+        """Read an exact recorded IAM identity, never a bucket or shared group."""
+        module, name = self._application_iam(kind)
+        result = await self._call(self.clients[kind].get, getattr(module, "Get" + name + "Request")(id=identity),
+                                  missing=True)
+        return self._value(result) if result is not None else None
+
+    async def delete_resource(self, kind: str, identity: str, *, idempotency_key: str) -> None:
+        """One DELETE attempt; caller must journal and qualify exact ownership first."""
+        module, name = self._application_iam(kind)
+        operation = await self._call(self.clients[kind].delete,
+            getattr(module, "Delete" + name + "Request")(id=identity), key=idempotency_key, missing=True)
+        if operation is None:
+            return
+        try:
+            await operation.wait(timeout=30, poll_retries=0)
+        except Exception:
+            raise ProviderRetryError("nebius_iam_deletion_unconfirmed") from None
+        if not operation.successful():
+            raise ProviderBlockedError("nebius_iam_deletion_failed")
+
     async def revoke_access_key(self, identity: str, expected: dict[str, Any], *, idempotency_key: str) -> None:
         """Delete only a recorded, readback-matching key ID; never a bucket/data."""
         from nebius.api.nebius.iam.v2 import DeleteAccessKeyRequest, GetAccessKeyRequest
