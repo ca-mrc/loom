@@ -247,3 +247,94 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         assert "private-root-v1" in rejected.value.body
     finally:
         container.stop()
+
+
+def _guest_pod(namespace: str) -> dict:
+    from loom.execution_contract import workload_requirements_from_task
+    from loom.pipeline.keys import canonical_digest
+    from tests.unit.test_guest_execution_materialization import _compile, _guest_inputs
+
+    task, trial, profile = _guest_inputs()
+    plan = _compile(task, trial, profile)
+    lease = _lease(namespace)
+    lease.target_id = "disposable-guest"
+    lease.execution_class_id = plan.execution_class_id
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
+    lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
+    template = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=namespace,
+    ))["spec"]["template"]
+    return {"apiVersion": "v1", "kind": "Pod", "metadata": {
+        **template["metadata"], "name": "guest-admission", "namespace": namespace,
+    }, "spec": template["spec"]}
+
+
+@pytest.mark.timeout(240)
+def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path):
+    import json
+    import os
+    import subprocess
+    import time
+
+    if os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1":
+        pytest.skip("set LOOM_RUN_DISPOSABLE_K3S=1 for actual isolated admission checks")
+    namespace = "loom-guest-policy-test"
+    policies = identity_policy_documents(namespace, "disposable-k3s", guest_target_id="disposable-guest")
+    container = _start_k3s()
+
+    def apply(documents, *, dry_run=False):
+        path = tmp_path / "guest-policy.yaml"
+        path.write_text(yaml.safe_dump_all(documents))
+        subprocess.run(["docker", "cp", str(path), container.get_wrapped_container().id + ":/tmp/guest-policy.yaml"],
+                       check=True, capture_output=True)
+        return container.exec(["kubectl", "apply", "-f", "/tmp/guest-policy.yaml", *(["--dry-run=server"] if dry_run else [])])
+
+    try:
+        result = apply([
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": namespace, "labels": identity_namespace_labels(),
+            }},
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+                "name": "loom-execution-attempt", "namespace": namespace,
+            }, "automountServiceAccountToken": False},
+            *policies,
+        ])
+        assert result.exit_code == 0, result.output.decode()
+        guest = _guest_pod(namespace)
+        for _ in range(60):
+            result = apply([guest], dry_run=True)
+            if result.exit_code == 0:
+                break
+            time.sleep(0.2)
+        assert result.exit_code == 0, result.output.decode()
+        assert apply([_pod(namespace)], dry_run=True).exit_code == 0
+        status = container.exec(["kubectl", "get", "validatingadmissionpolicy", policies[0]["metadata"]["name"], "-o", "json"])
+        assert not json.loads(status.output).get("status", {}).get("typeChecking", {}).get("expressionWarnings")
+        for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "shell", "probe", "host-sysctl"):
+            changed = deepcopy(guest)
+            sidecar = next(c for c in changed["spec"]["initContainers"] if c["name"] == "task-sandbox")
+            if damage.endswith("target"):
+                changed["metadata"]["annotations"]["loom.openai.com/target-id"] = (
+                    "disposable-k3s" if damage == "owner-target" else "foreign")
+            elif damage == "host-cap":
+                sidecar["securityContext"]["capabilities"]["add"].append("SYS_ADMIN")
+            elif damage == "writable-root":
+                sidecar["securityContext"]["readOnlyRootFilesystem"] = False
+            elif damage == "foreign-state":
+                sidecar["volumeMounts"][-1]["name"] = "verifier-sandbox-guest-state"
+            elif damage == "host-volume":
+                volume = next(v for v in changed["spec"]["volumes"] if v["name"] == "task-sandbox-guest-state")
+                volume.pop("emptyDir")
+                volume["hostPath"] = {"path": "/"}
+            elif damage == "shell":
+                sidecar["command"] = ["/bin/sh", "-c", "sleep 1000"]
+            elif damage == "probe":
+                sidecar["startupProbe"]["exec"]["command"] = ["/bin/sh", "-c", "true"]
+            else:
+                changed["spec"]["securityContext"]["sysctls"] = [{"name": "kernel.core_pattern", "value": "x"}]
+            result = apply([changed], dry_run=True)
+            assert result.exit_code != 0, damage
+    finally:
+        container.stop()
