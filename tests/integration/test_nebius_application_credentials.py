@@ -10,15 +10,18 @@ from uuid import uuid4
 import httpx
 import psycopg
 import pytest
-from psycopg import sql
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from psycopg import sql
 from sqlalchemy.engine import make_url
 
 from loom.db.schema import TeamMembership
-from loom.nebius_application_database import ApplicationDatabaseAccess, install_application_database_access
+from loom.nebius_application_database import (
+    ApplicationDatabaseAccess,
+    install_application_database_access,
+)
 from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material

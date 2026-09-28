@@ -1,7 +1,7 @@
 """Compose generation access, never personal databases or shared master keys.
 
 Protected installation supplies the shared CA/keyring and qualifies the IAM groups.
-This adapter does not activate Pods, enroll shared users, prove object revocation,
+This adapter does not activate Pods, issue login tokens, prove object revocation,
 release capacity or mark an application ready.
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ from loom.nebius_application_credentials import application_credential_names
 from loom_service.application_management.cloud_effects import ApplicationStorageAccessV1
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.application_management.database import AsyncApplicationDatabaseAccess
+from loom_service.application_management.identity import ApplicationOwnerProjection
 from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.application_management.material import (
@@ -37,7 +38,11 @@ from loom_service.application_management.proofs import (
     ApplicationKeyRetirement,
     ApplicationRetirementIdentity,
 )
-from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from loom_service.environment_management.provider import (
+    ProviderBlockedError,
+    ProviderRetryError,
+    ProviderWaitingError,
+)
 from loom_service.environment_management.registry import ManagementError
 
 
@@ -56,6 +61,7 @@ class ApplicationCredentialProvider:
         self.registry, self.cloud, self.database = registry, cloud, database
         self.storage = ApplicationStorageAccessV1.model_validate(storage_binding)
         self.shared = shared
+        self.identities = ApplicationOwnerProjection(registry)
 
     def _registration(self, plan: dict[str, Any]) -> ApplicationRegistrationV1:
         try:
@@ -126,9 +132,14 @@ class ApplicationCredentialProvider:
         role = await self.database.grant(lease, password, schema_revision=plan["release"]["schema_revision"])
         if role != f"lap_{row.incarnation.hex}_g{row.access_generation}":
             raise ProviderBlockedError("application_database_result_invalid")
+        principal = await self.identities.read(lease)
+        await self.database.enroll(lease, principal, schema_revision=plan["release"]["schema_revision"])
+        if await self.identities.read(lease) != principal:
+            raise ProviderRetryError("application_principal_changed")
         await self.cloud.create(lease, "data", binding)
         await self.cloud.create(lease, "source", binding)
-        await self.registry.frozen_plan(lease)
+        if await self.identities.read(lease) != principal:
+            raise ProviderRetryError("application_principal_changed")
         return material
 
     async def deliver(self, lease: ApplicationLease, kubernetes: ApplicationKubernetesProvider) -> None:

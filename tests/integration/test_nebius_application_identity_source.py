@@ -13,7 +13,9 @@ from tests.integration.test_nebius_application_credentials import shared_ca as s
 from tests.integration.test_nebius_application_effects import expire
 from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 

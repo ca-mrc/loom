@@ -191,6 +191,23 @@ def _install_identity(connection: psycopg.Connection[Any], manager_role: str) ->
             raise ApplicationDatabaseAccessError("application_database_installation_drift")
     connection.execute(sql.SQL("REVOKE ALL ON FUNCTION loom_application_access.enroll_principal({}) FROM PUBLIC; GRANT EXECUTE ON FUNCTION loom_application_access.enroll_principal({}) TO {}").format(
         sql.SQL(_TYPES), sql.SQL(_TYPES), sql.Identifier(manager_role)))
+    # The parent installer validated pre-existing private objects before this
+    # extension was created. Role-level default ACLs also apply to new objects;
+    # refuse unexpected inherited authority atomically, never publish it first.
+    if connection.execute("""SELECT EXISTS (
+            SELECT 1 FROM pg_catalog.pg_class c,
+                LATERAL pg_catalog.aclexplode(c.relacl) a
+            WHERE c.relnamespace='loom_application_access'::regnamespace
+                AND c.relname IN ('principal_identities','principal_enrollments')
+                AND a.grantee<>c.relowner
+        ) OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_proc p,
+                LATERAL pg_catalog.aclexplode(p.proacl) a
+            WHERE p.pronamespace='loom_application_access'::regnamespace AND p.proname='enroll_principal'
+                AND a.grantee<>p.proowner
+                AND (a.grantee<>pg_catalog.to_regrole(%s)::oid OR a.is_grantable)
+        )""", (manager_role,)).fetchone() != (False,):
+        raise ApplicationDatabaseAccessError("application_database_private_authority")
 
 
 class ApplicationDatabaseIdentity:
