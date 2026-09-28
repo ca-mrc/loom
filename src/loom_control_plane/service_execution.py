@@ -60,7 +60,11 @@ from loom_control_plane.execution_admission import (
     ExecutionAdmissionIdentity,
     reserve_execution_admission,
 )
-from loom_control_plane.execution_capacity import reserve_execution_provisioning
+from loom_control_plane.execution_capacity import (
+    _CAPACITY_MUTATION_LOCK,
+    reserve_execution_provisioning,
+)
+from loom_control_plane.execution_capacity_targets import validate_capacity_owner
 from loom_control_plane.execution_finance import (
     ExecutionFinanceBlockedError,
     reserve_execution_cost,
@@ -298,6 +302,17 @@ async def persist_execution_catalog(
     for target in targets:
         if target.execution_class_id != execution_class.class_id:
             raise ServiceExecutionConflict("target binds a different execution class")
+        if target.capacity_owner_target_id is not None:
+            # Catalog membership changes invalidate older physical snapshots and
+            # must serialize with observation and pre-create reservation writers.
+            await session.execute(_CAPACITY_MUTATION_LOCK)
+            owner = await session.get(ServiceExecutionTarget, target.capacity_owner_target_id)
+            try:
+                if owner is None:
+                    raise ValueError("capacity owner is unavailable")
+                validate_capacity_owner(target, ExecutionTargetV1.model_validate(owner.spec_json))
+            except ValueError as exc:
+                raise ServiceExecutionConflict(str(exc)) from exc
         target_json = target.model_dump(mode="json")
         existing_target = await session.get(ServiceExecutionTarget, target.target_id)
         if existing_target is None:

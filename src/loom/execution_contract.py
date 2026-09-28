@@ -227,6 +227,9 @@ class ExecutionTargetV1(_StrictContract):
     target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     logical_pool_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
     execution_class_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    capacity_owner_target_id: str | None = Field(
+        default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,79}$", exclude_if=lambda value: value is None,
+    )
     # Optional at the standalone V1 parsing boundary so already-persisted
     # regional records remain readable. A current topology requires an explicit
     # physical cluster scope for every target.
@@ -251,6 +254,13 @@ class ExecutionTargetV1(_StrictContract):
 
     @model_validator(mode="after")
     def _health_freshness_exceeds_probe_interval(self) -> ExecutionTargetV1:
+        if self.capacity_owner_target_id is not None and (
+            self.capacity_owner_target_id == self.target_id
+            or self.execution_class_id not in {
+                "linux-amd64-cpu-guest-v1", "linux-amd64-cpu-guest-web-v1",
+            }
+        ):
+            raise ValueError("only a guest target may share a distinct capacity owner")
         if self.health_stale_after_seconds <= self.health_check_interval_seconds:
             raise ValueError(
                 "health_stale_after_seconds must exceed the independent probe interval",
