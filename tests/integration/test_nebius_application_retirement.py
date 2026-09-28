@@ -235,7 +235,7 @@ async def test_stop_recovers_lost_namespace_create_before_closing_admission(appl
         api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}
         api.objects[PODS] = {"kind": "PodList", "metadata": {"resourceVersion": "1"}, "items": []}
         await provider.stop_workloads(current)
-        assert [method for method, _, _ in api.mutations] == ["POST", "POST"]
+        assert [body['kind'] for _, _, body in api.mutations] == ['Namespace', 'RoleBinding', 'ResourceQuota']
         assert all(effect.phase == "observed" for effect in await registry.effect_history(current))
 
 
@@ -266,7 +266,7 @@ async def test_stop_before_first_namespace_dispatch_retires_without_sending_old_
         api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}
         api.objects[PODS] = {"kind": "PodList", "metadata": {"resourceVersion": "1"}, "items": []}
         await provider.stop_workloads(current)
-        assert len(api.mutations) == 2
+        assert [body['kind'] for _, _, body in api.mutations] == ['Namespace', 'RoleBinding', 'ResourceQuota']
         assert all(body["metadata"]["annotations"]["loom.nebius/operation-id"] == str(current.operation_id)
                    for _, _, body in api.mutations)
         if prepared:
@@ -348,3 +348,66 @@ async def test_resource_authority_is_never_adopted_replaced_or_broadened(runtime
     with pytest.raises(ProviderBlockedError, match='application_resource_authority_conflict'):
         await provider.ensure_resource_authority(lease)
     assert len(api.mutations) == 2
+
+
+@pytest.mark.parametrize('status', [None, {'allowed': 'true'}, {'allowed': True, 'evaluationError': 'incomplete'},
+                                  {'allowed': True, 'denied': True}])
+async def test_uncertain_authorization_review_never_grants_resource_access(runtime_context, status):
+    _, kubernetes, _, api, lease, _ = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    def response(request):
+        if request.url.path == '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews':
+            return httpx.Response(201, json={'kind': 'SelfSubjectAccessReview', 'status': status})
+        return api.handle(request)
+    async with httpx.AsyncClient(base_url='https://kubernetes.test', transport=httpx.MockTransport(response)) as http:
+        kubernetes.http = http
+        with pytest.raises((ProviderBlockedError, ProviderWaitingError)):
+            await runtime(runtime_context).ensure_resource_authority(lease)
+    assert [body['kind'] for method, _, body in api.mutations if method == 'POST'] == ['Namespace', 'RoleBinding']
+
+
+@pytest.mark.parametrize('supersede', [False, True])
+async def test_prepared_binding_resumes_only_under_original_current_operation(runtime_context, monkeypatch, supersede):
+    registry, _, _, api, lease, alice = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    dispatch = registry.dispatch_effect
+    async def interrupt(*args, **kwargs):
+        raise asyncio.CancelledError
+    monkeypatch.setattr(registry, 'dispatch_effect', interrupt)
+    with pytest.raises(asyncio.CancelledError):
+        await runtime(runtime_context).ensure_resource_authority(lease)
+    monkeypatch.setattr(registry, 'dispatch_effect', dispatch)
+    current = lease
+    if supersede:
+        operation = await registry.transition(lease.application_id, principal=alice, action='suspend',
+            idempotency_key='stop', expected_generation=1)
+        current = await registry.claim(operation.operation_id)
+    await runtime(runtime_context).ensure_resource_authority(current)
+    binding = api.mutations[-1][2]
+    assert len(api.mutations) == 2 and binding['kind'] == 'RoleBinding'
+    assert binding['metadata']['annotations']['loom.nebius/operation-id'] == str(current.operation_id)
+    history = [item for item in await registry.effect_history(current) if item.intent.kind == 'RoleBinding']
+    assert [item.phase for item in history] == (['prepared', 'observed'] if supersede else ['observed'])
+
+
+async def test_peer_binding_creation_after_absent_read_is_not_a_conflict(runtime_context, monkeypatch):
+    _, kubernetes, authority, api, lease, _ = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    path = f'/apis/rbac.authorization.k8s.io/v1/namespaces/{NS}/rolebindings/{authority.name}'
+    read = kubernetes._read
+    raced = False
+    async def peer_progress(target):
+        nonlocal raced
+        actual = await read(target)
+        if target == path and not raced:
+            raced = True
+            assert actual is None
+            await runtime(runtime_context).ensure_resource_authority(lease)
+        return actual
+    monkeypatch.setattr(kubernetes, '_read', peer_progress)
+    await runtime(runtime_context).ensure_resource_authority(lease)
+    assert raced and len(api.mutations) == 2
+    assert api.objects[path]['subjects'][0]['name'] == 'loom-application-provisioner'

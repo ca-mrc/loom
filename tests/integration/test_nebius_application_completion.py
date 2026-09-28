@@ -279,7 +279,7 @@ async def test_stop_before_any_dispatch_completes_without_grants_or_workloads(st
     registry, factory, _, lease, runtime, credentials, verifier, api, cloud, _ = stopped_context
     await ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier).stop(lease)
     assert cloud.mutations == []
-    assert [body['kind'] for method, _, body in api.mutations if method == 'POST'] == ['Namespace', 'ResourceQuota']
+    assert [body['kind'] for method, _, body in api.mutations if method == 'POST'] == ['Namespace', 'RoleBinding', 'ResourceQuota']
     assert database_access[0].execute('SELECT count(*) FROM loom_application_access.generations').fetchone() == (0,)
     assert await charged(stopped_context) == (0, 0, 0, 0)
     async with factory() as session:
