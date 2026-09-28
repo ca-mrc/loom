@@ -11,6 +11,9 @@ func guestPlanPayload(t *testing.T) map[string]any {
 	p.RuntimeVolumeMiB = 1024
 	p.ExecutionClassID = "linux-amd64-cpu-guest-v1"
 	p.TaskResources = resources{CPUMillis: 1000, MemoryMiB: 1024, EphemeralStorageMiB: 2048}
+	controller := p.TaskResources
+	controller.EphemeralStorageMiB += p.RuntimeVolumeMiB
+	p.ControllerResources = &controller
 	for i := range p.Sidecars {
 		s := &p.Sidecars[i]
 		socket := "/loom/sandboxes/" + s.RoleName + "/sandbox.sock"
@@ -56,13 +59,21 @@ func TestGuestPlanStrictRoundTripAndOrdinaryOmission(t *testing.T) {
 }
 
 func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
-	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime"} {
+	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image"} {
 		t.Run(damage, func(t *testing.T) {
 			p := guestPlanPayload(t)
 			sides := p["sidecars"].([]any)
 			s := sides[0].(map[string]any)
 			g := s["guest_execution"].(map[string]any)
 			switch damage {
+			case "missing_controller":
+				delete(p, "controller_resources")
+			case "storage_unreserved":
+				p["controller_resources"].(map[string]any)["ephemeral_storage_mib"] = 2048
+			case "small_request":
+				p["resource_requests"] = map[string]any{"controller": map[string]any{"cpu_millis": 100, "memory_mib": 128, "ephemeral_storage_mib": 1024}}
+			case "wrong_image":
+				s["image_ref"] = p["agent_image_ref"]
 			case "ordinary_class":
 				p["execution_class_id"] = "linux-amd64-cpu-pod-v1"
 			case "missing_guest":
