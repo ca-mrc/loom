@@ -280,6 +280,53 @@ async def test_ready_readback_rejects_live_drift_without_repair(active_retired, 
     assert api.mutations == before
 
 
+@pytest.mark.parametrize('target,addition', [
+    ('container', {'command': ['/bin/sh'], 'args': ['-c', 'sleep infinity']}),
+    ('container', {'workingDir': '/tmp'}),
+    ('container', {'lifecycle': {'postStart': {'exec': {'command': ['touch', '/tmp/changed']}}}}),
+    ('pod', {'initContainers': [{'name': 'extra', 'image': 'other@sha256:' + '9' * 64}]}),
+    ('pod', {'hostNetwork': True}),
+    ('pod', {'dnsPolicy': 'Default'}),
+])
+async def test_unplanned_execution_fields_block_route_and_ready_readback(active_retired, target, addition):
+    context, provider = await pending_backends(active_retired)
+    api, lease = context[3:5]
+    ready_backends(api)
+    pod = api.objects[API]['spec']['template']['spec']
+    (pod['containers'][0] if target == 'container' else pod).update(addition)
+    # The controller has reconciled the changed template; this is not status lag.
+    api.objects[API]['metadata']['generation'] = 2
+    api.objects[API]['status']['observedGeneration'] = 2
+    before = copy.deepcopy(api.mutations)
+    for observe in (provider.start_workloads, provider.read_ready):
+        with pytest.raises(ProviderBlockedError, match='application_workload_identity_conflict'):
+            await observe(lease)
+    assert api.mutations == before
+    assert not any(obj['kind'] == 'Ingress' for obj in api.objects.values())
+
+
+async def test_api_defaulted_execution_template_still_reaches_ready(active_retired):
+    context, provider = await pending_backends(active_retired)
+    api, lease = context[3:5]
+    ready_backends(api)
+    for path in (API, WEB):
+        pod = api.objects[path]['spec']['template']['spec']
+        pod.update(dnsPolicy='ClusterFirst', restartPolicy='Always', schedulerName='default-scheduler',
+            terminationGracePeriodSeconds=30, serviceAccount=pod['serviceAccountName'])
+        container = pod['containers'][0]
+        container.update(terminationMessagePath='/dev/termination-log', terminationMessagePolicy='File')
+        container['ports'][0]['protocol'] = 'TCP'
+        probe = container['readinessProbe']
+        probe.update(timeoutSeconds=1, successThreshold=1, failureThreshold=3)
+        probe['httpGet']['scheme'] = 'HTTP'
+        for volume in pod.get('volumes', []):
+            if 'secret' in volume:
+                volume['secret'].setdefault('defaultMode', 420)
+    proof = await provider.start_workloads(lease)
+    assert proof.ingress.name == 'loom-web'
+    assert await provider.read_ready(lease) == proof
+
+
 @pytest.mark.parametrize('prepared', [True, False])
 async def test_interrupted_workload_create_recovers_original_request_without_duplicate(active_retired, monkeypatch, prepared):
     context, provider, _ = active_retired
