@@ -38,7 +38,7 @@ def setup_request(application_management_inputs):
 def application_material():
     from scripts.ops.nebius_application_setup import ApplicationSetupMaterial
 
-    from loom.nebius_platform_bootstrap import generate_material
+    from loom_service.environment_management.credentials import generate_material
 
     ca = generate_material(namespace='loom-nebius-platform', tls_secret_name='fixture-tls')['loom-platform-db']['ca.crt']
     return ApplicationSetupMaterial(manager_password='m' * 48, database_name='loom', ca_pem=ca,

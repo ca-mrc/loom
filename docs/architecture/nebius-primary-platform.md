@@ -740,8 +740,22 @@ with the existing schema lock, creates a missing ordinary manager login and
 installs the existing access routines. Retries authenticate the retained password
 and preserve the role identity; mismatches or a lost bound role fail rather than
 rotating or adopting credentials. It preserves business records and runs no
-business-schema migration. Its protected setup-Job and upgrade wiring are not yet
-installed; personal APIs must never invoke this administrator command.
+business-schema migration. Personal APIs must never invoke this administrator
+command.
+
+The fixed protected setup adapter uses the existing create-only recovery journal
+for application admission, shared observer permissions, shared network access and
+the SQL setup Job. Management-to-shared PostgreSQL ingress is separate from the
+personal application policies. It binds both namespace identities, exposes the
+admission type-checking barrier that must precede bootstrap permissions, and never
+retries an uncertain Job creation. A failed Job requires explicit recovery.
+The material phase delivers only three immutable revision-named Secrets: the
+retained SQL manager password for the setup Job, and the application's management
+cloud and shared SQL/CA/keyring bundles. It never generates new shared master keys,
+rotates existing credentials or overwrites bootstrap Secrets. Protected caller
+qualification of material provenance and actual cloud permissions remains required.
+These adapters are source/test coverage, not an installed upgrade: connecting the
+protected upgrade and qualifying the first personal HTTPS login remain outstanding.
 
 `POST /applications/{id}/login` exchanges the owning management **user session**
 for a 90-second one-use proof, never a shared password or database credential.

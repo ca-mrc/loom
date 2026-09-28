@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.ops.test_nebius_application_setup import application_material as application_material
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
 
 
 @pytest.mark.timeout(180)
-def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, application_management_inputs):
+def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, application_management_inputs, application_material):
     from kubernetes import client
     from scripts.ops.nebius_application_setup import (
         ApplicationSetupRequest,
@@ -67,9 +68,9 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
         shared = core.create_namespace({'metadata': {'name': application.shared.platform_namespace}})
         binding = ManagementBinding(str(deployment.installation_id), deployment.namespace,
             management.metadata.uid, core.read_namespace('kube-system').metadata.uid)
-        request = ApplicationSetupRequest(deployment, candidate, profile, binding, shared.metadata.uid, ROOT)
+        request = ApplicationSetupRequest(deployment, candidate, profile, binding, shared.metadata.uid, ROOT, application_material)
         rbac = client.RbacAuthorizationV1Api(core.api_client)
-        for phase in ('admission', 'permissions', 'network', 'database'):
+        for phase in ('admission', 'permissions', 'network', 'material', 'database'):
             with HTTPSApplicationSetupAPI(request=request, phase=phase, api_server=endpoint,
                                            ssl_context=trust) as api:
                 args = dict(request=request, phase=phase, api=api, state_dir=tmp_path / phase)
