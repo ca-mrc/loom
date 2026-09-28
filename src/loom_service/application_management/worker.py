@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -72,8 +73,11 @@ class ApplicationWorker:
                 heartbeat.cancel()
                 work.cancel()
                 await asyncio.gather(heartbeat, work, return_exceptions=True)
-        except ManagementError:
-            return  # A successor/current completion fences this attempt's reporting.
+        except ManagementError as exc:
+            if exc.code in {"stale_operation_lease", "stale_operation_generation"}:
+                return  # A successor/current completion fences this attempt's reporting.
+            code = exc.code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", exc.code) else "provider_internal_error"
+            await self._failure(lease, code, retry=False)
         except (ProviderRetryError, TimeoutError) as exc:
             code = exc.code if isinstance(exc, ProviderRetryError) else "provider_timeout"
             await self._failure(lease, code, retry=lease.runner_epoch < self.max_attempts)
