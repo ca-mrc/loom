@@ -36,8 +36,10 @@ async def test_exact_cloud_read_delete_use_native_requests_without_retries(kind,
     assert (await api.get_resource(kind, "recorded-id"))["metadata"]["id"] == "recorded-id"
     await api.delete_resource(kind, "recorded-id", idempotency_key="frozen-delete-key")
     assert calls == [
-        ("get", {"id": "recorded-id"}, {"timeout": 30, "retries": 0}),
-        ("delete", {"id": "recorded-id"}, {"timeout": 30, "retries": 0,
+        ("get", {"id": "recorded-id"}, {"timeout": 30, "auth_timeout": 30, "retries": 0,
+                                       "auth_options": {"max_fetch_token_retries": "0"}}),
+        ("delete", {"id": "recorded-id"}, {"timeout": 30, "auth_timeout": 30, "retries": 0,
+                                           "auth_options": {"max_fetch_token_retries": "0"},
                                            "metadata": [("x-idempotency-key", "frozen-delete-key")]}),
     ]
 
@@ -76,7 +78,8 @@ async def test_native_sdk_authentication_rejection_does_not_repeat_mutation(acti
     port = server.add_insecure_port("127.0.0.1:0")
     await server.start()
     sdk = SDK(credentials=RenewableBearer(StaticBearer("test-only-token")),
-              resolver=Constant(f"127.0.0.1:{port}"), options=[(INSECURE, True)])
+              resolver=Constant(f"127.0.0.1:{port}"), options=[(INSECURE, True)],
+              user_agent_prefix="loom-auth-retry-test/1.0")
     try:
         api = NebiusSdkEnvironmentApi(sdk)
         with pytest.raises(ProviderBlockedError, match="nebius_request_rejected"):

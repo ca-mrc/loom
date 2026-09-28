@@ -35,8 +35,12 @@ class NebiusSdkEnvironmentApi:
     async def _call(self, method: Any, request: Any, *, key: str | None = None, missing: bool = False) -> Any:
         from grpc import StatusCode
         from nebius.aio.service_error import RequestError
+        from nebius.aio.token.options import OPTION_MAX_RETRIES
 
-        kwargs: dict[str, Any] = {"timeout": 30, "retries": 0}
+        # SDK authentication renewal has its own RPC resend loop, independent
+        # of transport retries. Bound both on the native renewable credentials.
+        kwargs: dict[str, Any] = {"timeout": 30, "auth_timeout": 30, "retries": 0,
+                                  "auth_options": {OPTION_MAX_RETRIES: "0"}}
         if key is not None:
             kwargs["metadata"] = [("x-idempotency-key", key)]
         try:

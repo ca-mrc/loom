@@ -426,8 +426,9 @@ Retirement retains one deletion intent across superseding operations (for exampl
 suspend followed by destroy). A successor may dispatch a still-prepared retirement
 once under its current lease; a previously dispatched retirement only reconciles.
 
-`ApplicationCloudProvider` uses the existing native Nebius SDK with retries disabled
-and deterministic idempotency keys. Reads validate frozen names, project/group,
+`ApplicationCloudProvider` uses the existing native Nebius SDK with transport and
+native renewable-credential authentication retries disabled, 30-second request and
+authentication deadlines, and deterministic idempotency keys. Reads validate frozen names, project/group,
 labels, specification and recorded resource ID. Observed resources that disappear
 or change identity fail closed. Delete addresses only an exact recorded ID, after
 ownership readback, and confirms absence without automatically resending uncertain

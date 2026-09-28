@@ -294,7 +294,8 @@ async def test_sdk_membership_lookup_uses_generated_client_and_complete_inventor
         assert method == "ListMembers"
         assert isinstance(request, ListGroupMembershipsRequest)
         assert request.parent_id == "group-owned" and request.page_size == 100
-        assert kwargs == {"timeout": 30, "retries": 0}
+        assert kwargs == {"timeout": 30, "auth_timeout": 30, "retries": 0,
+                          "auth_options": {"max_fetch_token_retries": "0"}}
         calls.append(request.page_token)
         member = "service-account-wanted" if (
             case == "duplicate" or (case == "found" and request.page_token)
