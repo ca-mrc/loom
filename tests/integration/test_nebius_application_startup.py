@@ -2,14 +2,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 
 import pytest
 
+from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_effects import expire, intent, started
+from tests.integration.test_nebius_application_material import management_key as management_key
+from tests.integration.test_nebius_application_material import material
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_application_runtime import runtime
+from tests.integration.test_nebius_application_runtime import runtime_context as runtime_context
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -135,3 +143,107 @@ async def test_one_application_activation_never_blocks_another_owner(application
     assert not await registry.activation_started(sibling)
     assert (await registry.prepare_effect(sibling, "retire:scale:old",
         intent(other, action="patch", uid="bobs-api", resource_version="8"))).phase == "prepared"
+
+
+async def document(registry, lease, kind):
+    if kind == "Secret":
+        bundles = await registry.ensure_material(lease, material)
+        name = next(iter(bundles))
+        return {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+                "metadata": {"name": name, "namespace": "loom-dev-alice"},
+                "data": {key: base64.b64encode(value.encode()).decode() for key, value in bundles[name].items()}}
+    plan = await registry.frozen_plan(lease)
+    return next(doc for docs in plan["files"].values() for doc in docs if doc["kind"] == kind)
+
+
+async def interrupted_create(registry, client, lease, key, doc, monkeypatch):
+    async def crash(*args):
+        raise InterruptedError("crash after prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "dispatch_effect", crash)
+        with pytest.raises(InterruptedError):
+            await client.create(lease, key, doc)
+
+
+@pytest.mark.parametrize("kind", ["ServiceAccount", "NetworkPolicy", "Secret"])
+@pytest.mark.parametrize("lost_reply", [False, True])
+async def test_preparation_recovers_current_static_and_secret_writes_once(runtime_context, monkeypatch, kind, lost_reply):
+    registry, client, _, api, lease, _ = runtime_context
+    doc = await document(registry, lease, kind)
+    key = "prepare:" + kind.lower()
+    if lost_reply:
+        api.lose_response = True
+        with pytest.raises(ProviderWaitingError):
+            await client.create(lease, key, doc)
+    else:
+        await interrupted_create(registry, client, lease, key, doc, monkeypatch)
+    await expire(registry.session_factory, lease)
+    replacement = await registry.claim(lease.operation_id)
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await runtime(runtime_context).resume_preparation(lease)
+    await runtime(runtime_context).resume_preparation(replacement)
+    await runtime(runtime_context).resume_preparation(replacement)
+    assert [method for method, _, _ in api.mutations] == ["POST", "POST"]
+    effect = (await registry.effect_history(replacement))[-1]
+    assert effect.key == key and effect.phase == "observed"
+    actual = next(obj for obj in api.objects.values() if obj["kind"] == kind)
+    if kind == "Secret":
+        assert actual["immutable"] is True and actual["data"] == doc["data"]
+
+
+async def test_preparation_resumes_original_network_patch_preconditions(runtime_context, monkeypatch):
+    registry, client, _, api, lease, _ = runtime_context
+    doc = await document(registry, lease, "NetworkPolicy")
+    original = await client.create(lease, "network:create", doc)
+
+    async def crash(*args):
+        raise InterruptedError("crash after prepare")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(registry, "dispatch_effect", crash)
+        with pytest.raises(InterruptedError):
+            await client.patch_spec(lease, "network:patch", doc, uid=original.observed_uid,
+                                    resource_version=original.observed_resource_version)
+    api.reject_next = 409
+    with pytest.raises(ProviderWaitingError, match="application_preparation_pending"):
+        await runtime(runtime_context).resume_preparation(lease)
+    assert api.mutations[-1][2][:2] == [
+        {"op": "test", "path": "/metadata/uid", "value": original.observed_uid},
+        {"op": "test", "path": "/metadata/resourceVersion", "value": original.observed_resource_version},
+    ]
+    await runtime(runtime_context).resume_preparation(lease)
+    assert len(api.mutations) == 3
+    assert (await registry.effect_history(lease))[-1].phase == "rejected"
+
+
+@pytest.mark.parametrize("kind", ["Deployment", "Service", "Ingress"])
+async def test_preparation_cannot_start_workloads_or_publish_routes(runtime_context, monkeypatch, kind):
+    registry, client, _, api, lease, _ = runtime_context
+    await interrupted_create(registry, client, lease, "forbidden", await document(registry, lease, kind), monkeypatch)
+    with pytest.raises(ProviderBlockedError, match="application_preparation_effect_conflict"):
+        await runtime(runtime_context).resume_preparation(lease)
+    assert len(api.mutations) == 1
+    assert (await registry.effect_history(lease))[-1].phase == "prepared"
+
+
+async def test_preparation_never_dispatches_a_stopped_predecessors_unsent_secret(runtime_context, monkeypatch):
+    registry, client, _, api, lease, alice = runtime_context
+    await interrupted_create(registry, client, lease, "credential:db", await document(registry, lease, "Secret"), monkeypatch)
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    with pytest.raises(ProviderBlockedError, match="application_preparation_not_requested"):
+        await runtime(runtime_context).resume_preparation(current)
+    assert len(api.mutations) == 1
+
+
+async def test_preparation_cannot_run_after_the_activation_boundary(runtime_context):
+    registry, _, _, api, lease, _ = runtime_context
+    key = "activate:unfence:" + hashlib.sha256(b"fence-uid:9").hexdigest()
+    await registry.prepare_effect(lease, key, dict(api_version="v1", kind="ResourceQuota",
+        namespace="loom-dev-alice", name="loom-application-retired", action="delete",
+        uid="fence-uid", resource_version="9", request_sha256="a" * 64))
+    with pytest.raises(ProviderBlockedError, match="application_activation_started"):
+        await runtime(runtime_context).resume_preparation(lease)
+    assert len(api.mutations) == 1
