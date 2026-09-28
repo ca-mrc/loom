@@ -56,6 +56,7 @@ from loom_llm_gateway.rate_card import RateCardTable, hash_table
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.provider_connection_fixtures import insert_openai_connection
 from tests.support.execution_image_admission import signed_image_admission_bundle
 
 RAW_ADMIN_TOKEN = "loom_admin_" + "A" * 43
@@ -378,6 +379,16 @@ async def camp_setup(
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
+
+
+def _seed_connection(postgres_url: str, team_id: UUID, *model_ids: str) -> str:
+    """Model-backed submissions require an explicit Provider Connection (#2054)."""
+    engine = create_engine(postgres_url)
+    with sessionmaker(engine)() as s:
+        connection_id = insert_openai_connection(s, team_id=team_id, model_ids=model_ids)
+        s.commit()
+    engine.dispose()
+    return str(connection_id)
 
 
 async def test_post_batch_materializes_count(
@@ -1493,7 +1504,7 @@ async def test_post_batch_sanitizes_trial_request_params(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -1505,6 +1516,7 @@ async def test_post_batch_sanitizes_trial_request_params(
             json={
                 "name": "request params",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "stub"),
                 "task_filter": {"license": "MIT"},
                 "trial_config": {
                     "agent_name": "litellm",
@@ -1559,7 +1571,7 @@ async def test_post_batch_generates_concise_identity_when_name_omitted(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     with sync_engine.begin() as conn:
         conn.execute(
@@ -1612,6 +1624,7 @@ async def test_post_batch_generates_concise_identity_when_name_omitted(
             json={
                 "name_suffix": "canary",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
                 "task_filter": {
                     "benchmark_ids": ["humaneval", "mbpp"],
                     "subset_kind": "random_n",
@@ -2675,7 +2688,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
     agent_name: str,
     dockerfile: bool,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     suffix = "combinations" if use_combinations else "single"
     task_id = f"local/automatic-nebius-{suffix}"
     target_id = f"nebius-automatic-backend-{suffix}"
@@ -2767,6 +2780,7 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             payload: dict[str, object] = {
                 "name": f"automatic-nebius-{suffix}",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-5"),
                 "task_filter": {
                     "subset_kind": "explicit",
                     "task_ids": [task_id],
@@ -4693,6 +4707,7 @@ async def test_rerun_failed_batch_creates_linked_exact_targets(
     with sync_engine.begin() as conn:
         conn.execute(
             insert(Batch).values(
+                provider_connection_id=_seed_connection(postgres_url, team_id, "qwen"),
                 id=batch_id,
                 team_id=team_id,
                 name="gateway-flaked",
@@ -4809,6 +4824,7 @@ async def test_rerun_failed_validates_only_failed_agent_task_coordinates(
         )
         conn.execute(
             insert(Batch).values(
+                provider_connection_id=_seed_connection(postgres_url, team_id, "qwen"),
                 id=batch_id,
                 team_id=team_id,
                 name="coordinate-specific-admission",
@@ -4966,6 +4982,7 @@ async def test_rerun_failed_rejects_task_that_became_agent_incompatible(
         )
         conn.execute(
             insert(Batch).values(
+                provider_connection_id=_seed_connection(postgres_url, team_id, "qwen"),
                 id=batch_id,
                 team_id=team_id,
                 name="now-incompatible",
@@ -5101,6 +5118,7 @@ async def test_rerun_failed_batch_preserves_duplicate_task_coordinates(
     with sync_engine.begin() as conn:
         conn.execute(
             insert(Batch).values(
+                provider_connection_id=_seed_connection(postgres_url, team_id, "qwen"),
                 id=batch_id,
                 team_id=team_id,
                 name="gateway-flaked-twice",
@@ -5950,7 +5968,7 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
     `requires_capabilities`. The preflight must short-circuit them so
     a model-backed batch isn't blocked from running against an
     aime-shape task."""
-    _app, raw, _team_id = camp_setup
+    _app, raw, team_id = camp_setup
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
     with sl() as s:
@@ -5977,6 +5995,7 @@ async def test_post_batch_does_not_filter_when_agent_has_no_requirements(
             json={
                 "name": "litellm-on-script-task",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
                 "task_filter": {
                     "task_ids": ["local/script-only-1"],
                     "subset_kind": "explicit",
@@ -5999,7 +6018,7 @@ async def test_post_batch_rejects_completion_agent_for_workspace_task(
     postgres_url: str,
     agent_name: str,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     task_id = f"local/workspace-{agent_name}"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -6024,6 +6043,7 @@ async def test_post_batch_rejects_completion_agent_for_workspace_task(
             json={
                 "name": "completion-on-workspace",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
                 "task_filter": {
                     "task_ids": [task_id],
                     "subset_kind": "explicit",
@@ -6049,7 +6069,7 @@ async def test_post_batch_allows_workspace_agent_for_workspace_task(
     camp_setup: tuple[FastAPI, str, UUID],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id = camp_setup
+    app, raw, team_id = camp_setup
     task_id = "local/workspace-terminus"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -6074,6 +6094,7 @@ async def test_post_batch_allows_workspace_agent_for_workspace_task(
             json={
                 "name": "terminus-on-workspace",
                 "purpose": "evaluation",
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
                 "task_filter": {
                     "task_ids": [task_id],
                     "subset_kind": "explicit",

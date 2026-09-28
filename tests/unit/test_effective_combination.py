@@ -87,15 +87,14 @@ def test_own_connection_overrides_the_batch_connection() -> None:
     assert route.connection_id == CONN_B
 
 
-def test_no_connection_keeps_the_platform_route() -> None:
-    route = resolve_provider_route(
-        context="c",
-        agent_model=GPT,
-        connection_id=None,
-        model_id=None,
-    )
-
-    assert route == ProviderRoute(connection_id=None, model_id="gpt-4o")
+def test_model_backed_selection_without_connection_is_rejected() -> None:
+    with pytest.raises(ProviderRouteError, match="requires a Provider Connection"):
+        resolve_provider_route(
+            context="combinations[0]",
+            agent_model=GPT,
+            connection_id=None,
+            model_id="gpt-4o",
+        )
 
 
 def test_no_model_agent_takes_no_provider_fields() -> None:

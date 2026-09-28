@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
@@ -89,7 +89,11 @@ from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
-from loom_service.effective_combination import ProviderRouteError, resolve_provider_route
+from loom_service.effective_combination import (
+    ProviderRouteError,
+    resolve_provider_route,
+    stored_selection_error,
+)
 from loom_service.execution_admission import (
     admit_execution_backend,
     freeze_task_resource_requests,
@@ -689,18 +693,6 @@ def _disambiguate_derived_labels(
             combo = combo.model_copy(update={"label": f"{label}@{name}"[:200]})
         out.append(combo)
     return out
-
-
-def _rerun_selection_error(selection: dict[str, Any]) -> str | None:
-    agent_name = selection.get("agent_name")
-    if not isinstance(agent_name, str) or not agent_name:
-        return None
-    model_raw = selection.get("agent_model")
-    try:
-        model = None if model_raw is None else ModelSpec.model_validate(model_raw)
-    except ValidationError as exc:
-        return f"agent_model failed to validate: {exc}"
-    return validate_agent_model_compat(agent_name, model)
 
 
 def _combination_context(index: int, combo: Combination) -> str:
@@ -2733,7 +2725,7 @@ async def rerun_failed_batch(
     rerun_combination_idxs = sorted({int(t["combination_idx"]) for t in targets})
     for combination_idx in rerun_combination_idxs:
         selection = combinations[combination_idx] if combinations else rerun_trial_config
-        err = _rerun_selection_error(selection)
+        err = stored_selection_error(selection, batch_connection_id=b.provider_connection_id)
         if err is not None:
             context = f"combinations[{combination_idx}]" if combinations else "trial_config"
             reject_submission(

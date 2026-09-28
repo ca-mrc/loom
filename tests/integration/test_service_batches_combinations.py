@@ -759,6 +759,9 @@ async def test_combinations_reject_oracle_when_any_task_is_incompat(
         {
             "name": "oracle+litellm-on-script-task",
             "purpose": "evaluation",
+            "provider_connection_id": str(
+                _insert_connection(postgres_url, raw, "Incompat provider", ("gpt-4o-mini",)),
+            ),
             "task_filter": {
                 "task_ids": ["local/script-only-combo"],
                 "subset_kind": "explicit",
@@ -1049,3 +1052,30 @@ async def test_combinations_mixed_oracle_ignores_batch_level_route(
     assert stored[0]["provider_model_id"] is None
     assert stored[1]["provider_connection_id"] == str(conn_id)
     assert stored[1]["provider_model_id"] == "gpt-4o"
+
+
+async def test_model_backed_submission_without_connection_is_rejected(
+    setup: tuple[FastAPI, str],
+) -> None:
+    """#2054: no fallback to platform credentials for model-backed work."""
+    app, raw = setup
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-no-connection",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "combinations": [
+                {"agent_name": "oracle", "agent_model": None, "n_per_task": 1},
+                _litellm("gpt-4o"),
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "combinations[1]" in detail
+    assert "requires a Provider Connection" in detail

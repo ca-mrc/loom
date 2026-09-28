@@ -9,8 +9,9 @@ connection and model.
 
 Rules:
 - A no-model agent (oracle) takes no provider fields at all.
-- A model-backed agent inherits the batch-level connection when it names
-  none of its own.
+- A model-backed agent must use an explicitly selected Provider
+  Connection: its own, or the batch-level one inherited as a pair. There
+  is no fallback to platform credentials.
 - The effective model is always `agent_model.name`. A supplied
   `provider_model_id` (own or inherited) must equal it; omitted values
   are filled from it.
@@ -18,10 +19,15 @@ Rules:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
+
 from loom.models.types import ModelSpec
+from loom_service.agent_catalog import validate_agent_model_compat
 
 
 class ProviderRouteError(ValueError):
@@ -57,9 +63,13 @@ def resolve_provider_route(
             )
         return ProviderRoute(connection_id=None, model_id=None)
 
-    # A missing connection still means the platform-credential route; making
-    # a Provider Connection mandatory is a separate, pending decision.
     effective_connection = connection_id or default_connection_id
+    if effective_connection is None:
+        raise ProviderRouteError(
+            f"{context}: model {agent_model.name!r} requires a Provider "
+            "Connection; set provider_connection_id to an OpenAI-compatible "
+            "connection owned by or shared with your team",
+        )
     supplied_model_id = model_id or default_model_id
     if supplied_model_id and supplied_model_id != agent_model.name:
         source = "provider_model_id" if model_id else "the batch-level provider_model_id"
@@ -70,4 +80,42 @@ def resolve_provider_route(
     return ProviderRoute(connection_id=effective_connection, model_id=agent_model.name)
 
 
-__all__ = ["ProviderRoute", "ProviderRouteError", "resolve_provider_route"]
+def stored_selection_error(
+    selection: Mapping[str, Any],
+    *,
+    batch_connection_id: UUID | None,
+) -> str | None:
+    """Check a stored selection (a batch's `trial_config` or one of its
+    `combinations`) against current submission policy before new trials
+    are created from it by a rerun, clone or artifact reuse.
+
+    Batches accepted under older rules stay readable, but new trials
+    require a supported agent and, for model-backed agents, an explicit
+    Provider Connection (the selection's own or the batch-level one).
+    """
+    agent_name = selection.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name:
+        return None
+    model_raw = selection.get("agent_model")
+    try:
+        model = None if model_raw is None else ModelSpec.model_validate(model_raw)
+    except ValidationError as exc:
+        return f"agent_model failed to validate: {exc}"
+    err = validate_agent_model_compat(agent_name, model)
+    if err is not None:
+        return err
+    if model is not None and not (selection.get("provider_connection_id") or batch_connection_id):
+        return (
+            f"model {model.name!r} requires a Provider Connection; set "
+            "provider_connection_id to an OpenAI-compatible connection owned by "
+            "or shared with your team"
+        )
+    return None
+
+
+__all__ = [
+    "ProviderRoute",
+    "ProviderRouteError",
+    "resolve_provider_route",
+    "stored_selection_error",
+]

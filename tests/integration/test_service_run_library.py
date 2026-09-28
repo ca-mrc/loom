@@ -2107,12 +2107,12 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
     ) as ac:
         reused = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
-            json={"key": safe_key, "name": "beta reuse of typed metrics"},
+            json={"provider_connection_id": str(run_library_setup["conn_b"]), "key": safe_key, "name": "beta reuse of typed metrics"},
             headers={"Authorization": f"Bearer {raw_b}"},
         )
         blocked = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
-            json={"key": blocked_key, "name": "blocked typed debug reuse"},
+            json={"provider_connection_id": str(run_library_setup["conn_b"]), "key": blocked_key, "name": "blocked typed debug reuse"},
             headers={"Authorization": f"Bearer {raw_b}"},
         )
 
@@ -2140,7 +2140,8 @@ async def test_typed_registry_policy_controls_reuse_and_records_provenance(
         row = s.execute(
             select(Batch).where(Batch.id == UUID(body["batch_id"])),
         ).scalar_one()
-        assert row.provider_connection_id is None
+        # The caller's own connection (#2054), never the source team's.
+        assert row.provider_connection_id == run_library_setup["conn_b"]
         assert row.provider_connection_id != conn_a
         assert row.submitted_by_user_id == user_b
         assert row.source_provenance[0]["source_artifact_id"] == str(safe_artifact_id)
@@ -2359,7 +2360,7 @@ async def test_clone_and_reuse_reject_historical_benchmark_tasks(
             )
             reused = await ac.post(
                 f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
-                json={"key": safe_key, "name": "must reject historical reuse"},
+                json={"provider_connection_id": str(run_library_setup["conn_b"]), "key": safe_key, "name": "must reject historical reuse"},
                 headers={"Authorization": f"Bearer {raw_b}"},
             )
 
@@ -2519,12 +2520,12 @@ async def test_reuse_shared_artifact_creates_provenance_and_blocks_raw(
     ) as ac:
         reused = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
-            json={"key": safe_key, "name": "beta reuse of alpha report"},
+            json={"provider_connection_id": str(run_library_setup["conn_b"]), "key": safe_key, "name": "beta reuse of alpha report"},
             headers={"Authorization": f"Bearer {raw_b}"},
         )
         blocked = await ac.post(
             f"/api/v1/run-library/trials/{trial_id}/artifacts/reuse",
-            json={"key": blocked_key, "name": "blocked reuse"},
+            json={"provider_connection_id": str(run_library_setup["conn_b"]), "key": blocked_key, "name": "blocked reuse"},
             headers={"Authorization": f"Bearer {raw_b}"},
         )
 

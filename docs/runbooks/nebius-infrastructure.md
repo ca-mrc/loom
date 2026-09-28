@@ -893,6 +893,7 @@ uv run --no-sync python scripts/ops/build_nebius_acceptance_taskset.py \
 
 loom eval nebius-acceptance \
   --taskset-dir /secure/path/nebius-acceptance-taskset \
+  --provider az-gateway-loom-testing \
   --model MODEL_ID \
   --candidate-sha MERGED_DEV_SHA \
   --capacity-policy deploy/k8s/nebius-development-capacity-policy.json \
@@ -900,11 +901,13 @@ loom eval nebius-acceptance \
 ```
 
 The command uses the persisted `loom auth login` session and only normal user
-APIs. Omitting `--provider` uses the already configured Gateway model and needs
-only the user's `read:own,submit` scopes; it does not create a Provider
-Connection or require `providers:manage`. To select an existing connection,
-add `--provider MODEL_PROVIDER_CONNECTION` with a model available on that
-connection. Neither mode copies provider credentials into the acceptance bundle.
+APIs. Model-backed submissions require an explicit Provider Connection
+(#2054), so the run resolves `--provider` (default `az-gateway-loom-testing`)
+to this environment's connection id; `--model` must be a model that connection
+serves. It needs only the user's `read:own,submit` scopes and an existing
+connection owned by or shared with the team; it does not create a Provider
+Connection or require `providers:manage`, and it does not copy provider
+credentials into the acceptance bundle.
 
 It uploads and waits for the ordinary TaskSet, then runs bounded stages ending
 at `accepted_concurrency` (currently `1,20,40,56`, deduplicated). There is no

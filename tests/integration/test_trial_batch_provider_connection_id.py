@@ -950,3 +950,22 @@ def test_models_catalog_includes_connections_shared_with_the_team(app_setup) -> 
     sync_engine.dispose()
 
     assert str(ids["conn_a"]) in team_b_connection_ids()
+
+
+def test_model_backed_trial_without_provider_returns_400(app_setup) -> None:
+    """#2054: model-backed trials need an explicit Provider Connection."""
+    app, tokens, ids = app_setup
+    c = _client(app)
+    r = c.post(
+        "/api/v1/trials",
+        headers=_auth(tokens["a"]),
+        json={
+            "task_id": ids["task_id"],
+            "config": {
+                "agent_name": "direct-completion",
+                "agent_model": {"provider": "openai", "name": "gpt-4o"},
+            },
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "requires a Provider Connection" in r.json()["detail"]

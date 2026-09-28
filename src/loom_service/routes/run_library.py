@@ -42,6 +42,7 @@ from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.effective_combination import stored_selection_error
 from loom_service.execution_admission import (
     admit_execution_backend,
     freeze_task_resource_requests,
@@ -2306,6 +2307,41 @@ async def _freeze_derived_runtime_profile(
     return profile.model_dump(mode="json") if profile is not None else None
 
 
+
+async def _enforce_submission_policy(
+    session: Any,
+    *,
+    team_id: UUID,
+    trial_config: dict[str, Any],
+    combinations: list[dict[str, Any]],
+    provider_connection_id: UUID | None,
+    action: str,
+) -> None:
+    """A clone or artifact reuse creates new trials, so its stored
+    selections must pass current submission policy (#2054): supported
+    agents, and an explicit, authorized OpenAI-compatible Provider
+    Connection for every model-backed selection."""
+    selections = [(f"combinations[{i}]", c) for i, c in enumerate(combinations)] or [
+        ("trial_config", trial_config),
+    ]
+    for context, selection in selections:
+        err = stored_selection_error(selection, batch_connection_id=provider_connection_id)
+        if err is not None:
+            raise HTTPException(status_code=400, detail=f"cannot {action} {context}: {err}")
+    connection_ids = {provider_connection_id} | {
+        UUID(str(c["provider_connection_id"]))
+        for c in combinations
+        if c.get("provider_connection_id")
+    }
+    for connection_id in sorted((c for c in connection_ids if c is not None), key=str):
+        await validate_provider_connection(
+            session,
+            connection_id,
+            team_id=team_id,
+            agent_submission=True,
+        )
+
+
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201, response_model=wire.CloneRunLibraryBatchResult, response_model_exclude_unset=True)
 async def clone_run_library_batch_config(
     request: Request,
@@ -2327,12 +2363,14 @@ async def clone_run_library_batch_config(
             status_code=400,
             detail=("choose a provider_connection_id owned by or shared with your team"),
         )
-    if payload.provider_connection_id is not None:
-        await validate_provider_connection(
-            session,
-            payload.provider_connection_id,
-            team_id=ctx.team_id,
-        )
+    await _enforce_submission_policy(
+        session,
+        team_id=ctx.team_id,
+        trial_config=source.trial_config,
+        combinations=list(source.combinations or []),
+        provider_connection_id=payload.provider_connection_id,
+        action="clone",
+    )
 
     task_filter = dict(source.task_filter)
     explicit_task_ids = task_filter.get("task_ids")
@@ -2516,12 +2554,14 @@ async def reuse_run_library_artifact(
         )
     if typed_artifact is None and artifact is not None and _share_status(artifact) != "shared":
         raise HTTPException(status_code=403, detail=_blocked_reason(artifact))
-    if payload.provider_connection_id is not None:
-        await validate_provider_connection(
-            session,
-            payload.provider_connection_id,
-            team_id=ctx.team_id,
-        )
+    await _enforce_submission_policy(
+        session,
+        team_id=ctx.team_id,
+        trial_config=dict(batch.trial_config) if batch is not None else dict(trial.config),
+        combinations=list(batch.combinations or []) if batch is not None else [],
+        provider_connection_id=payload.provider_connection_id,
+        action="reuse",
+    )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
     role = (
