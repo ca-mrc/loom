@@ -212,9 +212,12 @@ def identity_policy_documents(namespace: str, target_id: str, *, guest_target_id
             "object.metadata.annotations['loom.openai.com/target-id'] == " + json.dumps(guest_target_id),
         })
         policy["spec"]["validations"].append({
+            # The built-in OpenAPI quantity reference is absent from CEL's
+            # inferred EmptyDir type. Dynamic selection preserves the runtime
+            # presence check without a static undefined-field warning.
             "expression": "!variables.isGuest || (size(variables.private) == 2 && size(variables.fixtures) == 0 && "
             "object.spec.volumes.filter(v, v.name in ['task-sandbox-guest-state','verifier-sandbox-guest-state']).all(v, "
-            "has(v.emptyDir) && has(v.emptyDir.sizeLimit) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '')))",
+            "has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '')))",
             "message": "Guest targets require two private guests with bounded disk state.",
         })
     binding = {

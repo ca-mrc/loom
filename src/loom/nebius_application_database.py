@@ -441,6 +441,41 @@ class ApplicationDatabaseAccess:
     def revoke(self, application_id: UUID, incarnation: UUID, through_generation: int) -> None:
         self._call("revoke_access", application_id, incarnation, through_generation)
 
+    def qualify(self, application_id: UUID, incarnation: UUID, generation: int, password: str,
+                *, schema_revision: str) -> str:
+        """Requalify retained access and inspect all required positive grants.
+
+        The lifecycle caller has already provisioned this generation. Replay
+        validates role/password/schema identity; catalog reads never repair
+        missing shared runtime grants. Only the protected installer does that.
+        """
+        role = self.grant(application_id, incarnation, generation, password, schema_revision=schema_revision)
+        try:
+            granted = self.connection.execute("""
+                WITH role AS (SELECT %s::text AS name)
+                SELECT pg_catalog.has_database_privilege(role.name,current_database(),'CONNECT')
+                    AND pg_catalog.has_schema_privilege(role.name,'public','USAGE')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_class c
+                        WHERE c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p','v','m','f')
+                        AND (NOT pg_catalog.has_table_privilege(role.name,c.oid,'SELECT')
+                            OR (c.relkind IN ('r','p','v') AND c.relname<>'alembic_version' AND (
+                                NOT pg_catalog.has_table_privilege(role.name,c.oid,'INSERT')
+                                OR NOT pg_catalog.has_table_privilege(role.name,c.oid,'UPDATE')
+                                OR NOT pg_catalog.has_table_privilege(role.name,c.oid,'DELETE')))))
+                    AND NOT EXISTS (
+                        SELECT 1 FROM pg_catalog.pg_class c
+                        WHERE c.relnamespace='public'::regnamespace AND c.relkind='S'
+                            AND (NOT pg_catalog.has_sequence_privilege(role.name,c.oid,'USAGE')
+                                 OR NOT pg_catalog.has_sequence_privilege(role.name,c.oid,'SELECT')))
+                FROM role
+            """, (role,)).fetchone()
+        except psycopg.Error as exc:
+            raise _failure(exc) from None
+        if granted != (True,):
+            raise ApplicationDatabaseAccessError("application_database_runtime_grants")
+        return role
+
     def drain(self, application_id: UUID, incarnation: UUID, through_generation: int) -> bool:
         result = self._call("drain_access", application_id, incarnation, through_generation)
         if type(result) is not bool:

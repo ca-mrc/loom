@@ -71,6 +71,7 @@ def test_management_ignores_unused_workload_execution_contract(monkeypatch: pyte
             "/api/v1/auth/", "/api/v1/admin/", "/api/v1/invites",
             "/api/v1/tokens", "/api/v1/teams", "/api/v1/team-registrations", "/api/v1/health",
             "/api/v1/environments", "/api/v1/environment-operations",
+            "/api/v1/applications", "/api/v1/application-operations",
         )), path
 
 
