@@ -35,7 +35,7 @@ def _task(*capabilities: str, **environment: object) -> TaskConfig:
                 "baseline_network_policy": {"kind": "gateway-only"},
                 "cpus": 1,
                 "memory_mb": 512,
-                "storage_mb": 128,
+                "storage_mb": 160,
                 "execution_requirements": {"capabilities": capabilities},
                 **environment,
             },
@@ -244,7 +244,7 @@ def test_guest_admission_keeps_external_capabilities_and_prerequisites_rejected(
     [
         ("cpus", 0.999, "guest_cpu_limit_too_small", "1000"),
         ("memory_mb", 511, "guest_memory_limit_too_small", "512"),
-        ("storage_mb", 127, "guest_ephemeral_storage_limit_too_small", "128"),
+        ("storage_mb", 159, "guest_ephemeral_storage_limit_too_small", "160"),
     ],
 )
 def test_guest_minimum_resources_are_enforced_with_actionable_limits(
