@@ -123,7 +123,7 @@ class ApplicationCredentialProvider:
         except (ValueError, KeyError, ArgumentError):
             raise ProviderBlockedError("application_credential_material_conflict") from None
         await self.registry.frozen_plan(lease)
-        role = await self.database.grant(lease, password)
+        role = await self.database.grant(lease, password, schema_revision=plan["release"]["schema_revision"])
         if role != f"lap_{row.incarnation.hex}_g{row.access_generation}":
             raise ProviderBlockedError("application_database_result_invalid")
         await self.cloud.create(lease, "data", binding)

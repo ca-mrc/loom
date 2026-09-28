@@ -58,6 +58,8 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
+    release = release.model_copy(update={"schema_revision": "test_revision"})
+    shared = shared.model_copy(update={"schema_revision": "test_revision"})
     prepared = render_application(row, release, shared, foundation, authority=authority)
     operation = await registry.create(principal=alice, idempotency_key=slug,
                                       prepared=prepared, release=release, shared=shared)
@@ -104,6 +106,19 @@ async def test_prepare_commits_real_revocable_login_and_reuses_shared_material(
     assert url.password not in (await registry.get_operation(lease.operation_id, principal=alice)).model_dump_json()
 
 
+async def test_preparation_rejects_schema_changed_since_publication(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, _, _, _, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    database_access[0].execute("UPDATE public.alembic_version SET version_num='different'")
+    with pytest.raises(ProviderBlockedError, match="application_database_schema_mismatch"):
+        await provider.prepare(lease)
+    assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone() == (0,)
+    assert await registry.load_material(lease) is not None
+    assert len(cloud.mutations) == 2  # No shared-data membership granted.
+
+
 async def test_sql_failure_after_material_commit_retries_same_password_without_new_iam(
     applications, platform_inputs, database_access, shared_ca,
 ):
@@ -146,7 +161,7 @@ async def test_stop_retires_database_generation_without_breaking_sibling(
         with pytest.raises(psycopg.OperationalError):
             login(database_access[1], first.username, first.password)
         with pytest.raises(ProviderBlockedError, match="application_database_retired"):
-            await provider.database.grant(lease, first.password)
+            await provider.database.grant(lease, first.password, schema_revision="test_revision")
     assert len(cloud.mutations) == 8  # SQL-only retirement does not claim S3 denial.
 
 

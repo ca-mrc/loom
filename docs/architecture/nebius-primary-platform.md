@@ -393,6 +393,15 @@ SQL schema binds one development data UUID, database identity and dedicated mana
 login. That ordinary manager can invoke the credential routines but cannot perform
 general role/schema administration or write the private records directly.
 
+Grants require an explicit release schema revision. The schema-qualified routine
+takes a shared transaction advisory lock and accepts only one matching live
+`public.alembic_version` row; the manager cannot invoke the internal unqualified
+grant. This uses read-committed isolation to avoid stale snapshots after waiting.
+The protected installer takes the matching exclusive lock, including first
+installation. Upgrading a legacy unqualified installation requires the dedicated
+manager to be `NOLOGIN` with no sessions; the installer neither kills sessions nor
+re-enables the manager. Existing binding and routine drift is never overwritten.
+
 Each application incarnation/access generation gets a separate ordinary login.
 PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
 and `ADMIN FALSE`; the login cannot assume the common runtime role. The common
@@ -418,7 +427,8 @@ would defeat revocation are rejected. Private records retain only credential
 fingerprints, not raw passwords. The protected caller must generate high-entropy
 credentials and retain them in protected material for retry. This code has no
 live installation/dispatch entry point and does not retire object-store keys,
-close Pods, qualify application schema compatibility, or release capacity.
+close Pods or release capacity. Schema qualification establishes exact database
+revision equality, not the correctness of arbitrary developer application code.
 
 ### Recoverable application credential material
 
@@ -501,7 +511,8 @@ provisioning credentials never enter them.
 
 Permissionless account/key creation precedes material persistence. Exact DB login
 and group membership grants follow successful encrypted commit and semantic bundle
-validation. Retry and lease takeover reuse the same password/key. Changed shared
+validation and equality with the frozen release's schema revision. Retry and lease
+takeover reuse the same password/key. Changed shared
 material or malformed persisted credentials fail closed rather than replacing a
 generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL off
 the heartbeat loop using private, bounded autocommit connections. The protected

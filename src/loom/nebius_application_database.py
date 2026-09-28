@@ -15,8 +15,11 @@ import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
+from loom.nebius_application_schema import APPLICATION_SCHEMA_LOCK
+
 _SCHEMA = "loom_application_access"
 _PASSWORD = re.compile(r"[A-Za-z0-9_-]{48,128}")
+_REVISION = re.compile(r"[a-zA-Z0-9_]{1,64}")
 
 
 class ApplicationDatabaseAccessError(RuntimeError):
@@ -234,6 +237,43 @@ _ROUTINES = {
     "drain_access": ("p_data uuid,p_app uuid,p_incarnation uuid,p_generation bigint", "boolean", _DRAIN),
 }
 
+_SCHEMA_GRANT = f"""
+BEGIN
+    IF pg_catalog.current_setting('transaction_isolation')<>'read committed' THEN
+        RAISE EXCEPTION 'application_database_isolation';
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock_shared({APPLICATION_SCHEMA_LOCK});
+    IF p_schema IS NULL OR p_schema !~ '^[a-zA-Z0-9_]{{1,64}}$'
+       OR (SELECT count(*) FROM public.alembic_version)<>1
+       OR NOT EXISTS (SELECT 1 FROM public.alembic_version WHERE version_num=p_schema) THEN
+        RAISE EXCEPTION 'application_database_schema_mismatch';
+    END IF;
+    RETURN loom_application_access.grant_access(p_data,p_app,p_incarnation,p_generation,p_password);
+END
+"""
+
+
+def _install_schema_grant(connection: psycopg.Connection[Any], manager_role: str, *, fresh: bool) -> None:
+    observed = connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace='loom_application_access'::regnamespace AND proname='grant_access_at_schema'").fetchall()
+    if not observed:
+        if not fresh:
+            # An in-flight pre-upgrade grant does not take the schema lock.
+            # The protected operator must first disable and stop this dedicated
+            # manager. Do not terminate sessions or re-enable it implicitly.
+            connection.execute("SELECT pg_catalog.pg_stat_clear_snapshot()")
+            if connection.execute("SELECT NOT rolcanlogin AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE usesysid=r.oid) FROM pg_catalog.pg_roles r WHERE rolname=%s", (manager_role,)).fetchone() != (True,):
+                raise ApplicationDatabaseAccessError("application_database_upgrade_requires_quiescence")
+        connection.execute(sql.SQL("CREATE FUNCTION loom_application_access.grant_access_at_schema(p_data uuid,p_app uuid,p_incarnation uuid,p_generation bigint,p_password text,p_schema text) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS {}").format(sql.Literal(_SCHEMA_GRANT)))
+    elif observed != [(_SCHEMA_GRANT, True, ["search_path=pg_catalog, pg_temp"])]:
+        raise ApplicationDatabaseAccessError("application_database_installation_drift")
+    connection.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM PUBLIC")
+    connection.execute(sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM {}").format(sql.Identifier(manager_role)))
+    for name, arguments in (("grant_access_at_schema", "uuid,uuid,uuid,bigint,text,text"),
+                            ("revoke_access", "uuid,uuid,uuid,bigint"),
+                            ("drain_access", "uuid,uuid,uuid,bigint")):
+        connection.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {}.{}({}) TO {}").format(
+            sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(arguments), sql.Identifier(manager_role)))
+
 
 def _failure(exc: psycopg.Error) -> ApplicationDatabaseAccessError:
     message = exc.diag.message_primary or ""
@@ -267,9 +307,13 @@ def install_application_database_access(
         with connection.transaction():
             if connection.execute("SELECT current_user=session_user AND rolsuper FROM pg_catalog.pg_roles WHERE rolname=current_user").fetchone() != (True,):
                 raise ApplicationDatabaseAccessError("application_database_administrator_required")
+            if connection.execute("SELECT pg_catalog.pg_try_advisory_xact_lock(%s)", (APPLICATION_SCHEMA_LOCK,)).fetchone() != (True,):
+                raise ApplicationDatabaseAccessError("application_database_schema_busy")
+            if connection.execute("SHOW transaction_isolation").fetchone() != ("read committed",):
+                raise ApplicationDatabaseAccessError("application_database_isolation")
             if connection.execute("""
                 SELECT NOT r.rolsuper AND NOT r.rolcreatedb AND NOT r.rolcreaterole
-                    AND NOT r.rolreplication AND NOT r.rolbypassrls AND r.rolcanlogin
+                    AND NOT r.rolreplication AND NOT r.rolbypassrls
                     AND NOT pg_catalog.has_schema_privilege(r.oid,'public','CREATE')
                     AND NOT pg_catalog.has_database_privilege(r.oid,current_database(),'CREATE')
                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_auth_members WHERE member=r.oid OR roleid=r.oid)
@@ -309,10 +353,6 @@ def install_application_database_access(
                 connection.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM PUBLIC")
                 connection.execute(sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM {}").format(sql.Identifier(manager_role)))
                 connection.execute(sql.SQL("GRANT USAGE ON SCHEMA loom_application_access TO {}").format(sql.Identifier(manager_role)))
-                for name in ("grant_access", "revoke_access", "drain_access"):
-                    arguments = "uuid,uuid,uuid,bigint" + (",text" if name == "grant_access" else "")
-                    connection.execute(sql.SQL("GRANT EXECUTE ON FUNCTION {}.{}({}) TO {}").format(
-                        sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(arguments), sql.Identifier(manager_role)))
             observed = connection.execute("SELECT data_environment_id,manager_role,runtime_role FROM loom_application_access.binding WHERE manager_oid=pg_catalog.to_regrole(manager_role)::oid AND runtime_oid=pg_catalog.to_regrole(runtime_role)::oid AND database_oid=(SELECT oid FROM pg_catalog.pg_database WHERE datname=current_database()) AND system_identifier=(SELECT system_identifier::text FROM pg_catalog.pg_control_system())").fetchone()
             if observed != expected:
                 raise ApplicationDatabaseAccessError("application_database_binding")
@@ -325,6 +365,7 @@ def install_application_database_access(
             for name, (_, _, body) in _ROUTINES.items():
                 if connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace=pg_catalog.to_regnamespace(%s) AND proname=%s", (_SCHEMA, name)).fetchall() != [(body, True, ["search_path=pg_catalog, pg_temp"])]:
                     raise ApplicationDatabaseAccessError("application_database_installation_drift")
+            _install_schema_grant(connection, manager_role, fresh=namespace == (None,))
             connection.execute(sql.SQL("DO {} ").format(sql.Literal("BEGIN " + _PUBLIC_SAFE + " END")))
             connection.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}; GRANT USAGE ON SCHEMA public TO {}").format(
                 sql.Identifier(connection.info.dbname), sql.Identifier(runtime), sql.Identifier(runtime)))
@@ -346,16 +387,20 @@ class ApplicationDatabaseAccess:
     def __init__(self, connection: psycopg.Connection[Any], data_environment_id: UUID):
         self.connection, self.data_environment_id = connection, data_environment_id
 
-    def _call(self, name: str, app: UUID, incarnation: UUID, generation: int, password: str | None = None) -> Any:
+    def _call(self, name: str, app: UUID, incarnation: UUID, generation: int, password: str | None = None,
+              schema_revision: str | None = None) -> Any:
         _idle(self.connection)
         if (any(not isinstance(value, UUID) or not value.int for value in (self.data_environment_id, app, incarnation))
                 or type(generation) is not int or not 1 <= generation <= 2**63 - 1):
             raise ValueError("invalid shared application database identity")
         arguments: list[Any] = [self.data_environment_id, app, incarnation, generation]
-        if name == "grant_access":
+        if name == "grant_access_at_schema":
             if not isinstance(password, str) or _PASSWORD.fullmatch(password) is None:
                 raise ValueError("invalid shared application database credential")
             arguments.append(password)
+            if not isinstance(schema_revision, str) or _REVISION.fullmatch(schema_revision) is None:
+                raise ValueError("invalid shared application database schema revision")
+            arguments.append(schema_revision)
         try:
             result = self.connection.execute(sql.SQL("SELECT {}.{}({})").format(
                 sql.Identifier(_SCHEMA), sql.Identifier(name), sql.SQL(",").join(sql.Placeholder() for _ in arguments)), arguments).fetchone()
@@ -365,8 +410,9 @@ class ApplicationDatabaseAccess:
             raise ApplicationDatabaseAccessError("application_database_result_missing")
         return result[0]
 
-    def grant(self, application_id: UUID, incarnation: UUID, generation: int, password: str) -> str:
-        role = self._call("grant_access", application_id, incarnation, generation, password)
+    def grant(self, application_id: UUID, incarnation: UUID, generation: int, password: str,
+              *, schema_revision: str) -> str:
+        role = self._call("grant_access_at_schema", application_id, incarnation, generation, password, schema_revision)
         if not isinstance(role, str):
             raise ApplicationDatabaseAccessError("application_database_result_invalid")
         return role
