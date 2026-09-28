@@ -104,6 +104,40 @@ class ApplicationRuntimeProvider:
                     return result
         raise ProviderBlockedError("application_kubernetes_request_conflict")
 
+    async def resume_preparation(self, lease: ApplicationLease) -> None:
+        """Recover only current static/credential writes before Pod admission.
+
+        Historical requests are never dispatched. Bootstrap and retirement keep
+        their specialized recovery paths; no workload or route starts here.
+        """
+        plan = await self.registry.frozen_plan(lease)
+        if plan["registration"]["desired_state"] != "active":
+            raise ProviderBlockedError("application_preparation_not_requested")
+        if await self.registry.activation_started(lease):
+            raise ProviderBlockedError("application_activation_started")
+        for effect in await self.registry.effect_history(lease):
+            if effect.operation_id != lease.operation_id or effect.phase not in {"prepared", "dispatched"}:
+                continue
+            intent = effect.intent
+            if intent.kind in {"Namespace", "RoleBinding", "ResourceQuota"} or effect.key.startswith("retire:"):
+                continue
+            if not ((intent.action == "create" and intent.kind in {"ServiceAccount", "NetworkPolicy", "Secret"})
+                    or (intent.action == "patch" and intent.kind == "NetworkPolicy")):
+                raise ProviderBlockedError("application_preparation_effect_conflict")
+            document = await self._request_document(lease, effect)
+            if effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key, document=document)
+                continue
+            try:
+                if intent.action == "create":
+                    await self.kubernetes.create(lease, effect.key, document)
+                else:
+                    assert intent.uid is not None and intent.resource_version is not None
+                    await self.kubernetes.patch_spec(lease, effect.key, document,
+                        uid=intent.uid, resource_version=intent.resource_version)
+            except KubernetesEffectRejectedError:
+                raise ProviderWaitingError("application_preparation_pending") from None
+
     async def _resume_retirement(self, lease: ApplicationLease) -> None:
         # A prepared request owns the current operation's journal slot. Resume
         # its original preconditions even if live resourceVersion has advanced.
