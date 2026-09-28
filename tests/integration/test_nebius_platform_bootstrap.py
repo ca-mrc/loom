@@ -587,6 +587,7 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
         from tests.unit.test_nebius_guest_deployment import guest_inputs
 
         guest_environment, guest_candidate, guest_profile = guest_inputs((environment, candidate, profile))
+        guest_environment.pop("regional_execution_targets", None)
         guest_files = build_platform(guest_environment, guest_candidate, guest_profile, {},
                                      repo_root=Path(__file__).resolve().parents[2])
         guest_data = guest_files["10-config-network.yaml"][0]["data"]

@@ -360,6 +360,12 @@ async def test_sibling_actuators_preserve_foreign_jobs_without_false_orphan_drif
         for actuator in actuators:
             assert await actuator.reconcile_full_once(now=now + timedelta(seconds=4)) == 0
             assert kube.jobs == before and kube.delete_count == 0
+        # Relabelling a sibling's observation cannot transfer its lease's
+        # persistence authority to this actuator through the watch path.
+        kube.watch_events = [kube.jobs[guest_lease.job_name].model_copy(update={
+            "target_id": ordinary[1].target_id, "resource_version": "9",
+        })]
+        assert await actuators[0].watch_once() == 0
         # Unregistered target annotations are still visible drift, never treated
         # as a legitimate sibling or deleted by another target's reconciler.
         foreign = next(iter(kube.jobs.values())).model_copy(update={
