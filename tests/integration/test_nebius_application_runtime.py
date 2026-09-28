@@ -1,6 +1,7 @@
 """Actual application journal coordinates the fixed Kubernetes Pod-admission gate."""
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import httpx
@@ -158,3 +159,33 @@ async def test_destroy_reconciles_uncertain_suspend_patch_before_advancing_again
     assert [method for method, _, _ in api.mutations] == ["POST", "POST", "PATCH", "PATCH"]
     assert all(effect.phase == "observed" for effect in await registry.effect_history(latest))
     assert api.objects[FENCE_PATH]["metadata"]["annotations"]["loom.nebius/deployment-generation"] == "3"
+
+
+async def test_prepared_current_patch_survives_version_churn_before_dispatch(runtime_context, monkeypatch):
+    provider = await close_ready(runtime_context)
+    registry, _, _, api, lease, alice = runtime_context
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    dispatch = registry.dispatch_effect
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError  # prepare_effect already committed in the real DB.
+
+    monkeypatch.setattr(registry, "dispatch_effect", interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await provider.close_admission(current)
+    prepared = (await registry.effect_history(current))[-1]
+    assert prepared.phase == "prepared" and prepared.intent.resource_version == "1"
+    monkeypatch.setattr(registry, "dispatch_effect", dispatch)
+    api.objects[FENCE_PATH]["metadata"]["resourceVersion"] = "99"
+    api.reject_next = 422  # Kubernetes rejects the original, now-stale exact RV.
+    with pytest.raises(ProviderWaitingError):
+        await provider.close_admission(current)
+    rejected = (await registry.effect_history(current))[-1]
+    assert rejected.key == prepared.key and rejected.phase == "rejected"
+    assert api.mutations[-1][2][1] == {"op": "test", "path": "/metadata/resourceVersion", "value": "1"}
+    await provider.close_admission(current)
+    assert api.mutations[-1][2][1] == {"op": "test", "path": "/metadata/resourceVersion", "value": "99"}
+    assert [effect.phase for effect in (await registry.effect_history(current))[-2:]] == ["rejected", "observed"]
+    assert len(api.mutations) == 4
