@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_application_render import inputs as application_inputs
+from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -309,7 +309,7 @@ def application_management_inputs(management_inputs, platform_inputs):
             shared_namespace=shared.platform_namespace).model_dump(mode='json'),
         'storage': {'data_environment_id': str(shared.data_environment_id), 'project_id': 'project-managed-storage',
             'data_group_id': 'group-shared-data', 'source_group_id': 'group-shared-source'},
-        'runtime': {'kubernetes': {'kind': 'projected_service_account',
+        'runtime': {'concurrency': 4, 'poll_seconds': 5, 'kubernetes': {'kind': 'projected_service_account',
             'endpoint': platform_inputs[0]['kubernetes_api_server'],
             'ca_file': '/var/run/loom-management-kubernetes/ca.crt',
             'token_file': '/var/run/loom-management-kubernetes/token'},

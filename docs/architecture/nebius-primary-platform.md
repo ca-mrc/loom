@@ -723,6 +723,16 @@ files, not owner requests. Invalid startup material exposes no application manag
 Shutdown removes owner admission and drains the worker before closing its clients.
 Management readiness includes actual application-worker poll health when configured.
 
+The management renderer accepts this application runtime instead of the legacy
+environment provisioner. It uses `loom-application-provisioner`, projected cluster
+credentials, and separate application cloud/shared-material Secret references.
+Application installation configuration is an immutable revision-named ConfigMap;
+the management database and admin/master-key references remain unchanged. This
+renderer creates no credentials and does not upgrade an existing installation:
+the initial installer remains create-only and legacy-runtime-only. Protected
+upgrade, old-process retirement and first-owner installed qualification remain
+required before enabling this configuration live.
+
 `POST /applications/{id}/login` exchanges the owning management **user session**
 for a 90-second one-use proof, never a shared password or database credential.
 Delegable bearer tokens cannot request a full browser session, which could otherwise
