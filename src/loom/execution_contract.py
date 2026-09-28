@@ -508,6 +508,13 @@ class ExecutionRoutingDecisionV1(_StrictContract):
         return self
 
 
+def _task_declares_guest_execution(task: TaskConfig) -> bool:
+    from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
+
+    declared = task.environment.execution_requirements
+    return bool(GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
+
+
 def workload_requirements_from_task(
     task: TaskConfig, trial: TrialConfig | None = None,
 ) -> WorkloadRequirementsV1:
@@ -548,11 +555,16 @@ def workload_requirements_from_task(
     # Task-only callers keep the declared env_mode so stored comparisons that
     # do not know the trial stay stable.
     if trial is None:
-        separate = task.verifier.env_mode == "separate"
+        separate = (
+            task.agent.name == "terminus-2"
+            and task.verifier.env_mode == "separate"
+            and not _task_declares_guest_execution(task)
+        )
     else:
         separate = (
             trial.agent_name == "terminus-2"
             and resolve_verifier_env_mode(task, trial) == "separate"
+            and not _task_declares_guest_execution(task)
         )
     verifier_topology = (
         VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT

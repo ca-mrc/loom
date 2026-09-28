@@ -128,9 +128,9 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         (f"variables.fixtures.all(c, {fixture})", "Fixture identity, mounts, lifecycle or resources are invalid."),
         ("variables.regular.all(c, !c.name.startsWith('fixture-'))", "Fixtures must be native init sidecars."),
         ("size(variables.fixtures) == 0 || (size(variables.fixtures) == 1 && "
-         "size(variables.private) == 2 && "
+         "(size(variables.private) == 1 || size(variables.private) == 2) && "
          "(!has(object.spec.hostAliases) || size(object.spec.hostAliases) == 0))",
-         "One fixture requires private sandboxes and private hostname resolution."),
+         "One fixture requires a private sandbox and private hostname resolution."),
         ("variables.regular.all(c, !(c.name in ['task-sandbox','verifier-sandbox']))", "Private sandboxes must be native init sidecars."),
         ("size(variables.private) == 0 || (object.spec.serviceAccountName == 'loom-execution-attempt' && "
          "has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && "

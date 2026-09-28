@@ -44,7 +44,7 @@ def test_prepared_fixture_socket_source_and_hostname_are_trial_private(tmp_path:
     lease.execution_class_id = plan.execution_class_id
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(resolve_prepared_task(task, grant)).model_dump(mode="json")
+    lease.workload_requirements_json = workload_requirements_from_task(resolve_prepared_task(task, grant), trial).model_dump(mode="json")
     lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
     spec = render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,

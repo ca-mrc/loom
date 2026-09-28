@@ -831,7 +831,10 @@ def _compile_terminus_plan(
                           if guest_execution is not None else profile.runtime_volume_mib)
     max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
                           if guest_execution is not None else profile.max_artifact_bytes)
-    sandbox_roles = ("task-sandbox",)
+    # Guest launch keeps both sandboxes in this pod. Separate grading otherwise
+    # defers the verifier until the agent pod is gone.
+    colocated_verifier = shared or guest_execution is not None
+    sandbox_roles = ("task-sandbox", "verifier-sandbox") if guest_execution is not None else ("task-sandbox",)
     for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
@@ -946,10 +949,10 @@ def _compile_terminus_plan(
             total_bytes=binding.total_bytes,
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
         main=phase("agent", "terminus-2", agent_timeout),
-        verifier_execution="in_attempt" if shared else "separate_execution",
-        verifier_after_agent_timeout=shared,
-        in_place_verifier=shared,
-        verifier=phase("verifier", "verify-sandbox", verifier_timeout) if shared else None,
+        verifier_execution="in_attempt" if colocated_verifier else "separate_execution",
+        verifier_after_agent_timeout=shared and guest_execution is None,
+        in_place_verifier=shared and guest_execution is None,
+        verifier=phase("verifier", "verify-sandbox", verifier_timeout) if colocated_verifier else None,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=max_artifact_bytes,
     )
