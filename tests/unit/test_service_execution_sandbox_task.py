@@ -430,6 +430,8 @@ async def test_verifier_cleanup_failure_retains_reports_without_success(
 
     monkeypatch.setattr(module, "materialize_workspace", noop)
     monkeypatch.setattr(module, "_import_workspace_archive", noop)
+    (tmp_path / ".loom").mkdir()
+    (tmp_path / ".loom/workspace.tar").write_bytes(b"workspace")
 
     def verify(cmd, user, cwd, env):
         driver.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = report
@@ -482,6 +484,8 @@ async def test_verifier_primary_failure_survives_cleanup_and_driver_stop_failure
 
     monkeypatch.setattr(module, "materialize_workspace", noop)
     monkeypatch.setattr(module, "_import_workspace_archive", noop)
+    (tmp_path / ".loom").mkdir()
+    (tmp_path / ".loom/workspace.tar").write_bytes(b"workspace")
 
     def verify(cmd, user, cwd, env):
         if exec_raises:
