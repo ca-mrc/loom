@@ -24,6 +24,7 @@ from loom_service.batch_runner import _materialize_trial_config
 from tests.integration.test_service_batches_crud import (
     RAW_ADMIN_TOKEN,
     _automatic_service_execution_task_config,
+    _seed_connection,
     _service_execution_runtime_profile,
     _service_execution_task_config,
 )
@@ -122,7 +123,7 @@ async def test_registration_real_auth_idempotency_rebind_and_public_catalog(
 @pytest.mark.parametrize("combinations", [False, True])
 @pytest.mark.parametrize("runtime_mode", ["frozen", "current", "unavailable", "no_controller", "prebound", "legacy", "other_agent"])
 async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
-    camp_setup, combinations, runtime_mode,
+    camp_setup, postgres_url, combinations, runtime_mode,
 ):
     app, user_token, team = camp_setup
     a, b = release("a-" + uuid4().hex), release("b-" + uuid4().hex, "9")
@@ -202,6 +203,7 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
         payload = {
             "name": "version freeze",
             "purpose": "evaluation",
+            "provider_connection_id": _seed_connection(postgres_url, team, "gpt-5"),
             "task_filter": {"task_ids": [task_id], "subset_kind": "explicit"},
             "backend": "nebius",
             "trial_config": {

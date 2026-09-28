@@ -66,6 +66,7 @@ from loom_service.delivery_export import ArchiveBuildResult, build_canonical_tri
 from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_trial_diagnosis
+from loom_service.effective_combination import ProviderRouteError, resolve_provider_route
 from loom_service.forwarders import forward, propagate
 from loom_service.monitor_filters import (
     apply_trial_monitor_filters,
@@ -1278,6 +1279,31 @@ def _validate_agent_name(config: dict[str, Any]) -> None:
         raise HTTPException(status_code=400, detail=err)
 
 
+def _resolve_trial_provider_route(payload: _SubmitReq) -> _SubmitReq:
+    """Apply the batch submission's connection/model rules (#2054) to one
+    trial: a matching resolved pair for model-backed agents, none for
+    no-model agents."""
+    agent_name = payload.config.get("agent_name")
+    if not isinstance(agent_name, str) or not agent_name:
+        return payload
+    model_raw = payload.config.get("agent_model")
+    try:
+        route = resolve_provider_route(
+            context="trial",
+            agent_model=None if model_raw is None else ModelSpec.model_validate(model_raw),
+            connection_id=payload.provider_connection_id,
+            model_id=payload.provider_model_id,
+        )
+    except ProviderRouteError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return payload.model_copy(
+        update={
+            "provider_connection_id": route.connection_id,
+            "provider_model_id": route.model_id,
+        },
+    )
+
+
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -1293,6 +1319,7 @@ async def submit_trial(
     require_scope(ctx, "submit")
     require_submitting_user(ctx)
     _validate_agent_name(payload.config)
+    payload = _resolve_trial_provider_route(payload)
     await validate_submission_agent_task_compatibility(
         s,
         team_id=ctx.team_id,

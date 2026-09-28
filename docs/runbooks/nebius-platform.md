@@ -680,6 +680,7 @@ CLI with an explicit logical target and a single four-Trial stage:
 ```sh
 loom eval nebius-acceptance \
   --taskset-dir /protected/nebius-acceptance-taskset \
+  --provider az-gateway-loom-testing \
   --model MODEL_ID --candidate-sha MERGED_CANDIDATE_SHA \
   --capacity-policy /protected/integration-acceptance-policy.json \
   --environment development --target-id nebius-eu-north1-integration \
