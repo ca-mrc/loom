@@ -18,7 +18,7 @@ from sqlalchemy.engine import make_url
 from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material
-from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError, ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_provider import Cloud
 from tests.integration.test_nebius_application_database import access_postgres as access_postgres
@@ -203,6 +203,89 @@ async def test_stop_does_not_dispatch_prepared_cloud_creation(
     async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(unexpected)) as http:
         await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
     assert cloud.mutations == []
+
+
+async def test_active_generation_created_during_retirement_scan_is_not_retired(
+    applications, platform_inputs, database_access, shared_ca, monkeypatch,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, _, _, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    history = registry.cloud_history
+    first = True
+
+    async def peer_prepares(current):
+        nonlocal first
+        result = await history(current)
+        if first:
+            first = False
+            await provider.prepare(current)
+        return result
+
+    monkeypatch.setattr(registry, "cloud_history", peer_prepares)
+    async with httpx.AsyncClient(base_url="https://storage.test") as http:
+        await provider.retire_cloud(lease, ApplicationObjectAccessVerifier(http))
+    assert len(cloud.mutations) == 4 and all(entry[0] == "create" for entry in cloud.mutations)
+
+
+async def test_cloud_retirement_recovers_lost_delete_across_destroy_without_resending(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await provider.prepare(lease)
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    original = await registry.frozen_plan(current)
+    env = next(doc for docs in original["files"].values() for doc in docs
+               if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")["spec"]["template"]["spec"]["containers"][0]["env"]
+    endpoint = next(entry["value"] for entry in env if entry["name"] == "LOOM_SVC_MINIO_ENDPOINT")
+    requests = []
+
+    def rejection(request):
+        requests.append(request)
+        return httpx.Response(403, text="<Error><Code>InvalidAccessKeyId</Code></Error>")
+
+    async with httpx.AsyncClient(base_url=endpoint, transport=httpx.MockTransport(rejection)) as http:
+        verifier = ApplicationObjectAccessVerifier(http)
+        cloud.delay_delete = True
+        with pytest.raises(ProviderRetryError):
+            await provider.retire_cloud(current, verifier)
+        destroyed = await registry.transition(row.application_id, principal=alice, action="destroy_retained",
+            idempotency_key="destroy", expected_generation=2)
+        latest = await registry.claim(destroyed.operation_id)
+        cloud.delay_delete = False
+        with pytest.raises(ProviderWaitingError):
+            await provider.retire_cloud(latest, verifier)
+        assert len(cloud.mutations) == 5 and requests == []
+        del cloud.resources["resource-4"]  # The single original DELETE takes effect late.
+        await provider.retire_cloud(latest, verifier)
+    assert cloud.resources == {} and len(cloud.mutations) == 8 and len(requests) == 1
+
+
+async def test_permissionless_undelivered_key_retires_without_invented_probe_material(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    for key in ("account", "key"):
+        await provider.cloud.create(lease, key, provider.storage.model_dump(mode="json"))
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+
+    def unexpected(request):
+        raise AssertionError("a never-delivered permissionless key needs no fabricated material")
+
+    async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(unexpected)) as http:
+        await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.resources == {} and len(cloud.mutations) == 4
 
 
 @pytest.mark.parametrize("damage", ["data", "ca", "keyring"])
