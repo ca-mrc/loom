@@ -29,7 +29,9 @@ from loom_service.application_management.material import (
     ApplicationMaterial,
     ApplicationMaterialJournal,
 )
+from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from loom_service.environment_management.registry import ManagementError
 
 
 @dataclass(frozen=True, repr=False)
@@ -149,4 +151,52 @@ class ApplicationCredentialProvider:
         await self.registry.frozen_plan(lease)
         if not await self.database.drain(lease, through):
             raise ProviderWaitingError("application_database_retirement_pending")
+        await self.registry.frozen_plan(lease)
+
+    async def retire_cloud(self, lease: ApplicationLease, verifier: ApplicationObjectAccessVerifier) -> None:
+        """Retire prior-generation IAM and prove rejection of delivered keys.
+
+        The lifecycle caller must stop old processes separately. Shared groups,
+        buckets, policies and other applications' credentials are never targets.
+        """
+        current_plan = await self.registry.frozen_plan(lease)
+        row = self._registration(current_plan)
+        through = lease.access_generation - (1 if row.desired_state == "active" else 0)
+        plans: dict[UUID, dict[str, Any]] = {lease.operation_id: current_plan}
+        for effect in await self.cloud.registry.cloud_history(lease):
+            if effect.operation_id not in plans:
+                plans[effect.operation_id] = await self.registry.frozen_plan(lease, operation_id=effect.operation_id)
+            source = self._registration(plans[effect.operation_id])
+            if source.access_generation <= through and effect.action == "create" and effect.phase == "dispatched":
+                await self.cloud.reconcile(lease, effect.operation_id, effect.key)
+        history = await self.cloud.registry.cloud_history(lease)
+        targets = [effect for effect in history if effect.action == "create" and effect.phase == "observed"
+                   and self._registration(plans[effect.operation_id]).access_generation <= through]
+        proofs: list[tuple[dict[str, Any], dict[str, str]]] = []
+        for effect in targets:
+            if effect.kind != "access_key":
+                continue
+            plan = plans[effect.operation_id]
+            try:
+                material = await self.registry.load_material(lease, operation_id=effect.operation_id)
+            except ManagementError as exc:
+                # Group grants require committed material. A key interrupted
+                # before that commit was permissionless and never deliverable.
+                # Corruption, or material missing after any membership intent,
+                # remains an error and cannot silently imply revoked access.
+                if exc.code != "application_material_missing" or any(
+                    item.operation_id == effect.operation_id and item.kind == "membership" for item in history
+                ):
+                    raise
+            else:
+                name = application_credential_names(self._registration(plan))["storage"]
+                proofs.append((plan, material[name]))
+        # Journal history follows generation/sequence, so reversing it removes
+        # memberships before keys before their service account. Existing exact
+        # deletion intent is reused even across suspend->destroy transitions.
+        for effect in reversed(targets):
+            await self.cloud.delete(lease, effect.operation_id, effect.key)
+        for plan, storage in proofs:
+            await self.registry.frozen_plan(lease)
+            await verifier.verify_retired(plan, storage)
         await self.registry.frozen_plan(lease)

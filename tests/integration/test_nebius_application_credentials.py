@@ -18,7 +18,11 @@ from sqlalchemy.engine import make_url
 from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material
-from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError, ProviderWaitingError
+from loom_service.environment_management.provider import (
+    ProviderBlockedError,
+    ProviderRetryError,
+    ProviderWaitingError,
+)
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_provider import Cloud
 from tests.integration.test_nebius_application_database import access_postgres as access_postgres

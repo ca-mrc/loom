@@ -506,6 +506,19 @@ leave an in-flight request; monotonic shared-side tombstones fence late grants.
 This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
 users, coordinate migrations, mark readiness or release platform reservations.
 
+Cloud retirement separately reconciles prior-generation grants and deletes exact
+owned memberships, keys and accounts in dependency order. Prepared predecessor
+creates are never sent; uncertain deletion intents survive suspend-to-destroy
+without another request. Shared groups, buckets and policies remain untouched.
+Retained encrypted material supplies a signed, read-only object-service probe
+after IAM retirement. The protected HTTPS client must match the original frozen
+endpoint. Only an explicit HTTP403 `InvalidAccessKeyId` response proves key
+rejection; generic access denial, successful reads, redirects, malformed responses
+and transport failures keep retirement pending. An interrupted permissionless key
+with no committed material or membership intent is deleted without fabricating
+probe credentials. This composes access retirement, not installed readiness or
+permission to release capacity.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal
