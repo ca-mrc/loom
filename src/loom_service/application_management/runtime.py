@@ -112,6 +112,11 @@ class ApplicationRuntimeProvider:
         # A peer can create/observe the quota while this caller awaits the API.
         # Judge the returned object against a post-read journal snapshot.
         history = await self._history(lease)
+        if any(effect.operation_id == lease.operation_id and effect.phase in {"prepared", "dispatched"}
+               for effect in history):
+            # A peer may prepare/send while we read. Let the next pass resume
+            # that exact intent before deriving another request from live RV.
+            raise ProviderWaitingError("application_pod_fence_pending")
         if actual is None:
             retired = {effect.observed_uid for effect in history
                        if effect.phase == "observed" and effect.intent.action == "delete"}
