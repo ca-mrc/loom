@@ -135,6 +135,78 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
 
 
 @pytest.mark.timeout(180)
+async def test_early_stop_bootstraps_using_only_protected_manager_authority(applications, platform_inputs):
+    from kubernetes import client, utils
+
+    from loom.nebius_application_authority import render_application_authority
+    from loom_service.application_management.runtime import ApplicationRuntimeProvider
+
+    registry, authority, lease, alice, _ = await runtime_inputs(applications, platform_inputs)
+    stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
+        idempotency_key='early-stop', expected_generation=1)
+    lease = await registry.claim(stopped.operation_id, lease_seconds=300)
+    container = await asyncio.to_thread(_start_k3s)
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        await asyncio.to_thread(core.create_namespace, {'metadata': {'name': authority.namespace}})
+        await asyncio.to_thread(core.create_namespaced_service_account, authority.namespace,
+            {'metadata': {'name': 'loom-application-provisioner'}})
+        documents = render_application_authority(authority)
+        for document in documents:
+            await asyncio.to_thread(utils.create_from_dict, core.api_client, document)
+        admission = client.AdmissionregistrationV1Api(core.api_client)
+        deadline = time.monotonic() + 25
+        for document in documents:
+            if document['kind'] != 'ValidatingAdmissionPolicy':
+                continue
+            while True:
+                policy = await asyncio.to_thread(admission.read_validating_admission_policy, document['metadata']['name'])
+                if policy.status and policy.status.type_checking:
+                    break
+                assert time.monotonic() < deadline, 'protected admission policy not ready'
+                await asyncio.sleep(0.1)
+        issued = await asyncio.to_thread(core.create_namespaced_service_account_token,
+            'loom-application-provisioner', authority.namespace, client.AuthenticationV1TokenRequest(
+                spec=client.V1TokenRequestSpec(audiences=[])))
+        config = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
+        # No admin client certificate: only the real protected manager token.
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
+                                     headers={'Authorization': 'Bearer ' + issued.status.token}) as http:
+            async def allowed(resource):
+                response = await http.post('/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', json={
+                    'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectAccessReview',
+                    'spec': {'resourceAttributes': {'namespace': 'loom-dev-alice', 'group': '',
+                                                    'resource': resource, 'verb': 'create'}}})
+                assert response.status_code == 201
+                return response.json()['status']['allowed'] is True
+            deadline = time.monotonic() + 25
+            while not await allowed('namespaces'):
+                assert time.monotonic() < deadline, 'bootstrap authorization not ready'
+                await asyncio.sleep(0.1)
+            assert not await allowed('resourcequotas')
+            provider = ApplicationRuntimeProvider(registry, ApplicationKubernetesProvider(registry, http), authority=authority)
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    proof = await provider.stop_workloads(lease)
+                    break
+                except ProviderWaitingError:
+                    assert time.monotonic() < deadline, 'protected early stop did not converge'
+                    await asyncio.sleep(0.1)
+            assert proof.deployments == ()
+            assert await allowed('resourcequotas')
+            effects = await registry.effect_history(lease)
+            assert [(item.intent.kind, item.intent.action) for item in effects] == [
+                ('Namespace', 'create'), ('RoleBinding', 'create'), ('ResourceQuota', 'create')]
+            assert all(item.phase == 'observed' for item in effects)
+            assert (await http.get('/api/v1/namespaces/loom-dev/services')).status_code == 403
+            assert (await http.delete('/api/v1/namespaces/loom-dev-alice')).status_code == 403
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
 async def test_journal_drives_real_create_preconditioned_patch_and_delete(applications):
     from kubernetes import client
 

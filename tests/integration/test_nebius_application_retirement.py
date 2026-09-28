@@ -285,3 +285,66 @@ async def test_early_stop_does_not_adopt_a_foreign_namespace(applications, platf
         with pytest.raises(ProviderBlockedError):
             await provider.stop_workloads(current)
     assert api.mutations == []
+
+
+async def test_runtime_bootstraps_exact_rolebinding_before_resource_access(runtime_context):
+    registry, _, authority, api, lease, _ = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    provider = runtime(runtime_context)
+    api.resource_access_ready = False
+    with pytest.raises(ProviderWaitingError, match='application_resource_authority_pending'):
+        await provider.ensure_resource_authority(lease)
+    role_path = f'/apis/rbac.authorization.k8s.io/v1/namespaces/{NS}/rolebindings/{authority.name}'
+    binding = api.objects[role_path]
+    assert binding['roleRef']['name'] == authority.name + '-resources'
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-application-provisioner',
+                                   'namespace': authority.namespace}]
+    assert len(api.mutations) == 2  # Namespace and binding, never quota/workloads.
+    api.resource_access_ready = True
+    await provider.ensure_resource_authority(lease)
+    assert len(api.mutations) == 2
+    assert (await registry.effect_history(lease))[-1].observed_uid == binding['metadata']['uid']
+
+
+async def test_binding_lost_reply_reconciles_after_supersession_without_repost(runtime_context):
+    registry, _, authority, api, lease, alice = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    provider = runtime(runtime_context)
+    api.lose_response = True
+    with pytest.raises(ProviderWaitingError):
+        await provider.ensure_resource_authority(lease)
+    path = f'/apis/rbac.authorization.k8s.io/v1/namespaces/{NS}/rolebindings/{authority.name}'
+    late = api.objects.pop(path)
+    api.lose_response = False
+    stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
+        idempotency_key='stop', expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    with pytest.raises(ProviderWaitingError):
+        await provider.ensure_resource_authority(current)
+    assert len(api.mutations) == 2
+    api.objects[path] = late
+    await provider.ensure_resource_authority(current)
+    assert len(api.mutations) == 2
+
+
+@pytest.mark.parametrize('damage', ['foreign', 'missing', 'subject', 'role'])
+async def test_resource_authority_is_never_adopted_replaced_or_broadened(runtime_context, damage):
+    _, _, authority, api, lease, _ = runtime_context
+    from tests.integration.test_nebius_application_runtime import runtime
+
+    provider = runtime(runtime_context)
+    await provider.ensure_resource_authority(lease)
+    path = f'/apis/rbac.authorization.k8s.io/v1/namespaces/{NS}/rolebindings/{authority.name}'
+    if damage == 'missing':
+        del api.objects[path]
+    elif damage == 'foreign':
+        api.objects[path]['metadata']['uid'] = 'foreign'
+    elif damage == 'subject':
+        api.objects[path]['subjects'][0]['name'] = 'other'
+    else:
+        api.objects[path]['roleRef']['name'] = 'cluster-admin'
+    with pytest.raises(ProviderBlockedError, match='application_resource_authority_conflict'):
+        await provider.ensure_resource_authority(lease)
+    assert len(api.mutations) == 2
