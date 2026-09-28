@@ -101,7 +101,6 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   const chunks = JSON.parse(readFileSync("dist/.vite/manifest.json", "utf8")) as Record<string, { file: string }>;
   const scripts = new Set<string>();
   page.on("request", request => scripts.add(new URL(request.url()).pathname));
-  const drawerChunk = `${browserHarness.routePrefix}/${chunks["src/components/pipelines/PipelineStageDrawer.tsx"].file}`;
   await apiHarness.install({
     role: "user",
     overrides: [
@@ -187,7 +186,6 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
     await expect(page.getByText(`Cursor page ${pageNumber} · 200 StageRuns on this page`)).toBeVisible();
   }
   await expect(page.getByText("Cursor page 5 · 200 StageRuns on this page")).toBeVisible();
-  expect(scripts.has(drawerChunk)).toBe(false);
   const openedAt = Date.now();
   const target = stageTable.getByRole("row", {
     name: /node-19 shard-0049/u,
@@ -195,7 +193,6 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   await target.click();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
   expect(Date.now() - openedAt).toBeLessThanOrEqual(750);
-  expect(scripts.has(drawerChunk)).toBe(true);
   expect(scripts.has(`${browserHarness.routePrefix}/${chunks["src/components/artifacts/BehaviorRolloutLivePreview.tsx"].file}`)).toBe(false);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();

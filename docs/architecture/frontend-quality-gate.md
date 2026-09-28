@@ -167,7 +167,7 @@ a Suspense boundary to every small component:
 | Admin access | Load tokens, teams, legacy requests and audit tabs independently; preserve existing per-tab query enablement. |
 | Provider detail | Overview does not download Models, editable settings or credential dialogs; each loads when used. |
 | Batch/trial diagnostics | Load the JSON tree and its CSS when raw details are opened. |
-| Pipeline run and artifact detail | Load the stage drawer, eligible live preview and specialized rollout viewer only when required. Generic artifacts use the small generic renderer. |
+| Pipeline run and artifact detail | Keep the small stage drawer with its lazy Pipeline route so opening it does not add a module-loading boundary before its requests. Load eligible live preview and the specialized rollout viewer only when required. Generic artifacts use the small generic renderer. |
 | Library, Tasks, Benchmarks, Pipeline lists | Preserve existing server pagination, bounded pages and the large-stage-list virtualizer. |
 | Usage, rates and remaining small pages | Keep existing lightweight native/SVG rendering; no chart framework or speculative memoization added. |
 
@@ -202,7 +202,7 @@ additional route static closures (minified decimal kB):
 | Monitor | 67.35 | 43.27 |
 | Admin access | 82.03 | 66.51 |
 | Provider detail | 70.13 | 39.37 |
-| Pipeline run | 65.73 | 57.23 |
+| Pipeline run | 65.73 | 61.16 |
 | Pipeline artifact | 34.83 | 25.94 |
 
 The Monitor default view and selected admin tab can add their own lazy modules;

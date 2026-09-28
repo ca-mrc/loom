@@ -28,10 +28,6 @@
       "bytes": 25258,
       "gzipBytes": 8202
     },
-    "src/components/pipelines/PipelineStageDrawer.tsx": {
-      "bytes": 31828,
-      "gzipBytes": 11518
-    },
     "src/components/providers/DeleteConnectionModal.tsx": {
       "bytes": 11152,
       "gzipBytes": 5417
