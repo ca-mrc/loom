@@ -159,7 +159,8 @@ def test_registration_database_rejects_invalid_state(environment_database, chang
 
 
 def test_upgrade_preserves_legacy_dev_rows(environment_database):
-    from loom.db.schema import DevInstance, Team, User
+    from loom.db.schema import Team, User
+    from tests.support.legacy_personal_dev_schema import DevInstance
 
     cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", environment_database.url.render_as_string(hide_password=False).replace("%", "%%"))
@@ -173,7 +174,10 @@ def test_upgrade_preserves_legacy_dev_rows(environment_database):
             deployment_generation=1, candidate_sha="a" * 40, operation_id=uuid4(),
         ))
         before = connection.execute(text("SELECT to_jsonb(d) FROM dev_instances d")).scalar_one()
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0166")
+    with pytest.raises(RuntimeError, match="retained-row disposition: dev_instances"):
+        command.upgrade(cfg, "head")
     with environment_database.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0166"
         assert connection.execute(text("SELECT to_jsonb(d) FROM dev_instances d")).scalar_one() == before
         assert connection.execute(text("SELECT count(*) FROM nebius_environments")).scalar_one() == 0

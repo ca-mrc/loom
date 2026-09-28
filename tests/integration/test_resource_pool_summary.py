@@ -14,7 +14,6 @@ from loom.db.schema import (
     TeamQuota,
     Trial,
     Worker,
-    WorkerPoolAutoscalerPolicy,
 )
 from loom.resource_pools import get_resource_pool_summary
 
@@ -26,7 +25,6 @@ async def _cleanup_db(postgres_url: str) -> Iterator[None]:
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as s:
         await s.execute(delete(Trial))
-        await s.execute(delete(WorkerPoolAutoscalerPolicy))
         await s.execute(delete(Worker))
         await s.execute(delete(Task))
         await s.execute(delete(TeamQuota))
@@ -94,27 +92,6 @@ async def test_resource_summary_ignores_retired_policy_and_preserves_draining_ca
                 state="running",
                 worker_id=draining_worker_id,
                 idempotency_key="draining-running",
-            ))
-            # Historical policy rows are retained but must not contribute capacity.
-            await s.execute(insert(WorkerPoolAutoscalerPolicy).values(
-                environment="production",
-                pool_name="retired-fixture",
-                actuator="slurm",
-                enabled=True,
-                min_slots=6,
-                max_slots=30,
-                scale_up_threshold_slots=1,
-                scale_down_idle_seconds=600,
-                scale_up_cooldown_seconds=60,
-                scale_down_cooldown_seconds=300,
-                drain_timeout_seconds=600,
-                actuator_config={"backend": "docker", "cpu_arch": "x86_64"},
-                idle_since_at=now - timedelta(seconds=123),
-                last_decision="request_drain",
-                last_decision_reason="idle_excess_capacity",
-                last_desired_slots=6,
-                last_pending_slots=0,
-                last_draining_slots=6,
             ))
             await s.commit()
 

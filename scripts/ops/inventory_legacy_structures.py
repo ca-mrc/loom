@@ -136,7 +136,7 @@ def inventory(connection: psycopg.Connection[Any], *, schema: str = "public") ->
         cursor.execute("""
             SELECT n.nspname AS schema, c.relname AS name
             FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE c.relkind='r' AND c.relname LIKE 'alembic_version%%'
+            WHERE c.relkind='r' AND c.relname LIKE '%%alembic_version%%'
             ORDER BY n.nspname, c.relname
         """)
         version_tables = cursor.fetchall()

@@ -1,4 +1,8 @@
-"""Verify Alembic migrations apply cleanly and the in_flight_count trigger fires."""
+"""Verify published pre-retirement migrations and their retained data contracts.
+
+This historical suite ends at 0166. The current head and retirement behavior are
+verified separately in test_legacy_feature_retirement.py.
+"""
 
 from __future__ import annotations
 
@@ -16,12 +20,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import (
-    DevInstance,
-    PersonalDevCandidate,
     Team,
     User,
 )
-from loom.db.schema_startup import service_schema_head
+from tests.support.legacy_personal_dev_schema import DevInstance, PersonalDevCandidate
 
 
 @pytest.fixture(scope="module")
@@ -45,7 +47,7 @@ def postgres_url():
             check=True,
         )
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
@@ -163,7 +165,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             await engine.dispose()
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
@@ -180,7 +182,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == service_schema_head()
+            assert revision == "0166"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
@@ -189,7 +191,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             engine.dispose()
     finally:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
