@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import ssl
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -53,6 +54,7 @@ def private_upgrade(entry_inputs, application_management_inputs, application_mat
     application['authority']['cluster_id'] = config['cluster_id']
     deployment['installation'].update(provider_runtime=None, applications=application)
     payload = {'schema_version': 'loom.nebius-management-upgrade-private-inputs.v1',
+        'foundation_candidate': '3' * 40,
         'original_operation': original_meta, 'deployment': deployment, 'candidate': original.candidate,
         'profile': original.profile, 'binding': asdict(installed.store.binding), 'shared_namespace_uid': str(uuid4()),
         'material_files': {key: private(key, value) for key, value in asdict(application_material).items()},
@@ -126,3 +128,34 @@ def test_bad_upgrade_input_never_opens_live_connection(private_upgrade, monkeypa
     assert entry.main(str(path), 'install') == 1
     assert json.loads(capsys.readouterr().out)['status'] == 'blocked'
     assert not Path(metadata['state_dir']).exists()
+
+
+def test_upgrade_qualifies_current_foundation_without_rewriting_historical_pins(private_upgrade, monkeypatch):
+    from scripts.ops import nebius_management_entry as entry
+    from scripts.ops.nebius_ingress_operation import LiveIngressAPI
+
+    metadata, _, _, _ = private_upgrade
+    inputs, request, old, ingress = entry.load_upgrade_inputs(metadata)
+    assert old.foundation_candidate == '2' * 40 and ingress['candidate'] == '1' * 40
+    assert inputs.foundation_candidate == '3' * 40
+    original_bytes = Path(inputs.original_operation['inputs_path']).read_bytes()
+    # Only operator/network boundaries are replaced. Real connection assembly and
+    # LiveIngressAPI.foundation consume the new pin and check the live profile.
+    async def operator(connection):
+        return ssl.create_default_context(), 'test-operator-token'
+    monkeypatch.setattr(entry, '_operator_transport', operator)
+    monkeypatch.setattr(entry.private_state, 'load_installation', lambda path: {})
+    Path(old.operator_connection.ca_file).write_text(request.setup.material.ca_pem)
+    config = request.setup.deployment.installation.foundation.platform_config
+    ingress['binding'].update(namespace=config['namespace'], child_domain='dev.example.test')
+    monkeypatch.setattr(LiveIngressAPI, 'verify_identity', lambda *args: None)
+    monkeypatch.setattr(LiveIngressAPI, '_run', lambda *args: json.dumps({'clusters': [{
+        'name': 'context-cluster-e00fixture', 'cluster': {'server': config['kubernetes_api_server'],
+            'certificate-authority-data': 'fixture-ca'}}]}))
+    monkeypatch.setattr(LiveIngressAPI, '_get', lambda *args: {
+        'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'loom-platform-config',
+            'namespace': config['namespace'], 'uid': str(uuid4()), 'resourceVersion': '1'},
+        'data': {'environment.json': json.dumps(config), 'profile.json': json.dumps({'candidate_sha': '3' * 40})}})
+    with entry.connected_upgrade_api(inputs, request, old, ingress) as api:
+        assert api.checks.base.ingress.foundation().platform_config['cluster_id'] == config['cluster_id']
+    assert Path(inputs.original_operation['inputs_path']).read_bytes() == original_bytes
