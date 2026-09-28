@@ -270,7 +270,7 @@ def test_switch_transport_does_not_expose_inherited_setup_writes(switch_inputs):
     assert not calls
 
 
-@pytest.mark.parametrize('remaining', ['none', 'generation', 'deployment', 'pod', 'replicaset', 'foreign', 'page'])
+@pytest.mark.parametrize('remaining', ['none', 'generation', 'deployment', 'pod', 'replicaset', 'foreign', 'page', 'fence', 'foreign-fence'])
 def test_retirement_observes_controllers_and_terminating_pods(switch_inputs, remaining):
     from scripts.ops.nebius_management_stage import ManagementStageError
     from scripts.ops.nebius_management_switch import HTTPSManagementSwitchAPI
@@ -290,6 +290,13 @@ def test_retirement_observes_controllers_and_terminating_pods(switch_inputs, rem
         rs['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
 
     def response(http):
+        if http.method == 'POST':
+            assert http.url.params['dryRun'] == 'All'
+            if remaining == 'fence':
+                return httpx.Response(201, json=json.loads(http.content))
+            name = request.setup.deployment.installation.applications.authority.name + '-legacy-pods'
+            return httpx.Response(403, json={'kind': 'Status', 'code': 403, 'reason': 'Forbidden',
+                'message': 'unrelated denial' if remaining == 'foreign-fence' else name + ': legacy management process is retired'})
         name = http.url.path.rsplit('/', 1)[1]
         if name == 'loom-service':
             value = current
@@ -309,7 +316,7 @@ def test_retirement_observes_controllers_and_terminating_pods(switch_inputs, rem
             ssl_context=ssl.create_default_context()) as api:
         api.client.close()
         api.client = httpx.Client(transport=httpx.MockTransport(response), base_url=api.api_server)
-        if remaining in {'foreign', 'page'}:
+        if remaining in {'foreign', 'page', 'foreign-fence'}:
             with pytest.raises(ManagementStageError):
                 api.retired()
         else:

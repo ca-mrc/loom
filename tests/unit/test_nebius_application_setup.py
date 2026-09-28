@@ -28,7 +28,7 @@ def render_setup(inputs):
 def test_fixed_sql_job_uses_shared_admin_route_and_only_setup_credentials(application_management_inputs):
     before = copy.deepcopy(application_management_inputs)
     phases = render_setup(application_management_inputs)
-    assert set(phases) == {'admission', 'permissions', 'network', 'database'}
+    assert set(phases) == {'admission', 'permissions', 'network', 'database', 'retirement'}
     docs = phases['database']
     assert [doc['kind'] for doc in docs] == ['ConfigMap', 'Job']
     config, job = docs
@@ -103,3 +103,18 @@ def test_management_sql_network_does_not_expand_personal_service_access(applicat
 def test_setup_rejects_legacy_runtime_without_application_binding(management_inputs):
     with pytest.raises(ValueError, match='application'):
         render_setup(management_inputs)
+
+
+def test_retirement_fence_blocks_only_legacy_management_pod_creation(application_management_inputs):
+    policy, binding = render_setup(application_management_inputs)['retirement']
+    assert policy['kind'] == 'ValidatingAdmissionPolicy'
+    assert binding['kind'] == 'ValidatingAdmissionPolicyBinding'
+    assert binding['spec']['policyName'] == policy['metadata']['name']
+    assert binding['spec']['validationActions'] == ['Deny']
+    assert policy['spec']['failurePolicy'] == 'Fail'
+    assert policy['spec']['matchConstraints']['resourceRules'] == [
+        {'operations': ['CREATE'], 'apiGroups': [''], 'apiVersions': ['v1'], 'resources': ['pods']}]
+    assert policy['spec']['validations'] == [{'expression':
+        "request.namespace != 'loom-nebius-management' || !has(object.spec.serviceAccountName) || "
+        "object.spec.serviceAccountName != 'loom-management-provisioner'",
+        'message': 'legacy management process is retired'}]

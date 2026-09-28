@@ -122,7 +122,7 @@ def test_retained_material_cannot_rotate_or_gain_extra_defaulted_keys(setup_requ
     assert not fresh.creates
 
 
-@pytest.mark.parametrize('phase', ['admission', 'permissions', 'network', 'database'])
+@pytest.mark.parametrize('phase', ['admission', 'permissions', 'network', 'database', 'retirement'])
 def test_setup_phase_replays_exact_uids_without_recreating(setup_request, tmp_path, phase):
     from scripts.ops.nebius_application_setup import stage_application_setup
 
