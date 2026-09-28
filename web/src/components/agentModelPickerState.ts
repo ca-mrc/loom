@@ -64,7 +64,9 @@ export const SELECT_CLS =
 
 export const CUSTOM_MODEL_KEY = "__custom__";
 
-export const ALL_SOURCES: ModelSource[] = ["api", "local-server", "hf"];
+// Hosted submissions use Provider Connections only (#2054). The other
+// ModelSource values remain so older saved selections still type-check.
+export const ALL_SOURCES: ModelSource[] = ["api"];
 
 export function modelKey(m: ModelEntry): string {
   return `${m.provider}|${m.name}|${m.provider_connection_id ?? ""}`;
@@ -88,6 +90,16 @@ export function providerNamespace(conn: ProviderConnectionEntry | undefined): st
   if (!conn) return "";
   if (conn.type === "openai-compatible") return "openai";
   return conn.type;
+}
+
+/** Resolve a catalog entry by canonical name or alias (e.g. a restored
+ * `openhands` selection resolves to `openhands-sdk`). */
+export function findAgent<T extends { name: string; aliases?: string[] }>(
+  items: readonly T[] | undefined,
+  name: string,
+): T | undefined {
+  if (!name) return undefined;
+  return items?.find((a) => a.name === name || (a.aliases ?? []).includes(name));
 }
 
 export function firstSource(agent: AgentEntry | undefined): ModelSource {

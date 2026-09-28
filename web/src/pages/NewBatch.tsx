@@ -100,8 +100,7 @@ export default function NewBatch(): JSX.Element {
     releaseScopeText,
     releaseTrialText,
     releaseBackendText,
-    releaseProviderText,
-    releaseModelText,
+    releaseCombinationLines,
     budgetUsd,
     setBudgetUsd,
     budgetPolicy,
@@ -119,6 +118,7 @@ export default function NewBatch(): JSX.Element {
     setConfirmedLargeFanOut,
     localError,
     submit,
+    isSubmitting,
     tagSelectionPending,
     submitButtonLabel,
   } = state;
@@ -166,7 +166,7 @@ export default function NewBatch(): JSX.Element {
             </div>
             <div className="space-y-4">
               {rows.map((r, i) => (
-                <div key={i} id={`batch-combination-${i + 1}`} tabIndex={-1} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div key={r.id} id={`batch-combination-${i + 1}`} tabIndex={-1} className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
                       Combination {i + 1}
@@ -185,7 +185,7 @@ export default function NewBatch(): JSX.Element {
                   <AgentModelPicker
                     value={r.picker}
                     onChange={(v) => updateRow(i, { picker: v })}
-                    disabled={create.isPending}
+                    disabled={isSubmitting}
                     specificAgentToggle
                     defaultAgentName={DEFAULT_AGENT_NAME}
                     teamId={currentTeamId}
@@ -240,8 +240,11 @@ export default function NewBatch(): JSX.Element {
               <p>{releaseScopeText}</p>
               <p>{releaseTrialText}</p>
               <p>{releaseBackendText}</p>
-              <p>{releaseProviderText}</p>
-              <p>{releaseModelText}</p>
+              <ul className="space-y-1">
+                {releaseCombinationLines.map((line, i) => (
+                  <li key={rows[i]?.id ?? i}>{line}</li>
+                ))}
+              </ul>
             </Card.Body>
           </Card>
           <Card>
@@ -349,7 +352,7 @@ export default function NewBatch(): JSX.Element {
               const lbl = r.label.trim() || `combo${i + 1}`;
               return (
                 <span
-                  key={i}
+                  key={r.id}
                   className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700"
                 >
                   <span className="font-semibold">{lbl}</span>
@@ -389,7 +392,7 @@ export default function NewBatch(): JSX.Element {
           onClick={() => {
             void submit();
           }}
-          disabled={create.isPending || totalTrials === 0 || tagSelectionPending}
+          disabled={isSubmitting || totalTrials === 0 || tagSelectionPending}
           title={
             totalTrials === undefined || totalTrials === 0
               ? "Choose a task source and complete the configuration before submitting."

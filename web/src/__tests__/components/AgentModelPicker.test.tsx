@@ -200,36 +200,14 @@ describe("AgentModelPicker copy", () => {
     ).toBeInTheDocument();
   });
 
-  it("uses linked keyboard-operable tabs for model sources", async () => {
-    const user = userEvent.setup();
+  it("offers only Provider Connections as the model source (#2054)", async () => {
     renderPicker();
 
-    const list = await screen.findByRole("tablist", { name: "Model source" });
-    const providerTab = screen.getByRole("tab", { name: "Provider API" });
-    const localTab = screen.getByRole("tab", { name: "Local server" });
-    const providerPanel = document.getElementById(
-      providerTab.getAttribute("aria-controls") ?? "missing",
-    );
-    expect(list).toContainElement(providerTab);
-    expect(providerPanel).toHaveAttribute("aria-labelledby", providerTab.id);
-    expect(providerTab).toHaveAttribute("tabindex", "0");
-
-    providerTab.focus();
-    await user.keyboard("{ArrowRight}");
-    expect(localTab).toHaveFocus();
-    expect(localTab).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tabpanel")).toHaveAttribute(
-      "aria-labelledby",
-      localTab.id,
-    );
-    expect(screen.getByText(/No local servers are available in this deployment/i)).toBeInTheDocument();
-
-    await user.keyboard("{End}");
-    expect(screen.getByRole("tab", { name: "HuggingFace" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
-    expect(screen.getByText("HuggingFace model id")).toBeInTheDocument();
+    expect(await screen.findByLabelText(/^Provider connection$/i)).toBeInTheDocument();
+    expect(screen.queryByRole("tablist", { name: "Model source" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Local server" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "HuggingFace" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^Model$/i)).toBeDisabled();
   });
 
   it("warns before submit when a selected provider model failed preflight", async () => {
@@ -249,6 +227,27 @@ describe("AgentModelPicker copy", () => {
       screen.getByText(/This model failed its last preflight/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/access-denied/i)).toBeInTheDocument();
+  });
+
+  it("keeps the selected model and its preflight warning while searching (#2054)", async () => {
+    const user = userEvent.setup();
+    renderPicker();
+
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      await screen.findByRole("option", { name: /Lab vLLM/i }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      await screen.findByRole("option", { name: /deepseek-chat/i }),
+    );
+    await user.type(screen.getByPlaceholderText(/deepseek, qwen, llama/i), "slow");
+
+    const model = screen.getByLabelText(/^Model$/i) as HTMLSelectElement;
+    expect(model.value).toBe("openai|deepseek-chat|conn-1");
+    expect(screen.getByRole("option", { name: /slow-reasoner/i })).toBeInTheDocument();
+    expect(screen.getByText(/This model failed its last preflight/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Ad-hoc model ID$/i, { selector: "span" })).not.toBeInTheDocument();
   });
 
   it("shows a non-blocking notice when the last preflight was only inconclusive", async () => {

@@ -10,6 +10,7 @@ import {
   type ProviderConnectionEntry,
 } from "../api";
 import { useAuth } from "../auth/useAuth";
+import { findAgent } from "../components/agentModelPickerState";
 import {
   buildAgentModel,
   buildProviderOverride,
@@ -75,6 +76,10 @@ export function useNewBatch() {
   const [budgetConfirmed, setBudgetConfirmed] = useState(false);
 
   const [localError, setLocalError] = useState<string | null>(null);
+
+  // Covers saving manual model ids AND creating the batch, so a second
+  // click during the save cannot submit a duplicate batch (#2054).
+  const [savingModels, setSavingModels] = useState(false);
 
   const navigate = useNavigate();
 
@@ -327,7 +332,7 @@ export function useNewBatch() {
     const out: Combination[] = [];
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      const selectedAgent = agents.data?.items.find((a) => a.name === r.picker.agentName);
+      const selectedAgent = findAgent(agents.data?.items, r.picker.agentName);
       if (!selectedAgent) {
         return { ok: false, error: `Combination ${i + 1}: pick an agent.` };
       }
@@ -348,10 +353,16 @@ export function useNewBatch() {
         };
       }
       const agentModel = buildAgentModel(r.picker, selectedAgent.needs_model);
+      if (selectedAgent.needs_model && !r.picker.providerConnectionId) {
+        return {
+          ok: false,
+          error: `Combination ${i + 1}: ${selectedAgent.display_name ?? selectedAgent.name} needs a model — choose a provider connection first.`,
+        };
+      }
       if (selectedAgent.needs_model && agentModel === null) {
         return {
           ok: false,
-          error: `Combination ${i + 1}: ${selectedAgent.name} needs a model — pick one from the dropdown or use the custom-model fields.`,
+          error: `Combination ${i + 1}: ${selectedAgent.display_name ?? selectedAgent.name} needs a model — pick one from the dropdown or enter an ad-hoc model ID.`,
         };
       }
       const n = Number.parseInt(r.nPerTask, 10);
@@ -389,7 +400,7 @@ export function useNewBatch() {
     const overrides: Array<{ index: number; value: ProviderOverride }> = [];
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      const selectedAgent = agents.data?.items.find((a) => a.name === r.picker.agentName);
+      const selectedAgent = findAgent(agents.data?.items, r.picker.agentName);
       if (!selectedAgent) continue;
       const override = buildProviderOverride(r.picker, selectedAgent.needs_model);
       if (override) overrides.push({ index: i, value: override });
@@ -559,7 +570,10 @@ export function useNewBatch() {
     return { ok: true, payload, providerOverrides };
   };
 
+  const isSubmitting = savingModels || create.isPending;
+
   const submit = async (): Promise<void> => {
+    if (isSubmitting) return;
     setLocalError(null);
     const result = buildSubmission();
     if (!result.ok) {
@@ -567,6 +581,7 @@ export function useNewBatch() {
       return;
     }
     const { payload, providerOverrides } = result;
+    setSavingModels(true);
     try {
       const manualOverrides = new Map<string, ProviderOverride>();
       for (const override of providerOverrides) {
@@ -582,15 +597,16 @@ export function useNewBatch() {
         });
       }
     } catch (e) {
+      setSavingModels(false);
       setLocalError(e instanceof Error ? e.message : "Could not save manual model id.");
       return;
     }
 
-    create.mutate(payload);
+    create.mutate(payload, { onSettled: () => setSavingModels(false) });
   };
 
   const submitButtonLabel = (() => {
-    if (create.isPending) return "Submitting…";
+    if (isSubmitting) return "Submitting…";
     if (totalTrials === undefined || totalTrials === 0) {
       return "Submit batch";
     }
@@ -633,28 +649,28 @@ export function useNewBatch() {
 
   const nebiusStatus = backends.data?.items.find((b) => b.name === NEBIUS_BACKEND);
 
-  const firstProviderConnectionId = rows.find((r) => r.picker.providerConnectionId)?.picker
-    .providerConnectionId;
-
-  const selectedProviderConnection: ProviderConnectionEntry | undefined =
-    providerConnections.data?.items.find((c) => c.id === firstProviderConnectionId);
-
-  const firstSelectedModel = rows.find((r) => r.picker.modelName && r.picker.modelProvider)?.picker;
-
-  const selectedModel: ModelEntry | undefined =
-    firstSelectedModel && models.data
-      ? models.data.items.find(
-          (m) =>
-            m.name === firstSelectedModel.modelName &&
-            m.provider === firstSelectedModel.modelProvider &&
-            (m.provider_connection_id ?? undefined) ===
-              (firstSelectedModel.providerConnectionId ?? undefined),
-        )
-      : undefined;
-
-  const releaseNeedsProvider = rows.some((row) => {
-    const agent = agents.data?.items.find((a) => a.name === row.picker.agentName);
-    return agent?.needs_model !== false;
+  // One review line per combination: connection, model and preflight for
+  // model-backed rows; "no model" for Oracle-style agents (#2054).
+  const releaseCombinationLines: string[] = rows.map((row, i) => {
+    const agent = findAgent(agents.data?.items, row.picker.agentName);
+    const prefix = `Combination ${i + 1}${agent ? ` (${agent.display_name ?? agent.name})` : ""}`;
+    if (!agent) return `${prefix}: pick an agent.`;
+    if (!agent.needs_model) return `${prefix}: no model or provider connection needed.`;
+    const connection: ProviderConnectionEntry | undefined = providerConnections.data?.items.find(
+      (c) => c.id === row.picker.providerConnectionId,
+    );
+    if (!connection) return `${prefix}: pick a provider connection before submitting.`;
+    const modelName = row.picker.modelName.trim();
+    if (!modelName) return `${prefix}: ${connection.name} (${connection.status}); pick a model before submitting.`;
+    const model: ModelEntry | undefined = models.data?.items.find(
+      (m) => m.name === modelName && m.provider_connection_id === connection.id,
+    );
+    const preflight = model
+      ? preflightLabel(model.last_preflight_status, model.last_preflight_failure_kind)
+      : row.picker.manualModel
+        ? "ad-hoc, saved on submit"
+        : "not preflighted";
+    return `${prefix}: ${connection.name} (${connection.status}) · ${modelName} ${preflight}.`;
   });
 
   const releaseScopeText =
@@ -679,20 +695,6 @@ export function useNewBatch() {
         : nebiusStatus.cold_start_available
           ? `Runs on Nebius, which can scale from zero via ${nebiusStatus.cold_start_pools.join(", ")}.`
           : "Runs on Nebius, which has no healthy execution target right now.";
-
-  const releaseProviderText = releaseNeedsProvider
-    ? selectedProviderConnection
-      ? `${selectedProviderConnection.name} provider status is ${selectedProviderConnection.status}.`
-      : "Pick a provider connection before submitting."
-    : "No provider connection required for the selected agent.";
-
-  const releaseModelText = releaseNeedsProvider
-    ? firstSelectedModel?.modelName
-      ? `${firstSelectedModel.modelName} ${
-          selectedModel ? preflightLabel(selectedModel.last_preflight_status, selectedModel.last_preflight_failure_kind) : "not preflighted"
-        }.`
-      : "Pick a model before submitting."
-    : "No model required for the selected agent.";
 
   const generatedIdentity = buildIdentityPreview({
     sourceIds: selectedSourceIdsSorted,
@@ -740,8 +742,7 @@ export function useNewBatch() {
     releaseScopeText,
     releaseTrialText,
     releaseBackendText,
-    releaseProviderText,
-    releaseModelText,
+    releaseCombinationLines,
     budgetUsd,
     setBudgetUsd,
     budgetPolicy,
@@ -759,6 +760,7 @@ export function useNewBatch() {
     setConfirmedLargeFanOut,
     localError,
     submit,
+    isSubmitting,
     buildSubmission,
     tagSelectionPending,
     submitButtonLabel,

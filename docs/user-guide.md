@@ -564,8 +564,9 @@ the generated prefix.
 
 For an agent × provider-model matrix, submit API-shaped combinations directly.
 Each combination can carry its own `provider_connection_id` and
-`provider_model_id`; batch-level provider fields are only defaults for legacy
-single-provider submissions:
+`provider_model_id`; a combination that sets neither inherits the batch-level
+pair. See [Supported agents and model access](#supported-agents-and-model-access)
+for the rules the service applies:
 
 ```bash
 loom eval batch create \
@@ -581,8 +582,8 @@ loom eval batch create \
       "n_per_task": 1
     },
     {
-      "label": "opencode-qwen",
-      "agent_name": "opencode",
+      "label": "codex-qwen",
+      "agent_name": "codex",
       "agent_model": {"provider": "openai", "name": "qwen3.6-35b-a3b", "source": "api"},
       "provider_connection_id": "33333333-3333-4333-8333-333333333333",
       "provider_model_id": "qwen3.6-35b-a3b",
@@ -829,6 +830,52 @@ operators can use the raw model view for debugging noisy catalogs.
 When New Batch links you to a provider's Models tab to refresh,
 preflight, or manually add a model, use the "Back to New Batch" link on
 that page to return to the batch form after the model catalog is ready.
+
+### Supported agents and model access
+
+Hosted submissions (New Batch, `POST /api/v1/batches`, `POST /api/v1/trials`
+and the hosted `loom eval` commands) accept five agents:
+
+| Agent | Model | Protocol |
+| --- | --- | --- |
+| `direct-completion` (alias `litellm`) | Required | Chat Completions; returns response text and runs no workspace tools |
+| `oracle` | None | Runs the task's `solution/solve.sh`; needs no connection or model |
+| `openhands-sdk` (shown as "openhands"; `openhands` still accepted) | Required | Chat Completions |
+| `terminus-2` | Required | Chat Completions |
+| `codex` | Required | Responses to the Gateway, which uses the upstream's native Responses API or its Chat Completions translation |
+
+Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode, Claude Code,
+Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
+but new submissions are rejected with the reason.
+
+Every model-backed selection needs an explicitly selected, authorized
+OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
+or shared with your team. There is no fallback to platform credentials, and
+native Anthropic/Google connections are not accepted for agents. The service
+resolves each selection once at submission:
+
+- The model that runs is `agent_model.name`. `provider_model_id` may be omitted;
+  when given (on the combination or inherited from the batch) it must name the
+  same model, otherwise the request is rejected before anything runs.
+- A combination without provider fields inherits the batch-level connection and
+  model as a pair. The resolved pair is stored on each combination, and preflight,
+  budget, fan-out and results all use it.
+- Oracle takes no provider fields; sending them is an error.
+- The same model on two connections gets distinct automatic labels
+  (`…@<connection name>`).
+- `/api/v1/models` lists models of connections owned by or shared with your
+  team; each item's `responses_route` says how Codex requests would be served
+  (`native`, `translated`, or `unprobed` until the first call).
+
+Reruns, clones and artifact reuse create new trials, so they follow the same
+rules. A rerun keeps the original connection. A clone or reuse runs every
+model-backed selection on the connection you select, never the source team's;
+if the source used several connections, submit a new batch instead. Batches
+accepted under older rules stay readable and their accepted work is unaffected.
+
+The hosted `local-server` and HuggingFace sources are retired: register the
+endpoint as an OpenAI-compatible Provider Connection instead. The standalone
+`loom run` paths below are unchanged.
 
 ### Local LLMs (vLLM, ollama, llama.cpp, lm-studio)
 

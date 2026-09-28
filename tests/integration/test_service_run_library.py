@@ -2699,7 +2699,11 @@ async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_adm
                     "requests": _NEBIUS_DEFAULT_REQUESTS,
                 }}
                 assert derived.team_id == f[f"team_{destination}"] and derived.provider_connection_id == provider_id
-                assert derived.combinations == combinations and derived.expected_trial_count == 4
+                # #2054: each derived combination carries the selected route.
+                assert derived.combinations == [
+                    {**c, "provider_connection_id": str(provider_id), "provider_model_id": "gpt-4o-mini"}
+                    for c in combinations
+                ] and derived.expected_trial_count == 4
                 assert derived.source_provenance[0]["source_batch_id"] == str(f["batch_shared"])
                 assert s.get(Batch, f["batch_shared"]).service_execution_runtime_profile == stale_profile
                 admitted = s.get(Trial, UUID(submitted.json()["trial_id"]))
@@ -2739,3 +2743,134 @@ async def test_derived_nebius_batch_freezes_current_runtime_and_enters_trial_adm
                 assert s.scalar(select(func.count()).select_from(Batch).where(Batch.name == "no runtime")) == 0
     finally:
         engine.dispose()
+
+
+async def test_clone_and_reuse_run_on_selected_connection_not_source_route(
+    run_library_setup: dict[str, object],
+) -> None:
+    """#2054: a submission stores its resolved route inside each combination.
+    Cloning or reusing it as team B with B's connection must replace team
+    A's connection everywhere it would dispatch, and must not require
+    access to A's (unshared) connection."""
+    from loom_service.batch_runner import _effective_provider_fields
+
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    trial_shared = run_library_setup["trial_shared"]
+    conn_a = run_library_setup["conn_a"]
+    conn_b = run_library_setup["conn_b"]
+    safe_key = run_library_setup["safe_key"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            update(Batch)
+            .where(Batch.id == batch_shared)
+            .values(
+                trial_config={},
+                combinations=[
+                    {
+                        "agent_name": "litellm",
+                        "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                        "n_per_task": 1,
+                        "label": "alpha",
+                        "provider_connection_id": str(conn_a),
+                        "provider_model_id": "gpt-4o-mini",
+                    },
+                ],
+                provider_connection_id=None,
+                provider_model_id=None,
+            ),
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        headers = {"Authorization": f"Bearer {raw_b}"}
+        cloned = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={"name": "clone onto beta", "provider_connection_id": str(conn_b)},
+            headers=headers,
+        )
+        reused = await ac.post(
+            f"/api/v1/run-library/trials/{trial_shared}/artifacts/reuse",
+            json={"key": safe_key, "name": "reuse onto beta", "provider_connection_id": str(conn_b)},
+            headers=headers,
+        )
+        conflicting = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={
+                "name": "conflicting clone",
+                "provider_connection_id": str(conn_b),
+                "provider_model_id": "gpt-4o",
+            },
+            headers=headers,
+        )
+        missing = await ac.post(
+            f"/api/v1/run-library/trials/{trial_shared}/artifacts/reuse",
+            json={"key": safe_key, "name": "reuse without connection"},
+            headers=headers,
+        )
+
+    assert cloned.status_code == 201, cloned.text
+    assert reused.status_code == 201, reused.text
+    assert conflicting.status_code == 400, conflicting.text
+    assert "conflicts with provider_model_id 'gpt-4o'" in conflicting.json()["detail"]
+    assert missing.status_code == 400, missing.text
+    assert "select a provider_connection_id" in missing.json()["detail"]
+
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        for batch_id in (cloned.json()["batch_id"], reused.json()["batch_id"]):
+            row = s.execute(select(Batch).where(Batch.id == UUID(batch_id))).scalar_one()
+            assert row.provider_connection_id == conn_b
+            assert row.combinations[0]["provider_connection_id"] == str(conn_b)
+            assert row.combinations[0]["provider_model_id"] == "gpt-4o-mini"
+            # What fan-out dispatches matches what is stored.
+            assert _effective_provider_fields(row, row.combinations[0]) == (
+                conn_b,
+                "gpt-4o-mini",
+            )
+    sync_engine.dispose()
+
+
+async def test_clone_rejects_ambiguous_multi_connection_source(
+    run_library_setup: dict[str, object],
+) -> None:
+    app = run_library_setup["app"]
+    raw_b = run_library_setup["raw_b"]
+    batch_shared = run_library_setup["batch_shared"]
+    conn_a = run_library_setup["conn_a"]
+    conn_b = run_library_setup["conn_b"]
+    postgres_url = run_library_setup["postgres_url"]
+
+    def combo(label: str, connection: object) -> dict[str, object]:
+        return {
+            "agent_name": "litellm",
+            "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+            "n_per_task": 1,
+            "label": label,
+            "provider_connection_id": str(connection),
+            "provider_model_id": "gpt-4o-mini",
+        }
+
+    sync_engine = create_engine(str(postgres_url))
+    with sync_engine.begin() as conn:
+        conn.execute(
+            update(Batch)
+            .where(Batch.id == batch_shared)
+            .values(trial_config={}, combinations=[combo("a", conn_a), combo("b", conn_b)]),
+        )
+    sync_engine.dispose()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/run-library/batches/{batch_shared}/clone-config",
+            json={"name": "ambiguous clone", "provider_connection_id": str(conn_b)},
+            headers={"Authorization": f"Bearer {raw_b}"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert "2 different Provider Connections" in r.json()["detail"]

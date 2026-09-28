@@ -362,6 +362,8 @@ function mockEndpoints(opts: {
   switchTeamId?: string;
   honorActiveTeamProviderAvailability?: boolean;
   providerConnectionsDelayMs?: number;
+  /** Delay the manual-model save so a second click lands while it runs. */
+  manualModelDelayMs?: number;
   /**
    * Override for `POST /api/v1/tasks/count`. When set, the count
    * endpoint returns this value regardless of body. Used by the
@@ -443,6 +445,13 @@ function mockEndpoints(opts: {
       if (url.includes("/api/v1/auth/me")) return json(AUTH_ME_RESPONSE);
       if (url.includes("/api/v1/agents")) return json(AGENTS_RESPONSE);
       if (url.includes("/api/v1/provider-connections/") && url.endsWith("/models")) {
+        if (opts.manualModelDelayMs) {
+          return new Promise<Response>((resolve) => {
+            setTimeout(() => {
+              void json({ model_id: "manual-vllm-checkpoint" }, 201).then(resolve);
+            }, opts.manualModelDelayMs);
+          });
+        }
         return json({ model_id: "manual-vllm-checkpoint" }, 201);
       }
       if (url.includes("/api/v1/provider-connections")) {
@@ -889,9 +898,8 @@ describe("NewBatch", () => {
 
     expect(await screen.findByText(/Release review/i)).toBeInTheDocument();
     expect(
-      screen.getByText(/No provider connection required/i),
+      screen.getByText(/no model or provider connection needed/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/No model required/i)).toBeInTheDocument();
   });
 
   it("shows unpublished benchmarks disabled while publish work is pending", async () => {
@@ -1682,6 +1690,89 @@ describe("NewBatch", () => {
       "11111111-1111-4111-8111-111111111111",
     );
     expect(body.combinations?.[0].provider_model_id).toBe("manual-vllm-checkpoint");
+  });
+});
+
+
+describe("NewBatch combination integrity (#2054)", () => {
+  beforeEach(() => {
+    activeTeamProvidersAvailable = true;
+    window.localStorage.clear();
+    window.localStorage.setItem("loom_token", "test-token");
+    vi.restoreAllMocks();
+  });
+
+  it("cannot create a duplicate batch while a manual model is being saved", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12, manualModelDelayMs: 150 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBenchmark();
+    await user.selectOptions(
+      await screen.findByLabelText(/^Provider connection$/i),
+      "11111111-1111-4111-8111-111111111111",
+    );
+    await user.selectOptions(
+      screen.getByLabelText(/^Model$/i),
+      screen.getByRole("option", { name: /Ad-hoc model ID/i }),
+    );
+    await user.type(
+      await screen.findByPlaceholderText("manual-vllm-checkpoint"),
+      "manual-vllm-checkpoint",
+    );
+
+    const submitButton = screen.getByRole("button", { name: SUBMIT_BTN });
+    await user.click(submitButton);
+    expect(await screen.findByRole("button", { name: /Submitting/i })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: /Submitting/i }));
+
+    await vi.waitFor(() => expect(batchCall(spy)).not.toBeNull());
+    const creates = spy.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes("/api/v1/batches") &&
+        (c[1] as RequestInit | undefined)?.method === "POST",
+    );
+    expect(creates).toHaveLength(1);
+  });
+
+  it("requires a provider connection for a model-backed combination", async () => {
+    const spy = mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBenchmark();
+
+    await user.click(screen.getByRole("button", { name: SUBMIT_BTN }));
+
+    expect(
+      await screen.findByText(/needs a model — choose a provider connection first/i),
+    ).toBeInTheDocument();
+    expect(batchCall(spy)).toBeNull();
+  });
+
+  it("reviews every combination and keeps row state with its row when one is removed", async () => {
+    mockEndpoints({ matchingTasks: 12 });
+    const user = userEvent.setup();
+    renderWithProviders(<NewBatch />);
+    await waitForNewBatchReady();
+    await pickBenchmark();
+    await pickDefaultModel(user);
+    await user.click(screen.getByRole("button", { name: /\+ Add combination/i }));
+
+    expect(
+      await screen.findByText(/^Combination 1 \(.*\): Lab vLLM \(valid\) · deepseek-chat/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Combination 2 \(.*\): pick a provider connection before submitting\./),
+    ).toBeInTheDocument();
+
+    const searches = screen.getAllByPlaceholderText(/deepseek, qwen, llama/i);
+    await user.type(searches[1], "second-row-search");
+    await user.click(screen.getAllByRole("button", { name: /^Remove$/i })[0]);
+
+    const remaining = screen.getAllByPlaceholderText(/deepseek, qwen, llama/i);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toHaveValue("second-row-search");
   });
 });
 
