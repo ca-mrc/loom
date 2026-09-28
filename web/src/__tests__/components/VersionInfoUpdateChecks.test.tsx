@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -126,13 +127,13 @@ function renderOpenPage() {
     defaultOptions: { queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><QueryClientProvider client={queryClient}>
       <label>
         Draft
         <input aria-label="Draft" />
       </label>
       <VersionInfo environmentLabel="Development" />
-    </QueryClientProvider>,
+    </QueryClientProvider></MemoryRouter>,
   );
 }
 
@@ -140,7 +141,9 @@ const dot = () => screen.queryByTitle("A newer build is available");
 const loadedLine = () => screen.getByTestId("sidebar-build-revision");
 
 describe("VersionInfo served-build checks (#2183)", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    // Resolve the real lazy dialog before controlling time for polling tests.
+    await import("../../components/VersionDetails");
     vi.useFakeTimers();
     visibility = "visible";
     Object.defineProperty(document, "visibilityState", {

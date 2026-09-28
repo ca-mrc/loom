@@ -1,3 +1,6 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
+
 import AxeBuilder from "@axe-core/playwright";
 
 import type { BrowserRole } from "./fixtures/api";
@@ -27,6 +30,13 @@ const routes: Record<BrowserRole, string[]> = {
     "/task-sets/task-set-1",
     "/providers",
     "/task-sets",
+    "/task-sets/new",
+    "/providers/new",
+    "/tasks",
+    "/benchmarks",
+    "/usage",
+    "/trials/compare",
+    "/missing-route",
     "/settings",
   ],
   admin: ["/admin/access", "/rate-cards"],
@@ -39,7 +49,14 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
       browserHarness,
       page,
       failureSink,
-    }) => {
+    }, testInfo) => {
+      const scripts = new Set<string>();
+      page.on("request", request => {
+        const url = new URL(request.url());
+        if (url.pathname.startsWith(`${browserHarness.routePrefix}/assets/`) && url.pathname.endsWith(".js")) {
+          scripts.add(url.pathname.slice(browserHarness.routePrefix.length + 1));
+        }
+      });
       if (role === "logged-out") {
         failureSink.expectDiagnostic({
           kind: "console",
@@ -91,6 +108,8 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
         locator: "main, [data-testid='public-onboarding-shell']",
       });
 
+      await expect(page.getByText("Loading this Loom page…", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Loom could not display this section" })).toHaveCount(0);
       await expect(page).toHaveTitle(/.+ · Loom$/);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
       await page.keyboard.press("Tab");
@@ -114,10 +133,23 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
       );
       expect(serious, JSON.stringify(serious, null, 2)).toEqual([]);
 
+      const files = [...scripts].sort().map(file => {
+        const buffer = readFileSync(`dist/${file}`);
+        return { file, bytes: buffer.length, gzipBytes: gzipSync(buffer).length };
+      });
+      const evidencePath = testInfo.outputPath("cold-route-scripts.json");
+      writeFileSync(evidencePath, JSON.stringify({
+        role, path, prefix: browserHarness.routePrefix, files,
+        bytes: files.reduce((total, file) => total + file.bytes, 0),
+        gzipBytes: files.reduce((total, file) => total + file.gzipBytes, 0),
+      }, null, 2));
+      await testInfo.attach("cold-route-scripts", { path: evidencePath, contentType: "application/json" });
       await page.reload();
       await expect(page.locator("#root")).toHaveAttribute("data-loom-mounted", "true");
       await expect(page.locator("#root")).toHaveAttribute("data-loom-auth-settled", "true");
       await expect(page.locator("#root")).not.toBeEmpty();
+      await expect(page.getByText("Loading this Loom page…", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("heading", { name: "Loom could not display this section" })).toHaveCount(0);
     });
   }
 }

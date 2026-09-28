@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && node scripts/verify-production-build.mjs",
+    "build": "vite build && node scripts/verify-production-build.mjs && node scripts/check-bundle-budget.mjs",
     "build:browser-test": "node scripts/build-browser-test.mjs",
     "preview": "vite preview",
     "lint": "eslint . --ext ts,tsx --max-warnings=0",
@@ -20,7 +20,8 @@
     "test:e2e:desktop": "playwright test --project=chromium-desktop",
     "test:route-browser-unit": "vitest run scripts/frontend-route-browser-smoke.test.mjs",
     "test:admin-browser-unit": "vitest run scripts/admin-browser-smoke.test.mjs",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bundle:baseline": "node scripts/check-bundle-budget.mjs --write-baseline"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.51.0",

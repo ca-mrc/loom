@@ -59,17 +59,17 @@ export function RouteRecoveryBoundary({
     <BrowserErrorBoundary
       resetKey={location.key}
       pathname={window.location.pathname}
-      renderFallback={({ referenceId, retry }) => (
+      renderFallback={({ referenceId, retry, reloadRequired }) => (
         <RecoveryPanel
           scope="route"
           title="Loom could not display this section"
           message={
-            retryPolicy === "transient"
+            retryPolicy === "transient" && !reloadRequired
               ? "This page encountered an unexpected browser error. Retry it, reload Loom, or return to a safe starting point."
               : "This page could not be loaded. Reload Loom or return to a safe starting point."
           }
           referenceId={referenceId}
-          onRetry={retryPolicy === "transient" ? retry : undefined}
+          onRetry={retryPolicy === "transient" && !reloadRequired ? retry : undefined}
           onReload={onReload}
           homeHref={frontendHomePath()}
         />

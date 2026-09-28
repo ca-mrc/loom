@@ -97,3 +97,123 @@ candidate.
 
 See [frontend domain boundaries](frontend-domain-boundaries.md) for code generation,
 ownership, aggregate catalog discovery and the local/manual acceptance boundary.
+
+## JavaScript loading and bundle budgets (#212)
+
+`App.tsx` lazy-loads routed pages. The managed-login route stays outside Layout
+so consuming its proof is not remounted by authentication changes; the
+entrypoint still scrubs the proof before any asynchronous work. Contextual help
+and version details load on opening. The existing ten-minute served-build check
+remains active while details are closed; the backend version request is deferred
+until details open. Startup imports session/core API code directly instead of
+the composed domain API, with session mutation code loaded on user action.
+
+`npm run build` runs the marker verifier and `check-bundle-budget.mjs`. The
+checker reads Vite's production manifest and recursively follows static imports,
+deduplicating shared dependencies. It sums minified file bytes and each file's
+Node gzip bytes (default compression); source maps are excluded. Decimal kB
+means 1,000 bytes. It enforces:
+
+- entrypoint plus all static startup dependencies: 260 kB / 85 kB gzip;
+- each dynamic entry plus its static dependencies not already in startup:
+  300 kB / 90 kB gzip (shared dependencies count on a cold route visit);
+- every emitted JS file, even one outside the manifest: no file above 500 kB;
+- at most 10% growth for either metric against `web/bundle-baseline.json`.
+
+The startup number is the common application shell, not the sum of all requests
+needed to render a particular first page: a cold Home visit also downloads its
+lazy dependency closure. `dist/bundle-report.json` records both categories with
+exact asset lists, plus `coldEntries` (deduplicated shell + dynamic entry static
+closure). These are module-graph measurements, not a claim that deferred children
+mounted by a page's default view cost zero. The route browser suite additionally
+attaches `cold-route-scripts.json` with actual requested JS and compressed sizes
+before reload. CI retains the production report before the browser-test build
+replaces `dist`.
+
+The original #212 startup target was 250/80 kB. The owner approved prioritizing
+useful whole-frontend optimization over mechanically fitting that target. The
+260/85 shell ceiling leaves room for the expanded lazy-import map and release
+metadata; it does not redefine a complete cold page as just the shell. The
+500 kB emitted-file limit and the 10% regression check remain unchanged.
+
+Baseline keys use source paths instead of hashed asset names. Missing entries
+fail. After reviewing the composition and user impact of an intentional change,
+run a production Vite build followed by `npm run bundle:baseline`, then commit
+and review that diff with the change. This explicit update can approve relative
+growth but cannot waive any hard cap. Normal builds never rewrite the baseline.
+No Vite warning threshold is raised. Lazy chunk URLs use compact content hashes
+to reduce the startup preload map; source identities remain in the manifest.
+Vite's default modulepreload behavior and polyfill are preserved.
+
+`web/e2e/lazy-routes.test.ts` resolves actual filenames from the build manifest,
+retains request evidence proving that Home does not fetch unrelated page
+modules, and exercises delayed and rejected real module imports. It shares the
+existing prefix server and fail-closed guards, with no production fault hook.
+Run it and the route/recovery suites under both `/dev` and `/prod`. These local
+checks do not establish hosted AMD64 fixed-candidate acceptance.
+
+### Whole-frontend audit
+
+The implementation audits all routed pages, shared widgets, polling, lists and
+optional workflows. Splitting follows interaction boundaries rather than adding
+a Suspense boundary to every small component:
+
+| Area | Loading/rendering decision |
+| --- | --- |
+| All routed pages, authentication/onboarding, Home, guides, Settings | Load the destination page independently; preserve managed-proof scrubbing and session serialization. |
+| Task Set submission | Import YAML parsing on Review submission; preserve revision checks, syntax validation and the separate confirm-upload action. |
+| New batch | Load advanced fields on first expansion and retain them afterward so edits and validation focus survive collapse; load export UI on export. |
+| Monitor | Load the selected batches/trials view; mount resource diagnostics only while expanded. Keep summary polling and URL filters outside these boundaries. |
+| Admin access | Load tokens, teams, legacy requests and audit tabs independently; preserve existing per-tab query enablement. |
+| Provider detail | Overview does not download Models, editable settings or credential dialogs; each loads when used. |
+| Batch/trial diagnostics | Load the JSON tree and its CSS when raw details are opened. |
+| Pipeline run and artifact detail | Keep the small stage drawer with its lazy Pipeline route so opening it does not add a module-loading boundary before its requests. Load eligible live preview and the specialized rollout viewer only when required. Generic artifacts use the small generic renderer. |
+| Library, Tasks, Benchmarks, Pipeline lists | Preserve existing server pagination, bounded pages and the large-stage-list virtualizer. |
+| Usage, rates and remaining small pages | Keep existing lightweight native/SVG rendering; no chart framework or speculative memoization added. |
+
+Existing visibility-aware polling, terminal-state stopping/backoff, bounded
+artifact JSON reads, and explicit refresh to protect unsaved input remain in
+place. Collapsing Monitor capacity diagnostics additionally unmounts nested
+placement queries. No new dependency, manual framework chunk, warning-threshold
+increase, prefetch of unrelated routes, or production deployment is required.
+
+Browser coverage includes module request isolation, real delayed/rejected module
+imports, collapsed panel expansion, retained advanced-field values, deferred
+manifest validation, provider model tabs and admin tab isolation. Existing
+form submission, auth, navigation, error recovery and accessibility suites remain
+part of verification. Size reduction is measured; server latency and real-user
+LCP/INP improvement require separately collected deployed evidence.
+
+On the September 28 local production build, the original eager entry was
+855.56 kB / 234.80 kB gzip. The final common shell is 247.96 / 79.89 kB;
+the Home cold module closure is 263.83 / 85.98 kB. The largest emitted JS is
+132.68 kB. Browser-test instrumentation adds a small amount: a cold user Home
+visit requested 264.49 / 86.22 kB, while New batch requested 348.12 / 112.23 kB.
+These complete-route figures are intentionally reported separately from the
+shell ceiling. Sizes are build/platform snapshots, not LCP or INP claims.
+
+Compared with route splitting alone, optional-content deferral reduces these
+additional route static closures (minified decimal kB):
+
+| Page | Route split only | With optional content deferred |
+| --- | ---: | ---: |
+| Task Set submission | 126.02 | 28.10 |
+| New batch | 118.71 | 99.47 |
+| Monitor | 67.35 | 43.27 |
+| Admin access | 82.03 | 66.51 |
+| Provider detail | 70.13 | 39.37 |
+| Pipeline run | 65.73 | 61.16 |
+| Pipeline artifact | 34.83 | 25.94 |
+
+The Monitor default view and selected admin tab can add their own lazy modules;
+these static-closure numbers should not be substituted for browser request
+totals or summed without deduplication.
+
+The web image uses the same `npm ci` lockfile graph as local/CI builds. Linux
+native bindings for both supported architectures are pinned in that lockfile
+and checked during the image build. Do not add a second unlocked `npm install`
+to repair optional bindings: that silently upgraded Vite 8.0.16 to 8.3.1 and
+71 dependencies, changing chunk composition and invalidating the measured
+baseline. Fix missing binding declarations/lockfile entries instead. Browser
+handoff tests wait for the destination viewer's content, not just its route
+header, because those now load at different times.

@@ -4,6 +4,7 @@ import React from "react";
 import { Link, MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { lazyRoute } from "../../lib/lazyRoute";
 import { RouteRecoveryBoundary } from "../../components/RouteRecoveryBoundary";
 import {
   BROWSER_ERROR_REDACTION,
@@ -17,6 +18,19 @@ describe("RouteRecoveryBoundary", () => {
     window.history.replaceState(null, "", "/");
     setBrowserFailureReporter(null);
     vi.restoreAllMocks();
+  });
+
+  it("automatically requires reload for a rejected route module without retaining raw errors", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const load = vi.fn().mockRejectedValue(new Error("secret module URL"));
+    const LazyPage = lazyRoute(load);
+    render(<MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <RouteRecoveryBoundary><LazyPage /></RouteRecoveryBoundary>
+    </MemoryRouter>);
+    expect(await screen.findByRole("alert")).not.toHaveTextContent("secret module URL");
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload Loom" })).toBeVisible();
+    expect(load).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the shell usable and resets failure state on sibling navigation", async () => {

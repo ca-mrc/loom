@@ -12,17 +12,15 @@ import {
 } from "react";
 
 import {
-  api,
   AuthSessionLoadError,
   setCsrfToken,
   setUnauthorizedHandler,
-  type AuthMe,
-} from "../api";
+} from "../api/core";
 import {
   createBrowserFailureId,
   reportBrowserFailure,
 } from "../lib/errorReporting";
-import { TeamSwitchRejectedError } from "../api/auth";
+import { loadAuthSession, TeamSwitchRejectedError, type AuthMe } from "../api/authSession";
 import {
   AuthContext,
   type AuthCtx,
@@ -82,7 +80,7 @@ function loadAuthoritativeSession(queryClient: QueryClient): Promise<AuthMe> {
   return coordinateSessionOperation(queryClient, async () => {
     setCsrfToken(null);
     try {
-      const next = await api.authMe();
+      const next = await loadAuthSession();
       // Keep the process-wide request layer aligned even if the Provider that
       // started this read unmounts before its React continuation runs.
       if (sessionAuthorityEpoch(queryClient) === authorityEpoch) {
@@ -297,7 +295,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
   }, [refreshMe]);
 
   const loginStart = useCallback(
-    (email: string) => api.loginStart(email),
+    async (email: string) => (await import("../api/authActions")).sessionActions.loginStart(email),
     [],
   );
 
@@ -339,28 +337,28 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
 
   const loginComplete = useCallback(
     async (token: string): Promise<void> => {
-      await runSessionMutation(() => api.loginComplete(token));
+      await runSessionMutation(async () => (await import("../api/authActions")).sessionActions.loginComplete(token));
     },
     [runSessionMutation],
   );
 
   const loginPassword = useCallback(
     async (username: string, password: string): Promise<void> => {
-      await runSessionMutation(() => api.loginPassword(username, password));
+      await runSessionMutation(async () => (await import("../api/authActions")).sessionActions.loginPassword(username, password));
     },
     [runSessionMutation],
   );
 
   const acceptInvite = useCallback(
     async (code: string, email: string): Promise<AuthMe> => {
-      return runSessionMutation(() => api.acceptInvite({ code, email }));
+      return runSessionMutation(async () => (await import("../api/authActions")).sessionActions.acceptInvite({ code, email }));
     },
     [runSessionMutation],
   );
 
   const switchTeam = useCallback(
     async (teamId: string): Promise<void> => {
-      await runSessionMutation(() => api.switchTeam(teamId));
+      await runSessionMutation(async () => (await import("../api/authActions")).sessionActions.switchTeam(teamId));
     },
     [runSessionMutation],
   );
@@ -371,7 +369,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     generationRef.current = generation;
     inFlightRef.current = null;
     try {
-      await clearAuthoritativeSession(queryClient, () => api.logout());
+      await clearAuthoritativeSession(queryClient, async () => (await import("../api/authActions")).sessionActions.logout());
     } finally {
       if (activeRef.current && generation === generationRef.current) {
         setSignedOut(false);

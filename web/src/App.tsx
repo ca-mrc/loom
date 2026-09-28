@@ -1,41 +1,51 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import Layout from "./components/Layout";
-import AdminAccess from "./pages/AdminAccess";
-import Benchmarks from "./pages/Benchmarks";
-import ProviderCreate from "./pages/ProviderCreate";
-import ProviderDetail from "./pages/ProviderDetail";
-import ProvidersList from "./pages/ProvidersList";
-import BatchDetail from "./pages/BatchDetail";
-import Home from "./pages/Home";
-import GettingStarted from "./pages/GettingStarted";
-import InviteAccept from "./pages/InviteAccept";
-import Monitor from "./pages/Monitor";
-import PipelineRunDetail from "./pages/PipelineRunDetail";
-import PipelineArtifactDetail from "./pages/PipelineArtifactDetail";
-import PipelineRuns from "./pages/PipelineRuns";
-import NewBatch from "./pages/NewBatch";
-import NotFound from "./pages/NotFound";
-import PasswordAction from "./pages/PasswordAction";
-import AuthLogin from "./pages/AuthLogin";
-import ManagedLogin from "./pages/ManagedLogin";
-import RateCardsAdmin from "./pages/RateCardsAdmin";
-import RunLibrary from "./pages/RunLibrary";
-import RunLibraryBatchDetail from "./pages/RunLibraryBatchDetail";
-import Settings from "./pages/Settings";
-import TaskSetDetail from "./pages/TaskSetDetail";
-import TaskSetsList from "./pages/TaskSetsList";
-import TaskSetSubmit from "./pages/TaskSetSubmit";
-import Tasks from "./pages/Tasks";
-import TrialCompare from "./pages/TrialCompare";
-import TrialDetail from "./pages/TrialDetail";
-import UsageDashboard from "./pages/UsageDashboard";
+import { lazyRoute } from "./lib/lazyRoute";
+
+import { RouteRecoveryBoundary } from "./components/RouteRecoveryBoundary";
+import { SkipLink } from "./components/SkipLink";
+
+const ManagedLogin = lazyRoute(() => import("./pages/ManagedLogin"));
+
+const AdminAccess = lazyRoute(() => import("./pages/AdminAccess"));
+const Benchmarks = lazyRoute(() => import("./pages/Benchmarks"));
+const ProviderCreate = lazyRoute(() => import("./pages/ProviderCreate"));
+const ProviderDetail = lazyRoute(() => import("./pages/ProviderDetail"));
+const ProvidersList = lazyRoute(() => import("./pages/ProvidersList"));
+const BatchDetail = lazyRoute(() => import("./pages/BatchDetail"));
+const Home = lazyRoute(() => import("./pages/Home"));
+const GettingStarted = lazyRoute(() => import("./pages/GettingStarted"));
+const InviteAccept = lazyRoute(() => import("./pages/InviteAccept"));
+const Monitor = lazyRoute(() => import("./pages/Monitor"));
+const PipelineRunDetail = lazyRoute(() => import("./pages/PipelineRunDetail"));
+const PipelineArtifactDetail = lazyRoute(() => import("./pages/PipelineArtifactDetail"));
+const PipelineRuns = lazyRoute(() => import("./pages/PipelineRuns"));
+const NewBatch = lazyRoute(() => import("./pages/NewBatch"));
+const NotFound = lazyRoute(() => import("./pages/NotFound"));
+const PasswordAction = lazyRoute(() => import("./pages/PasswordAction"));
+const AuthLogin = lazyRoute(() => import("./pages/AuthLogin"));
+const RateCardsAdmin = lazyRoute(() => import("./pages/RateCardsAdmin"));
+const RunLibrary = lazyRoute(() => import("./pages/RunLibrary"));
+const RunLibraryBatchDetail = lazyRoute(() => import("./pages/RunLibraryBatchDetail"));
+const Settings = lazyRoute(() => import("./pages/Settings"));
+const TaskSetDetail = lazyRoute(() => import("./pages/TaskSetDetail"));
+const TaskSetsList = lazyRoute(() => import("./pages/TaskSetsList"));
+const TaskSetSubmit = lazyRoute(() => import("./pages/TaskSetSubmit"));
+const Tasks = lazyRoute(() => import("./pages/Tasks"));
+const TrialCompare = lazyRoute(() => import("./pages/TrialCompare"));
+const TrialDetail = lazyRoute(() => import("./pages/TrialDetail"));
+const UsageDashboard = lazyRoute(() => import("./pages/UsageDashboard"));
 
 export default function App(): JSX.Element {
   return (
     <Routes>
       {/* Keep proof consumption mounted while auth state changes the app shell. */}
-      <Route path="/auth/managed" element={<ManagedLogin />} />
+      <Route path="/auth/managed" element={
+        <><SkipLink /><main id="main-content" tabIndex={-1}>
+          <RouteRecoveryBoundary><ManagedLogin /></RouteRecoveryBoundary>
+        </main></>
+      } />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         <Route path="getting-started" element={<GettingStarted />} />
