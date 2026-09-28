@@ -67,6 +67,18 @@ def test_raw_unqualified_grants_are_not_manager_authority(database_access):
                                   (data_id, uuid4(), uuid4(), 1, token_urlsafe(48)))
 
 
+@pytest.mark.parametrize("function", ["grant_access_at_schema", "migration_ready"])
+def test_schema_installer_never_overwrites_changed_routines(database_access, function):
+    admin, url, _, data_id = database_access
+    # Preserve the signature/security attributes but replace its behavior.
+    definition = admin.execute("SELECT pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace='loom_application_access'::regnamespace AND proname=%s", (function,)).fetchone()[0]
+    changed = definition.replace("BEGIN", "BEGIN RAISE EXCEPTION 'changed routine';", 1)
+    admin.execute(changed)
+    with pytest.raises(ApplicationDatabaseAccessError, match="installation_drift"):
+        install_application_database_access(admin, data_environment_id=data_id, manager_role=make_url(url).username)
+    assert admin.execute("SELECT pg_get_functiondef(oid) FROM pg_proc WHERE pronamespace='loom_application_access'::regnamespace AND proname=%s", (function,)).fetchone()[0] == changed
+
+
 def test_schema_qualified_grant_replays_only_at_the_declared_revision(database_access):
     admin, url, access, _ = database_access
     app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
