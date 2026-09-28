@@ -235,3 +235,73 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
     with guest(docker=True, plugin_layout=layout) as (client, _, _):
         assert "v0.36.1" in execute(client, "docker buildx version")
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
+
+
+def test_container_guest_preserves_distinct_files_on_separate_mounts() -> None:
+    """9p must remap equal inode numbers from different outer filesystems."""
+    import uuid
+
+    configured = os.environ.get("LOOM_GUEST_PAYLOAD")
+    if configured is None:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("CI must build LOOM_GUEST_PAYLOAD before running guest qualification")
+        pytest.skip("requires built LOOM_GUEST_PAYLOAD")
+    payload = Path(configured).resolve()
+    name = "loom-guest-mounts-" + uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(prefix="loom-mounts-", dir="/tmp") as temporary:
+        directory = Path(temporary)
+        root = directory / "root"
+        for item in ("bin", "etc", "tmp", "proc", "sys", "dev", "var", "lib", "usr"):
+            (root / item).mkdir(parents=True)
+        shutil.copyfile(payload / "bin/busybox", root / "bin/busybox")
+        (root / "bin/busybox").chmod(0o755)
+        (root / "bin/sh").symlink_to("busybox")
+        (directory / "Dockerfile").write_text("FROM scratch\nCOPY root /\n")
+        subprocess.run(["docker", "build", "-q", "-t", name, str(directory)], check=True, capture_output=True)
+        rpc = directory / "rpc"
+        rpc.mkdir(mode=0o770)
+        rpc.chmod(0o2770)  # inherit the caller's group for the root-owned socket
+        command = [
+            "docker", "run", "--name", name, "--read-only", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE",
+            "--security-opt=no-new-privileges", "--cpus=1", "--memory=1g", "--pids-limit=128",
+            "--tmpfs", "/left", "--tmpfs", "/right", "--tmpfs", "/state:size=1g",
+            "--volume", f"{payload}:/payload:ro", "--volume", f"{rpc}:/rpc",
+            name, "/bin/busybox", "sh", "-ec",
+            "echo left > /left/value; echo right > /right/value; "
+            "exec /payload/bin/loom-guest-runtime --payload /payload --root / "
+            "--state /state/incarnation --socket /rpc/sandbox.sock --memory-mib 1024 "
+            "--storage-mib 160 --cpu-millis 1000 --exec-timeout-seconds 60",
+        ]
+        with (directory / "console.log").open("wb") as log:
+            process = subprocess.Popen(command, stdout=log, stderr=log)
+            try:
+                with httpx.Client(
+                    transport=httpx.HTTPTransport(uds=str(rpc / "sandbox.sock")), timeout=35
+                ) as client:
+                    deadline = time.monotonic() + 65
+                    while True:
+                        try:
+                            if client.get("http://sandbox/health").is_success:
+                                break
+                        except httpx.TransportError:
+                            pass
+                        assert process.poll() is None, (directory / "console.log").read_text()
+                        assert time.monotonic() < deadline, (directory / "console.log").read_text()
+                        time.sleep(0.05)
+                    outer = subprocess.run([
+                        "docker", "exec", name, "/bin/busybox", "stat", "-c", "%d:%i", "/left/value", "/right/value",
+                    ], check=True, capture_output=True, text=True).stdout.splitlines()
+                    left, right = [value.split(":") for value in outer]
+                    assert left[0] != right[0] and left[1] == right[1], outer
+                    response = client.post("http://sandbox/exec", json={
+                        "argv": ["/bin/busybox", "cat", "/left/value", "/right/value"], "timeout_sec": 10,
+                    })
+                    response.raise_for_status()
+                    result = response.json()
+                    assert result["return_code"] == 0, result
+                    assert base64.b64decode(result["stdout"] or "") == b"left\nright\n"
+            finally:
+                subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
+                process.wait(timeout=10)
+                subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+                subprocess.run(["docker", "image", "rm", name], capture_output=True, check=False)
