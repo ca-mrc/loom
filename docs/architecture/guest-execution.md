@@ -17,7 +17,9 @@ class serialization is unchanged. Trusted-host privilege, Docker sockets,
 mounts, devices, host networking and shared kernel changes remain forbidden.
 
 A deployment profile opts in with `guest_runtime = "qemu-tcg-v1"`, task identity
-support and at least 1024 MiB of runtime volume. Only tasks declaring a guest
+support and at least 1024 MiB of runtime volume. `guest_runtime_volume_mib` and
+`guest_max_artifact_bytes` override these budgets for guest tasks while leaving
+ordinary plan budgets unchanged. Only tasks declaring a guest
 capability select a guest class; ordinary tasks retain their original class.
 The compiler requires the Terminus controller with two private sandboxes and
 explicit root task/verifier identities. Unresolved prerequisites and external
@@ -39,10 +41,14 @@ needed to read the immutable task image. Its root filesystem and runtime payload
 are read-only. Only its own state and RPC socket volumes are mounted writable;
 controller credentials and private verifier inputs are not mounted there.
 
-A read-only 9p task-image filesystem forms an overlay lower layer. A private,
+A read-only 9p view of the outer sandbox filesystem forms an overlay lower layer. A private,
 bounded ext4 disk holds the writable overlay and Docker data root. The payload
-is another read-only export. Read caching requires both lower exports to remain
-immutable throughout the guest lifetime. The sandbox server runs as PID 1 of an
+is another read-only export. The task image and payload stay immutable throughout
+the guest lifetime. The outer sandbox's own changing launcher/socket mounts are
+also visible read-only beneath reserved runtime paths; reading these paths is
+unsupported and may return cached data. They contain no controller credentials,
+foreign sandbox state or private verifier inputs. QID remapping keeps inodes on
+different outer mounts distinct. The sandbox server runs as PID 1 of an
 inner guest PID namespace, so process cleanup excludes guest kernel threads.
 
 RPC streams use yamux over the named `loom.rpc` virtio-serial device. The outer
@@ -63,7 +69,8 @@ or hosted cleanup qualification.
 Minimum declared resources are 1000 CPU millicores, 512 MiB RAM and 160 MiB
 storage. These are boot minima, not recommended budgets for Docker, a debugger,
 or large image builds. QEMU reserves 256 MiB of the memory limit; 32 MiB of each
-sandbox storage allocation covers launcher metadata/initramfs. The remaining
+sandbox storage allocation covers launcher metadata/initramfs. The TCG translation
+cache is explicitly bounded to 64 MiB within the emulator reservation. The remaining
 storage bounds the guest disk, including Docker layers, containers and cache.
 The controller allocation and request also reserve the shared runtime volume,
 so placement cannot count its kernel/tool payload as free storage.

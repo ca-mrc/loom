@@ -49,7 +49,9 @@ func (c guestConfig) validate() error {
 
 func (c guestConfig) qemuArgs() []string {
 	return []string{
-		"-L", filepath.Join(c.Payload, "share/qemu"), "-accel", "tcg,thread=multi", "-machine", "q35", "-cpu", "max",
+		// QEMU's automatic translation cache can consume hundreds of MiB beyond
+		// guest RAM. Pin its bound inside the reserved emulator envelope.
+		"-L", filepath.Join(c.Payload, "share/qemu"), "-accel", "tcg,thread=multi,tb-size=64", "-machine", "q35", "-cpu", "max",
 		"-smp", strconv.Itoa((c.CPUMillis + 999) / 1000), "-m", strconv.Itoa(c.MemoryMiB - 256),
 		"-nographic", "-nodefaults", "-no-reboot", "-serial", "stdio", "-monitor", "none",
 		"-bios", filepath.Join(c.Payload, "share/seabios/bios-256k.bin"), "-kernel", filepath.Join(c.Payload, "kernel"),

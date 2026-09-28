@@ -23,7 +23,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
 @contextlib.contextmanager
-def guest(*, docker: bool = False, plugin_layout: str | None = None) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
+def guest(*, docker: bool = False, plugin_layout: str | None = None,
+          wait_ready: bool = True) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
     configured = os.environ.get("LOOM_GUEST_PAYLOAD")
     if configured is None:
         if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -66,7 +67,7 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None) -> Iterator
             client = httpx.Client(transport=httpx.HTTPTransport(uds=str(socket)), timeout=40)
             try:
                 deadline = time.monotonic() + 65
-                while True:
+                while wait_ready:
                     try:
                         response = client.get("http://sandbox/health")
                         if response.status_code == 200:
@@ -139,6 +140,25 @@ def test_parallel_guests_have_independent_kernel_and_artifacts() -> None:
         assert execute(right, "cat /proc/sys/kernel/core_pattern /tmp/owner") == "right\nright\n"
 
 
+def test_cancellation_during_boot_retires_state_and_prevents_restart() -> None:
+    with guest(wait_ready=False) as (_, process, directory):
+        deadline = time.monotonic() + 10
+        while not (directory / "state/channel.sock").exists():
+            assert process.poll() is None, (directory / "console.log").read_text()
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert not (directory / "sandbox.sock").exists(), "probe must cancel before readiness"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=5) != 0
+        assert not (directory / "state/state.ext4").exists()
+        assert not (directory / "state/channel.sock").exists()
+        assert (directory / "state/retired").exists()
+        restarted = subprocess.run(process.args, capture_output=True, timeout=5)
+        assert restarted.returncode != 0
+        assert b"state already exists" in restarted.stderr
+        assert not (directory / "state/state.ext4").exists()
+
+
 def test_failed_command_deadline_and_guest_exit_remain_distinct() -> None:
     with guest() as (client, process, directory):
         for command, timeout, code in (("exit 7", 10, 7), ("sleep 30", 0.1, 124)):
@@ -157,6 +177,7 @@ def test_failed_command_deadline_and_guest_exit_remain_distinct() -> None:
         assert (directory / "state/retired").exists()
 
 
+@pytest.mark.timeout(180)
 def test_guest_docker_build_cache_invalidation_and_artifact() -> None:
     with guest(docker=True) as (client, _, _):
         execute(client, "set -eu; /bin/busybox mkdir -p /tmp/context; "
@@ -237,8 +258,9 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
         assert execute(client, "echo $DOCKER_CONFIG").strip() == "/loom/docker-client"
 
 
-def test_container_guest_preserves_distinct_files_on_separate_mounts() -> None:
-    """9p must remap equal inode numbers from different outer filesystems."""
+@contextlib.contextmanager
+def container_guest(*, memory_mib: int = 1024) -> Iterator[tuple[httpx.Client, str]]:
+    """Launch with the rendered read-only root and limited outer capabilities."""
     import uuid
 
     configured = os.environ.get("LOOM_GUEST_PAYLOAD")
@@ -263,13 +285,13 @@ def test_container_guest_preserves_distinct_files_on_separate_mounts() -> None:
         rpc.chmod(0o2770)  # inherit the caller's group for the root-owned socket
         command = [
             "docker", "run", "--name", name, "--read-only", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE",
-            "--security-opt=no-new-privileges", "--cpus=1", "--memory=1g", "--pids-limit=128",
+            "--security-opt=no-new-privileges", "--cpus=1", f"--memory={memory_mib}m", "--pids-limit=128",
             "--tmpfs", "/left", "--tmpfs", "/right", "--tmpfs", "/state:size=1g",
             "--volume", f"{payload}:/payload:ro", "--volume", f"{rpc}:/rpc",
             name, "/bin/busybox", "sh", "-ec",
             "echo left > /left/value; echo right > /right/value; "
             "exec /payload/bin/loom-guest-runtime --payload /payload --root / "
-            "--state /state/incarnation --socket /rpc/sandbox.sock --memory-mib 1024 "
+            f"--state /state/incarnation --socket /rpc/sandbox.sock --memory-mib {memory_mib} "
             "--storage-mib 160 --cpu-millis 1000 --exec-timeout-seconds 60",
         ]
         with (directory / "console.log").open("wb") as log:
@@ -288,20 +310,46 @@ def test_container_guest_preserves_distinct_files_on_separate_mounts() -> None:
                         assert process.poll() is None, (directory / "console.log").read_text()
                         assert time.monotonic() < deadline, (directory / "console.log").read_text()
                         time.sleep(0.05)
-                    outer = subprocess.run([
-                        "docker", "exec", name, "/bin/busybox", "stat", "-c", "%d:%i", "/left/value", "/right/value",
-                    ], check=True, capture_output=True, text=True).stdout.splitlines()
-                    left, right = [value.split(":") for value in outer]
-                    assert left[0] != right[0] and left[1] == right[1], outer
-                    response = client.post("http://sandbox/exec", json={
-                        "argv": ["/bin/busybox", "cat", "/left/value", "/right/value"], "timeout_sec": 10,
-                    })
-                    response.raise_for_status()
-                    result = response.json()
-                    assert result["return_code"] == 0, result
-                    assert base64.b64decode(result["stdout"] or "") == b"left\nright\n"
+                    yield client, name
             finally:
                 subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
                 process.wait(timeout=10)
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
                 subprocess.run(["docker", "image", "rm", name], capture_output=True, check=False)
+
+
+def test_container_guest_preserves_distinct_files_on_separate_mounts() -> None:
+    """9p must remap equal inode numbers from different outer filesystems."""
+    with container_guest() as (client, name):
+        outer = subprocess.run([
+            "docker", "exec", name, "/bin/busybox", "stat", "-c", "%d:%i", "/left/value", "/right/value",
+        ], check=True, capture_output=True, text=True).stdout.splitlines()
+        left, right = [value.split(":") for value in outer]
+        assert left[0] != right[0] and left[1] == right[1], outer
+        assert execute(client, "/bin/busybox cat /left/value /right/value") == "left\nright\n"
+
+
+@pytest.mark.parametrize("memory_mib,pressure_mib", [(512, 128), (1024, 600)])
+def test_container_guest_stays_within_memory_limit_under_ram_and_disk_pressure(
+    memory_mib: int, pressure_mib: int,
+) -> None:
+    with container_guest(memory_mib=memory_mib) as (client, name):
+        # Leave room for the guest kernel. Concurrent disk traffic must not
+        # consume the outer envelope, even at the admitted boot minimum.
+        response = client.post("http://sandbox/exec", json={
+            "argv": ["/bin/sh", "-ec",
+                     f"/bin/busybox mkdir /pressure; /bin/busybox mount -t tmpfs -o size={pressure_mib}m tmpfs /pressure; "
+                     f"/bin/busybox dd if=/dev/zero of=/pressure/data bs=1M count={pressure_mib}; "
+                     "/bin/busybox dd if=/dev/zero of=/tmp/data bs=1M count=64; "
+                     "/bin/busybox sha256sum /pressure/data; /bin/busybox sync"],
+            "timeout_sec": 60,
+        }, timeout=65)
+        response.raise_for_status()
+        result = response.json()
+        assert result["return_code"] == 0, result
+        events = subprocess.run([
+            "docker", "exec", name, "/bin/busybox", "cat", "/sys/fs/cgroup/memory.events",
+        ], check=True, capture_output=True, text=True).stdout
+        counts = dict(line.split() for line in events.splitlines())
+        assert counts["oom"] == counts["oom_kill"] == "0", events
+        assert execute(client, "echo alive") == "alive\n"
