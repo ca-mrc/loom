@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import base64
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
 import psycopg
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from sqlalchemy.engine import make_url
 
 from loom.nebius_application_render import render_application
@@ -150,6 +155,27 @@ async def test_changed_shared_material_is_not_silently_delivered_on_replay(
     with pytest.raises(ProviderBlockedError):
         await provider.prepare(lease)
     assert len(cloud.mutations) == 4
+
+
+async def test_duplicate_ca_extensions_are_bounded_before_any_access_grant(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, _, _, _, _, lease, cloud, config = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "malformed-test-ca")])
+    now = datetime.now(UTC)
+    builder = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(1).not_valid_before(now - timedelta(minutes=1)).not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True))
+    # Only the malformed fixture bypasses the builder's duplicate-extension guard.
+    builder._extensions.append(builder._extensions[0])
+    pem = builder.sign(key, hashes.SHA256()).public_bytes(serialization.Encoding.PEM).decode()
+    provider.shared = replace(config, ca_pem=pem)
+    with pytest.raises(ProviderBlockedError, match="application_shared_credentials_invalid"):
+        await provider.prepare(lease)
+    assert cloud.mutations == []
+    assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone()[0] == 0
 
 
 async def test_retirement_does_not_need_a_deliverable_ca_or_keyring(
