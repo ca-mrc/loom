@@ -369,6 +369,7 @@ async def submit_trial(
                 trial_config,
                 source_provenance=dict(task_row.source_provenance or {}),
                 allow_task_image_preparation=True,
+                supported_capabilities=profile.supported_guest_capabilities,
             )
         )
     required_worker_pool = _resolve_required_worker_pool_for_backend(

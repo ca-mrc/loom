@@ -250,6 +250,8 @@ async def admit_execution_backend(
                                 parsed_trial,
                                 source_provenance=provenance,
                                 allow_task_image_preparation=True,
+                                supported_capabilities=(profile.supported_guest_capabilities
+                                                        if profile is not None else frozenset()),
                             )
                         )
                     )

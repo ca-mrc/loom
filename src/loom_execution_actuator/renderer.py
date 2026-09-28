@@ -106,6 +106,7 @@ def _probe(value: ProbeV1) -> dict[str, Any]:
 
 def _sidecar(
     value: SidecarContainerV1, *, request: ContainerResourcesV1 | None = None,
+    max_artifact_bytes: int | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "name": value.role_name,
@@ -159,6 +160,27 @@ def _sidecar(
                 for filename in ("hosts", "resolv.conf")
             ],
         ]
+        if value.guest_execution is not None:
+            if max_artifact_bytes is None:
+                raise ActuatorContractError("guest execution requires a frozen transfer limit")
+            result["securityContext"]["readOnlyRootFilesystem"] = True
+            result["securityContext"]["capabilities"]["add"] = ["DAC_OVERRIDE"]
+            result["volumeMounts"].extend([
+                {"name": "runtime", "mountPath": "/loom/runtime", "readOnly": True},
+                {"name": f"{value.role_name}-guest-state", "mountPath": "/loom/guest-state"},
+            ])
+            result["command"] = [
+                "/loom/runtime/guest/bin/loom-guest-runtime", "--payload", "/loom/runtime/guest",
+                "--root", "/", "--state", "/loom/guest-state/incarnation",
+                "--socket", f"/loom/sandboxes/{value.role_name}/sandbox.sock",
+                "--memory-mib", str(value.resources.memory_mib),
+                "--storage-mib", str(value.resources.ephemeral_storage_mib - 32),
+                "--cpu-millis", str(value.resources.cpu_millis),
+                "--max-transfer-bytes", str(max_artifact_bytes),
+                "--exec-timeout-seconds", value.argv[-1],
+            ]
+            if "nested_docker" in value.guest_execution.capabilities:
+                result["command"].append("--nested-docker")
     return result
 
 
@@ -277,7 +299,8 @@ def render_execution_job(
             "securityContext": _security_context(),
             "volumeMounts": [runtime_mount],
         },
-        *[_sidecar(sidecar, request=plan.container_request(sidecar.role_name))
+        *[_sidecar(sidecar, request=plan.container_request(sidecar.role_name),
+                   max_artifact_bytes=plan.max_artifact_bytes)
           for sidecar in plan.sidecars],
     ]
     output_mib = max(
@@ -376,6 +399,11 @@ def render_execution_job(
     }
     pod = job["spec"]["template"]["spec"]
     for sidecar in plan.sidecars:
+        if sidecar.guest_execution is not None:
+            pod["volumes"].append({
+                "name": f"{sidecar.role_name}-guest-state",
+                "emptyDir": {"sizeLimit": f"{sidecar.resources.ephemeral_storage_mib}Mi"},
+            })
         if sidecar.private_sandbox:
             name = f"{sidecar.role_name}-socket"
             pod["volumes"].append({"name": name, "emptyDir": {"sizeLimit": "1Mi"}})

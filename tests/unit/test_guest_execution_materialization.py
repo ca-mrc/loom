@@ -135,6 +135,19 @@ def test_guest_requires_terminus_and_external_requirements_remain_rejected():
         _compile(task, trial, profile)
 
 
+def test_guest_rejects_unqualified_fixture_networking():
+    from tests.unit.test_task_fixtures import _fixture
+
+    task, trial, _ = _guest_inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"].update(docker_image=None, dockerfile="environment/Dockerfile",
+                              docker_build_context="environment", sidecars=[_fixture()])
+    reasons = automatic_service_execution_rejections(TaskConfig.model_validate(raw), trial,
+        source_provenance=_provenance(), allow_task_image_preparation=True,
+        supported_capabilities=GUEST_EXECUTION_CAPABILITIES)
+    assert "guest_sidecars_unsupported" in reasons
+
+
 @pytest.mark.parametrize("explicit_controller", [False, True])
 @pytest.mark.parametrize("request_override", [False, True])
 def test_guest_payload_storage_is_reserved_in_controller_and_node_share(explicit_controller, request_override):
@@ -167,7 +180,7 @@ def test_guest_payload_storage_is_reserved_in_controller_and_node_share(explicit
 @pytest.mark.parametrize("damage", [
     "ordinary_class", "missing_guest", "one_guest", "empty_caps", "external_cap",
     "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_resources",
-    "duplicate_caps", "unsorted_caps", "long_timeout", "unreserved_payload",
+    "duplicate_caps", "unsorted_caps", "long_timeout", "unreserved_payload", "noncanonical_timeout",
 ])
 def test_guest_runtime_shape_rejects_partial_or_unsafe_launches(damage):
     task, trial, profile = _guest_inputs()
@@ -191,8 +204,8 @@ def test_guest_runtime_shape_rejects_partial_or_unsafe_launches(damage):
     elif damage in {"duplicate_caps", "unsorted_caps"}:
         raw["sidecars"][0]["guest_execution"]["capabilities"] = [
             "nested_docker", "nested_docker" if damage == "duplicate_caps" else "isolated_kernel_settings"]
-    elif damage == "long_timeout":
-        raw["sidecars"][0]["argv"][-1] = "86401"
+    elif damage in {"long_timeout", "noncanonical_timeout"}:
+        raw["sidecars"][0]["argv"][-1] = "86401" if damage == "long_timeout" else "0900"
     elif damage == "unreserved_payload":
         raw["controller_resources"] = None
     else:
