@@ -104,3 +104,12 @@ class ApplicationStopEvidence(_Proof):
     workloads: ApplicationWorkloadRetirement
     database: ApplicationDatabaseRetirement
     objects: ApplicationCloudRetirement
+
+
+class ApplicationStartupPreparation(_Proof):
+    workloads: ApplicationWorkloadRetirement
+    database: ApplicationDatabaseRetirement
+    objects: ApplicationCloudRetirement
+    prepared: ApplicationPreparationReadiness
+    access: ApplicationAccessReadiness
+    network: tuple[ApplicationSharedPolicyObservation, ...]

@@ -631,6 +631,15 @@ frozen development binding, rejects absence/drift/termination, and returns only
 name/UID/resourceVersion observations under the current lease. This read authority
 is not part of bootstrap and is not yet activated by a live installer.
 
+`ApplicationLifecycleCoordinator.prepare` composes these concrete adapters: resume
+current preparation, stop prior personal processes, retire prior SQL/object access,
+prepare static resources, verify shared ingress, enroll/deliver and qualify current
+credentials, then refresh live resource/network/process evidence. Missing
+prerequisites keep admission closed. It returns internal typed preparation evidence
+without starting Deployments/routes, completing the operation, or releasing its
+reservation. Admission reopening, workload readiness and an installed active
+worker remain separate unfinished lifecycle steps.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
