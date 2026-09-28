@@ -380,7 +380,7 @@ close Pods, qualify application schema compatibility, or release capacity.
 The internal application registry persists a generation's credential bundles in
 the existing management `LocalEncryptedSecretStore` before a trusted lifecycle
 caller prepares or dispatches external grants or Kubernetes Secret delivery.
-Migration0163 atomically links each operation to its unique encrypted record;
+Migration0164 atomically links each operation to its unique encrypted record;
 foreign keys retain both the operation and ciphertext, and downgrade refuses to
 erase material history. Provider-secret collection recognizes these references,
 preserving any referenced retired key without aborting unrelated collection.

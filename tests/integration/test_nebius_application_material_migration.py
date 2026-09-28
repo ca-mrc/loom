@@ -22,8 +22,8 @@ def test_empty_material_downgrade_preserves_operations_and_orm_shape(application
     with application_database.begin() as connection:
         operation(connection)
         before = connection.execute(select(NebiusApplicationOperation)).mappings().all()
-    migrate(application_database, "downgrade", "0162")
-    migrate(application_database, "upgrade", "0163")
+    migrate(application_database, "downgrade", "0163")
+    migrate(application_database, "upgrade", "0164")
     with application_database.connect() as connection:
         assert connection.execute(select(NebiusApplicationOperation)).mappings().all() == before
     assert {col["name"] for col in inspect(application_database).get_columns("nebius_application_material")} == set(
@@ -60,7 +60,7 @@ def test_material_history_cannot_be_downgraded_or_orphaned(application_database)
                 operation_id=second["operation_id"], secret_ref=ref))
         assert duplicate.value.orig.sqlstate == "23505"  # a ciphertext reference cannot be adopted twice
     with pytest.raises(DBAPIError, match="cannot remove application material history"):
-        migrate(application_database, "downgrade", "0162")
+        migrate(application_database, "downgrade", "0163")
     with application_database.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0163"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0164"
         assert connection.execute(select(NebiusApplicationMaterial)).mappings().all() == before

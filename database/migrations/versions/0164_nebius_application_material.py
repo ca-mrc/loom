@@ -1,12 +1,12 @@
 """Application generation material in the existing encrypted SecretStore.
 
-Revision ID: 0163
-Revises: 0162
+Revision ID: 0164
+Revises: 0163
 """
 from alembic import op
 
-revision = "0163"
-down_revision = "0162"
+revision = "0164"
+down_revision = "0163"
 branch_labels = None
 depends_on = None
 
