@@ -219,3 +219,38 @@ async def test_peer_fence_creation_during_read_is_not_a_permanent_identity_confl
             await provider.close_admission(lease)
     await provider.close_admission(lease)
     assert len(api.mutations) == 2
+
+
+async def test_peer_prepares_patch_after_initial_history_scan_remains_pending(runtime_context, monkeypatch):
+    provider = await close_ready(runtime_context)
+    registry, kubernetes, _, api, lease, alice = runtime_context
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    read, dispatch = provider._read, registry.dispatch_effect
+    first = True
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    async def peer_prepares_before_read(active, namespace):
+        nonlocal first
+        if first:
+            first = False
+            monkeypatch.setattr(registry, "dispatch_effect", interrupted)
+            with pytest.raises(asyncio.CancelledError):
+                await kubernetes.patch_spec(active, "peer-prepared-patch", await provider._fence(active),
+                    uid=api.objects[FENCE_PATH]["metadata"]["uid"], resource_version="1")
+            monkeypatch.setattr(registry, "dispatch_effect", dispatch)
+            api.objects[FENCE_PATH]["metadata"]["resourceVersion"] = "99"
+        return await read(active, namespace)
+
+    monkeypatch.setattr(provider, "_read", peer_prepares_before_read)
+    with pytest.raises(ProviderWaitingError):
+        await provider.close_admission(current)
+    assert len(api.mutations) == 2
+    api.reject_next = 422
+    with pytest.raises(ProviderWaitingError):
+        await provider.close_admission(current)
+    await provider.close_admission(current)
+    assert len(api.mutations) == 4
