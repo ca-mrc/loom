@@ -186,8 +186,7 @@ function defaultApiResponse(
     if (role === "logged-out") return jsonResponse({ detail: "unauthorized" }, 401);
     return jsonResponse(auth(role));
   }
-  // #2009: VersionInfo (rendered in NavBar, so on every authenticated page)
-  // fetches this unauthenticated, role-independent endpoint on mount.
+  // Version details fetch this role-independent endpoint when opened.
   if (path === "/v1/version") {
     return jsonResponse({ buildRevision: null, buildTime: null });
   }

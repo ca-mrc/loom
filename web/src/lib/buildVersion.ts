@@ -30,34 +30,19 @@
  * revision-less lookup keeps the last valid served revision rather than
  * clearing a confirmed update, and never invents one.
  */
-import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { apiFetch } from "../api";
-import { queryKeys } from "../api/queryKeys";
+import { buildVersionKey } from "../api/buildVersionKey";
 import { fetchServedBuildInfo, getFrontendConfig } from "./frontendConfig";
 
-const STALE_TIME_MS = 60_000;
 export const SERVED_BUILD_CHECK_INTERVAL_MS = 10 * 60_000;
 export const SERVED_BUILD_FOCUS_THROTTLE_MS = 60_000;
-
-export interface BackendVersion {
-  buildRevision: string | null;
-  buildTime: string | null;
-}
 
 export interface ServedFrontendBuild {
   revision: string | null;
   sourceRef: string | null;
   buildTime: string | null;
-}
-
-async function fetchBackendVersion(): Promise<BackendVersion | null> {
-  try {
-    return await apiFetch<BackendVersion>("/api/v1/version");
-  } catch {
-    return null;
-  }
 }
 
 /** Throwing (rather than resolving `null`) makes react-query keep the last
@@ -82,7 +67,7 @@ export interface ServedFrontendBuildCheck {
 
 export function useServedFrontendBuild(): ServedFrontendBuildCheck {
   const query = useQuery<ServedFrontendBuild | null>({
-    queryKey: queryKeys["build-version"]("frontend-served"),
+    queryKey: buildVersionKey("frontend-served"),
     queryFn: fetchServedBuildForCheck,
     // Seed from startup's own already-fetched config instead of issuing a
     // second request for the same resource on mount. That startup fetch
@@ -155,16 +140,6 @@ export function useServedFrontendBuild(): ServedFrontendBuildCheck {
   return { data: query.data ?? null, checkNow };
 }
 
-export function useBackendVersion(): UseQueryResult<BackendVersion | null> {
-  return useQuery({
-    queryKey: queryKeys["build-version"]("backend"),
-    queryFn: fetchBackendVersion,
-    refetchOnWindowFocus: true,
-    staleTime: STALE_TIME_MS,
-    retry: false,
-  });
-}
-
 export interface FrontendUpdateStatus {
   /** True only when both the loaded and served revisions are known and
    * differ — a failed/unknown served fetch never claims an update. */
@@ -189,3 +164,5 @@ export function frontendUpdateStatus(
     servedRevision !== loadedRevision;
   return { hasNewerBuild, servedRevision };
 }
+
+export { useBackendVersion, type BackendVersion } from "./backendVersion";

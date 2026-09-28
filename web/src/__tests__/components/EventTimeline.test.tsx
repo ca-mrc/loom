@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -135,9 +135,8 @@ describe("EventTimeline", () => {
     );
     await user.click(screen.getByText("Raw event data"));
     // The raw JSON contains the model name.
-    const all = screen.getAllByText(/gpt-4/);
-    // One in summary, one in JSON viewer when expanded.
-    expect(all.length).toBeGreaterThanOrEqual(2);
+    // Wait for the on-demand JSON renderer, retaining both content checks.
+    await waitFor(() => expect(screen.getAllByText(/gpt-4/).length).toBeGreaterThanOrEqual(2));
   });
 
   it("keeps raw event payloads behind a row-level diagnostics disclosure", async () => {

@@ -7,8 +7,12 @@ import { StatusPill } from "../components/StatusPill";
 import { ProgressSummary } from "../components/TrialProgress";
 import { useAdaptivePolling } from "../hooks/useAdaptivePolling";
 import { useDebouncedValue } from "../hooks/useDebouncedValue";
-import { plural, queueStatusText, queueStatusVariant, stateCount, type View } from "./monitorPresentation";
-import { CountBox, NebiusExecutionBreakdown, ResourcePoolBreakdown } from "./MonitorResources";
+import { queueStatusText, queueStatusVariant, stateCount, type View } from "./monitorPresentation";
+import { Suspense, useEffect, useState } from "react";
+import { lazyRoute } from "../lib/lazyRoute";
+import LoadingState from "../components/LoadingState";
+
+const MonitorCapacityDetails = lazyRoute(() => import("./MonitorCapacityDetails"));
 
 export function MonitorHealthSummary({
   view,
@@ -37,6 +41,8 @@ export function MonitorHealthSummary({
   providerModelFilter: string;
   batchId?: string;
 }): JSX.Element | null {
+  const [detailsOpen, setDetailsOpen] = useState(!compact);
+  useEffect(() => { setDetailsOpen(!compact); }, [compact]);
   const debouncedSearch = useDebouncedValue(search, 300);
   const polling = useAdaptivePolling({
     baseIntervalMs: 4_000,
@@ -109,7 +115,6 @@ export function MonitorHealthSummary({
       </Card>
     );
   }
-  const resources = data.resources?.aggregate;
   return (
     <Card>
       <Card.Header
@@ -121,67 +126,9 @@ export function MonitorHealthSummary({
       <Card.Body className="space-y-4">
         <ProgressSummary progress={data.progress} batchId={batchId} />
         <p className="text-sm text-slate-600">{queueStatusText(data)}</p>
-        <details open={!compact}>
+        <details open={detailsOpen} onToggle={event => setDetailsOpen(event.currentTarget.open)}>
           <summary className="cursor-pointer text-sm font-medium">Nodes, scheduling and capacity diagnostics</summary>
-          <div className="mt-4 space-y-4">
-        {!(data.progress && data.service_execution?.targets.length) ? (
-          <>
-            <div className="grid gap-3 md:grid-cols-4">
-              <CountBox
-                label="Concurrent tasks"
-                value={
-                  resources
-                    ? `${resources.occupied_slots} / ${
-                        resources.current_active_slots ?? resources.total_slots
-                      }`
-                    : stateCount(data.queue.running + data.queue.claimed, "active")
-                }
-              />
-              <CountBox
-                label="Queued"
-                value={stateCount(
-                  resources?.queued_tasks ?? data.queue.queued + data.queue.protected_pending,
-                  "queued",
-                )}
-              />
-              <CountBox
-                label="Running"
-                value={stateCount(resources?.running_tasks ?? data.queue.running, "running")}
-              />
-              <CountBox
-                label="Starting"
-                value={stateCount(resources?.starting_tasks ?? data.queue.claimed, "starting")}
-              />
-            </div>
-            <div className="grid gap-3 text-sm md:grid-cols-2">
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Queue health</p>
-
-                <p className="mt-1 text-xs text-slate-500">
-                  <span>{plural(data.queue.active_workers, "active worker")}</span>
-                  <span className="px-1">·</span>
-                  <span>{stateCount(data.state_counts.trials.failed, "failed")}</span>
-                </p>
-              </div>
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                <p
-                  className="text-xs font-medium uppercase tracking-wider text-slate-600"
-                  title="Adapters advertised by live legacy workers. Submissions always run on Nebius."
-                >
-                  Worker adapters
-                </p>
-                <p className="mt-1 text-slate-700">
-                  {data.queue.available_backends.length > 0
-                    ? data.queue.available_backends.join(", ")
-                    : "No active worker adapter"}
-                </p>
-              </div>
-            </div>
-            <ResourcePoolBreakdown resources={data.resources} />
-          </>
-        ) : null}
-        <NebiusExecutionBreakdown serviceExecution={data.service_execution} />
-          </div>
+          {detailsOpen ? <Suspense fallback={<LoadingState label="Loading capacity diagnostics…" />}><MonitorCapacityDetails data={data} /></Suspense> : null}
         </details>
         <div className="flex flex-wrap gap-2 text-xs text-slate-500">
           <span>{stateCount(data.state_counts.trials["protected-pending"], "protected pending")}</span>

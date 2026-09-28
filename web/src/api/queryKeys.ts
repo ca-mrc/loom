@@ -7,6 +7,9 @@ function key<const Root extends string>(root: Root) {
   ];
 }
 
+import { buildVersionKey } from "./buildVersionKey";
+export { buildVersionKey } from "./buildVersionKey";
+
 export const queryKeys = {
   admin: key("admin"),
   "admin-teams": key("admin-teams"),
@@ -19,7 +22,7 @@ export const queryKeys = {
   batches: key("batches"),
   "benchmark-discovery": key("benchmark-discovery"),
   benchmarks: key("benchmarks"),
-  "build-version": key("build-version"),
+  "build-version": buildVersionKey,
   invite: key("invite"),
   invites: key("invites"),
   "local-servers": key("local-servers"),

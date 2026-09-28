@@ -1,5 +1,7 @@
 import React from "react";
 
+import { LazyRouteLoadError } from "../lib/lazyRoute";
+
 import {
   clearBrowserTestRecoveryFault,
   IS_BROWSER_TEST_BUILD,
@@ -11,6 +13,7 @@ import {
 } from "../lib/errorReporting";
 
 interface BrowserErrorFallback {
+  reloadRequired: boolean;
   referenceId: string;
   retry: () => void;
 }
@@ -23,6 +26,7 @@ interface BrowserErrorBoundaryProps {
 }
 
 interface BrowserErrorBoundaryState {
+  reloadRequired: boolean;
   referenceId: string | null;
   renderAttempt: number;
   resetKey: string;
@@ -41,6 +45,7 @@ export class BrowserErrorBoundary extends React.Component<
 
   state: BrowserErrorBoundaryState = {
     referenceId: null,
+    reloadRequired: false,
     renderAttempt: 0,
     resetKey: this.props.resetKey,
   };
@@ -52,6 +57,7 @@ export class BrowserErrorBoundary extends React.Component<
     if (props.resetKey === state.resetKey) return null;
     return {
       referenceId: null,
+      reloadRequired: false,
       renderAttempt: state.renderAttempt + (state.referenceId ? 1 : 0),
       resetKey: props.resetKey,
     };
@@ -60,7 +66,10 @@ export class BrowserErrorBoundary extends React.Component<
   static getDerivedStateFromError(
     error: unknown,
   ): Partial<BrowserErrorBoundaryState> {
-    return { referenceId: prepareBrowserFailureForBoundary(error) };
+    return {
+      reloadRequired: error instanceof LazyRouteLoadError,
+      referenceId: prepareBrowserFailureForBoundary(error),
+    };
   }
 
   componentDidCatch(error: unknown): void {
@@ -89,6 +98,7 @@ export class BrowserErrorBoundary extends React.Component<
     }
     this.setState((state) => ({
       referenceId: null,
+      reloadRequired: false,
       renderAttempt: state.renderAttempt + 1,
     }));
   };
@@ -97,6 +107,7 @@ export class BrowserErrorBoundary extends React.Component<
     if (this.state.referenceId) {
       return this.props.renderFallback({
         referenceId: this.state.referenceId,
+        reloadRequired: this.state.reloadRequired,
         retry: this.retry,
       });
     }

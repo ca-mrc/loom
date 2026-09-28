@@ -1,16 +1,20 @@
 import { clearCursorParams } from "../hooks/useUrlCursorPage";
 import { queryKeys } from "../api/queryKeys";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigationType, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth/useAuth";
 import { Input } from "../components/Input";
-import { BatchesView } from "./MonitorBatches";
 import { SegmentedToggle } from "./MonitorControls";
 import { MonitorHealthSummary } from "./MonitorHealth";
 import { BATCH_STATE_OPTIONS, stateOptionLabel, TRIAL_STATE_OPTIONS, type View } from "./monitorPresentation";
-import { TrialsView } from "./MonitorTrials";
+
+import { lazyRoute } from "../lib/lazyRoute";
+import LoadingState from "../components/LoadingState";
+
+const BatchesView = lazyRoute(async () => ({ default: (await import("./MonitorBatches")).BatchesView }));
+const TrialsView = lazyRoute(async () => ({ default: (await import("./MonitorTrials")).TrialsView }));
 
 export default function Monitor(): JSX.Element {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -240,6 +244,7 @@ export default function Monitor(): JSX.Element {
         batchId={batchIdFilter}
       />
 
+      <Suspense fallback={<LoadingState label="Loading monitor view…" />}>
       {capacity ? null : view === "batches" ? (
         <BatchesView
           search={search}
@@ -266,6 +271,7 @@ export default function Monitor(): JSX.Element {
           providerModelFilter={providerModelFilter}
         />
       )}
+      </Suspense>
     </div>
   );
 }

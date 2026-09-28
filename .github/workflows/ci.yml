@@ -889,7 +889,8 @@ jobs:
             npx --no-install vitest run --coverage \
               "${web_tests[@]}" \
               scripts/frontend-route-browser-smoke.test.mjs \
-              scripts/admin-browser-smoke.test.mjs
+              scripts/admin-browser-smoke.test.mjs \
+              scripts/check-bundle-budget.test.mjs
           else
             cd web
             npm run test:coverage
@@ -898,6 +899,15 @@ jobs:
       - name: Production build
         working-directory: web
         run: npm run build
+
+      - name: Retain production bundle composition and budget report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: frontend-bundle-budget
+          path: web/dist/bundle-report.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Install Chromium
         working-directory: web
