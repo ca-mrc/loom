@@ -212,3 +212,56 @@ async def test_completion_and_admission_preserve_sibling_and_single_budget(stopp
         assert row.memory_mib == sibling_plan['prepared'].platform_envelope.memory_mib
     if all(isinstance(result, Exception) for result in results[1:]):
         await registry.create(principal=alice, idempotency_key='new-a', **prepare('new-a'))
+
+
+async def test_stop_coordinator_composes_retirement_before_durable_completion(stopped_context, database_access):
+    from loom_service.application_management.coordinator import ApplicationLifecycleCoordinator
+
+    registry, factory, _, lease, runtime, credentials, verifier, api, cloud, _ = stopped_context
+    coordinator = ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier)
+    api.objects[PODS]['items'] = [{'metadata': {'name': 'still-running'}}]
+    with pytest.raises(ProviderWaitingError, match='application_workloads_retirement_pending'):
+        await coordinator.stop(lease)
+    assert database_access[0].execute('SELECT retired_through FROM loom_application_access.applications').fetchone() == (0,)
+    assert len(cloud.resources) == 4
+    assert (await charged(stopped_context))[0] > 0
+    api.objects[PODS]['items'] = []
+    await coordinator.stop(lease)
+    assert cloud.resources == {}
+    assert database_access[0].execute('SELECT retired_through FROM loom_application_access.applications').fetchone() == (2,)
+    assert await charged(stopped_context) == (0, 0, 0, 0)
+    async with factory() as session:
+        operation = await session.get(NebiusApplicationOperation, lease.operation_id)
+        assert operation.phase == 'completed'
+        assert operation.completion_json['workloads']['pods_resource_version'] == '10'
+
+
+@pytest.mark.parametrize('boundary', ['sql', 'cloud', 'object', 'last_process_check', 'cancel'])
+async def test_coordinator_failure_never_completes_or_releases(stopped_context, monkeypatch, boundary):
+    from loom_service.application_management.coordinator import ApplicationLifecycleCoordinator
+
+    registry, factory, _, lease, runtime, credentials, verifier, api, cloud, _ = stopped_context
+    coordinator = ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier)
+    async def fail(*args, **kwargs):
+        if boundary == 'cancel':
+            raise asyncio.CancelledError
+        raise ProviderWaitingError('injected_provider_failure')
+
+    if boundary in {'sql', 'cancel'}:
+        monkeypatch.setattr(credentials.database, 'drain', fail)
+    elif boundary == 'cloud':
+        monkeypatch.setattr(cloud, 'delete_resource', fail)
+    elif boundary == 'object':
+        monkeypatch.setattr(verifier, 'verify_retired', fail)
+    else:
+        verify = verifier.verify_retired
+        async def new_pod(*args, **kwargs):
+            await verify(*args, **kwargs)
+            api.objects[PODS]['items'] = [{'metadata': {'name': 'late-terminating-pod'}}]
+        monkeypatch.setattr(verifier, 'verify_retired', new_pod)
+    with pytest.raises(asyncio.CancelledError if boundary == 'cancel' else ProviderWaitingError):
+        await coordinator.stop(lease)
+    assert (await charged(stopped_context))[0] > 0
+    async with factory() as session:
+        operation = await session.get(NebiusApplicationOperation, lease.operation_id)
+        assert operation.phase == 'running' and operation.completion_json is operation.completed_at is None
