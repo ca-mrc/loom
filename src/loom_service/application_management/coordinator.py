@@ -1,4 +1,4 @@
-"""Concrete retirement and closed-admission preparation; no active startup worker."""
+"""Concrete application lifecycle coordination; no polling worker or owner API."""
 from __future__ import annotations
 
 from loom_service.application_management.credentials import ApplicationCredentialProvider
@@ -6,6 +6,7 @@ from loom_service.application_management.effects import ApplicationEffect
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.proofs import (
+    ApplicationReadyEvidence,
     ApplicationStartupPreparation,
     ApplicationStopEvidence,
 )
@@ -52,6 +53,19 @@ class ApplicationLifecycleCoordinator:
         await self.runtime.read_prepared(lease)
         await self.runtime.read_shared_network(lease)
         return await self.runtime.open_admission(lease)
+
+    async def start(self, lease: ApplicationLease) -> None:
+        """Converge a qualified personal version and record current readiness."""
+        await self.activate(lease)
+        await self.runtime.start_workloads(lease)
+        database = await self.credentials.retire_database(lease)
+        objects = await self.credentials.retire_cloud(lease, self.object_verifier)
+        access = await self.credentials.qualify(lease)
+        prepared = await self.runtime.read_prepared(lease)
+        network = await self.runtime.read_shared_network(lease)
+        workloads = await self.runtime.read_ready(lease)
+        await self.registry.complete_ready(lease, ApplicationReadyEvidence(workloads=workloads,
+            database=database, objects=objects, access=access, prepared=prepared, network=network))
 
     async def stop(self, lease: ApplicationLease) -> None:
         plan = await self.registry.frozen_plan(lease)

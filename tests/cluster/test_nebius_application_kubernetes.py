@@ -85,28 +85,38 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
             await kubernetes.create(lease, "namespace", named(rendered, "Namespace", "loom-dev-alice"))
             await kubernetes.create(lease, "account", named(rendered, "ServiceAccount", "loom-platform"))
             deadline = time.monotonic() + 30
-            while not running:
+            while True:
                 try:
                     await runtime.close_admission(lease)
                     break
                 except ProviderWaitingError:
                     assert time.monotonic() < deadline
                     await asyncio.sleep(0.1)
-            # Default images never run. The second case starts harmless imported
-            # fixtures before the gate, proving real controller-owned Pod exit.
-            for docs in rendered.files.values():
-                for doc in docs:
-                    if doc["kind"] in {"Deployment", "Service", "Ingress"}:
-                        await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
+            # Default images never run. The second case opens admission and
+            # starts harmless imported fixtures through the active lifecycle.
             if running:
+                await runtime.open_admission(lease)
                 deadline = time.monotonic() + 60
                 while True:
-                    pods = (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items
-                    if len(pods) == 2 and all(pod.status.phase == "Running" for pod in pods):
-                        assert all(pod.metadata.owner_references[0].kind == "ReplicaSet" for pod in pods)
+                    try:
+                        ready = await runtime.start_workloads(lease)
                         break
-                    assert time.monotonic() < deadline, "fixture Deployment Pods did not start"
-                    await asyncio.sleep(0.2)
+                    except ProviderWaitingError:
+                        assert time.monotonic() < deadline, "current fixture backends did not become ready"
+                        await asyncio.sleep(0.2)
+                assert {item.name for item in ready.deployments} == {'loom-service', 'loom-web'}
+                assert all(item.replicas == 1 and item.observed_generation >= item.generation for item in ready.deployments)
+                pods = (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items
+                assert len(pods) == 2 and all(pod.status.phase == "Running" for pod in pods)
+                assert all(pod.metadata.owner_references[0].kind == "ReplicaSet" for pod in pods)
+                before = list(requests)
+                await runtime.read_ready(lease)
+                assert all(method == 'GET' for method, _ in requests[len(before):])
+            else:
+                for docs in rendered.files.values():
+                    for doc in docs:
+                        if doc["kind"] in {"Deployment", "Service", "Ingress"}:
+                            await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
             stopped = await registry.transition(lease.application_id, principal=alice,
                 idempotency_key="stop", action="suspend", expected_generation=1)
             current = await registry.claim(stopped.operation_id)
@@ -264,6 +274,10 @@ async def test_application_preparation_and_stop_use_only_protected_manager_autho
                 assert len(prepared.resources) == 8
                 assert set(bundles) <= {item.name for item in prepared.resources}
                 assert (await asyncio.to_thread(core.list_namespaced_pod, 'loom-dev-alice')).items == []
+                opening = await provider.open_admission(lease)
+                assert opening.phase == 'observed'
+                assert await provider.open_admission(lease) == opening
+                assert (await http.get('/api/v1/namespaces/loom-dev-alice/resourcequotas/loom-application-retired')).status_code == 404
     finally:
         await asyncio.to_thread(container.stop)
 

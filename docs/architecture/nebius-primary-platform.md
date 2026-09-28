@@ -619,8 +619,8 @@ including when that request is rejected or awaiting observation. Under the journ
 lock, this phase prevents new retirement, quota-closing and static/Secret writes
 in the same operation. The single unresolved-effect slot prevents an earlier
 prepared request crossing that boundary. A stopped successor can still close its
-own generation's admission. These are preparation primitives; active orchestration,
-live shared-access qualification and installed owner acceptance remain required.
+own generation's admission. New `start:` workload intents require an observed
+opening under the same journal lock; preparation success alone cannot admit them.
 
 The protected shared installer may separately grant the provisioner a namespaced
 Role allowing GET of only the three installation-specific PostgreSQL, Control
@@ -637,8 +637,44 @@ prepare static resources, verify shared ingress, enroll/deliver and qualify curr
 credentials, then refresh live resource/network/process evidence. Missing
 prerequisites keep admission closed. It returns internal typed preparation evidence
 without starting Deployments/routes, completing the operation, or releasing its
-reservation. Admission reopening, workload readiness and an installed active
-worker remain separate unfinished lifecycle steps.
+reservation. The active coordinator below consumes these prerequisites; an installed
+worker and owner-facing deployment flow remain separate unfinished steps.
+
+### Active application startup and completion
+
+`ApplicationLifecycleCoordinator.activate` invokes preparation only before the
+first activation intent. Recovery refreshes shared access, immutable resources and
+shared ingress rules without re-entering retirement/static writes. The runtime's
+`read_retired` is observation-only: current zero-Pod admission, observed zero-replica
+controllers, absent routes and a complete empty PodList must still hold before an
+unsent quota deletion. Prepared deletion retains its original UID/resourceVersion;
+only definitive409/422 rejection permits a fresh precondition key. Dispatched
+deletion only reconciles, and observed deletion requires actual quota absence. A
+replacement quota is a conflict, never permission for another deletion.
+
+`start_workloads` installs the frozen current Deployments and Services, preserving
+retained Deployment UIDs through exact preconditioned patches from zero replicas.
+Routes may be recreated only after their recorded prior identities retired.
+Interrupted current requests recover the original frozen document and preconditions;
+uncertain requests never resend. A current template/image match and controller
+observed generation are required, with updated/ready/available/total replicas all
+equal to desired and no unavailable or terminating replicas. Only then is the
+Ingress created. `read_ready` repeats live checks without resource writes.
+
+`ApplicationLifecycleCoordinator.start` composes activation, workloads, refreshed
+access/static/network/retirement observations, and durable ready completion.
+`complete_ready` takes budget, application and operation locks in that order,
+requires a current unexpired lease, settled journals, current activation and exact
+workload/static references, schema/owner/access-key evidence, and prior access
+retirement. Its secret-free immutable receipt completes the operation and clears
+the lease. The current frozen CPU/memory/ephemeral reservation stays charged;
+only excess held for an old/new transition is released. Shared storage stays0.
+Exact receipt replay changes neither timestamp nor reservation.
+
+This is internal lifecycle implementation, not installed acceptance. It does not
+enable a polling worker, owner endpoint or live installer. Protected installation,
+four distinct versions/fifth-owner onboarding, real execution provenance,
+authorization, recovery/teardown isolation and scale-to-zero still need live proof.
 
 ### Stopped application completion
 
@@ -646,8 +682,8 @@ worker remain separate unfinished lifecycle steps.
 close Pod admission and stop personal workloads, revoke/drain SQL access, retire
 exact IAM identities and probe retained keys, then refresh the live workload and
 admission observations. Only this internal path supplies completion attestations;
-owner requests cannot submit evidence or a success flag. Active startup and a
-polling worker are not enabled by this coordinator.
+owner requests cannot submit evidence or a success flag. No polling worker or
+owner-facing deployment flow is enabled by the coordinator itself.
 
 The adapters return immutable, secret-free evidence bound to the application,
 incarnation, shared data environment, operation/generations and lease epoch/token

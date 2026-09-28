@@ -127,3 +127,12 @@ class ApplicationStartupPreparation(_Proof):
     prepared: ApplicationPreparationReadiness
     access: ApplicationAccessReadiness
     network: tuple[ApplicationSharedPolicyObservation, ...]
+
+
+class ApplicationReadyEvidence(_Proof):
+    workloads: ApplicationWorkloadReadiness
+    database: ApplicationDatabaseRetirement
+    objects: ApplicationCloudRetirement
+    prepared: ApplicationPreparationReadiness
+    access: ApplicationAccessReadiness
+    network: tuple[ApplicationSharedPolicyObservation, ...]
