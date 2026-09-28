@@ -177,6 +177,46 @@ def test_failed_command_deadline_and_guest_exit_remain_distinct() -> None:
         assert (directory / "state/retired").exists()
 
 
+def test_guest_posix_semaphores_work_and_are_private(tmp_path: Path) -> None:
+    """Python multiprocessing and legacy image downloaders need sem_open."""
+    source = tmp_path / "semaphore.c"
+    source.write_text(r'''
+#include <errno.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+int main(void) {
+    sem_t *sem = sem_open("/loom-private-probe", O_CREAT | O_EXCL, 0600, 0);
+    if (sem == SEM_FAILED) { int code = errno; perror("sem_open"); return code == EEXIST ? 17 : 1; }
+    pid_t child = fork();
+    if (child < 0) return 2;
+    if (child == 0) _exit(sem_post(sem) == 0 ? 0 : 3);
+    if (sem_wait(sem) != 0) return 4;
+    int status;
+    if (waitpid(child, &status, 0) != child || status != 0) return 5;
+    if (sem_close(sem) != 0) return 6;
+    puts("semaphore handoff passed");
+    return 0;
+}
+''')
+    binary = tmp_path / "semaphore"
+    subprocess.run(["cc", "-static", "-pthread", "-o", str(binary), str(source)],
+                   check=True, capture_output=True)
+    with guest() as (first, _, _), guest() as (other, _, _):
+        for client in (first, other):
+            response = client.put("http://sandbox/file", params={"path": "/tmp/semaphore"},
+                                  content=binary.read_bytes())
+            response.raise_for_status()
+            assert execute(client, "/bin/busybox chmod +x /tmp/semaphore; /tmp/semaphore") == "semaphore handoff passed\n"
+        # The name persists in its own guest, while the unrelated guest could
+        # create that same exclusive name and operate on its own semaphore.
+        response = first.post("http://sandbox/exec", json={"argv": ["/tmp/semaphore"], "timeout_sec": 10})
+        response.raise_for_status()
+        assert response.json()["return_code"] == 17
+
+
 @pytest.mark.timeout(180)
 def test_guest_docker_build_cache_invalidation_and_artifact() -> None:
     with guest(docker=True) as (client, _, _):
