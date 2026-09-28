@@ -273,3 +273,39 @@ def test_installer_cannot_inherit_unrelated_default_privileges(migration_access,
     with pytest.raises(ApplicationDatabaseAccessError, match="private_authority"):
         install_application_database_access(admin, data_environment_id=access.data_environment_id, manager_role=make_url(url).username)
     assert admin.execute("SELECT to_regclass('loom_application_access.principal_enrollments')").fetchone() == (None,)
+
+
+@pytest.mark.parametrize("privilege", ["SELECT", "UPDATE"])
+def test_installer_refuses_column_access_to_retained_identity_history(migration_access, privilege):
+    admin, url, access, _ = migration_access
+    app, incarnation, _, _ = granted(access)
+    enroll(access, app, incarnation, principal())
+    admin.execute(sql.SQL("GRANT {}(identity_id) ON loom_application_access.principal_identities TO {}").format(
+        sql.SQL(privilege), sql.Identifier(make_url(url).username)))
+    # These grants live in pg_attribute.attacl, not the table's relacl. They
+    # allow the ordinary manager to read or corrupt the deletion tombstones.
+    if privilege == "SELECT":
+        assert len(access.connection.execute("SELECT identity_id FROM loom_application_access.principal_identities").fetchall()) == 2
+    else:
+        # Prove the writable capability but roll back the test's corruption.
+        with pytest.raises(RuntimeError, match="rollback"):
+            with access.connection.transaction():
+                assert access.connection.execute("UPDATE loom_application_access.principal_identities SET identity_id=%s", (uuid4(),)).rowcount == 2
+                raise RuntimeError("rollback")
+    with pytest.raises(ApplicationDatabaseAccessError, match="private_authority"):
+        install_application_database_access(admin, data_environment_id=access.data_environment_id, manager_role=make_url(url).username)
+
+
+@pytest.mark.parametrize("direction", ["public_parent", "public_child"])
+def test_installer_refuses_inheritance_across_private_provenance(migration_access, direction):
+    admin, url, access, _ = migration_access
+    if direction == "public_parent":
+        admin.execute("CREATE TABLE public.identity_parent(kind text NOT NULL,identity_id uuid NOT NULL,first_application_id uuid NOT NULL)")
+        admin.execute("ALTER TABLE loom_application_access.principal_identities INHERIT public.identity_parent")
+    else:
+        admin.execute("CREATE TABLE public.identity_child() INHERITS (loom_application_access.principal_identities)")
+    with pytest.raises(ApplicationDatabaseAccessError, match="installation_drift"):
+        install_application_database_access(admin, data_environment_id=access.data_environment_id, manager_role=make_url(url).username)
+    # Rejected installation must not expand API authority to the public table.
+    table = "identity_parent" if direction == "public_parent" else "identity_child"
+    assert admin.execute("SELECT has_table_privilege(runtime_oid,%s,'SELECT,INSERT,UPDATE,DELETE') FROM loom_application_access.binding", ("public." + table,)).fetchone() == (False,)
