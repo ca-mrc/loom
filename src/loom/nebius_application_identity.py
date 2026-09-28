@@ -182,6 +182,7 @@ def _install_identity(connection: psycopg.Connection[Any], manager_role: str) ->
         rules = connection.execute("SELECT pg_catalog.pg_get_constraintdef(oid),convalidated,condeferrable FROM pg_catalog.pg_constraint WHERE conrelid=%s::regclass ORDER BY 1", (relation,)).fetchall()
         safe = connection.execute("""SELECT c.relkind='r' AND c.relpersistence='p' AND NOT c.relrowsecurity
             AND NOT c.relforcerowsecurity AND NOT c.relispartition AND NOT c.relhasrules
+            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits WHERE inhrelid=c.oid OR inhparent=c.oid)
             AND c.relowner=n.nspowner AND NOT EXISTS (
                 SELECT 1 FROM pg_catalog.pg_trigger WHERE tgrelid=c.oid AND NOT tgisinternal)
             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
@@ -197,6 +198,12 @@ def _install_identity(connection: psycopg.Connection[Any], manager_role: str) ->
     if connection.execute("""SELECT EXISTS (
             SELECT 1 FROM pg_catalog.pg_class c,
                 LATERAL pg_catalog.aclexplode(c.relacl) a
+            WHERE c.relnamespace='loom_application_access'::regnamespace
+                AND c.relname IN ('principal_identities','principal_enrollments')
+                AND a.grantee<>c.relowner
+        ) OR EXISTS (
+            SELECT 1 FROM pg_catalog.pg_attribute t JOIN pg_catalog.pg_class c ON c.oid=t.attrelid,
+                LATERAL pg_catalog.aclexplode(t.attacl) a
             WHERE c.relnamespace='loom_application_access'::regnamespace
                 AND c.relname IN ('principal_identities','principal_enrollments')
                 AND a.grantee<>c.relowner
