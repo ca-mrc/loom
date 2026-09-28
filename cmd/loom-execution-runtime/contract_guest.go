@@ -60,7 +60,7 @@ func (p plan) validateGuestExecution() error {
 			}
 		}
 	}
-	if guestClass && (guests != 2 || len(p.Sidecars) != 2 || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload") {
+	if guestClass && (guests != 2 || len(p.Sidecars) != 2 || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" || p.VerifierExecution != "in_attempt" || p.Verifier == nil) {
 		return fmt.Errorf("guest class requires two private guests and bounded runtime payload storage")
 	}
 	if guestClass {

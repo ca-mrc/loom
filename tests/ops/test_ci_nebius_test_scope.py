@@ -145,8 +145,8 @@ def test_cluster_gate_checks_supported_contracts_without_retired_render_commands
 def test_go_checks_cover_current_runtime_packages():
     jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
     commands = [step.get("run", "") for step in jobs["go-checks"]["steps"]]
-    assert "go vet ./cmd/..." in commands
-    assert "go test -race ./cmd/..." in commands
+    assert "go vet ./cmd/... ./internal/..." in commands
+    assert "go test -race ./cmd/... ./internal/..." in commands
 
 
 def test_retired_capacity_hooks_are_removed():

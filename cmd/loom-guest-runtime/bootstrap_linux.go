@@ -149,13 +149,19 @@ func sandboxInit() {
 	}
 	bootMust(installGuestTools())
 	bootMust(configureGuestNetwork())
-	environment := guestEnvironment(config.Environment)
 	// Kernel requests for overlay/loop/netfilter dependencies are also confined
 	// to the guest. Never use a task-image modprobe compiled for another kernel.
 	bootMust(os.WriteFile("/proc/sys/kernel/modprobe", []byte("/loom/guest-wrappers/modprobe\n"), 0644))
 	if config.NestedDocker {
-		bootMust(os.MkdirAll("/usr/local/lib/docker", 0755))
-		bootMust(os.Symlink(guestPayload+"/docker/cli-plugins", "/usr/local/lib/docker/cli-plugins"))
+		// Task images can already own Docker plugin directories or symlinks.
+		// Select our bundled plugin through a private client configuration instead
+		// of mutating those paths.
+		bootMust(os.MkdirAll("/loom/docker-client", 0700))
+		bootMust(os.WriteFile("/loom/docker-client/config.json", []byte(`{"cliPluginsExtraDirs":["/loom/guest-tools/docker/cli-plugins"]}`), 0600))
+		config.Environment = append(config.Environment, "DOCKER_CONFIG=/loom/docker-client")
+	}
+	environment := guestEnvironment(config.Environment)
+	if config.NestedDocker {
 		bootMust(startDocker(environment))
 	}
 	binary := guestPayload + "/bin/loom-sandbox-runtime"

@@ -54,9 +54,11 @@ func (c guestConfig) qemuArgs() []string {
 		"-nographic", "-nodefaults", "-no-reboot", "-serial", "stdio", "-monitor", "none",
 		"-bios", filepath.Join(c.Payload, "share/seabios/bios-256k.bin"), "-kernel", filepath.Join(c.Payload, "kernel"),
 		"-initrd", filepath.Join(c.State, "initrd"), "-append", "console=ttyS0 panic=-1 rdinit=/init loom_guest=1 quiet",
-		"-fsdev", "local,id=root,path=" + c.Root + ",security_model=none,readonly=on",
+		// Container mounts can reuse inode numbers. Remap the QID namespace so
+		// guest caches cannot alias files from distinct outer filesystems.
+		"-fsdev", "local,id=root,path=" + c.Root + ",security_model=none,readonly=on,multidevs=remap",
 		"-device", "virtio-9p-pci,fsdev=root,mount_tag=taskroot",
-		"-fsdev", "local,id=payload,path=" + c.Payload + ",security_model=none,readonly=on",
+		"-fsdev", "local,id=payload,path=" + c.Payload + ",security_model=none,readonly=on,multidevs=remap",
 		"-device", "virtio-9p-pci,fsdev=payload,mount_tag=payload",
 		"-drive", "file=" + filepath.Join(c.State, "state.ext4") + ",format=raw,if=virtio",
 		"-device", "virtio-serial-pci", "-chardev", "socket,id=rpc,path=" + filepath.Join(c.State, "channel.sock") + ",server=on,wait=off",
