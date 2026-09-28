@@ -52,13 +52,6 @@ export interface AgentEntry extends AgentReadinessLike {
   display_name?: string;
 }
 
-export interface LocalServerEntry {
-  name: string;
-  base_url: string;
-  kind: string | null;
-  description: string | null;
-}
-
 export const SELECT_CLS =
   "block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 disabled:cursor-not-allowed disabled:opacity-60";
 
@@ -103,7 +96,7 @@ export function findAgent<T extends { name: string; aliases?: string[] }>(
 }
 
 export function firstSource(agent: AgentEntry | undefined): ModelSource {
-  return (agent?.supported_model_sources[0] as ModelSource | undefined) ?? "api";
+  return ALL_SOURCES.find((source) => agent?.supported_model_sources.includes(source)) ?? "api";
 }
 
 export function supportsModelSelection(agent: AgentEntry, value: AgentModelValue): boolean {

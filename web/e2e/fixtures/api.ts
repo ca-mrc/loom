@@ -225,7 +225,6 @@ function defaultApiResponse(
   if (path.startsWith("/v1/benchmarks")) return jsonResponse({ items: [], next_cursor: null });
   if (path.startsWith("/v1/models")) return jsonResponse({ items: [] });
   if (path.startsWith("/v1/provider-connections")) return jsonResponse({ items: [] });
-  if (path === "/v1/local-servers") return jsonResponse({ items: [] });
   if (path === "/v1/tasks/count") return jsonResponse({ count: 0 });
   if (path === "/v1/tasks") return jsonResponse({ items: [], next_cursor: null });
   if (path.startsWith("/v1/run-library")) return jsonResponse({ items: [], next_cursor: null });

@@ -140,3 +140,27 @@ async def test_hosted_cannot_mint_local_task_image_credentials(monkeypatch, hand
             SimpleNamespace(), admin._TaskImageServiceTokenPayload(expires_in_days=1), None,
         )
     assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize("local", [False, True])
+async def test_retired_local_model_catalog_is_absent_from_api_and_settings(monkeypatch, local):
+    import httpx
+
+    from loom_service.app import create_app
+    from loom_service.config import LoomServiceSettings
+
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1" if local else "0")
+    settings = LoomServiceSettings(
+        _env_file=None, db_url="postgresql+psycopg://test:test@localhost/test",
+        minio_access_key="test", minio_secret_key="test",
+    )
+    app = create_app(settings)
+    assert "local_servers_json" not in LoomServiceSettings.model_fields
+    assert "huggingface_api_key" not in LoomServiceSettings.model_fields
+    assert "/api/v1/local-servers" not in app.openapi()["paths"]
+    assert "/api/v1/models" in app.openapi()["paths"]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        assert (await client.get("/api/v1/local-servers")).status_code == 404

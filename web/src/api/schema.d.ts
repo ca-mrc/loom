@@ -1170,23 +1170,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/local-servers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Local Servers */
-        get: operations["list_local_servers_api_v1_local_servers_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -4127,26 +4110,6 @@ export interface components {
         GetHealthResponse: {
             /** Status */
             status: string;
-        } & {
-            [key: string]: unknown;
-        };
-        /** GetLocalServersResponse */
-        GetLocalServersResponse: {
-            /** Items */
-            items: components["schemas"]["GetLocalServersResponseItemsItem"][];
-        } & {
-            [key: string]: unknown;
-        };
-        /** GetLocalServersResponseItemsItem */
-        GetLocalServersResponseItemsItem: {
-            /** Base Url */
-            base_url: string;
-            /** Description */
-            description: string | null;
-            /** Kind */
-            kind: string | null;
-            /** Name */
-            name: string;
         } & {
             [key: string]: unknown;
         };
@@ -10893,37 +10856,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InviteEntry"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_local_servers_api_v1_local_servers_get: {
-        parameters: {
-            query?: never;
-            header?: {
-                authorization?: string | null;
-            };
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["GetLocalServersResponse"];
                 };
             };
             /** @description Validation Error */

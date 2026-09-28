@@ -209,15 +209,6 @@ export const providersApi = {
         };
       }[];
     }>("/api/v1/agents"),
-  listLocalServers: () =>
-    apiFetch<{
-      items: {
-        name: string;
-        base_url: string;
-        kind: string | null;
-        description: string | null;
-      }[];
-    }>("/api/v1/local-servers"),
   listModels: (view?: "default" | "raw") =>
     apiFetch<{ items: ModelEntry[] }>(`/api/v1/models${qs({ view })}`),
   listProviderConnections: (teamId?: string) =>

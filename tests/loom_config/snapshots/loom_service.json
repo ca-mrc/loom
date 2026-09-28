@@ -129,19 +129,9 @@
     "default": "'http://loom-llm-gateway:9100'",
     "required": false
   },
-  "huggingface_api_key": {
-    "annotation": "pydantic.types.SecretStr | None",
-    "default": "None",
-    "required": false
-  },
   "k8s_worker_enabled": {
     "annotation": "<class 'bool'>",
     "default": "True",
-    "required": false
-  },
-  "local_servers_json": {
-    "annotation": "<class 'str'>",
-    "default": "'{}'",
     "required": false
   },
   "log_level": {

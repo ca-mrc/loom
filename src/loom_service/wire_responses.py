@@ -62,19 +62,6 @@ class GetBackendsResponse(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
-class GetLocalServersResponseItemsItem(TypedDict):
-    name: str
-    base_url: str
-    kind: str | None
-    description: str | None
-
-
-@with_config(ConfigDict(extra="allow"))
-class GetLocalServersResponse(TypedDict):
-    items: list[GetLocalServersResponseItemsItem]
-
-
-@with_config(ConfigDict(extra="allow"))
 class PostBatchesIdCancelResponse(TypedDict):
     batch_id: str
     state: str

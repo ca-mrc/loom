@@ -3,14 +3,15 @@
 Tracking: [#2231](https://github.com/qianyi-sun/loom/issues/2231).
 Source baseline: `acb34152f026e0113f0b7213fe08819dcaddaf70` (2026-09-28).
 This is a source dependency inventory, not a live database/object inventory or
-permission to delete retained records. No table in this inventory is dropped by
-the initial readiness/Worker-loop change.
+permission to delete retained records. No table in this inventory has yet been approved for live deletion.
+All repository cleanup is consolidated in PR #2232; it remains Draft until the
+remaining dependencies and migration verification are resolved.
 
 ## Feature chains and disposition
 
 | Chain | Entry point and persisted state | Disposition / next dependency |
 | --- | --- | --- |
-| Hosted HF/local model selection | Web agent-model picker → local-server/catalog APIs → effective batch configuration; local CLI execution is separate | Coordinate with #2054 / PR #2226 before removing remaining endpoints/settings. Preserve accepted work and supported local execution. |
+| Hosted HF/local model selection | Web agent-model picker → local-server/catalog APIs → effective batch configuration; local CLI execution is separate | HF/local picker panels, `/local-servers`, its settings/client/types and stale test fixtures are removed in this PR. Preserve historical model interpretation and local CLI/Gateway execution. Reconcile the final picker implementation with #2054 / PR #2226. |
 | Old personal environment | Removed old development routes → candidates/build grants/lifecycle operations → image/object/secret references | Account for historical candidates and installed build-guard SQL; current personal application work (#1915 / PR #2229) must not inherit these tables accidentally. |
 | Slurm/GB10 Worker pools | Retired hosted controllers → Worker jobs/pool policy → grants and historical Worker references | Remove provisioning/read-only grants with a future schema migration; retain independent local Worker execution. |
 | Task-image auxiliary records | Retired build authority → grant/event/attestation records → signed image provenance | Reconcile historical evidence and installed guard chains; native task-image builds and trusted historical readers remain supported. |
@@ -63,6 +64,23 @@ Important SQL source examples are
 A main-schema Alembic head alone does not identify which independent guard chains
 or functions are installed. Published migration files remain intact for upgrades
 and qualified historical restores.
+
+## Read-only target inventory
+
+Run `.venv/bin/python scripts/ops/inventory_legacy_structures.py` with the exact
+target's `LOOM_DB_URL` supplied through the operator's protected environment.
+Never paste the connection URL into the issue or pass it as a command argument.
+The tool uses a repeatable-read, read-only transaction, per-statement/lock
+limits, and emits metadata/counts rather than row payloads. A timed-out count is
+`null` with an explicit unavailable status; it is never converted to zero.
+The report includes table/index bytes, visible FKs, trigger functions, possible
+function/view references, visible grants and installed Alembic version tables.
+It cannot establish external readers or a last-write observation window, and
+must be supplemented with retention and object-version evidence.
+
+The application service no longer has a `local_servers_json` setting or an HF
+inference-token setting. Generic gateway local/HF execution and dataset tooling's
+independent `HF_TOKEN` input remain; neither exposes the removed hosted catalog.
 
 ## Schema and data execution order
 
