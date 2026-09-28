@@ -73,6 +73,8 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         env={**os.environ, "PUBLICATION_MODE": "platform", "AGENT_VERSION": "",
              "NEBIUS_TASK_WEB_EGRESS_READY": ready, "NEBIUS_SERVICE_LIFECYCLE_READY": ready,
              "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_GUEST_RUNTIME_READY": "false", "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "",
+             "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "",
              "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
              "work": "/unused", "RUNNER_TEMP": "/unused"},
     )
@@ -82,6 +84,43 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         assert result.returncode == 0, result.stderr
         for flag in ("--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"):
             assert (flag in result.stdout.splitlines()) is (ready == "true")
+
+
+@pytest.mark.parametrize("ready,volume,artifact,mode,valid", [
+    ("false", "", "", "platform", True),
+    ("true", "1024", "10737418240", "platform", True),
+    ("true", "", "10737418240", "platform", False),
+    ("true", "1024", "", "platform", False),
+    ("invalid", "1024", "10737418240", "platform", False),
+    ("false", "1024", "10737418240", "platform", False),
+    ("true", "1024", "10737418240", "harness", True),
+])
+def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, artifact, mode, valid):
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                if step.get("name") == "Build and publish the fixed candidate")
+    script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+         'uv() { printf "%s\\n" "$@"; }\npublication_args=(--mode "$PUBLICATION_MODE")' + script],
+        capture_output=True, text=True,
+        env={**os.environ, "PUBLICATION_MODE": mode, "AGENT_VERSION": "",
+             "NEBIUS_TASK_WEB_EGRESS_READY": "true", "NEBIUS_SERVICE_LIFECYCLE_READY": "true",
+             "NEBIUS_TASK_IDENTITY_READY": "true", "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_GUEST_RUNTIME_READY": ready, "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": volume,
+             "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": artifact,
+             "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
+             "work": "/unused", "RUNNER_TEMP": "/unused"},
+    )
+    assert (result.returncode == 0) is valid, result.stderr
+    arguments = result.stdout.splitlines()
+    if valid and ready == "true" and mode == "platform":
+        for flag, value in (("--guest-runtime", "qemu-tcg-v1"),
+                            ("--guest-runtime-volume-mib", volume),
+                            ("--guest-max-artifact-bytes", artifact)):
+            assert arguments[arguments.index(flag) + 1] == value
+    else:
+        assert not any(argument.startswith("--guest-") for argument in arguments)
 
 
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
