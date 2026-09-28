@@ -650,6 +650,14 @@ See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https),
 [the upstream selector](https://github.com/caddyserver/certmagic/blob/v0.25.3/handshake.go),
 and [Nebius CSI storage](https://docs.nebius.com/kubernetes/storage/disk-over-csi).
 
+The static nginx origin enables `gzip_proxied any`: Caddy adds a `Via` request
+header, which otherwise disables nginx gzip under its default proxy policy.
+Verify a current hashed JS asset through public HTTPS with `Accept-Encoding:
+gzip`: it must return `Content-Encoding: gzip` and `Vary: Accept-Encoding`, while
+an identity request returns the same decompressed content. Build-time gzip size
+alone does not verify compression on the deployed proxy path. API and streaming
+responses use their separate service proxy and are unaffected by this setting.
+
 Developer verification uses an explicitly built web image and a disposable
 Pebble CA; it exercises the two-pass bootstrap transition, real TLS-ALPN issuance and renewal,
 restart with the CA unavailable, SPA headers, API forwarding and SSE:
