@@ -79,7 +79,7 @@ class ApplicationCredentialProvider:
             if not parts or any(len(base64.b64decode(part.strip(), validate=True)) != 32 for part in parts):
                 raise ValueError
             return row
-        except (ValueError, TypeError, KeyError, AttributeError, x509.ExtensionNotFound):
+        except (ValueError, TypeError, KeyError, AttributeError, x509.ExtensionNotFound, x509.DuplicateExtension):
             raise ProviderBlockedError("application_shared_credentials_invalid") from None
 
     def _url(self, plan: dict[str, Any], row: ApplicationRegistrationV1, password: str) -> str:
