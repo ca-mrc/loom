@@ -159,13 +159,31 @@ class ApplicationCloudJournal(ApplicationMaterialJournal):
                 raise ManagementError("application_cloud_dependency_missing")
             intent = copy.deepcopy(target.intent_json) | {"action": "delete",
                 "resource_id": target.observed_resource_id, "source_operation_id": str(operation_id), "source_key": key}
-            return await self._insert_cloud(session, lease.operation_id, f"retire:{operation_id.hex}:{key}", intent)
+            retirement_key = f"retire:{operation_id.hex}:{key}"
+            # Retirement belongs to the resource, not the latest stop operation.
+            # Supersession must not grant a second send after a lost DELETE reply.
+            previous = (await session.scalars(select(NebiusApplicationCloudEffect).join(
+                NebiusApplicationOperation,
+                NebiusApplicationOperation.operation_id == NebiusApplicationCloudEffect.operation_id,
+            ).where(
+                NebiusApplicationOperation.application_id == current.application_id,
+                NebiusApplicationOperation.deployment_generation <= current.deployment_generation,
+                NebiusApplicationCloudEffect.effect_key == retirement_key,
+            ))).all()
+            if previous:
+                if len(previous) != 1 or previous[0].intent_json != intent:
+                    raise ManagementError("application_cloud_retirement_conflict")
+                return _view(previous[0])
+            return await self._insert_cloud(session, lease.operation_id, retirement_key, intent)
 
-    async def dispatch_cloud_effect(self, lease: ApplicationLease, key: str) -> bool:
+    async def dispatch_cloud_effect(self, lease: ApplicationLease, key: str,
+                                    *, operation_id: UUID | None = None) -> bool:
         """Exactly one True. False means reconcile; NEVER resend an unknown write."""
         async with self.session_factory.begin() as session:
             operation, _ = await self._leased(session, lease)
-            row = await self._cloud_target(session, operation, lease.operation_id, key)
+            row = await self._cloud_target(session, operation, operation_id or lease.operation_id, key)
+            if row.operation_id != lease.operation_id and row.intent_json["action"] != "delete":
+                raise ManagementError("application_cloud_forbidden", 403)
             if row.phase != "prepared":
                 return False
             row.phase, row.dispatch_epoch = "dispatched", lease.runner_epoch

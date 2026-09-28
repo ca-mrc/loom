@@ -422,6 +422,9 @@ same-application dispatches and delete exact observed predecessor identities, bu
 cannot dispatch a superseded CREATE or adopt unrelated/sibling resources. A
 matching resource without recorded dispatch is not silently adopted. Downgrade
 refuses to erase cloud history.
+Retirement retains one deletion intent across superseding operations (for example,
+suspend followed by destroy). A successor may dispatch a still-prepared retirement
+once under its current lease; a previously dispatched retirement only reconciles.
 
 `ApplicationCloudProvider` uses the existing native Nebius SDK with retries disabled
 and deterministic idempotency keys. Reads validate frozen names, project/group,

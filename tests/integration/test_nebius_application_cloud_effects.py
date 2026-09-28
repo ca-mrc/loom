@@ -96,6 +96,8 @@ async def test_stop_reconciles_and_retires_only_own_recorded_history(application
     stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="stop",
         action="suspend", expected_generation=1)
     current = await registry.claim(stopped.operation_id)
+    with pytest.raises(ManagementError, match="application_cloud_forbidden"):
+        await registry.dispatch_cloud_effect(current, "account", operation_id=first.operation_id)
     with pytest.raises(ManagementError, match="invalid_application_cloud_operation"):
         await registry.prepare_cloud_create(current, "account", binding(plan))
     with pytest.raises(ManagementError, match="application_cloud_dependency_missing"):
@@ -123,6 +125,8 @@ async def test_same_owner_sibling_cannot_observe_or_retire_cloud_history(applica
         await registry.prepare_cloud_delete(other, first.operation_id, "account")
     with pytest.raises(ManagementError, match="application_cloud_forbidden"):
         await registry.observe_cloud_effect(other, first.operation_id, "account", resource_id="first-account")
+    with pytest.raises(ManagementError, match="application_cloud_forbidden"):
+        await registry.dispatch_cloud_effect(other, "account", operation_id=first.operation_id)
 
 
 @pytest.mark.parametrize("key,change", [

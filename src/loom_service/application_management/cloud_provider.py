@@ -105,7 +105,7 @@ class ApplicationCloudProvider:
         current = await self.api.get_resource(effect.kind, effect.resource_id)
         if current is not None:
             self._identity(effect, current)
-        if not await self.registry.dispatch_cloud_effect(lease, effect.key):
+        if not await self.registry.dispatch_cloud_effect(lease, effect.key, operation_id=effect.operation_id):
             return await self.reconcile(lease, effect.operation_id, effect.key)
         if current is not None:
             await self.api.delete_resource(effect.kind, effect.resource_id, idempotency_key=self._key(effect))
