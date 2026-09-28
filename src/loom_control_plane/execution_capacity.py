@@ -21,6 +21,7 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
 )
 from loom.pipeline.keys import canonical_digest
+from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.execution_placement import (
     PlacementUnavailableError,
     cold_sample,
@@ -231,6 +232,9 @@ async def create_execution_capacity_observation(
     target = await session.get(ServiceExecutionTarget, target_id)
     if target is None or target.provider != "nebius":
         raise ValueError("capacity observation target must be a Nebius execution target")
+    group = await resolve_capacity_targets(session, target_id)
+    if group.owner.id != target_id:
+        raise ValueError("capacity observations must be published by the capacity owner")
     payload: dict[str, Any] = {
         "schema_version": "loom.execution-capacity-observation.v1",
         "target_id": target_id,
@@ -256,6 +260,8 @@ async def create_execution_capacity_observation(
         ) != len(parsed.nodes):
             raise ValueError("placement contains duplicate node identities")
         payload["placement"] = parsed.model_dump(mode="json")
+    if not group.matches_observation_scope(payload):
+        raise ValueError("capacity observation target scope does not match authoritative membership")
     digest = canonical_digest(payload)
     existing = (
         await session.execute(
@@ -352,6 +358,9 @@ async def upsert_execution_capacity_policy(
     target = await session.get(ServiceExecutionTarget, target_id)
     if target is None or target.provider != "nebius":
         raise ValueError("capacity policy target must be a Nebius execution target")
+    group = await resolve_capacity_targets(session, target_id)
+    if group.owner.id != target_id:
+        raise ValueError("capacity policy must be configured on the capacity owner")
     row = await session.get(ExecutionCapacityPolicy, target_id, with_for_update=True)
     if row is None:
         row = ExecutionCapacityPolicy(
@@ -401,6 +410,7 @@ async def native_allocatable_sample(
     sample = cold_sample(current)
     if sample is not None:
         return sample
+    target_id = (await resolve_capacity_targets(session, target_id)).owner.id
     # Reuse the same compatible immutable history for actual admission and
     # waiting eligibility. A zero-node observation need not carry a new sample.
     history = (await session.scalars(select(ExecutionCapacityObservation.observation_json)
@@ -551,12 +561,17 @@ async def admit_capacity_resources(
         raise ExecutionProvisioningBlockedError("execution_capacity_target_not_active")
     if target.health_status != "healthy":
         raise ExecutionProvisioningBlockedError("execution_capacity_target_unhealthy")
-    policy = await session.get(ExecutionCapacityPolicy, target.id, with_for_update=True)
+    group = await resolve_capacity_targets(session, target.id)
+    if group.owner.desired_state != "active":
+        raise ExecutionProvisioningBlockedError("execution_capacity_owner_not_active")
+    policy = await session.get(ExecutionCapacityPolicy, group.owner.id, with_for_update=True)
     if policy is None or not policy.enabled:
         raise ExecutionProvisioningBlockedError("execution_capacity_policy_unavailable")
-    observation = await _latest_observation(session, target.id)
+    observation = await _latest_observation(session, group.owner.id)
     if observation is None:
         raise ExecutionProvisioningBlockedError("execution_capacity_observation_unavailable")
+    if not group.matches_observation_scope(observation.observation_json):
+        raise ExecutionProvisioningBlockedError("execution_capacity_target_scope_unavailable")
     if observation.observed_at > current_time + timedelta(seconds=60):
         raise ExecutionProvisioningBlockedError("execution_capacity_observation_from_future")
     if current_time > observation.observed_at + timedelta(
@@ -602,14 +617,14 @@ async def admit_capacity_resources(
         claiming_target=target, claiming_resources=resources,
     )
 
-    def native_demands(target_id: str, *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
+    def native_demands(target_ids: frozenset[str], *, include_waits: bool = True) -> list[tuple[str, ResourceTotals]]:
         return [
-            *((row.demand_id, row.resources) for row in native_active if row.target_id == target_id),
+            *((row.demand_id, row.resources) for row in native_active if row.target_id in target_ids),
             *((f"task-image-wait:{row.materialization_id}:{row.lease_epoch}", wait_resources(row))
-              for row in waiting if include_waits and row.target_id == target_id),
+              for row in waiting if include_waits and row.target_id in target_ids),
         ]
 
-    same_target = [row for row in authorizations if row.target_id == target.id]
+    same_target = [row for row in authorizations if row.target_id in group.target_ids]
     generations = {
         lease_key: generation
         for lease_key, generation in (
@@ -629,18 +644,18 @@ async def admit_capacity_resources(
         if f"{row.lease_id}:{generations[row.lease_id]}" not in observed_leases
     ]
     recent_native = [row for row in native_active
-                     if row.target_id == target.id and row.demand_id not in observed_leases]
+                     if row.target_id in group.target_ids and row.demand_id not in observed_leases]
     recent_creates = await session.scalar(
         select(func.count(ExecutionProvisioningAuthorization.id)).where(
-            ExecutionProvisioningAuthorization.target_id == target.id,
+            ExecutionProvisioningAuthorization.target_id.in_(group.target_ids),
             ExecutionProvisioningAuthorization.authorized_at >= current_time - timedelta(minutes=1),
         )
     )
     recent_creates = int(recent_creates or 0) + sum(
-        row.target_id == target.id and row.reserved_at >= current_time - timedelta(minutes=1)
+        row.target_id in group.target_ids and row.reserved_at >= current_time - timedelta(minutes=1)
         for row in native
     )
-    waiting_here = sum(row.target_id == target.id for row in waiting)
+    waiting_here = sum(row.target_id in group.target_ids for row in waiting)
     if not already_reserved and int(recent_creates or 0) + waiting_here >= policy.max_create_per_minute:
         raise ExecutionProvisioningBlockedError("execution_capacity_create_rate_exceeded", 30)
     recent_pending = sum(
@@ -685,8 +700,8 @@ async def admit_capacity_resources(
         ]
 
     try:
-        sample = await native_allocatable_sample(session, target.id, placement)
-        actual_demands = [*demands(same_target), *native_demands(target.id, include_waits=False)]
+        sample = await native_allocatable_sample(session, group.owner.id, placement)
+        actual_demands = [*demands(same_target), *native_demands(group.target_ids, include_waits=False)]
         prior = plan_placement(placement, actual_demands, sample=sample)
         actual_projected = plan_placement(
             placement, [*actual_demands, (demand_id, resources)], sample=sample,
@@ -695,7 +710,7 @@ async def admit_capacity_resources(
             placement,
             [
                 *demands(same_target),
-                *native_demands(target.id),
+                *native_demands(group.target_ids),
                 (
                     demand_id,
                     ResourceTotals(
@@ -761,7 +776,7 @@ async def admit_capacity_resources(
                 select(ServiceExecutionTarget.id)
                 .where(
                     ServiceExecutionTarget.provider == "nebius",
-                    ServiceExecutionTarget.id != target.id,
+                    ServiceExecutionTarget.id.not_in(group.target_ids),
                 )
                 .order_by(ServiceExecutionTarget.id)
             )
@@ -781,11 +796,16 @@ async def admit_capacity_resources(
     all_node_ids = {node.uid for node in placement.nodes}
     all_provider_ids = {node.provider_id for node in placement.nodes}
     seen_groups = {placement.node_group.id}
+    seen_owners = {group.owner.id}
     for other_target in other_targets:
-        other_observation = await _latest_observation(session, other_target)
-        has_active = (any(row.target_id == other_target for row in authorizations)
-                      or any(row.target_id == other_target for row in native_active)
-                      or any(row.target_id == other_target for row in waiting))
+        other_group = await resolve_capacity_targets(session, other_target)
+        if other_group.owner.id in seen_owners:
+            continue
+        seen_owners.add(other_group.owner.id)
+        other_observation = await _latest_observation(session, other_group.owner.id)
+        has_active = (any(row.target_id in other_group.target_ids for row in authorizations)
+                      or any(row.target_id in other_group.target_ids for row in native_active)
+                      or any(row.target_id in other_group.target_ids for row in waiting))
         if other_observation is None and not has_active:
             continue
         if other_observation is None:
@@ -813,7 +833,9 @@ async def admit_capacity_resources(
         }
         if not shared:
             continue
-        other_policy = await session.get(ExecutionCapacityPolicy, other_target)
+        if not other_group.matches_observation_scope(other_observation.observation_json):
+            raise ExecutionProvisioningBlockedError("execution_capacity_shared_target_scope_unavailable")
+        other_policy = await session.get(ExecutionCapacityPolicy, other_group.owner.id)
         if (
             other_policy is None
             or other_observation.observed_at > current_time + timedelta(seconds=60)
@@ -836,9 +858,9 @@ async def admit_capacity_resources(
         try:
             other_plan = plan_placement(
                 other,
-                [*demands([row for row in authorizations if row.target_id == other_target]),
-                 *native_demands(other_target)],
-                sample=await native_allocatable_sample(session, other_target, other),
+                [*demands([row for row in authorizations if row.target_id in other_group.target_ids]),
+                 *native_demands(other_group.target_ids)],
+                sample=await native_allocatable_sample(session, other_group.owner.id, other),
             )
         except PlacementUnavailableError as exc:
             raise ExecutionProvisioningBlockedError(
@@ -897,8 +919,9 @@ async def fetch_execution_capacity_status(
     )
     rows: list[dict[str, object]] = []
     for target in targets:
-        policy = await session.get(ExecutionCapacityPolicy, target.id)
-        observation = await _latest_observation(session, target.id)
+        group = await resolve_capacity_targets(session, target.id)
+        policy = await session.get(ExecutionCapacityPolicy, group.owner.id)
+        observation = await _latest_observation(session, group.owner.id)
         authorization_counts: dict[str, int] = {
             str(state): int(count)
             for state, count in (
@@ -946,6 +969,7 @@ async def fetch_execution_capacity_status(
         observation_is_fresh = (
             fresh_until is not None
             and observation is not None
+            and group.matches_observation_scope(observation.observation_json)
             and observation.observed_at <= current_time + timedelta(seconds=60)
             and current_time <= fresh_until
         )
@@ -954,6 +978,8 @@ async def fetch_execution_capacity_status(
             blockers.append("execution_capacity_policy_unavailable")
         if target.desired_state != "active":
             blockers.append("execution_capacity_target_not_active")
+        if group.owner.id != target.id and group.owner.desired_state != "active":
+            blockers.append("execution_capacity_owner_not_active")
         if target.health_status != "healthy":
             blockers.append("execution_capacity_target_unhealthy")
         if observation is None:
@@ -961,6 +987,8 @@ async def fetch_execution_capacity_status(
         elif not observation_is_fresh:
             blockers.append("execution_capacity_observation_stale")
         if observation is not None:
+            if not group.matches_observation_scope(observation.observation_json):
+                blockers.append("execution_capacity_target_scope_unavailable")
             if not observation.observation_json.get("placement"):
                 blockers.append("execution_capacity_placement_unavailable")
             if observation.provider_capacity_state == "insufficient":
@@ -1021,6 +1049,8 @@ async def fetch_execution_capacity_status(
         rows.append(
             {
                 "target_id": target.id,
+                **({"capacity_owner_target_id": group.owner.id,
+                    "target_scope": group.scope.model_dump(mode="json")} if group.scope is not None else {}),
                 "pool_id": target.logical_pool_id,
                 "environment": target.environment,
                 "region": target.region,

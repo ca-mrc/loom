@@ -6,6 +6,7 @@ or cleanup authority and never infers sharing from overlapping observations.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,6 +52,11 @@ class CapacityTargetGroup:
             namespace_name=ExecutionTargetV1.model_validate(self.owner.spec_json).namespace_name,
             target_ids=sorted(self.target_ids),
         )
+
+    def matches_observation_scope(self, payload: dict[str, Any]) -> bool:
+        placement = payload.get("placement") or {}
+        scope = self.scope
+        return bool(placement.get("target_scope") == (scope.model_dump(mode="json") if scope else None))
 
 
 async def resolve_capacity_targets(session: AsyncSession, target_id: str) -> CapacityTargetGroup:

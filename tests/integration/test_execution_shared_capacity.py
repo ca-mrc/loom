@@ -180,7 +180,8 @@ async def test_registration_invalidates_old_observation_for_whole_family(native_
     now = datetime.now(UTC)
     async with sessions() as session, session.begin():
         owner, alias, _ = await _family(session, now, publish=False)
-        with pytest.raises(ExecutionProvisioningBlockedError, match="target_scope"):
+    with pytest.raises(ExecutionProvisioningBlockedError, match="target_scope"):
+        async with sessions() as session, session.begin():
             if guest:
                 await _guest_reserve(session, alias, now + timedelta(seconds=2))
             else:
@@ -196,7 +197,8 @@ async def test_guest_requires_own_health_and_owner_authority(native_setup, damag
         if damage == "owner_disabled":
             (await session.get(ServiceExecutionTarget, owner[1].target_id)).desired_state = "disabled"
         elif damage == "guest_unhealthy":
-            (await session.get(ServiceExecutionTarget, guest[1].target_id)).health_status = "unknown"
+            await set_execution_target_health(session, target_id=guest[1].target_id,
+                desired_state="active", observed_state="degraded", health_status="unhealthy", observed_at=now)
         elif damage == "owner_policy_disabled":
             (await session.get(ExecutionCapacityPolicy, owner[1].target_id)).enabled = False
         reason = {"owner_disabled": "owner_not_active", "guest_unhealthy": "target_unhealthy",
