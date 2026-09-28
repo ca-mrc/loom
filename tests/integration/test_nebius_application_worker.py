@@ -261,3 +261,73 @@ async def test_loop_database_outage_cancels_active_work_and_recovers_health(appl
         async with admin.connect() as connection:
             await connection.execute(text(f'ALTER DATABASE {database} ALLOW_CONNECTIONS true'))
         await admin.dispose()
+
+
+@pytest.mark.parametrize('method', ['runnable_operations', 'renew'])
+async def test_stalled_database_poll_or_renewal_cancels_work_before_lease_expiry(applications, monkeypatch, method):
+    from loom_service.application_management.worker import ApplicationWorker
+
+    registry, _, (alice, _), prepare, _, _ = applications
+    operation = await registry.create(principal=alice, idempotency_key='stalled', **prepare())
+    coordinator = HoldingCoordinator(registry)
+    worker = ApplicationWorker(registry, coordinator, lease_seconds=3)
+    original = getattr(registry, method)
+    stalled, recovered = asyncio.Event(), asyncio.Event()
+
+    async def stall_after_start(*args, **kwargs):
+        if coordinator.entered.is_set() and not recovered.is_set():
+            stalled.set()
+            await asyncio.Event().wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(registry, method, stall_after_start)
+    task = asyncio.create_task(worker.run(poll_seconds=1))
+    try:
+        await asyncio.wait_for(coordinator.entered.wait(), 2)
+        assert worker.healthy
+        await asyncio.wait_for(stalled.wait(), 2)
+        # A DB stall must stop the real lifecycle before its three-second lease
+        # can expire, without relying on the 45-second provider-attempt timeout.
+        await asyncio.wait_for(coordinator.cancelled.wait(), 1)
+        assert not worker.healthy and not task.done()
+        result = await registry.get_operation(operation.operation_id, principal=alice)
+        assert result.phase == 'running' and result.error_code is None
+        recovered.set()
+        async with asyncio.timeout(3):
+            while not worker.healthy:
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize('method,phase', [('claim', 'pending'), ('frozen_plan', 'running'),
+    ('finish_attempt', 'running')])
+async def test_stalled_database_attempt_boundaries_preserve_uncertain_state(applications, monkeypatch, method, phase):
+    from loom_service.application_management.worker import ApplicationWorker
+
+    registry, factory, (alice, _), prepare, _, _ = applications
+    operation = await registry.create(principal=alice, idempotency_key='stalled-attempt', **prepare())
+    coordinator = HoldingCoordinator(registry, ProviderBlockedError('test_conflict'))
+    worker = ApplicationWorker(registry, coordinator, lease_seconds=3)
+    stalled = asyncio.Event()
+
+    async def stall(*args, **kwargs):
+        stalled.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(registry, method, stall)
+    task = asyncio.create_task(worker.reconcile_once(operation.operation_id))
+    try:
+        await asyncio.wait_for(stalled.wait(), 2)
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, f'{method} must have a bounded database wait'
+        error = task.exception()
+        assert isinstance(error, OSError) and not isinstance(error, TimeoutError)
+        result = await registry.get_operation(operation.operation_id, principal=alice)
+        assert result.phase == phase and result.error_code is None
+        async with factory() as session:
+            assert (await session.get(NebiusApplicationReservation, operation.application_id)).cpu_millis > 0
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
