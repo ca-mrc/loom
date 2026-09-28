@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,21 +256,37 @@ func startDocker(environment []string) error {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- daemon.Wait() }()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		checkCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		check := exec.CommandContext(checkCtx, guestPayload+"/docker/docker", "--host=unix:///var/run/docker.sock", "info")
-		check.Env = environment
-		err := check.Run()
-		cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return waitDocker(ctx, exited, "/var/run/docker.sock")
+}
+
+func waitDocker(ctx context.Context, exited <-chan error, socket string) error {
+	// Repeatedly starting the CLI under TCG competes with daemon boot for the
+	// guest's CPU. Probe its private API directly under the same startup budget.
+	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://docker/_ping", nil)
+		if err != nil {
+			return err
+		}
+		response, err := client.Do(request)
 		if err == nil {
-			return nil
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return nil
+			}
 		}
 		select {
+		case <-ctx.Done():
+			return fmt.Errorf("guest Docker daemon did not become ready: %w", ctx.Err())
 		case err := <-exited:
 			return fmt.Errorf("guest Docker daemon exited: %v", err)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	return errors.New("guest Docker daemon did not become ready")
 }
