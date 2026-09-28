@@ -5,7 +5,11 @@ import asyncio
 import copy
 import os
 import ssl
+import subprocess
+import tempfile
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -21,7 +25,13 @@ from tests.integration.conftest import (
 from tests.integration.conftest import (
     migration_template_postgres_url as migration_template_postgres_url,
 )
-from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_execution_actuator_k3s import (
+    _build_image,
+    _docker_platform,
+    _import_image,
+    _load_client,
+    _start_k3s,
+)
 from tests.integration.test_nebius_application_credentials import setup as credential_setup
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
 from tests.integration.test_nebius_application_database import access_postgres as access_postgres
@@ -40,36 +50,62 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires explicitly disposable Kubernetes")
 
 
-@pytest.mark.timeout(180)
-async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(applications, platform_inputs):
+@pytest.mark.timeout(240)
+@pytest.mark.parametrize("running", [False, True])
+async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(applications, platform_inputs, running):
     from loom_service.application_management.runtime import ApplicationRuntimeProvider
 
-    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
-    container = await asyncio.to_thread(_start_k3s)
+    tag = "docker.io/library/loom-application-retirement:" + uuid4().hex
+    container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
     try:
         _, core, _ = await asyncio.to_thread(_load_client, container)
+        image = None
+        if running:
+            platform = await asyncio.to_thread(_docker_platform)
+            await asyncio.to_thread(_build_image, tag=tag,
+                dockerfile="tests/fixtures/execution_runtime_fixture/Dockerfile", platform=platform)
+            with tempfile.TemporaryDirectory(prefix="loom-application-retirement-") as temporary:
+                image = await asyncio.to_thread(_import_image, container, tag=tag, root=Path(temporary), ordinal=1)
+        registry, authority, lease, alice, rendered = await runtime_inputs(
+            applications, platform_inputs, fixture_image=image)
         config = core.api_client.configuration
         trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
         trust.load_cert_chain(config.cert_file, config.key_file)
-        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False) as http:
+        requests = []
+
+        async def record_request(request):
+            requests.append((request.method, request.url.path))
+
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
+                                     event_hooks={"request": [record_request]}) as http:
             kubernetes = ApplicationKubernetesProvider(registry, http)
             runtime = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
             await registry.renew(lease, lease_seconds=180)
             await kubernetes.create(lease, "namespace", named(rendered, "Namespace", "loom-dev-alice"))
+            await kubernetes.create(lease, "account", named(rendered, "ServiceAccount", "loom-platform"))
             deadline = time.monotonic() + 30
-            while True:
+            while not running:
                 try:
                     await runtime.close_admission(lease)
                     break
                 except ProviderWaitingError:
                     assert time.monotonic() < deadline
                     await asyncio.sleep(0.1)
-            # The closed quota prevents pulling/running application images while
-            # real controllers exercise generation and ResourceVersion changes.
+            # Default images never run. The second case starts harmless imported
+            # fixtures before the gate, proving real controller-owned Pod exit.
             for docs in rendered.files.values():
                 for doc in docs:
                     if doc["kind"] in {"Deployment", "Service", "Ingress"}:
                         await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
+            if running:
+                deadline = time.monotonic() + 60
+                while True:
+                    pods = (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items
+                    if len(pods) == 2 and all(pod.status.phase == "Running" for pod in pods):
+                        assert all(pod.metadata.owner_references[0].kind == "ReplicaSet" for pod in pods)
+                        break
+                    assert time.monotonic() < deadline, "fixture Deployment Pods did not start"
+                    await asyncio.sleep(0.2)
             stopped = await registry.transition(lease.application_id, principal=alice,
                 idempotency_key="stop", action="suspend", expected_generation=1)
             current = await registry.claim(stopped.operation_id)
@@ -90,9 +126,12 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
             assert (await asyncio.to_thread(core.list_namespaced_service, "loom-dev-alice")).items == []
             assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
             assert (await http.get("/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/ingresses/loom-web")).status_code == 404
+            assert not any(method == "DELETE" and "/pods/" in path for method, path in requests)
             await runtime.stop_workloads(current)
     finally:
         await asyncio.to_thread(container.stop)
+        if running:
+            await asyncio.to_thread(subprocess.run, ["docker", "image", "rm", tag], capture_output=True, check=False)
 
 
 @pytest.mark.timeout(180)
