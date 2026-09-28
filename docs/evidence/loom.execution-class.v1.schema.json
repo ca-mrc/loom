@@ -1,11 +1,50 @@
 {
   "$defs": {
+    "GuestExecutionClassV1": {
+      "additionalProperties": false,
+      "description": "Guest-local capabilities, without authority over the trusted host.",
+      "properties": {
+        "runtime": {
+          "const": "qemu-tcg-v1",
+          "default": "qemu-tcg-v1",
+          "title": "Runtime",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "loom.guest-execution-class.v1",
+          "default": "loom.guest-execution-class.v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "supported_capabilities": {
+          "default": [
+            "isolated_kernel_settings",
+            "nested_docker",
+            "singularity_mounts"
+          ],
+          "items": {
+            "enum": [
+              "nested_docker",
+              "singularity_mounts",
+              "isolated_kernel_settings"
+            ],
+            "type": "string"
+          },
+          "title": "Supported Capabilities",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "title": "GuestExecutionClassV1",
+      "type": "object"
+    },
     "IsolationLevel": {
       "description": "Container isolation supplied by an execution class.",
       "enum": [
         "shared_kernel",
         "sandboxed_runtime",
-        "dedicated_ephemeral_node"
+        "dedicated_ephemeral_node",
+        "dedicated_guest_kernel"
       ],
       "title": "IsolationLevel",
       "type": "string"
@@ -44,6 +83,17 @@
       ],
       "title": "Gpu Vendor",
       "type": "string"
+    },
+    "guest_execution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GuestExecutionClassV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "isolation_level": {
       "$ref": "#/$defs/IsolationLevel"
