@@ -122,7 +122,7 @@ def test_retained_material_cannot_rotate_or_gain_extra_defaulted_keys(setup_requ
     assert not fresh.creates
 
 
-@pytest.mark.parametrize('phase', ['admission', 'permissions', 'network', 'database', 'retirement'])
+@pytest.mark.parametrize('phase', ['config', 'admission', 'permissions', 'network', 'database', 'retirement', 'migration'])
 def test_setup_phase_replays_exact_uids_without_recreating(setup_request, tmp_path, phase):
     from scripts.ops.nebius_application_setup import stage_application_setup
 
@@ -132,6 +132,27 @@ def test_setup_phase_replays_exact_uids_without_recreating(setup_request, tmp_pa
     observed = copy.deepcopy(api.resources)
     assert stage_application_setup(**args) == first
     assert api.resources == observed and len(api.creates) == len(observed)
+
+
+def test_management_migration_waits_for_recorded_job_and_retains_failure(setup_request, tmp_path):
+    from scripts.ops.nebius_application_setup import (
+        application_setup_ready,
+        stage_application_setup,
+    )
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    request, api = setup_request
+    args = dict(request=request, phase='migration', api=api, state_dir=tmp_path / 'migration')
+    stage_application_setup(**args)
+    assert application_setup_ready(**args) is False
+    job, = api.resources.values()
+    job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+    assert application_setup_ready(**args) is True
+    job['status'] = {'conditions': [{'type': 'Failed', 'status': 'True'}]}
+    with pytest.raises(ManagementStageError):
+        application_setup_ready(**args)
+    stage_application_setup(**args)
+    assert len(api.creates) == 1
 
 
 @pytest.mark.parametrize('failure', ['before', 'after'])

@@ -28,7 +28,7 @@ def render_setup(inputs):
 def test_fixed_sql_job_uses_shared_admin_route_and_only_setup_credentials(application_management_inputs):
     before = copy.deepcopy(application_management_inputs)
     phases = render_setup(application_management_inputs)
-    assert set(phases) == {'admission', 'permissions', 'network', 'database', 'retirement'}
+    assert set(phases) == {'config', 'admission', 'permissions', 'network', 'database', 'retirement', 'migration'}
     docs = phases['database']
     assert [doc['kind'] for doc in docs] == ['ConfigMap', 'Job']
     config, job = docs
@@ -77,6 +77,34 @@ def test_admission_can_be_qualified_before_bootstrap_grant(application_managemen
         if 'subjects' in doc:
             assert doc['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-application-provisioner',
                 'namespace': 'loom-nebius-management'}]
+
+
+def test_upgrade_stages_only_new_config_account_and_fixed_management_migration(application_management_inputs):
+    phases = render_setup(application_management_inputs)
+    config, account = phases['config']
+    assert config['kind'] == 'ConfigMap' and config['immutable'] is True
+    assert config['metadata']['name'].startswith('loom-management-applications-')
+    assert set(config['data']) == {'installation.json'}
+    installation = json.loads(config['data']['installation.json'])
+    assert installation['applications'] is not None and installation['provider_runtime'] is None
+    assert account['kind'] == 'ServiceAccount'
+    assert account['metadata']['name'] == 'loom-application-provisioner'
+    assert account['automountServiceAccountToken'] is False
+    job, = phases['migration']
+    assert job['metadata']['namespace'] == config['metadata']['namespace'] == 'loom-nebius-management'
+    assert job['metadata']['name'].startswith('loom-management-migrate-')
+    assert job['spec']['backoffLimit'] == 0 and 'ttlSecondsAfterFinished' not in job['spec']
+    pod = job['spec']['template']['spec']
+    container, = pod['containers']
+    assert container['command'] == ['python', '-m', 'loom.nebius_platform_bootstrap', 'management-database']
+    env = {row['name']: row for row in container['env']}
+    assert env['LOOM_DB_URL']['valueFrom']['secretKeyRef'] == {'name': 'loom-platform-db', 'key': 'admin-url'}
+    assert env['LOOM_DB_SERVICE_PASSWORD']['valueFrom']['secretKeyRef'] == {
+        'name': 'loom-platform-db', 'key': 'service-password'}
+    volumes = {row['name']: row for row in pod['volumes']}
+    assert set(volumes) == {'platform-config', 'db-ca'}
+    assert volumes['platform-config']['configMap']['name'] == 'loom-platform-config'
+    assert volumes['platform-config']['configMap']['items'] == [{'key': 'environment.json', 'path': 'environment.json'}]
 
 
 def test_management_sql_network_does_not_expand_personal_service_access(application_management_inputs):

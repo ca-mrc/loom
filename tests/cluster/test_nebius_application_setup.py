@@ -70,7 +70,7 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
             management.metadata.uid, core.read_namespace('kube-system').metadata.uid)
         request = ApplicationSetupRequest(deployment, candidate, profile, binding, shared.metadata.uid, ROOT, application_material)
         rbac = client.RbacAuthorizationV1Api(core.api_client)
-        for phase in ('admission', 'permissions', 'network', 'material', 'database'):
+        for phase in ('config', 'admission', 'permissions', 'network', 'material', 'database', 'migration'):
             with HTTPSApplicationSetupAPI(request=request, phase=phase, api_server=endpoint,
                                            ssl_context=trust) as api:
                 args = dict(request=request, phase=phase, api=api, state_dir=tmp_path / phase)
@@ -84,7 +84,7 @@ def test_application_setup_stages_fixed_resources_on_real_api(tmp_path, applicat
                     while not application_setup_ready(**args):
                         assert time.monotonic() < deadline, 'application admission did not become ready'
                         time.sleep(0.1)
-                elif phase == 'database':
+                elif phase in {'database', 'migration'}:
                     # No platform image, DB Secret, or eligible node exists.
                     # Defaulted/persisted Job/config alone cannot prove SQL ran.
                     assert application_setup_ready(**args) is False
