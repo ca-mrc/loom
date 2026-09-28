@@ -451,7 +451,7 @@ describe("BatchDetail run plan", () => {
     const user = userEvent.setup();
     renderBatchDetail();
 
-    expect(await screen.findByText("Delivery bundle")).toBeInTheDocument();
+    expect(await screen.findByText("Prepared delivery bundle")).toBeInTheDocument();
     expect(await screen.findByText("ready")).toBeInTheDocument();
     expect(await screen.findByText(/5003 trials/)).toBeInTheDocument();
     expect(

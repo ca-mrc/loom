@@ -318,6 +318,21 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.queryByText("debug_evidence")).not.toBeInTheDocument();
   });
 
+  it.each(["accounting/usage.json", "artifacts/result.json"])("distinguishes canonical and original bundle files: %s", async (relativePath) => {
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+      ...TRIAL_BODY,
+      artifacts: ["canonical", "files"].map((kind, index) => ({
+        key: `trials/team/${TRIAL_ID}/attempts/1/bundles/bundle-id/${kind}/${relativePath}`,
+        step_name: "trial_bundle", size: index ? 956 : 1122, download_url: "/download",
+      })),
+    });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>,
+      { route: `/trials/${TRIAL_ID}` });
+    for (const kind of ["canonical", "files"]) {
+      await screen.findByRole("button", { name: (name) => name.includes(`Download artifact ${kind}/${relativePath}`) });
+    }
+  });
+
   it("downloads artifacts through the authenticated service endpoint", async () => {
     const fetchMock = fetchSpy(
       { ok: true, body: { events: [], next_cursor: null } },

@@ -438,6 +438,8 @@ async def get_monitor_summary(
         provider_model_id=provider_model_id,
         state=None,
     )
+    if batch_id is not None:
+        batch_counts_stmt = batch_counts_stmt.where(Batch.id == batch_id)
     trial_counts_stmt = select(Trial.state, func.count()).select_from(Trial)
     trial_counts_stmt = apply_trial_monitor_filters(
         trial_counts_stmt,
