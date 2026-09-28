@@ -216,3 +216,51 @@ async def test_stop_recovers_lost_namespace_create_before_closing_admission(appl
         await provider.stop_workloads(current)
         assert [method for method, _, _ in api.mutations] == ["POST", "POST"]
         assert all(effect.phase == "observed" for effect in await registry.effect_history(current))
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_stop_before_first_namespace_dispatch_retires_without_sending_old_intent(
+    applications, platform_inputs, monkeypatch, prepared,
+):
+    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
+    api = KubernetesAPI()
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
+        kubernetes = ApplicationKubernetesProvider(registry, http)
+        provider = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
+        dispatch = registry.dispatch_effect
+
+        async def interrupt(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        if prepared:
+            monkeypatch.setattr(registry, "dispatch_effect", interrupt)
+            with pytest.raises(asyncio.CancelledError):
+                await kubernetes.create(lease, "namespace", named(rendered, "Namespace", NS))
+            monkeypatch.setattr(registry, "dispatch_effect", dispatch)
+        stopped = await registry.transition(lease.application_id, principal=alice,
+            idempotency_key="stop", action="suspend", expected_generation=1)
+        current = await registry.claim(stopped.operation_id)
+        with pytest.raises(ProviderWaitingError, match="application_pod_fence_pending"):
+            await provider.stop_workloads(current)
+        api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}
+        api.objects[PODS] = {"kind": "PodList", "metadata": {"resourceVersion": "1"}, "items": []}
+        await provider.stop_workloads(current)
+        assert len(api.mutations) == 2
+        assert all(body["metadata"]["annotations"]["loom.nebius/operation-id"] == str(current.operation_id)
+                   for _, _, body in api.mutations)
+        if prepared:
+            assert (await registry.effect_history(current))[0].phase == "prepared"
+
+
+async def test_early_stop_does_not_adopt_a_foreign_namespace(applications, platform_inputs):
+    registry, authority, lease, alice, _ = await runtime_inputs(applications, platform_inputs)
+    api = KubernetesAPI()
+    api.objects["/api/v1/namespaces/" + NS] = {"metadata": {"name": NS, "uid": "foreign", "resourceVersion": "1"}}
+    stopped = await registry.transition(lease.application_id, principal=alice,
+        idempotency_key="stop", action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
+        provider = ApplicationRuntimeProvider(registry, ApplicationKubernetesProvider(registry, http), authority=authority)
+        with pytest.raises(ProviderBlockedError):
+            await provider.stop_workloads(current)
+    assert api.mutations == []
