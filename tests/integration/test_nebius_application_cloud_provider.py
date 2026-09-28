@@ -174,6 +174,38 @@ async def test_uncertain_delete_only_reconciles_exact_retained_identity(applicat
     assert len(cloud.mutations) == 2
 
 
+@pytest.mark.parametrize("first_phase", ["prepared", "dispatched", "observed"])
+async def test_superseding_stop_keeps_one_retirement_intent(applications, first_phase):
+    worker, cloud, registry, _, alice, plan, first, lease = await provider(applications)
+    await worker.create(lease, "account", binding(plan))
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key="suspend",
+        action="suspend", expected_generation=1)
+    stopping = await registry.claim(stopped.operation_id)
+    deletion = await registry.prepare_cloud_delete(stopping, first.operation_id, "account")
+    if first_phase == "dispatched":
+        cloud.delay_delete = True
+        with pytest.raises(ProviderRetryError):
+            await worker.delete(stopping, first.operation_id, "account")
+    elif first_phase == "observed":
+        await worker.delete(stopping, first.operation_id, "account")
+    destroyed = await registry.transition(first.application_id, principal=alice, idempotency_key="destroy",
+        action="destroy_retained", expected_generation=2)
+    current = await registry.claim(destroyed.operation_id)
+    retained = await registry.prepare_cloud_delete(current, first.operation_id, "account")
+    assert (retained.operation_id, retained.key) == (deletion.operation_id, deletion.key)
+    if first_phase == "dispatched":
+        with pytest.raises(ProviderWaitingError):
+            await worker.delete(current, first.operation_id, "account")
+        assert len(cloud.mutations) == 2
+        cloud.resources.pop("resource-1")  # Original delayed DELETE finally arrives.
+    result = await worker.delete(current, first.operation_id, "account")
+    assert result.phase == "observed"
+    assert result.operation_id == stopped.operation_id
+    assert len(cloud.mutations) == 2
+    history = await registry.cloud_history(current)
+    assert len([effect for effect in history if effect.action == "delete"]) == 1
+
+
 async def test_matching_but_unrecorded_resource_is_not_adopted(applications):
     worker, cloud, registry, _, _, plan, _, lease = await provider(applications)
     planned = await registry.prepare_cloud_create(lease, "account", binding(plan))
