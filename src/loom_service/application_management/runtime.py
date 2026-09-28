@@ -636,3 +636,45 @@ class ApplicationRuntimeProvider:
             raise ProviderWaitingError("application_pod_fence_pending")
         await self.registry.frozen_plan(lease)
         return _observation(actual, recorded)
+
+    async def activation_effect(self, lease: ApplicationLease) -> ApplicationEffect | None:
+        """Return the current durable opening phase, never infer it from absence."""
+        await self._fence(lease)
+        plan = await self.registry.frozen_plan(lease)
+        if plan["registration"]["desired_state"] != "active":
+            raise ProviderBlockedError("application_activation_not_requested")
+        return next((item for item in reversed(await self._history(lease))
+            if item.operation_id == lease.operation_id and item.key.startswith("activate:unfence:")), None)
+
+    async def open_admission(self, lease: ApplicationLease) -> ApplicationEffect:
+        """Open the qualified generation with one exact journaled quota DELETE.
+
+        The concrete coordinator qualifies shared access/static resources before
+        calling. A prepared request retains its original UID/RV; uncertainty is
+        observation-only. Opening admission is not workload readiness.
+        """
+        effect = await self.activation_effect(lease)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        if effect is not None and effect.phase == "dispatched":
+            effect = await self.kubernetes.reconcile(lease, effect.operation_id, effect.key)
+        if effect is None or effect.phase in {"prepared", "rejected"}:
+            retired = await self.read_retired(lease)
+            if effect is not None and effect.phase == "prepared":
+                uid, version, key = effect.intent.uid, effect.intent.resource_version, effect.key
+                assert uid is not None and version is not None
+            else:
+                uid, version = retired.fence.uid, retired.fence.resource_version
+                key = "activate:unfence:" + hashlib.sha256(f"{uid}:{version}".encode()).hexdigest()
+            try:
+                effect = await self.kubernetes.delete(lease, key, api_version="v1", kind="ResourceQuota",
+                    namespace=namespace, name=_FENCE, uid=uid, resource_version=version)
+            except KubernetesEffectRejectedError:
+                raise ProviderWaitingError("application_activation_pending") from None
+        assert effect is not None and effect.phase == "observed"
+        if await self._read(lease, namespace) is not None:
+            # The journal proves the original UID retired, not that a foreign or
+            # successor quota with this fixed name may also be deleted.
+            raise ProviderBlockedError("application_pod_fence_conflict")
+        await self.registry.frozen_plan(lease)
+        return effect

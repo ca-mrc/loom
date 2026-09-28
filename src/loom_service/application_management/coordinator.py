@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from loom_service.application_management.credentials import ApplicationCredentialProvider
+from loom_service.application_management.effects import ApplicationEffect
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.proofs import (
@@ -36,6 +37,21 @@ class ApplicationLifecycleCoordinator:
             raise ProviderBlockedError("application_activation_started")
         return ApplicationStartupPreparation(workloads=workloads, database=database, objects=objects,
             prepared=prepared, access=access, network=network)
+
+    async def activate(self, lease: ApplicationLease) -> ApplicationEffect:
+        """Refresh concrete prerequisites and open admission, without readiness."""
+        opening = await self.runtime.activation_effect(lease)
+        if opening is None:
+            await self.prepare(lease)
+        else:
+            # Even a rejected opening permanently leaves preparation. A lost
+            # reply may already have opened admission; never close it again.
+            await self.credentials.retire_database(lease)
+            await self.credentials.retire_cloud(lease, self.object_verifier)
+        await self.credentials.qualify(lease)
+        await self.runtime.read_prepared(lease)
+        await self.runtime.read_shared_network(lease)
+        return await self.runtime.open_admission(lease)
 
     async def stop(self, lease: ApplicationLease) -> None:
         plan = await self.registry.frozen_plan(lease)
