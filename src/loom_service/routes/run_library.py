@@ -42,7 +42,11 @@ from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.delivery_export_errors import DeliveryExportError
 from loom_service.dependencies import SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
-from loom_service.effective_combination import stored_selection_error
+from loom_service.effective_combination import (
+    DerivedRoutes,
+    ProviderRouteError,
+    derive_stored_routes,
+)
 from loom_service.execution_admission import (
     admit_execution_backend,
     freeze_task_resource_requests,
@@ -2308,38 +2312,42 @@ async def _freeze_derived_runtime_profile(
 
 
 
-async def _enforce_submission_policy(
+async def _derive_new_batch_routes(
     session: Any,
     *,
     team_id: UUID,
     trial_config: dict[str, Any],
     combinations: list[dict[str, Any]],
-    provider_connection_id: UUID | None,
+    source_connection_id: UUID | None,
+    source_model_id: str | None,
+    replacement_connection_id: UUID | None,
+    replacement_model_id: str | None,
     action: str,
-) -> None:
+) -> DerivedRoutes:
     """A clone or artifact reuse creates new trials, so its stored
-    selections must pass current submission policy (#2054): supported
-    agents, and an explicit, authorized OpenAI-compatible Provider
-    Connection for every model-backed selection."""
-    selections = [(f"combinations[{i}]", c) for i, c in enumerate(combinations)] or [
-        ("trial_config", trial_config),
-    ]
-    for context, selection in selections:
-        err = stored_selection_error(selection, batch_connection_id=provider_connection_id)
-        if err is not None:
-            raise HTTPException(status_code=400, detail=f"cannot {action} {context}: {err}")
-    connection_ids = {provider_connection_id} | {
-        UUID(str(c["provider_connection_id"]))
-        for c in combinations
-        if c.get("provider_connection_id")
-    }
-    for connection_id in sorted((c for c in connection_ids if c is not None), key=str):
+    selections go through the fresh-submission contract (#2054), and every
+    model-backed selection runs on the caller's selected connection rather
+    than the source's. Only the resulting connections are authorized."""
+    try:
+        routes = derive_stored_routes(
+            trial_config=trial_config,
+            combinations=combinations,
+            source_connection_id=source_connection_id,
+            source_model_id=source_model_id,
+            replacement_connection_id=replacement_connection_id,
+            replacement_model_id=replacement_model_id,
+            replace_connections=True,
+        )
+    except ProviderRouteError as exc:
+        raise HTTPException(status_code=400, detail=f"cannot {action}: {exc}") from exc
+    for connection_id in sorted(routes.connection_ids, key=str):
         await validate_provider_connection(
             session,
             connection_id,
             team_id=team_id,
             agent_submission=True,
         )
+    return routes
 
 
 @router.post("/run-library/batches/{batch_id}/clone-config", status_code=201, response_model=wire.CloneRunLibraryBatchResult, response_model_exclude_unset=True)
@@ -2358,17 +2366,15 @@ async def clone_run_library_batch_config(
     if not _can_read_batch(ctx, source):
         raise HTTPException(status_code=403, detail="batch is not shared")
     _require_nebius_source_backend(source.backend, action="cloning its config")
-    if source.provider_connection_id is not None and payload.provider_connection_id is None:
-        raise HTTPException(
-            status_code=400,
-            detail=("choose a provider_connection_id owned by or shared with your team"),
-        )
-    await _enforce_submission_policy(
+    routes = await _derive_new_batch_routes(
         session,
         team_id=ctx.team_id,
         trial_config=source.trial_config,
         combinations=list(source.combinations or []),
-        provider_connection_id=payload.provider_connection_id,
+        source_connection_id=source.provider_connection_id,
+        source_model_id=source.provider_model_id,
+        replacement_connection_id=payload.provider_connection_id,
+        replacement_model_id=payload.provider_model_id,
         action="clone",
     )
 
@@ -2389,7 +2395,7 @@ async def clone_run_library_batch_config(
         task_filter=task_filter,
         team_id=ctx.team_id,
     )
-    combinations = list(source.combinations or [])
+    combinations = routes.combinations
     trial_config = apply_plan_mode(dict(source.trial_config), mode=payload.model_switch_plan_mode)
     runtime_profile = await _freeze_derived_runtime_profile(
         request, session, team_id=ctx.team_id, backend=source.backend,
@@ -2441,8 +2447,8 @@ async def clone_run_library_batch_config(
         backend=source.backend,
         combinations=combinations,
         required_worker_pools=required_worker_pools,
-        provider_connection_id=payload.provider_connection_id,
-        provider_model_id=payload.provider_model_id or source.provider_model_id,
+        provider_connection_id=routes.batch_connection_id,
+        provider_model_id=routes.batch_model_id,
         source_provenance=provenance,
         created_at=clone_created_at,
         lifecycle_authority_id=clone_lifecycle_authority_id,
@@ -2554,12 +2560,17 @@ async def reuse_run_library_artifact(
         )
     if typed_artifact is None and artifact is not None and _share_status(artifact) != "shared":
         raise HTTPException(status_code=403, detail=_blocked_reason(artifact))
-    await _enforce_submission_policy(
+    routes = await _derive_new_batch_routes(
         session,
         team_id=ctx.team_id,
         trial_config=dict(batch.trial_config) if batch is not None else dict(trial.config),
         combinations=list(batch.combinations or []) if batch is not None else [],
-        provider_connection_id=payload.provider_connection_id,
+        source_connection_id=(
+            batch.provider_connection_id if batch is not None else trial.provider_connection_id
+        ),
+        source_model_id=trial.provider_model_id or (batch.provider_model_id if batch else None),
+        replacement_connection_id=payload.provider_connection_id,
+        replacement_model_id=payload.provider_model_id,
         action="reuse",
     )
 
@@ -2609,7 +2620,7 @@ async def reuse_run_library_artifact(
         task_filter=task_filter,
         team_id=ctx.team_id,
     )
-    combinations = list(batch.combinations or []) if batch else []
+    combinations = routes.combinations
     backend = batch.backend if batch else "docker"
     runtime_profile = await _freeze_derived_runtime_profile(
         request, session, team_id=ctx.team_id, backend=backend,
@@ -2653,12 +2664,8 @@ async def reuse_run_library_artifact(
         service_execution_runtime_profile=runtime_profile,
         combinations=combinations,
         required_worker_pools=required_worker_pools,
-        provider_connection_id=payload.provider_connection_id,
-        provider_model_id=(
-            payload.provider_model_id
-            or trial.provider_model_id
-            or (batch.provider_model_id if batch else None)
-        ),
+        provider_connection_id=routes.batch_connection_id,
+        provider_model_id=routes.batch_model_id,
         source_provenance=provenance,
         created_at=derived_created_at,
         lifecycle_authority_id=derived_lifecycle_authority_id,

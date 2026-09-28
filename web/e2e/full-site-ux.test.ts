@@ -88,12 +88,11 @@ test("guide topic selection and New batch source controls fit narrow screens", a
   const add = page.getByRole("button", { name: "+ Add combination" });
   await expect(add).toBeVisible();
   await expect(add).toHaveCSS("white-space", "nowrap");
-  const hf = page.getByRole("tab", { name: "HuggingFace", exact: true });
-  await hf.click();
-  await expect(hf).toHaveCSS("white-space", "nowrap");
-  await expect(page.getByLabel("HuggingFace model", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Availability depends on model access/)).toBeVisible();
-  await page.getByRole("tab", { name: "Local server", exact: true }).click();
-  await expect(page.getByText(/No local servers are available/)).toBeVisible();
+  // #2054: hosted models come only from Provider Connections, even when an
+  // agent still advertises the retired HuggingFace/local-server sources.
+  await expect(page.getByRole("tab", { name: "HuggingFace", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Local server", exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Provider connection", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Model", { exact: true })).toBeDisabled();
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

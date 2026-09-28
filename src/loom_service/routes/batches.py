@@ -91,8 +91,8 @@ from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
 from loom_service.effective_combination import (
     ProviderRouteError,
+    derive_stored_routes,
     resolve_provider_route,
-    stored_selection_error,
 )
 from loom_service.execution_admission import (
     admit_execution_backend,
@@ -2722,23 +2722,24 @@ async def rerun_failed_batch(
         agent_task_pairs.append((task_id, agent_name))
     # #2054: a rerun submits new trials, so it follows current submission
     # policy. The parent batch and its accepted trials are left untouched.
-    rerun_combination_idxs = sorted({int(t["combination_idx"]) for t in targets})
-    for combination_idx in rerun_combination_idxs:
-        selection = combinations[combination_idx] if combinations else rerun_trial_config
-        err = stored_selection_error(selection, batch_connection_id=b.provider_connection_id)
-        if err is not None:
-            context = f"combinations[{combination_idx}]" if combinations else "trial_config"
-            reject_submission(
-                reason="invalid_input",
-                status_code=400,
-                detail=f"cannot rerun {context}: {err}",
-            )
-    rerun_connection_ids = {b.provider_connection_id} | {
-        UUID(str(combinations[idx]["provider_connection_id"]))
-        for idx in rerun_combination_idxs
-        if combinations and combinations[idx].get("provider_connection_id")
-    }
-    for conn_id in sorted((c for c in rerun_connection_ids if c is not None), key=str):
+    # Only the re-dispatched combinations are resolved; the rerun persists
+    # their resolved routes so what is stored matches what runs.
+    try:
+        rerun_routes = derive_stored_routes(
+            trial_config=rerun_trial_config,
+            combinations=combinations,
+            source_connection_id=b.provider_connection_id,
+            source_model_id=b.provider_model_id,
+            indices={int(t["combination_idx"]) for t in targets},
+        )
+    except ProviderRouteError as exc:
+        reject_submission(
+            reason="invalid_input",
+            status_code=400,
+            detail=f"cannot rerun: {exc}",
+        )
+    combinations = rerun_routes.combinations
+    for conn_id in sorted(rerun_routes.connection_ids, key=str):
         try:
             await validate_provider_connection(
                 s,
@@ -2789,8 +2790,13 @@ async def rerun_failed_batch(
             if service_execution_runtime_profile is not None
             else None
         ),
-        provider_connection_id=b.provider_connection_id,
-        provider_model_id=b.provider_model_id,
+        # Combinations carry their own resolved routes, so the parent's
+        # batch-level defaults stay as they were; a single selection's route
+        # lives in the batch-level fields.
+        provider_connection_id=(
+            b.provider_connection_id if combinations else rerun_routes.batch_connection_id
+        ),
+        provider_model_id=b.provider_model_id if combinations else rerun_routes.batch_model_id,
         rerun_of_batch_id=b.id,
         rerun_targets=targets,
         source_provenance=[

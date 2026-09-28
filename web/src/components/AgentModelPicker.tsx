@@ -7,8 +7,8 @@ import { Tabs } from "./Tabs";
 import {
   AgentModelPickerProps,
   CUSTOM_MODEL_KEY,
+  findAgent,
   firstSource,
-  LocalServerEntry,
   modelKey,
   ModelSource,
   preflightOptionSuffix,
@@ -41,11 +41,9 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     enterCustomMode,
     selectedConnection,
     filteredModels,
-    fallbackCatalogModels,
     customMode,
     leaveCustomMode,
     selectedCatalogModel,
-    localServers,
     specificAgentToggle,
     agents,
     defaultAgent,
@@ -143,9 +141,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
           title="Choose a discovered model, or use an ad-hoc model ID for the selected provider connection."
           className={SELECT_CLS}
           value={selectedModelKey}
-          disabled={
-            disabled || models.isPending || (connectionList.length > 0 && !value.providerConnectionId)
-          }
+          disabled={disabled || models.isPending || !value.providerConnectionId}
           onChange={(e) => {
             const v = e.target.value;
             if (v === CUSTOM_MODEL_KEY) {
@@ -160,7 +156,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
               return;
             }
             setCustomMode(false);
-            const selected = [...filteredModels, ...fallbackCatalogModels].find((m) => modelKey(m) === v);
+            const selected = filteredModels.find((m) => modelKey(m) === v);
             onChange({
               ...value,
               modelProvider: selected?.provider ?? "",
@@ -171,8 +167,10 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
             });
           }}
         >
-          <option value="">Choose a model…</option>
-          {(value.providerConnectionId ? filteredModels : fallbackCatalogModels).map((m) => (
+          <option value="">
+            {value.providerConnectionId ? "Choose a model…" : "Choose a provider connection first"}
+          </option>
+          {filteredModels.map((m) => (
             <option key={modelKey(m)} value={modelKey(m)}>
               {m.name}
               {preflightOptionSuffix(m)}
@@ -184,67 +182,28 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
       </label>
       {customMode ? (
         <div className="space-y-2">
-          {selectedConnection ? (
-            <label className="block">
-              <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                Ad-hoc model ID
-              </span>
-              <Input
-                value={value.modelName}
-                onChange={(e) =>
-                  onChange({
-                    ...value,
-                    modelProvider: providerNamespace(selectedConnection) || value.modelProvider,
-                    modelName: e.target.value,
-                    manualModel: true,
-                  })
-                }
-                placeholder="manual-vllm-checkpoint"
-                disabled={disabled}
-              />
-              <p className="mt-1 text-xs text-slate-500">
-                Use this for a model ID that exists on the selected provider connection but has not been
-                discovered or added to the catalog yet.
-              </p>
-            </label>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              <label className="block">
-                <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                  Provider
-                </span>
-                <Input
-                  value={value.modelProvider}
-                  onChange={(e) =>
-                    onChange({
-                      ...value,
-                      modelProvider: e.target.value,
-                      manualModel: false,
-                    })
-                  }
-                  placeholder="anthropic"
-                  disabled={disabled}
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-                  Model name
-                </span>
-                <Input
-                  value={value.modelName}
-                  onChange={(e) =>
-                    onChange({
-                      ...value,
-                      modelName: e.target.value,
-                      manualModel: false,
-                    })
-                  }
-                  placeholder="claude-opus-4-7"
-                  disabled={disabled}
-                />
-              </label>
-            </div>
-          )}
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
+              Ad-hoc model ID
+            </span>
+            <Input
+              value={value.modelName}
+              onChange={(e) =>
+                onChange({
+                  ...value,
+                  modelProvider: providerNamespace(selectedConnection) || value.modelProvider,
+                  modelName: e.target.value,
+                  manualModel: true,
+                })
+              }
+              placeholder="manual-vllm-checkpoint"
+              disabled={disabled}
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Use this for a model ID that exists on the selected provider connection but has not been
+              discovered or added to the catalog yet.
+            </p>
+          </label>
           <Button
             size="sm"
             variant="secondary"
@@ -296,115 +255,6 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     </div>
   );
 
-  const renderHFPanel = (): JSX.Element => (
-    <div className="space-y-3">
-      <label className="block">
-        <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-          HuggingFace model id
-        </span>
-        <Input
-          value={value.modelName}
-          onChange={(e) =>
-            onChange({
-              ...value,
-              modelProvider: "hf",
-              modelName: e.target.value,
-            })
-          }
-          aria-label="HuggingFace model"
-          placeholder="meta-llama/Llama-3-8B-Instruct"
-          disabled={disabled}
-        />
-        <p className="mt-1 text-xs text-slate-500">Enter a compatible HuggingFace model ID. Availability depends on model access, the selected agent, and this deployment’s execution support.</p>
-      </label>
-      <fieldset className="space-y-2">
-        <legend className="text-xs font-medium uppercase tracking-wider text-slate-500">Execution</legend>
-        <label className="flex items-start gap-2 text-sm text-slate-700">
-          <input
-            type="radio"
-            checked={(value.hfExecution ?? "local-vllm") === "local-vllm"}
-            onChange={() => onChange({ ...value, hfExecution: "local-vllm" })}
-            disabled={disabled}
-            className="mt-1"
-          />
-          <span>
-            <strong>Run via local vLLM</strong> (default) — requires a deployment with compatible GPU workers, vLLM, and access to the model. Ask your operator to confirm these prerequisites before submitting.
-          </span>
-        </label>
-        <label className="flex items-start gap-2 text-sm text-slate-700">
-          <input
-            type="radio"
-            checked={value.hfExecution === "inference-api"}
-            onChange={() => onChange({ ...value, hfExecution: "inference-api" })}
-            disabled={disabled}
-            className="mt-1"
-          />
-          <span>
-            <strong>HuggingFace Inference Endpoints</strong> — managed by HF, metered. Requires{" "}
-            <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">HF_TOKEN</code> in the
-            gateway.
-          </span>
-        </label>
-      </fieldset>
-    </div>
-  );
-
-  const renderLocalServerPanel = (): JSX.Element => {
-    const items = localServers.data?.items ?? [];
-    return (
-      <div className="space-y-3">
-        <label className="block">
-          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-            Local server
-          </span>
-          <select
-            className={SELECT_CLS}
-            value={value.localServer ?? ""}
-            disabled={disabled || localServers.isPending}
-            title="Choose an operator-configured local server target."
-            onChange={(e) => onChange({ ...value, localServer: e.target.value })}
-          >
-            <option value="">Choose a server…</option>
-            {items.map((s: LocalServerEntry) => (
-              <option key={s.name} value={s.name}>
-                {s.name}
-                {s.kind ? ` (${s.kind})` : ""}
-              </option>
-            ))}
-          </select>
-          {items.length === 0 && !localServers.isPending ? (
-            <p className="mt-1 text-xs text-amber-700">
-              No local servers are available in this deployment. Ask your operator to configure a server, or choose an available API provider connection.
-            </p>
-          ) : null}
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs font-medium uppercase tracking-wider text-slate-500">
-            Model id
-          </span>
-          <Input
-            aria-label="Local model"
-            value={value.modelName}
-            onChange={(e) =>
-              onChange({
-                ...value,
-                modelProvider: "local",
-                modelName: e.target.value,
-              })
-            }
-            placeholder="llama3"
-            disabled={disabled}
-          />
-          <p className="mt-1 text-xs text-slate-500">
-            Model identifier the local server recognises (the
-            <code className="mx-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">model</code>
-            field it expects in OpenAI-compatible requests).
-          </p>
-        </label>
-      </div>
-    );
-  };
-
   const selectSource = (source: ModelSource): void => {
     onChange({
       ...value,
@@ -418,16 +268,15 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
   };
 
   const renderSourcePanel = (source: ModelSource): JSX.Element | null => {
-    if (source === "api") return renderCatalogPanel();
-    if (source === "hf") return renderHFPanel();
-    if (source === "local-server") return renderLocalServerPanel();
-    return null;
+    // Hosted submissions use Provider Connections only; the HuggingFace and
+    // local-server sources are retired (#2054).
+    return source === "api" ? renderCatalogPanel() : null;
   };
 
   const showAgentSelector = !specificAgentToggle || value.useSpecificAgent === true;
 
   const chooseAgent = (agentName: string): void => {
-    const next = agents.data?.items.find((a) => a.name === agentName);
+    const next = findAgent(agents.data?.items, agentName);
     if (!next) {
       onChange({
         ...value,
@@ -509,7 +358,7 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
             aria-label="Agent"
             title="Choose which agent implementation will run each task."
             className={SELECT_CLS}
-            value={value.agentName}
+            value={selectedAgent?.name ?? value.agentName}
             disabled={disabled || agents.isPending}
             onChange={(e) => chooseAgent(e.target.value)}
           >
@@ -536,7 +385,14 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
           ) : null}
           {selectedAgent && !selectedAgentReady ? (
             <p className="mt-1 text-xs text-amber-700">
-              Setup needed: {agentReadinessMessage(selectedAgent)}
+              {selectedAgent.product_support === "deferred"
+                ? agentReadinessMessage(selectedAgent)
+                : `Setup needed: ${agentReadinessMessage(selectedAgent)}`}
+            </p>
+          ) : null}
+          {value.agentName && !selectedAgent && agents.data ? (
+            <p className="mt-1 text-xs text-amber-700">
+              Agent {value.agentName} is not in the catalog; choose an available agent.
             </p>
           ) : null}
         </label>

@@ -20,6 +20,7 @@ import {
   buildAgentModel,
   buildProviderOverride,
 } from "./agentModelSelection";
+import { findAgent } from "./agentModelPickerState";
 import { Button } from "./Button";
 import ErrorState from "./ErrorState";
 import {
@@ -60,7 +61,7 @@ export function SubmitTrialModal({
 
   const handleSubmit = async (): Promise<void> => {
     setError(null);
-    const selected = agents.data?.items.find((a) => a.name === value.agentName);
+    const selected = findAgent(agents.data?.items, value.agentName);
     if (!selected) {
       setError(new Error("Pick an agent before submitting."));
       return;
@@ -70,12 +71,13 @@ export function SubmitTrialModal({
       return;
     }
     const agentModel = buildAgentModel(value, selected.needs_model);
+    const agentLabel = selected.display_name ?? selected.name;
+    if (selected.needs_model && !value.providerConnectionId) {
+      setError(new Error(`${agentLabel} needs a model — choose a provider connection first.`));
+      return;
+    }
     if (selected.needs_model && agentModel === null) {
-      setError(
-        new Error(
-          `${selected.name} needs a model — choose one from the dropdown.`,
-        ),
-      );
+      setError(new Error(`${agentLabel} needs a model — choose one from the dropdown.`));
       return;
     }
     const providerOverride = buildProviderOverride(
