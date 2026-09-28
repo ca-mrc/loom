@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
+from loom.nebius_application_identity import MembershipRole
 from loom_service.application_management.leases import ApplicationLease
 
 Identifier = Annotated[StrictStr, Field(pattern=r"^[A-Za-z0-9._:-]{1,256}$")]
@@ -48,6 +49,28 @@ class ApplicationResourceObservation(_Proof):
     resource_version: Identifier
 
 
+class ApplicationSharedPolicyObservation(_Proof):
+    name: Identifier
+    uid: Identifier
+    resource_version: Identifier
+
+
+class ApplicationAccessReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    schema_revision: Annotated[StrictStr, Field(pattern=r"^[a-zA-Z0-9_]{1,64}$")]
+    database_role: Identifier
+    user_id: UUID
+    team_id: UUID
+    membership_role: MembershipRole
+    access_key_sha256: Digest
+
+
+class ApplicationPreparationReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    namespace: ApplicationResourceObservation
+    resources: tuple[ApplicationResourceObservation, ...]
+
+
 class ApplicationDeploymentRetirement(ApplicationResourceObservation):
     generation: Positive
     observed_generation: Positive
@@ -59,6 +82,20 @@ class ApplicationWorkloadRetirement(_Proof):
     fence: ApplicationResourceObservation
     pods_resource_version: Identifier
     deployments: tuple[ApplicationDeploymentRetirement, ...]
+
+
+class ApplicationDeploymentReadiness(ApplicationDeploymentRetirement):
+    replicas: Positive
+
+
+class ApplicationWorkloadReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    namespace: ApplicationResourceObservation
+    activation_key: Identifier
+    retired_quota_uid: Identifier
+    deployments: tuple[ApplicationDeploymentReadiness, ...]
+    services: tuple[ApplicationResourceObservation, ...]
+    ingress: ApplicationResourceObservation
 
 
 class ApplicationDatabaseRetirement(_Proof):
@@ -81,3 +118,21 @@ class ApplicationStopEvidence(_Proof):
     workloads: ApplicationWorkloadRetirement
     database: ApplicationDatabaseRetirement
     objects: ApplicationCloudRetirement
+
+
+class ApplicationStartupPreparation(_Proof):
+    workloads: ApplicationWorkloadRetirement
+    database: ApplicationDatabaseRetirement
+    objects: ApplicationCloudRetirement
+    prepared: ApplicationPreparationReadiness
+    access: ApplicationAccessReadiness
+    network: tuple[ApplicationSharedPolicyObservation, ...]
+
+
+class ApplicationReadyEvidence(_Proof):
+    workloads: ApplicationWorkloadReadiness
+    database: ApplicationDatabaseRetirement
+    objects: ApplicationCloudRetirement
+    prepared: ApplicationPreparationReadiness
+    access: ApplicationAccessReadiness
+    network: tuple[ApplicationSharedPolicyObservation, ...]

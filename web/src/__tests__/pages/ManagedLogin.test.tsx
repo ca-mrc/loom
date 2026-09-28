@@ -19,7 +19,11 @@ const owner = {
 
 afterEach(() => vi.restoreAllMocks());
 
-it.each([true, false])("managed route consumes one proof only after an explicit click (success=%s)", async (succeeds) => {
+it.each([
+  { succeeds: true, token }, { succeeds: false, token },
+  { succeeds: true, token: "loom_app_login_" + "b".repeat(32) + "_" + "a".repeat(43) },
+  { succeeds: false, token: "loom_app_login_" + "b".repeat(32) + "_" + "a".repeat(43) },
+])("managed route consumes one proof only after an explicit click (success=$succeeds)", async ({ succeeds, token }) => {
   let scrubbed = false;
   captureManagedLoginProof(
     { pathname: "/auth/managed", protocol: "https:", hash: "#token=" + token },

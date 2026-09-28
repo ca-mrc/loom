@@ -35,7 +35,7 @@ export default function ManagedLogin(): JSX.Element {
         <Link to="/settings">Open environment settings</Link>
       </>}
       {state === "failed" && <p role="alert">
-        Sign-in unavailable. Request a fresh browser login with <code>loom dev login ENVIRONMENT_ID --browser</code>.
+        Sign-in unavailable. Request a fresh browser login from your management server.
       </p>}
     </div>
   );

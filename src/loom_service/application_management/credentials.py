@@ -12,7 +12,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from cryptography import x509
@@ -21,6 +21,7 @@ from sqlalchemy.exc import ArgumentError
 
 from loom.nebius_application_contract import ApplicationRegistrationV1
 from loom.nebius_application_credentials import application_credential_names
+from loom.nebius_application_identity import MembershipRole
 from loom_service.application_management.cloud_effects import ApplicationStorageAccessV1
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.application_management.database import AsyncApplicationDatabaseAccess
@@ -33,6 +34,7 @@ from loom_service.application_management.material import (
 )
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.proofs import (
+    ApplicationAccessReadiness,
     ApplicationCloudRetirement,
     ApplicationDatabaseRetirement,
     ApplicationKeyRetirement,
@@ -111,6 +113,18 @@ class ApplicationCredentialProvider:
                 names["storage"]: dict(storage),
                 names["auth"]: {"secret-store-master-keys": self.shared.secret_store_master_keys}}
 
+    def _password(self, plan: dict[str, Any], row: ApplicationRegistrationV1,
+                  material: ApplicationMaterial, storage: dict[str, str]) -> str:
+        try:
+            db = material[application_credential_names(row)["db"]]
+            password = make_url(db["url"]).password
+            if (password is None or re.fullmatch(r"[A-Za-z0-9_-]{48,128}", password) is None
+                    or material != self._material(plan, row, password, storage)):
+                raise ValueError
+        except (ValueError, KeyError, ArgumentError):
+            raise ProviderBlockedError("application_credential_material_conflict") from None
+        return password
+
     async def prepare(self, lease: ApplicationLease) -> ApplicationMaterial:
         plan = await self.registry.frozen_plan(lease)
         row = self._qualify(plan)
@@ -120,14 +134,7 @@ class ApplicationCredentialProvider:
         storage = await self.cloud.key_material(lease)
         material = await self.registry.ensure_material(lease, lambda frozen: self._material(
             frozen, self._qualify(frozen), secrets.token_urlsafe(48), storage))
-        try:
-            db = material[application_credential_names(row)["db"]]
-            password = make_url(db["url"]).password
-            if (password is None or re.fullmatch(r"[A-Za-z0-9_-]{48,128}", password) is None
-                    or material != self._material(plan, row, password, storage)):
-                raise ValueError
-        except (ValueError, KeyError, ArgumentError):
-            raise ProviderBlockedError("application_credential_material_conflict") from None
+        password = self._password(plan, row, material, storage)
         await self.registry.frozen_plan(lease)
         role = await self.database.grant(lease, password, schema_revision=plan["release"]["schema_revision"])
         if role != f"lap_{row.incarnation.hex}_g{row.access_generation}":
@@ -141,6 +148,41 @@ class ApplicationCredentialProvider:
         if await self.identities.read(lease) != principal:
             raise ProviderRetryError("application_principal_changed")
         return material
+
+    async def qualify(self, lease: ApplicationLease) -> ApplicationAccessReadiness:
+        """Recheck provisioned access, without new IAM/material/Secret delivery."""
+        plan = await self.registry.frozen_plan(lease)
+        row = self._qualify(plan)
+        principal = await self.identities.read(lease)
+        material = await self.registry.load_material(lease)
+        history = {item.key: item for item in await self.cloud.registry.cloud_history(lease)
+                   if item.operation_id == lease.operation_id}
+        for key, kind, parent in (("account", "service_account", self.storage.project_id),
+                                  ("key", "access_key", self.storage.project_id),
+                                  ("data", "membership", self.storage.data_group_id),
+                                  ("source", "membership", self.storage.source_group_id)):
+            effect = history.get(key)
+            if (effect is None or effect.phase != "observed" or effect.action != "create" or effect.kind != kind
+                    or effect.expected["metadata"]["parent_id"] != parent):
+                raise ProviderBlockedError("application_access_not_prepared")
+            await self.cloud.reconcile(lease, lease.operation_id, key)
+        storage = await self.cloud.key_material(lease)
+        password = self._password(plan, row, material, storage)
+        if await self.identities.read(lease) != principal:
+            raise ProviderRetryError("application_principal_changed")
+        role = await self.database.qualify(lease, password, schema_revision=plan["release"]["schema_revision"])
+        if role != f"lap_{row.incarnation.hex}_g{row.access_generation}":
+            raise ProviderBlockedError("application_database_result_invalid")
+        if await self.identities.read(lease) != principal:
+            raise ProviderRetryError("application_principal_changed")
+        shared_role = await self.database.enroll(lease, principal, schema_revision=plan["release"]["schema_revision"])
+        if await self.identities.read(lease) != principal:
+            raise ProviderRetryError("application_principal_changed")
+        return ApplicationAccessReadiness(
+            identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id),
+            schema_revision=plan["release"]["schema_revision"], database_role=role,
+            user_id=principal.user_id, team_id=principal.team_id, membership_role=cast(MembershipRole, shared_role),
+            access_key_sha256=hashlib.sha256(storage["access-key"].encode()).hexdigest())
 
     async def deliver(self, lease: ApplicationLease, kubernetes: ApplicationKubernetesProvider) -> None:
         """Deliver only frozen generation bundles into an already-owned namespace.
