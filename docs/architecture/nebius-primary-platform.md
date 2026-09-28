@@ -1151,9 +1151,22 @@ is an unauthenticated, bounded, read-only database probe returning only componen
 status, with HTTP 503 on failure. When the optional provisioner is configured,
 its supervised-loop health is included; a dead or recovering worker is not ready.
 It reports no identities, credentials or database errors and has no dependency on
-child availability. Application-mode readiness
-and its authentication contract are unchanged. Hosted sessions retain secure
-host-only cookies and sibling-origin rejection in either mode.
+child availability. In application mode, the authenticated `/api/v1/health/ready`
+checks PostgreSQL with `SELECT 1` and each configured artifacts/trajectories bucket
+with `HEAD`, returning HTTP 503 if either dependency is unavailable. It works in
+all application environments; environment and namespace are descriptive metadata.
+It does not query staging mutation epochs or staging capacity evidence. The JSON
+response contains `status`, `postgres`, `object_store`, `environment`, `namespace`
+and `blockers`; the former staging-only `mutation_epoch`, `capacity`,
+`capacity_ready` and `resource_digest` fields have been removed. This probe does
+not certify storage capacity or admit destructive lifecycle operations; those
+retain their own policy checks. Hosted sessions retain secure host-only cookies
+and sibling-origin rejection in either mode.
+
+The Control Plane starts legacy Worker heartbeat recovery only when
+`LOOM_ENV=development` and `LOOM_LOCAL_EXECUTION=1`, matching its local Worker
+routes. Native execution reconciliation, retry-exhaustion handling, metrics and
+expired live-preview cleanup remain independent of that opt-in.
 
 The optional provider worker can provision an execution-disabled child and perform
 retained teardown. These are implementation capabilities, **not installed Nebius
