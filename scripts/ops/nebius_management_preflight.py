@@ -6,10 +6,13 @@ import argparse
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
@@ -215,9 +218,13 @@ def main() -> int:
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--namespace", default="loom-nebius-platform")
     parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument('--prepare-shared-inputs', action='store_true',
+        help='Retain required shared inputs privately on the gateway; no cluster changes')
     args = parser.parse_args()
     try:
         result = inspect(Kubectl(args.kubeconfig), namespace=args.namespace, expected_cluster_id=args.expected_cluster_id)
+        if args.prepare_shared_inputs:
+            result['shared_input_observation'] = prepare_shared_inputs(result, kubeconfig=args.kubeconfig)
     except Exception as exc:
         # Never print raw config, kubeconfig, API errors or exception messages.
         result = {"schema_version": "loom.nebius-management-preflight.v1", "status": "blocked",
@@ -226,6 +233,31 @@ def main() -> int:
     (args.evidence_dir / "management-preflight.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps({"status": result["status"]}))
     return 0 if result["status"] == "observed" else 1
+
+
+def prepare_shared_inputs(report: dict[str, Any], *, kubeconfig: Path) -> dict[str, str]:
+    """Run the fixed collector remotely so no Secret payload enters Actions."""
+    target = os.environ['LOOM_DEPLOY_SSH_TARGET']
+    if not re.fullmatch(r'[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+', target):
+        raise DeploymentError('invalid observation SSH target')
+    identities = {row['name']: row['uid'] for row in report['namespaces']}
+    arguments = ['python3', '-', '--kubeconfig', str(kubeconfig), '--cluster-id', report['cluster_id'],
+        '--namespace', report['namespace'], '--namespace-uid', identities[report['namespace']],
+        '--kube-system-uid', identities['kube-system']]
+    command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+        '-o', 'UserKnownHostsFile=' + os.environ['LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE'],
+        '-i', os.environ['LOOM_DEPLOY_SSH_KEY_FILE'], target, shlex.join(arguments)]
+    result = subprocess.run(command, input=Path(__file__).with_name('nebius_application_snapshot.py').read_text(),
+        capture_output=True, text=True, timeout=240, check=False)
+    if result.returncode or len(result.stdout) > 4096:
+        raise DeploymentError('shared input observation unavailable')
+    value = json.loads(result.stdout)
+    if (not isinstance(value, dict) or set(value) != {'status', 'observation_id', 'candidate_sha'}
+            or value['status'] != 'shared_inputs_observed' or str(UUID(value['observation_id'])) != value['observation_id']
+            or not UUID(value['observation_id']).int or not re.fullmatch(r'[0-9a-f]{40}', value['candidate_sha'])):
+        raise DeploymentError('shared input observation unqualified')
+    return {key: str(value[key]) for key in ('status', 'observation_id', 'candidate_sha')}
 
 
 if __name__ == "__main__":

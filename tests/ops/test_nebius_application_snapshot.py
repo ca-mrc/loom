@@ -17,7 +17,8 @@ def snapshot_objects():
                 'resourceVersion': '12'}, **fields}
     config = {'namespace': 'loom-nebius-platform', 'environment': 'development',
         'cluster_id': 'mk8scluster-test', 'kubernetes_api_server': 'https://api.example.test'}
-    encode = lambda value: base64.b64encode(value.encode()).decode()
+    def encode(value):
+        return base64.b64encode(value.encode()).decode()
     return {
         ('namespace', 'loom-nebius-platform'): obj('Namespace', 'loom-nebius-platform', '1' * 32),
         ('namespace', 'kube-system'): obj('Namespace', 'kube-system', '2' * 32),
@@ -114,3 +115,57 @@ def test_protected_inspection_snapshot_transport_never_requests_secret_payloads_
     assert 'python3 -' in command[-1] and 'kubectl' not in command[-1]
     assert 'capture_shared_inputs' in options['input']
     assert options['timeout'] <= 240
+
+
+def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(snapshot_objects, monkeypatch, tmp_path, capsys):
+    import subprocess
+
+    from scripts.ops import nebius_application_snapshot as snapshot
+
+    home = tmp_path / '.loom/nebius-management'
+    home.mkdir(parents=True, mode=0o700)
+    inputs = home / 'inputs.json'
+    inputs.write_text(json.dumps({'binding': {'kube_system_uid': '2' * 32}, 'deployment': {'installation': {
+        'foundation': {'platform_config_json': json.dumps({'namespace': 'loom-nebius-platform',
+            'cluster_id': 'mk8scluster-test'})}}}}))
+    inputs.chmod(0o600)
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr('sys.argv', ['snapshot', '--kubeconfig', str(tmp_path / 'kubeconfig'),
+        '--cluster-id', 'mk8scluster-test', '--namespace', 'loom-nebius-platform',
+        '--namespace-uid', '1' * 32, '--kube-system-uid', '2' * 32])
+    calls = []
+    def execute(command, **kwargs):
+        assert command[:5] == ['kubectl', '--kubeconfig', str(tmp_path / 'kubeconfig'), '--request-timeout=30s', 'get']
+        calls.append((command[5], command[6]))
+        return subprocess.CompletedProcess(command, 0, json.dumps(snapshot_objects[calls[-1]]).encode(), b'')
+    monkeypatch.setattr(snapshot.subprocess, 'run', execute)
+    assert snapshot.main() == 0
+    assert set(calls) == set(snapshot_objects)
+    assert json.loads(capsys.readouterr().out)['status'] == 'shared_inputs_observed'
+    inputs.chmod(0o644)
+    calls.clear()
+    assert snapshot.main() == 1 and not calls
+    assert capsys.readouterr().out.strip() == '{"status": "blocked"}'
+
+
+@pytest.mark.parametrize('extra', ['secret-value', 'unexpected-field'])
+def test_inspection_rejects_unqualified_remote_response(monkeypatch, tmp_path, extra):
+    import subprocess
+
+    from scripts.ops import nebius_management_preflight as preflight
+
+    for key in ('LOOM_DEPLOY_SSH_KEY_FILE', 'LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE'):
+        monkeypatch.setenv(key, str(tmp_path / 'private'))
+    monkeypatch.setenv('LOOM_DEPLOY_SSH_TARGET', 'codex@gateway.example.test')
+    response = {'status': 'shared_inputs_observed', 'observation_id': '11111111-1111-4111-8111-111111111111',
+        'candidate_sha': 'a' * 40}
+    if extra == 'secret-value':
+        response['observation_id'] = 'DO-NOT-EXPORT'
+    else:
+        response['secret'] = 'DO-NOT-EXPORT'
+    monkeypatch.setattr(preflight.subprocess, 'run', lambda *args, **kwargs:
+        subprocess.CompletedProcess([], 0, json.dumps(response), ''))
+    report = {'cluster_id': 'mk8scluster-test', 'namespace': 'loom-nebius-platform', 'namespaces': [
+        {'name': 'loom-nebius-platform', 'uid': '1' * 32}, {'name': 'kube-system', 'uid': '2' * 32}]}
+    with pytest.raises((preflight.DeploymentError, ValueError)):
+        preflight.prepare_shared_inputs(report, kubeconfig=Path('/private/kubeconfig'))

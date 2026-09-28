@@ -802,6 +802,20 @@ credentials. Do not place these private values in the public operation metadata.
 The new foundation pin qualifies the current shared deployment; do not rewrite
 the original input or historical ingress candidate pins after a publication.
 
+To prepare those shared inputs without an unprotected Kubernetes operation, run
+protected `nebius-rollout` with `operation=inspect` and
+`prepare_shared_inputs=true`. Its fixed gateway collector verifies the shared
+namespace and cluster identities against both inspection and the retained original
+management configuration. It reads only the shared ConfigMap, service Deployment,
+database/auth Secrets and namespace identities; it makes no Kubernetes writes.
+The gateway retains configuration/profile/public keyring, resource UIDs, database
+name, database CA and secret-store keys under the private
+`.loom/nebius-management/shared-input-observations/<observation_id>/` directory.
+It never copies the database administrator password, JWT keys or whole Secrets.
+Only the observation UUID and candidate commit return to Actions. Ordinary
+inspection does not collect credentials. Select that private snapshot when
+preparing upgrade inputs; the upgrade still checks it against live consumers.
+
 Prerequisites bind the management candidate ID, shared ConfigMap/service/database
 Secret/auth Secret UIDs, existing business bucket IDs and application IAM scope.
 Each application release ID selects a protected publication with matching source
