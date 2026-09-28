@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import os
 import ssl
@@ -37,6 +38,7 @@ from tests.integration.test_nebius_application_credentials import setup as crede
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
 from tests.integration.test_nebius_application_effects import started
 from tests.integration.test_nebius_application_material import management_key as management_key
+from tests.integration.test_nebius_application_material import material as fixture_material
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_application_runtime import runtime_inputs
 from tests.integration.test_nebius_environment_management import (
@@ -252,6 +254,16 @@ async def test_application_preparation_and_stop_use_only_protected_manager_autho
                 assert (await http.patch(first_path, json={'spec': {'ingress': [{}]}},
                     headers={'Content-Type': 'application/merge-patch+json'})).status_code == 403
                 assert (await http.delete(first_path)).status_code == 403
+                bundles = await registry.ensure_material(lease, fixture_material)
+                for index, (name, values) in enumerate(bundles.items()):
+                    await provider.kubernetes.create(lease, f'credential:{index}', {
+                        'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'immutable': True,
+                        'metadata': {'name': name, 'namespace': 'loom-dev-alice'},
+                        'data': {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}})
+                prepared = await provider.read_prepared(lease)
+                assert len(prepared.resources) == 8
+                assert set(bundles) <= {item.name for item in prepared.resources}
+                assert (await asyncio.to_thread(core.list_namespaced_pod, 'loom-dev-alice')).items == []
     finally:
         await asyncio.to_thread(container.stop)
 

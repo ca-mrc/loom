@@ -65,6 +65,12 @@ class ApplicationAccessReadiness(_Proof):
     access_key_sha256: Digest
 
 
+class ApplicationPreparationReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    namespace: ApplicationResourceObservation
+    resources: tuple[ApplicationResourceObservation, ...]
+
+
 class ApplicationDeploymentRetirement(ApplicationResourceObservation):
     generation: Positive
     observed_generation: Positive

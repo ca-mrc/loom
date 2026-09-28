@@ -607,6 +607,13 @@ NetworkPolicy only through an exact preconditioned patch. Live disappearance,
 replacement, spec drift or termination blocks preparation rather than recreating
 or repairing unqualified resources. Historical write success is not readiness.
 
+`read_prepared` separately observes current network resources and the three exact
+immutable generation Secrets, including complete data equality, without writes
+or material generation. The retained ServiceAccount keeps its original UID;
+network/Secret observations must belong to the current operation. It works before
+and after unfencing and returns only lease-bound resource references, so readiness
+can refresh evidence without closing admission or exposing credential contents.
+
 An exact current-operation quota DELETE intent is the durable activation boundary,
 including when that request is rejected or awaiting observation. Under the journal
 lock, this phase prevents new retirement, quota-closing and static/Secret writes

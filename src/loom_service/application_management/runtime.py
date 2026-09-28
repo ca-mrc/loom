@@ -20,6 +20,7 @@ from loom.nebius_application_authority import (
     application_pod_fence,
 )
 from loom.nebius_application_contract import ApplicationRegistrationV1
+from loom.nebius_application_credentials import application_credential_names
 from loom.nebius_application_network import application_shared_network_policies
 from loom_service.application_management.effects import ApplicationEffect
 from loom_service.application_management.kubernetes import (
@@ -29,6 +30,7 @@ from loom_service.application_management.kubernetes import (
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.application_management.proofs import (
     ApplicationDeploymentRetirement,
+    ApplicationPreparationReadiness,
     ApplicationResourceObservation,
     ApplicationRetirementIdentity,
     ApplicationSharedPolicyObservation,
@@ -143,8 +145,8 @@ class ApplicationRuntimeProvider:
     async def _static(self, lease: ApplicationLease, document: dict[str, Any]
                       ) -> tuple[dict[str, Any] | None, ApplicationEffect | None]:
         kind, name, namespace = document["kind"], document["metadata"]["name"], document["metadata"]["namespace"]
-        resource = {"ServiceAccount": "serviceaccounts", "NetworkPolicy": "networkpolicies"}[kind]
-        prefix = "/api/v1" if kind == "ServiceAccount" else "/apis/networking.k8s.io/v1"
+        resource = {"ServiceAccount": "serviceaccounts", "NetworkPolicy": "networkpolicies", "Secret": "secrets"}[kind]
+        prefix = "/apis/networking.k8s.io/v1" if kind == "NetworkPolicy" else "/api/v1"
         path = f"{prefix}/namespaces/{namespace}/{resource}/{name}"
         await self.kubernetes._namespace(lease, kind, namespace)
         actual = await self.kubernetes._read(path)
@@ -173,7 +175,7 @@ class ApplicationRuntimeProvider:
         original = await self._request_document(lease, recorded)
         expected = self.kubernetes._document(lease, recorded.key, original, operation_id=recorded.operation_id,
             deployment_generation=plan["registration"]["deployment_generation"])
-        if not _contains(actual, expected):
+        if not _contains(actual, expected) or (kind == "Secret" and actual.get("data") != expected["data"]):
             raise ProviderBlockedError("application_static_resource_conflict")
         await self.kubernetes._namespace(lease, kind, namespace)
         return actual, recorded
@@ -236,6 +238,46 @@ class ApplicationRuntimeProvider:
             observations.append(ApplicationSharedPolicyObservation(name=metadata["name"],
                 uid=actual["metadata"]["uid"], resource_version=actual["metadata"]["resourceVersion"]))
         return tuple(observations)
+
+    async def read_prepared(self, lease: ApplicationLease) -> ApplicationPreparationReadiness:
+        """Read actual journal-owned static resources and immutable material.
+
+        This is usable after unfencing, so it never closes admission, installs
+        resources or dispatches unfinished writes. Credentials are not returned.
+        """
+        await self._fence(lease)
+        plan = await self.registry.frozen_plan(lease)
+        row = ApplicationRegistrationV1.model_validate(plan["registration"])
+        if row.desired_state != "active":
+            raise ProviderBlockedError("application_preparation_not_requested")
+        namespace = await self.kubernetes._namespace(lease, "Secret", row.application_namespace)
+        assert namespace is not None
+        namespace_effect = next(item for item in await self.registry.effect_history(lease)
+            if item.intent.kind == "Namespace" and item.intent.action == "create"
+            and item.phase == "observed" and item.observed_uid == namespace["metadata"]["uid"])
+        resources = []
+        for docs in plan["files"].values():
+            for document in docs:
+                if document["kind"] not in {"ServiceAccount", "NetworkPolicy"}:
+                    continue
+                actual, effect = await self._static(lease, document)
+                if (actual is None or effect is None
+                        or (document["kind"] == "NetworkPolicy" and effect.operation_id != lease.operation_id)):
+                    raise ProviderBlockedError("application_static_resource_conflict")
+                resources.append(_observation(actual, effect))
+        material = await self.registry.load_material(lease)
+        for name in application_credential_names(row).values():
+            document = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+                "metadata": {"name": name, "namespace": row.application_namespace},
+                "data": {key: base64.b64encode(value.encode()).decode() for key, value in material[name].items()}}
+            actual, effect = await self._static(lease, document)
+            if actual is None or effect is None or effect.operation_id != lease.operation_id or effect.intent.action != "create":
+                raise ProviderBlockedError("application_static_resource_conflict")
+            resources.append(_observation(actual, effect))
+        await self.registry.frozen_plan(lease)
+        return ApplicationPreparationReadiness(
+            identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id),
+            namespace=_observation(namespace, namespace_effect), resources=tuple(resources))
 
     async def _resume_retirement(self, lease: ApplicationLease) -> None:
         # A prepared request owns the current operation's journal slot. Resume
