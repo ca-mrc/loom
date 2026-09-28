@@ -13,6 +13,7 @@ from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material
 from loom_service.environment_management.provider import ProviderBlockedError
+from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_provider import Cloud
 from tests.integration.test_nebius_application_database import access_postgres as access_postgres
 from tests.integration.test_nebius_application_database import database_access as database_access
@@ -38,7 +39,7 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     from loom_service.application_management.database import AsyncApplicationDatabaseAccess
 
     registry, factory, (alice, _), _, _, _ = applications
-    admin, manager_url, _, data_id = database_access
+    _, manager_url, _, data_id = database_access
     row, release, shared, foundation = inputs(platform_inputs, slug)
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
@@ -96,7 +97,7 @@ async def test_sql_failure_after_material_commit_retries_same_password_without_n
         applications, platform_inputs, database_access, shared_ca)
     admin = database_access[0]
     admin.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
-    with pytest.raises(ProviderBlockedError, match="application_database_public_privileges"):
+    with pytest.raises(ProviderBlockedError, match="application_database_role_identity"):
         await provider.prepare(lease)
     original = await registry.load_material(lease)
     assert admin.execute("SELECT count(*) FROM loom_application_access.generations").fetchone()[0] == 0
@@ -145,3 +146,56 @@ async def test_changed_shared_material_is_not_silently_delivered_on_replay(
     with pytest.raises(ProviderBlockedError):
         await provider.prepare(lease)
     assert len(cloud.mutations) == 4
+
+
+async def test_retirement_does_not_need_a_deliverable_ca_or_keyring(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, _, alice, row, lease, _, config = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    url = make_url(db_bundle(await provider.prepare(lease))["url"])
+    provider.shared = replace(config, ca_pem="retired-ca", secret_store_master_keys="retired-keyring")
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    await provider.retire_database(await registry.claim(stopped.operation_id))
+    with pytest.raises(psycopg.OperationalError):
+        login(database_access[1], url.username, url.password)
+
+
+async def test_invalid_persisted_url_is_bounded_before_any_access_grant(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, _, _, row, lease, cloud, config = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await registry.ensure_material(lease, lambda _: {
+        f"loom-application-db-{row.incarnation.hex}-g1": {"url": "invalid-private-url", "ca.crt": shared_ca},
+        f"loom-application-storage-{row.incarnation.hex}-g1": {"access-key": "x", "secret-key": "y"},
+        f"loom-application-auth-{row.incarnation.hex}-g1": {"secret-store-master-keys": config.secret_store_master_keys},
+    })
+    with pytest.raises(ProviderBlockedError, match="application_credential_material_conflict") as error:
+        await provider.prepare(lease)
+    assert "invalid-private-url" not in str(error.value)
+    assert len(cloud.mutations) == 2
+    assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone()[0] == 0
+
+
+async def test_lease_loss_during_key_read_prevents_credential_commit_and_grants(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, factory, _, _, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    read = cloud.access_key_secret
+
+    async def delayed(identity):
+        value = await read(identity)
+        await expire(factory, lease)
+        return value
+
+    cloud.access_key_secret = delayed
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await provider.prepare(lease)
+    current = await registry.claim(lease.operation_id)
+    with pytest.raises(ManagementError, match="application_material_missing"):
+        await registry.load_material(current)
+    assert len(cloud.mutations) == 2
+    assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone()[0] == 0
