@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -134,7 +135,11 @@ async def test_stop_retires_database_generation_without_breaking_sibling(
         stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
             idempotency_key="stop", expected_generation=1)
         current = await registry.claim(stopped.operation_id)
-        await provider.retire_database(current)
+        proof = await provider.retire_database(current)
+        assert proof.identity.operation_id == current.operation_id
+        assert proof.identity.application_id == row.application_id
+        assert proof.identity.data_environment_id == database_access[3]
+        assert proof.retired_through == 2
         with pytest.raises(psycopg.OperationalError):
             old_connection.execute("SELECT 1")
         assert other.execute("SELECT 1").fetchone() == (1,)
@@ -180,7 +185,12 @@ async def test_stop_retires_only_owned_cloud_generation_and_requires_data_plane_
             ("membership", "resource-4"), ("membership", "resource-3"),
             ("access_key", "resource-2"), ("service_account", "resource-1")]
         code = "InvalidAccessKeyId"
-        await provider.retire_cloud(current, verifier)
+        proof = await provider.retire_cloud(current, verifier)
+        assert proof.identity.operation_id == current.operation_id
+        assert len(proof.keys) == 1
+        assert proof.keys[0].operation_id == lease.operation_id
+        assert proof.keys[0].access_key_sha256 == hashlib.sha256(b'test-access-key').hexdigest()
+        assert 'test-access-key' not in proof.model_dump_json()
         destroyed = await registry.transition(row.application_id, principal=alice, action="destroy_retained",
             idempotency_key="destroy", expected_generation=2)
         latest = await registry.claim(destroyed.operation_id)

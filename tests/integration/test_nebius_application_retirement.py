@@ -71,6 +71,27 @@ async def test_stop_removes_only_personal_routes_and_preserves_deployment_templa
     assert len(api.mutations) == count
 
 
+async def test_stop_returns_exact_live_process_and_fence_evidence(retirement):
+    context, provider = retirement
+    registry, _, _, api, lease, _ = context
+    proof = await provider.stop_workloads(lease)
+    assert proof.identity.operation_id == lease.operation_id
+    assert proof.identity.application_id == lease.application_id
+    assert proof.identity.runner_epoch == lease.runner_epoch
+    assert proof.namespace.uid == api.objects['/api/v1/namespaces/' + NS]['metadata']['uid']
+    assert proof.fence.uid == api.objects[FENCE_PATH]['metadata']['uid']
+    assert proof.fence.operation_id == lease.operation_id
+    assert proof.pods_resource_version == '1'
+    assert {item.name for item in proof.deployments} == {'loom-service', 'loom-web'}
+    history = {(item.operation_id, item.key): item for item in await registry.effect_history(lease)}
+    for item in (proof.namespace, proof.fence, *proof.deployments):
+        assert history[item.operation_id, item.key].observed_uid == item.uid
+    for item in proof.deployments:
+        actual = api.objects[API if item.name == 'loom-service' else WEB]
+        assert item.resource_version == actual['metadata']['resourceVersion']
+        assert item.generation == item.observed_generation == 1
+
+
 @pytest.mark.parametrize("condition", ["running", "terminating", "foreign", "controller"])
 async def test_stop_waits_for_every_pod_and_deployment_controller(retirement, condition):
     context, provider = retirement
