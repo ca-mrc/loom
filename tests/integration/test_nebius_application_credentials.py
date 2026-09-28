@@ -45,7 +45,7 @@ def shared_ca():
     return generate_material(namespace="loom-dev", tls_secret_name="test-tls")["loom-platform-db"]["ca.crt"]
 
 
-async def setup(applications, platform_inputs, database_access, shared_ca, *, slug="alice", cloud=None):
+async def setup(applications, platform_inputs, database_access, shared_ca, *, slug="alice", cloud=None, authority=None):
     from loom_service.application_management.credentials import (
         ApplicationCredentialProvider,
         SharedApplicationCredentials,
@@ -58,7 +58,7 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
-    prepared = render_application(row, release, shared, foundation)
+    prepared = render_application(row, release, shared, foundation, authority=authority)
     operation = await registry.create(principal=alice, idempotency_key=slug,
                                       prepared=prepared, release=release, shared=shared)
     lease = await registry.claim(operation.operation_id)
