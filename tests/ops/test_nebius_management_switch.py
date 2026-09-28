@@ -252,6 +252,24 @@ def test_https_switch_rejects_foreign_snapshot_before_network(switch_inputs):
     assert not calls
 
 
+def test_switch_transport_does_not_expose_inherited_setup_writes(switch_inputs):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+    from scripts.ops.nebius_management_switch import HTTPSManagementSwitchAPI
+
+    request, _ = switch_inputs
+    calls = []
+    with HTTPSManagementSwitchAPI(request=request,
+            api_server=request.setup.deployment.installation.applications.runtime.kubernetes.endpoint,
+            ssl_context=ssl.create_default_context()) as api:
+        api.client.close()
+        api.client = httpx.Client(transport=httpx.MockTransport(lambda http: calls.append(http)))
+        document = copy.deepcopy(next(iter(api.documents.values())))
+        document['metadata'].setdefault('annotations', {})['loom.nebius/management-stage-operation'] = str(uuid4())
+        with pytest.raises(ManagementStageError):
+            api.create_resource(document)
+    assert not calls
+
+
 @pytest.mark.parametrize('remaining', ['none', 'generation', 'deployment', 'pod', 'replicaset', 'foreign', 'page'])
 def test_retirement_observes_controllers_and_terminating_pods(switch_inputs, remaining):
     from scripts.ops.nebius_management_stage import ManagementStageError
