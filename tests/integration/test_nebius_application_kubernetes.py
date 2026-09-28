@@ -120,6 +120,48 @@ async def test_namespace_create_is_single_winner_and_observed_replay_never_resen
     assert history == [observed]
 
 
+async def test_stop_reconciles_late_predecessor_create_without_resending(provider, applications):
+    client, api, registry, plan, lease = await namespace_ready(provider)
+    document = named(plan["prepared"], "Deployment", "loom-service")
+    api.lose_response = True
+    with pytest.raises(ProviderWaitingError):
+        await client.create(lease, "api", document)
+    alice = applications[2][0]
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    api.hide_objects = True
+    with pytest.raises(ProviderWaitingError):
+        await client.reconcile(current, lease.operation_id, "api", document=document)
+    assert len(api.mutations) == 2
+    api.hide_objects = False
+    damaged = copy.deepcopy(document)
+    damaged["spec"]["replicas"] = 9
+    with pytest.raises(ProviderBlockedError, match="application_kubernetes_request_conflict"):
+        await client.reconcile(current, lease.operation_id, "api", document=damaged)
+    result = await client.reconcile(current, lease.operation_id, "api", document=document)
+    assert result.operation_id == lease.operation_id and result.phase == "observed"
+    assert result.observed_uid == "uid-2"
+    assert len(api.mutations) == 2
+    assert (await registry.frozen_plan(current, operation_id=lease.operation_id))["registration"]["desired_state"] == "active"
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await client.reconcile(lease, lease.operation_id, "api", document=document)
+
+
+async def test_same_owner_sibling_cannot_load_or_observe_predecessor_effects(provider, applications):
+    client, _, registry, _, lease = await namespace_ready(provider)
+    _, _, (alice, _), prepare, _, _ = applications
+    sibling = await registry.create(principal=alice, idempotency_key="sibling", **prepare("alice-second", alice))
+    other = await registry.claim(sibling.operation_id)
+    with pytest.raises(ManagementError, match="application_history_forbidden"):
+        await registry.frozen_plan(other, operation_id=lease.operation_id)
+    with pytest.raises(ManagementError, match="application_history_forbidden"):
+        await registry.observe_effect(other, "namespace", uid="uid-1", resource_version="1",
+                                      operation_id=lease.operation_id)
+    with pytest.raises(ProviderBlockedError, match="application_kubernetes_effect_missing"):
+        await client.reconcile(other, lease.operation_id, "namespace")
+
+
 @pytest.mark.parametrize("replacement", [False, True])
 async def test_concurrent_readbacks_preserve_first_observation_and_reject_different_uid(provider, monkeypatch, replacement):
     client, api, registry, plan, lease = provider
