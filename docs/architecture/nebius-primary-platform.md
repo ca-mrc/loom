@@ -404,6 +404,45 @@ key or shared keyring. The trusted lifecycle provider still must qualify those
 values, protect delivery and coordinate revocation; no credential provisioning,
 runtime activation, readiness or capacity release is enabled by this journal.
 
+### Application object-store access
+
+`application_management.cloud_effects` journals fixed-purpose IAM effects separately
+from retained full-environment provisioning. A protected storage binding identifies
+the shared development data UUID, dedicated provisioning project and existing
+data/source access groups. Each application incarnation/access generation creates
+one service account and one EXPLICIT access key; it creates no buckets, policies,
+groups or backup credentials. Membership requests require the recorded key and
+successfully decrypted, committed application material. The trusted lifecycle
+caller qualifies the material and shared groups before using this interface.
+
+Migration0165 retains cloud request identities, dispatch epochs and observed IDs.
+One current-lease caller wins dispatch. Lost responses remain uncertain: absence
+does not authorize another CREATE or DELETE. Current authority can reconcile earlier
+same-application dispatches and delete exact observed predecessor identities, but
+cannot dispatch a superseded CREATE or adopt unrelated/sibling resources. A
+matching resource without recorded dispatch is not silently adopted. Downgrade
+refuses to erase cloud history.
+Retirement retains one deletion intent across superseding operations (for example,
+suspend followed by destroy). A successor may dispatch a still-prepared retirement
+once under its current lease; a previously dispatched retirement only reconciles.
+
+`ApplicationCloudProvider` uses the existing native Nebius SDK with transport and
+native renewable-credential authentication retries disabled, 30-second request and
+authentication deadlines, and deterministic idempotency keys. Reads validate frozen names, project/group,
+labels, specification and recorded resource ID. Observed resources that disappear
+or change identity fail closed. Delete addresses only an exact recorded ID, after
+ownership readback, and confirms absence without automatically resending uncertain
+requests. EXPLICIT access-key material is retrieved separately for encrypted
+persistence; no key values enter the cloud journal or public progress.
+
+This adapter supplies bounded IAM I/O, not an activated lifecycle worker. Protected
+installation still must qualify shared group/prefix grants and credential authority.
+Lifecycle orchestration must reconcile all outstanding grants, retire credentials
+and processes, verify object-store revocation propagation, and coordinate schema
+and readiness before releasing reservations. The API does not claim that a cloud
+resource snapshot fences a privileged external administrator, proves S3 access
+denial, or completes personal-environment acceptance.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

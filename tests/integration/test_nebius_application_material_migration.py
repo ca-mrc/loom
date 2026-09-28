@@ -33,6 +33,7 @@ def test_empty_material_downgrade_preserves_operations_and_orm_shape(application
 def test_material_history_cannot_be_downgraded_or_orphaned(application_database):
     from loom.db.schema import NebiusApplicationMaterial
 
+    migrate(application_database, "downgrade", "0164")
     ref = "loom://synthetic-material/" + str(uuid4())
     with application_database.begin() as connection:
         owner = operation(connection)
