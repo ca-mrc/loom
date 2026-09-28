@@ -41,6 +41,61 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(180)
+async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(applications, platform_inputs):
+    from loom_service.application_management.runtime import ApplicationRuntimeProvider
+
+    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
+    container = await asyncio.to_thread(_start_k3s)
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        config = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
+        trust.load_cert_chain(config.cert_file, config.key_file)
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False) as http:
+            kubernetes = ApplicationKubernetesProvider(registry, http)
+            runtime = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
+            await registry.renew(lease, lease_seconds=180)
+            await kubernetes.create(lease, "namespace", named(rendered, "Namespace", "loom-dev-alice"))
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    await runtime.close_admission(lease)
+                    break
+                except ProviderWaitingError:
+                    assert time.monotonic() < deadline
+                    await asyncio.sleep(0.1)
+            # The closed quota prevents pulling/running application images while
+            # real controllers exercise generation and ResourceVersion changes.
+            for docs in rendered.files.values():
+                for doc in docs:
+                    if doc["kind"] in {"Deployment", "Service", "Ingress"}:
+                        await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
+            stopped = await registry.transition(lease.application_id, principal=alice,
+                idempotency_key="stop", action="suspend", expected_generation=1)
+            current = await registry.claim(stopped.operation_id)
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    await runtime.stop_workloads(current)
+                    break
+                except ProviderWaitingError:
+                    assert time.monotonic() < deadline, "personal process retirement did not converge"
+                    await asyncio.sleep(0.1)
+            for name in ("loom-service", "loom-web"):
+                response = await http.get("/apis/apps/v1/namespaces/loom-dev-alice/deployments/" + name)
+                assert response.status_code == 200
+                deployment = response.json()
+                assert deployment["spec"]["replicas"] == 0
+                assert deployment["status"]["observedGeneration"] >= deployment["metadata"]["generation"]
+            assert (await asyncio.to_thread(core.list_namespaced_service, "loom-dev-alice")).items == []
+            assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
+            assert (await http.get("/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/ingresses/loom-web")).status_code == 404
+            await runtime.stop_workloads(current)
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
 async def test_journal_drives_real_create_preconditioned_patch_and_delete(applications):
     from kubernetes import client
 

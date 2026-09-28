@@ -6,7 +6,10 @@ qualifies actual Kubernetes admission before this internal adapter is used.
 """
 from __future__ import annotations
 
+import base64
+import copy
 import hashlib
+import re
 from typing import Any
 from uuid import UUID
 
@@ -27,6 +30,9 @@ from loom_service.environment_management.kubernetes_provider import _contains
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
 
 _FENCE = "loom-application-retired"
+_WORKLOAD_RESOURCES = {"Deployment": ("apps/v1", "deployments"),
+    "Ingress": ("networking.k8s.io/v1", "ingresses"), "Service": ("v1", "services")}
+_SCALE_KEY = re.compile(r"retire:scale:([0-9a-f]{32}):[0-9a-f]{64}\Z")
 
 
 class ApplicationRuntimeProvider:
@@ -58,6 +64,170 @@ class ApplicationRuntimeProvider:
         await self.kubernetes._namespace(lease, "ResourceQuota", namespace)
         await self.registry.frozen_plan(lease)
         return actual
+
+    async def _request_document(self, lease: ApplicationLease, effect: ApplicationEffect) -> dict[str, Any]:
+        """Recover exact request content from durable authority, never live fields."""
+        match = _SCALE_KEY.fullmatch(effect.key)
+        source = UUID(hex=match[1]) if match else effect.operation_id
+        plan = await self.registry.frozen_plan(lease, operation_id=source)
+        intent = effect.intent
+        if intent.kind == "Secret" and intent.action == "create":
+            material = await self.registry.load_material(lease, operation_id=source)
+            if intent.name in material:
+                return {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+                    "metadata": {"name": intent.name, "namespace": intent.namespace},
+                    "data": {key: base64.b64encode(value.encode()).decode()
+                             for key, value in material[intent.name].items()}}
+        for docs in plan["files"].values():
+            for document in docs:
+                if (document["kind"] == intent.kind and document["apiVersion"] == intent.api_version
+                        and document["metadata"]["name"] == intent.name
+                        and document["metadata"].get("namespace") == intent.namespace):
+                    result: dict[str, Any] = copy.deepcopy(document)
+                    if match:
+                        if intent.kind != "Deployment" or intent.action != "patch":
+                            break
+                        result["spec"]["replicas"] = 0
+                    return result
+        raise ProviderBlockedError("application_kubernetes_request_conflict")
+
+    async def _resume_retirement(self, lease: ApplicationLease) -> None:
+        # A prepared request owns the current operation's journal slot. Resume
+        # its original preconditions even if live resourceVersion has advanced.
+        for effect in await self.registry.effect_history(lease):
+            if effect.operation_id != lease.operation_id or effect.phase not in {"prepared", "dispatched"}:
+                continue
+            if effect.intent.kind == "ResourceQuota":
+                continue  # close_admission owns only the fixed quota protocol.
+            intent = effect.intent
+            if not effect.key.startswith("retire:"):
+                raise ProviderWaitingError("application_workloads_retirement_pending")
+            document = None if intent.action == "delete" else await self._request_document(lease, effect)
+            if effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key, document=document)
+                continue
+            assert intent.uid is not None and intent.resource_version is not None
+            try:
+                if intent.action == "delete" and intent.kind in {"Ingress", "Service"}:
+                    assert intent.namespace is not None
+                    await self.kubernetes.delete(lease, effect.key, api_version=intent.api_version,
+                        kind=intent.kind, namespace=intent.namespace, name=intent.name,
+                        uid=intent.uid, resource_version=intent.resource_version)
+                elif intent.action == "patch" and _SCALE_KEY.fullmatch(effect.key):
+                    assert document is not None
+                    await self.kubernetes.patch_spec(lease, effect.key, document,
+                        uid=intent.uid, resource_version=intent.resource_version)
+                else:
+                    raise ProviderBlockedError("application_kubernetes_request_conflict")
+            except KubernetesEffectRejectedError:
+                raise ProviderWaitingError("application_workloads_retirement_pending") from None
+
+    async def _workload(self, lease: ApplicationLease, kind: str, namespace: str, name: str
+                        ) -> tuple[dict[str, Any] | None, ApplicationEffect | None]:
+        version, resource = _WORKLOAD_RESOURCES[kind]
+        prefix = "/api/v1" if version == "v1" else "/apis/" + version
+        await self.kubernetes._namespace(lease, kind, namespace)
+        actual = await self.kubernetes._read(f"{prefix}/namespaces/{namespace}/{resource}/{name}")
+        await self.kubernetes._namespace(lease, kind, namespace)
+        history = [item for item in await self.registry.effect_history(lease)
+                   if item.intent.kind == kind and item.intent.namespace == namespace and item.intent.name == name]
+        if any(item.phase == "dispatched" or (item.phase == "prepared" and item.operation_id == lease.operation_id)
+               for item in history):
+            raise ProviderWaitingError("application_workloads_retirement_pending")
+        if actual is None:
+            deleted = {item.observed_uid for item in history
+                       if item.phase == "observed" and item.intent.action == "delete"}
+            if any(item.phase == "observed" and item.intent.action == "create"
+                   and item.observed_uid not in deleted for item in history):
+                raise ProviderBlockedError("application_workload_identity_conflict")
+            return None, None
+        metadata = actual["metadata"]
+        annotations = metadata.get("annotations", {})
+        recorded = next((item for item in reversed(history) if item.phase == "observed"
+            and item.intent.action in {"create", "patch"} and item.observed_uid == metadata["uid"]
+            and annotations.get("loom.nebius/operation-id") == str(item.operation_id)
+            and annotations.get("loom.nebius/effect-key") == item.key), None)
+        if recorded is None:
+            raise ProviderBlockedError("application_workload_identity_conflict")
+        document = await self._request_document(lease, recorded)
+        plan = await self.registry.frozen_plan(lease, operation_id=recorded.operation_id)
+        expected = self.kubernetes._document(lease, recorded.key, document, operation_id=recorded.operation_id,
+            deployment_generation=plan["registration"]["deployment_generation"])
+        if not _contains(actual, expected):
+            raise ProviderBlockedError("application_workload_identity_conflict")
+        if metadata.get("deletionTimestamp"):
+            raise ProviderWaitingError("application_workloads_retirement_pending")
+        return actual, recorded
+
+    async def stop_workloads(self, lease: ApplicationLease) -> None:
+        """Fence admission, retire routes and prove personal processes have exited.
+
+        Shared data, access revocation and reservation accounting are deliberately
+        not changed here. Even foreign/terminating Pods retain the retirement gate.
+        """
+        await self._fence(lease)  # Qualify installation before any resumed mutation.
+        await self._resume_retirement(lease)
+        await self.close_admission(lease)
+        for effect in await self.registry.effect_history(lease):
+            if effect.phase == "dispatched":
+                document = None if effect.intent.action == "delete" else await self._request_document(lease, effect)
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key, document=document)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        documents = [doc for docs in plan["files"].values() for doc in docs]
+        for kind in ("Ingress", "Service", "Deployment"):
+            for doc in documents:
+                if doc["kind"] != kind:
+                    continue
+                name = doc["metadata"]["name"]
+                actual, recorded = await self._workload(lease, kind, namespace, name)
+                if actual is None:
+                    continue
+                assert recorded is not None
+                metadata = actual["metadata"]
+                identity = ":".join((kind, name, metadata["uid"], metadata["resourceVersion"]))
+                suffix = hashlib.sha256(identity.encode()).hexdigest()
+                try:
+                    if kind != "Deployment":
+                        await self.kubernetes.delete(lease, "retire:route:" + suffix,
+                            api_version=doc["apiVersion"], kind=kind, namespace=namespace, name=name,
+                            uid=metadata["uid"], resource_version=metadata["resourceVersion"])
+                    elif actual["spec"]["replicas"] != 0:
+                        match = _SCALE_KEY.fullmatch(recorded.key)
+                        source = UUID(hex=match[1]) if match else recorded.operation_id
+                        document = await self._request_document(lease, recorded)
+                        document["spec"]["replicas"] = 0
+                        await self.kubernetes.patch_spec(lease, f"retire:scale:{source.hex}:{suffix}", document,
+                            uid=metadata["uid"], resource_version=metadata["resourceVersion"])
+                except KubernetesEffectRejectedError:
+                    raise ProviderWaitingError("application_workloads_retirement_pending") from None
+        # Separate live evidence from historical success. A controller can lag
+        # behind its accepted scale-down; terminating Pods still run processes.
+        for doc in documents:
+            if doc["kind"] not in _WORKLOAD_RESOURCES:
+                continue
+            actual, _ = await self._workload(lease, doc["kind"], namespace, doc["metadata"]["name"])
+            if actual is None:
+                continue
+            generation = actual["metadata"].get("generation")
+            observed = actual.get("status", {}).get("observedGeneration")
+            if (doc["kind"] != "Deployment" or actual["spec"]["replicas"] != 0
+                    or type(generation) is not int or type(observed) is not int or observed < generation):
+                raise ProviderWaitingError("application_workloads_retirement_pending")
+        await self.kubernetes._namespace(lease, "Pod", namespace)
+        response = await self.kubernetes._request("GET", f"/api/v1/namespaces/{namespace}/pods")
+        try:
+            pods = response.json()
+            if (response.status_code != 200 or not isinstance(pods, dict) or pods.get("kind") != "PodList"
+                    or not isinstance(pods.get("items"), list) or not isinstance(pods.get("metadata"), dict)
+                    or not pods["metadata"].get("resourceVersion") or pods["metadata"].get("continue")):
+                raise ValueError
+        except ValueError:
+            raise ProviderBlockedError("application_kubernetes_invalid_response") from None
+        if pods["items"]:
+            raise ProviderWaitingError("application_workloads_retirement_pending")
+        await self.kubernetes._namespace(lease, "Pod", namespace)
+        await self.registry.frozen_plan(lease)
 
     async def _identity(self, lease: ApplicationLease, actual: dict[str, Any],
                          history: list[ApplicationEffect]) -> ApplicationEffect:

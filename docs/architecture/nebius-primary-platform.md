@@ -191,9 +191,18 @@ recorded quota, and advances an older gate only with its observed UID and exact
 resourceVersion. Live generation/operation/identity and unscoped zero-Pod spec
 must match, and the quota controller's status must acknowledge `pods: 0` before
 the call returns. Definitive patch conflicts wait for new preconditions; uncertain
-writes are never resent. This adapter neither removes the gate nor proves that
-existing processes, object access or SQL connections have retired. It is not a
-completed lifecycle worker or capacity-release authority.
+writes are never resent. Closing admission alone does not prove process shutdown.
+
+`stop_workloads` then removes exact journal-owned personal Ingress/Service objects
+and scales retained Deployment names to zero. Requests use original frozen
+templates and UID/resourceVersion preconditions; a prepared request resumes its
+original preconditions before a new intent can be derived. Lost earlier replies
+are reconciled, never resent. Completion requires current Deployment controller
+observations and a live, unfiltered empty Pod list; terminating or foreign Pods
+keep retirement pending without being manually deleted. Replaced or drifted
+workload identities block cleanup. Shared resources are never cleanup targets.
+These methods do not remove the admission gate, retire object/SQL access, release
+capacity or constitute a completed lifecycle worker.
 
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
