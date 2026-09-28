@@ -7,11 +7,15 @@ import copy
 import httpx
 import pytest
 
+from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
+from loom_service.application_management.runtime import ApplicationRuntimeProvider
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_application_runtime import (
     FENCE_PATH,
     close_ready,
+    runtime_inputs,
 )
 from tests.integration.test_nebius_application_runtime import (
     runtime_context as runtime_context,
@@ -20,6 +24,7 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+from tests.unit.test_nebius_application_render import named
 
 NS = "loom-dev-alice"
 PODS = f"/api/v1/namespaces/{NS}/pods"
@@ -184,3 +189,25 @@ async def test_uncertain_old_create_is_reconciled_only_then_retired(runtime_cont
     assert len(api.mutations) == before + 1
     assert api.mutations[-1][0:2] == ("PATCH", API)
     assert api.objects[API]["spec"]["replicas"] == 0
+
+
+async def test_stop_recovers_lost_namespace_create_before_closing_admission(applications, platform_inputs):
+    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
+    api = KubernetesAPI()
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
+        kubernetes = ApplicationKubernetesProvider(registry, http)
+        provider = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
+        api.lose_response = True
+        with pytest.raises(ProviderWaitingError):
+            await kubernetes.create(lease, "namespace", named(rendered, "Namespace", NS))
+        api.lose_response = False
+        stopped = await registry.transition(lease.application_id, principal=alice,
+            idempotency_key="stop", action="suspend", expected_generation=1)
+        current = await registry.claim(stopped.operation_id)
+        with pytest.raises(ProviderWaitingError, match="application_pod_fence_pending"):
+            await provider.stop_workloads(current)
+        api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}
+        api.objects[PODS] = {"kind": "PodList", "metadata": {"resourceVersion": "1"}, "items": []}
+        await provider.stop_workloads(current)
+        assert [method for method, _, _ in api.mutations] == ["POST", "POST"]
+        assert all(effect.phase == "observed" for effect in await registry.effect_history(current))
