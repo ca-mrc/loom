@@ -495,3 +495,96 @@ async def test_shared_network_preflight_does_not_follow_foreign_authority(runtim
     with pytest.raises(ProviderBlockedError, match="application_runtime_authority_conflict"):
         await provider.read_shared_network(lease)
     assert len(api.mutations) == 1
+
+
+async def prepared_resources(context):
+    registry, client, _, _, lease, _ = context
+    provider = await close_ready(context)
+    await provider.prepare_static(lease)
+    bundles = await registry.ensure_material(lease, material)
+    for index, (name, values) in enumerate(bundles.items()):
+        await client.create(lease, f"credential:{index}", {
+            "apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",
+            "metadata": {"name": name, "namespace": "loom-dev-alice"},
+            "data": {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}})
+    return provider, bundles
+
+
+@pytest.mark.parametrize("activated", [False, True])
+async def test_prepared_readback_returns_exact_current_resource_references_without_writes(runtime_context, activated):
+    registry, _, _, api, lease, _ = runtime_context
+    provider, bundles = await prepared_resources(runtime_context)
+    if activated:
+        await registry.prepare_effect(lease, "activate:unfence:" + hashlib.sha256(b"fence-uid:9").hexdigest(),
+            dict(api_version="v1", kind="ResourceQuota", namespace="loom-dev-alice", name="loom-application-retired",
+                 action="delete", uid="fence-uid", resource_version="9", request_sha256="a" * 64))
+    writes = copy.deepcopy(api.mutations)
+    proof = await provider.read_prepared(lease)
+    assert proof.identity.operation_id == lease.operation_id
+    assert proof.namespace.uid == api.objects['/api/v1/namespaces/loom-dev-alice']['metadata']['uid']
+    assert {item.name for item in proof.resources} == {
+        "loom-platform", "default-deny", "public-api", "public-web", "application-egress", *bundles}
+    history = {(item.operation_id, item.key): item for item in await registry.effect_history(lease)}
+    for item in proof.resources:
+        assert item.uid == history[item.operation_id, item.key].observed_uid
+    assert api.mutations == writes
+    for values in bundles.values():
+        assert all(secret not in proof.model_dump_json() for secret in values.values())
+
+
+@pytest.mark.parametrize("damage", ["missing", "replaced", "extra-data", "changed-data", "mutable", "static-drift"])
+async def test_prepared_readback_never_recreates_or_repairs_damaged_material(runtime_context, damage):
+    _, _, _, api, lease, _ = runtime_context
+    provider, bundles = await prepared_resources(runtime_context)
+    path = "/api/v1/namespaces/loom-dev-alice/secrets/" + next(iter(bundles))
+    actual = api.objects[path]
+    if damage == "missing":
+        del api.objects[path]
+    elif damage == "replaced":
+        actual["metadata"]["uid"] = "foreign"
+    elif damage == "extra-data":
+        actual["data"]["injected"] = "eA=="
+    elif damage == "changed-data":
+        actual["data"][next(iter(actual["data"]))] = "eA=="
+    elif damage == "mutable":
+        actual["immutable"] = False
+    else:
+        api.objects[NETWORK_PATH + "public-api"]["spec"]["ingress"] = [{}]
+    writes = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError, match="application_static_resource_conflict"):
+        await provider.read_prepared(lease)
+    assert api.mutations == writes
+
+
+async def test_prepared_readback_requires_current_network_generation(runtime_context, platform_inputs):
+    _, _, _, api, _, _ = runtime_context
+    provider, _ = await prepared_resources(runtime_context)
+    current = await next_static_generation(runtime_context, platform_inputs)
+    writes = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError, match="application_static_resource_conflict"):
+        await provider.read_prepared(current)
+    assert api.mutations == writes
+
+
+async def test_prepared_readback_does_not_generate_missing_material(runtime_context):
+    registry, _, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    await provider.prepare_static(lease)
+    writes = copy.deepcopy(api.mutations)
+    with pytest.raises(ManagementError, match="application_material_missing"):
+        await provider.read_prepared(lease)
+    with pytest.raises(ManagementError, match="application_material_missing"):
+        await registry.load_material(lease)
+    assert api.mutations == writes
+
+
+async def test_prepared_readback_cannot_return_evidence_for_stopped_application(runtime_context):
+    registry, _, _, api, lease, alice = runtime_context
+    provider, _ = await prepared_resources(runtime_context)
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    writes = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError, match="application_preparation_not_requested"):
+        await provider.read_prepared(current)
+    assert api.mutations == writes
