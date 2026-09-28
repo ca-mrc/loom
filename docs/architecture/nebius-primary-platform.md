@@ -657,7 +657,9 @@ retained Deployment UIDs through exact preconditioned patches from zero replicas
 Routes may be recreated only after their recorded prior identities retired.
 Interrupted current requests recover the original frozen document and preconditions;
 uncertain requests never resend. A current template/image match and controller
-observed generation are required, with updated/ready/available/total replicas all
+observed generation are required. Execution fields must match after normalizing
+known Kubernetes API defaults; unplanned commands, lifecycle hooks, init containers
+or scheduling changes cannot qualify as the frozen version. Updated/ready/available/total replicas all
 equal to desired and no unavailable or terminating replicas. Only then is the
 Ingress created. `read_ready` repeats live checks without resource writes.
 

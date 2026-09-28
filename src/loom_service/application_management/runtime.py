@@ -48,6 +48,39 @@ _WORKLOAD_RESOURCES = {"Deployment": ("apps/v1", "deployments"),
 _SCALE_KEY = re.compile(r"retire:scale:([0-9a-f]{32}):[0-9a-f]{64}\Z")
 
 
+def _defaulted_execution_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Normalize API defaults of the fixed application template, not arbitrary additions.
+
+    Metadata/status remain extensible, but command, lifecycle, mounts, scheduling
+    and all other execution fields must come from the frozen PodSpec. In particular
+    never strip a default-named field whose live value differs from its default.
+    """
+    spec = copy.deepcopy(spec)
+    for key, value in {"dnsPolicy": "ClusterFirst", "restartPolicy": "Always",
+                       "schedulerName": "default-scheduler", "terminationGracePeriodSeconds": 30}.items():
+        spec.setdefault(key, value)
+    if "serviceAccountName" in spec:
+        spec.setdefault("serviceAccount", spec["serviceAccountName"])
+    for container in spec["containers"]:
+        container.setdefault("terminationMessagePath", "/dev/termination-log")
+        container.setdefault("terminationMessagePolicy", "File")
+        for port in container.get("ports", []):
+            port.setdefault("protocol", "TCP")
+        for name in ("readinessProbe", "livenessProbe", "startupProbe"):
+            if name not in container:
+                continue
+            probe = container[name]
+            for key, value in {"timeoutSeconds": 1, "periodSeconds": 10,
+                               "successThreshold": 1, "failureThreshold": 3}.items():
+                probe.setdefault(key, value)
+            if "httpGet" in probe:
+                probe["httpGet"].setdefault("scheme", "HTTP")
+    for volume in spec.get("volumes", []):
+        if "secret" in volume:
+            volume["secret"].setdefault("defaultMode", 420)
+    return spec
+
+
 def _observation(actual: dict[str, Any], recorded: ApplicationEffect) -> ApplicationResourceObservation:
     metadata = actual["metadata"]
     return ApplicationResourceObservation(operation_id=recorded.operation_id, key=recorded.key,
@@ -344,6 +377,11 @@ class ApplicationRuntimeProvider:
         expected = self.kubernetes._document(lease, recorded.key, document, operation_id=recorded.operation_id,
             deployment_generation=plan["registration"]["deployment_generation"])
         if not _contains(actual, expected):
+            raise ProviderBlockedError("application_workload_identity_conflict")
+        if kind == "Deployment" and not _contains(
+            _defaulted_execution_spec(actual["spec"]["template"]["spec"]),
+            _defaulted_execution_spec(expected["spec"]["template"]["spec"]), exact=True,
+        ):
             raise ProviderBlockedError("application_workload_identity_conflict")
         if metadata.get("deletionTimestamp"):
             raise ProviderWaitingError("application_workloads_retirement_pending")
