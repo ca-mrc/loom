@@ -30,6 +30,7 @@ def resolve_timeout_native_artifacts(
     )
     runtime_file = next(x for x in verifier if x.archive_path == "verifier/runtime-result.json")
     prefix = runtime_file.source_key.removesuffix("result.json")
+    assert trial.result is not None  # The verifier resolver validated this outcome.
     runtime = trial.result["runtime_result"]
     resolved: dict[str, bytes] = {}
 
