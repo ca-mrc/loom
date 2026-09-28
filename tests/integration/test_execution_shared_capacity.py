@@ -55,8 +55,7 @@ from tests.unit.test_guest_execution_materialization import _compile, _guest_inp
 native_setup = _native_setup
 
 
-async def _family(session, now, *, publish=True, **placement_args):
-    pair = await _seed_ready_trial(session, now=now)
+async def _register_guest(session, pair, now):
     alias = _alias(pair[1])
     await persist_execution_catalog(session, execution_class=nebius_guest_execution_class(), targets=(alias,))
     await set_execution_target_health(session, target_id=alias.target_id, desired_state="active",
@@ -72,12 +71,19 @@ async def _family(session, now, *, publish=True, **placement_args):
     guest_id = uuid4()
     session.add(Trial(id=guest_id, team_id=owner_trial.team_id, task_id=owner_trial.task_id,
         config=owner_trial.config, requires_caps=owner_trial.requires_caps, state="queued", attempt_count=0))
-    group = await resolve_capacity_targets(session, alias.target_id)
+    await session.flush()
+    return guest_id, alias
+
+
+async def _family(session, now, *, publish=True, **placement_args):
+    pair = await _seed_ready_trial(session, now=now)
+    guest = await _register_guest(session, pair, now)
+    group = await resolve_capacity_targets(session, pair[1].target_id)
     placement = placement_fixture(target_id=pair[1].target_id, **placement_args)
     placement["target_scope"] = group.scope.model_dump(mode="json")
     if publish:
         await _record(session, pair[1].target_id, now + timedelta(seconds=1), placement)
-    return pair, (guest_id, alias), placement
+    return pair, guest, placement
 
 
 async def _guest_reserve(session, pair, now):
@@ -251,3 +257,84 @@ async def test_guest_status_and_resource_allocation_resolve_owner_without_rebind
         assert rows[guest[1].target_id]["capacity_owner_target_id"] == owner[1].target_id
         assert rows[guest[1].target_id]["target_scope"] == placement["target_scope"]
         assert rows[guest[1].target_id]["observation"]["id"] == rows[owner[1].target_id]["observation"]["id"]
+
+
+async def test_collector_policy_endpoint_returns_current_family_only_for_owner(native_setup, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from loom_control_plane.routes import admin
+
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        owner, guest, placement = await _family(session, now)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(session_factory=sessions)))
+    monkeypatch.setattr(admin, "_require_capacity_observer", AsyncMock())
+    response = await admin.get_execution_capacity_collector_policy(owner[1].target_id, request,
+        pool_id=owner[1].logical_pool_id, authorization="test-observer")
+    assert response["target_scope"] == placement["target_scope"]
+    with pytest.raises(HTTPException, match="owner") as error:
+        await admin.get_execution_capacity_collector_policy(guest[1].target_id, request,
+            pool_id=guest[1].logical_pool_id, authorization="test-observer")
+    assert error.value.status_code == 409
+
+
+async def test_owner_health_does_not_impersonate_guest_health(native_setup):
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        owner, guest, _ = await _family(session, now)
+        await set_execution_target_health(session, target_id=owner[1].target_id, desired_state="active",
+            observed_state="degraded", health_status="unhealthy", observed_at=now)
+        assert (await _guest_reserve(session, guest, now + timedelta(seconds=2))).target_id == guest[1].target_id
+
+
+async def test_forecast_shares_capacity_but_not_calibration_and_rejects_old_scope(native_setup):
+    from loom_control_plane.execution_resource_calibration import (
+        fetch_execution_resource_profile_status,
+    )
+
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        _, guest, _ = await _family(session, now, publish=False)
+        status = await fetch_execution_resource_profile_status(session, now=now + timedelta(seconds=2))
+        row = next(row for row in status["targets"] if row["target_id"] == guest[1].target_id)
+        assert row["binding"] is None and row["calibration"] is None
+        assert "resource_forecast_capacity_policy_unavailable" not in row["blockers"]
+        assert "resource_forecast_capacity_observation_unavailable" not in row["blockers"]
+        assert "resource_forecast_capacity_target_scope_unavailable" in row["blockers"]
+        assert not row["forecast_is_fresh"]
+
+
+async def test_unregistered_overlap_is_rejected_even_when_one_side_is_a_family(native_setup):
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        owner, _, placement = await _family(session, now)
+        other = await _seed_ready_trial(session, now=now)
+        overlapping = {key: value for key, value in placement.items() if key != "target_scope"}
+        await _record(session, other[1].target_id, now + timedelta(seconds=1), overlapping)
+    with pytest.raises(ExecutionProvisioningBlockedError, match="overlapping_targets"):
+        async with sessions() as session, session.begin():
+            await _reserve(session, trial_id=owner[0], target=owner[1], now=now + timedelta(seconds=2))
+
+
+async def test_other_pool_charges_disabled_capacity_family_once(native_setup):
+    sessions, _ = native_setup
+    now = datetime.now(UTC)
+    async with sessions() as session, session.begin():
+        owner, guest, _ = await _family(session, now, quota_nodes=2, parent_id="shared-tenant")
+        await _guest_reserve(session, guest, now + timedelta(seconds=2))
+        for pair in (owner, guest):
+            (await session.get(ServiceExecutionTarget, pair[1].target_id)).desired_state = "disabled"
+        other = await _seed_ready_trial(session, now=now)
+        await _record(session, other[1].target_id, now + timedelta(seconds=1), placement_fixture(
+            target_id=other[1].target_id, nodes=0, used_nodes=1, quota_nodes=2, parent_id="shared-tenant"))
+        lease = await _reserve(session, trial_id=other[0], target=other[1], now=now + timedelta(seconds=3))
+        auth = await session.scalar(select(ExecutionProvisioningAuthorization).where(
+            ExecutionProvisioningAuthorization.lease_id == lease.id))
+        assert auth.incremental_nodes == 1

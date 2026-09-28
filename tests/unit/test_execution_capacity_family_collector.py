@@ -130,3 +130,16 @@ async def test_policy_client_preserves_validated_authoritative_membership(tmp_pa
         assert binding.target_scope == _scope()
     finally:
         await client.close()
+
+
+def test_singleton_observation_preserves_pre_alias_canonical_bytes():
+    from loom.pipeline.keys import canonical_digest
+    from loom_execution_capacity_collector.contracts import CapacityObservationV1
+    from tests.unit.test_execution_capacity_collector import _observation
+
+    raw = _observation(datetime(2026, 9, 9, tzinfo=UTC)).model_dump()
+    raw["placement"] = placement_fixture(target_id="target")
+    observation = CapacityObservationV1.model_validate(raw)
+    # Captured from dc011a6c0's observation contract before target aliases.
+    assert canonical_digest(observation.model_dump(mode="json")) == (
+        "sha256:1557143838e8cdb44a79a66d03d5ecfb2a0bb4f9c5009f12f1d553cc5a958091")
