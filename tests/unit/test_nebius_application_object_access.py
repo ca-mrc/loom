@@ -55,7 +55,7 @@ async def test_wrong_protected_origin_never_receives_retired_credentials():
     assert requests == []
 
 
-@pytest.mark.parametrize("failure", ["timeout", "redirect", "malformed"])
+@pytest.mark.parametrize("failure", ["timeout", "redirect", "malformed", "encoding"])
 async def test_unknown_response_never_proves_revocation_or_retries(failure):
     from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 
@@ -67,6 +67,8 @@ async def test_unknown_response_never_proves_revocation_or_retries(failure):
             raise httpx.ReadTimeout("private-key must not escape")
         if failure == "redirect":
             return httpx.Response(307, headers={"Location": "https://foreign.test/"})
+        if failure == "encoding":
+            return httpx.Response(403, text='<?xml version="1.0" encoding="invalid-encoding"?><Error/>')
         return httpx.Response(403, text="not XML")
 
     async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(response)) as http:
@@ -74,3 +76,23 @@ async def test_unknown_response_never_proves_revocation_or_retries(failure):
             await ApplicationObjectAccessVerifier(http).verify_retired(
                 plan(), {"access-key": "retired-access", "secret-key": "private-key"})
     assert len(requests) == 1 and "private-key" not in str(error.value)
+
+
+async def test_client_auth_cannot_replace_the_original_key_probe():
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    class ForeignAuth(httpx.Auth):
+        def auth_flow(self, request):
+            request.headers["Authorization"] = "foreign missing key"
+            yield request
+
+    def response(request):
+        if "Credential=retired-access/" in request.headers["Authorization"]:
+            return httpx.Response(200, text="<ListBucketResult/>")  # Original key still works.
+        return httpx.Response(403, text="<Error><Code>InvalidAccessKeyId</Code></Error>")
+
+    async with httpx.AsyncClient(base_url="https://storage.test", auth=ForeignAuth(),
+                                transport=httpx.MockTransport(response)) as http:
+        with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
+            await ApplicationObjectAccessVerifier(http).verify_retired(
+                plan(), {"access-key": "retired-access", "secret-key": "private-key"})
