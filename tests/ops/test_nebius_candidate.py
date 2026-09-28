@@ -233,6 +233,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert "tb90_task" not in manifest["images"]
     config, _, _ = request.getfixturevalue("platform_inputs")
     if enabled:
+        config["guest_execution_target"] = {"target_id": "nebius-guest-fixture"}
         config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
         config["task_identity_policy"] = {
             "mode": "private-root-v1", "target_id": config["target_id"],
@@ -248,6 +249,10 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert catalog["execution_class"].get("supports_task_web_egress", False) is enabled
     assert catalog["topology"]["execution_class_id"] == expected
     assert all(row["execution_class_id"] == expected for row in catalog["topology"]["targets"])
+    if enabled:
+        guest_target, = json.loads(data["guest-catalog.json"])["topology"]["targets"]
+        assert guest_target["target_id"] == "nebius-guest-fixture"
+        assert guest_target["capacity_owner_target_id"] == config["target_id"]
     manifest["images"]["web"]["image_ref"] = "image:mutable"
     (output / "candidate.json").write_text(json.dumps(manifest))
     result = subprocess.run(verify, capture_output=True, text=True, env=environment)

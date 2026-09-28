@@ -93,6 +93,9 @@ jobs:
           NEBIUS_TASK_WEB_EGRESS_READY: ${{ vars.NEBIUS_TASK_WEB_EGRESS_READY || 'false' }}
           NEBIUS_SERVICE_LIFECYCLE_READY: ${{ vars.NEBIUS_SERVICE_LIFECYCLE_READY || 'false' }}
           NEBIUS_TASK_IDENTITY_READY: ${{ vars.NEBIUS_TASK_IDENTITY_READY || 'false' }}
+          NEBIUS_GUEST_RUNTIME_READY: ${{ vars.NEBIUS_GUEST_RUNTIME_READY || 'false' }}
+          NEBIUS_GUEST_RUNTIME_VOLUME_MIB: ${{ vars.NEBIUS_GUEST_RUNTIME_VOLUME_MIB }}
+          NEBIUS_GUEST_MAX_ARTIFACT_BYTES: ${{ vars.NEBIUS_GUEST_MAX_ARTIFACT_BYTES }}
           PUBLICATION_MODE: ${{ inputs.mode || 'platform' }}
           AGENT_VERSION: ${{ inputs.agent_version }}
         shell: bash
@@ -129,7 +132,7 @@ jobs:
           publication_args=(--mode "$PUBLICATION_MODE")
           if [[ -n "$AGENT_VERSION" ]]; then publication_args+=(--agent-version "$AGENT_VERSION"); fi
           if [[ "$PUBLICATION_MODE" == platform ]]; then
-            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY; do
+            for setting in NEBIUS_TASK_WEB_EGRESS_READY NEBIUS_SERVICE_LIFECYCLE_READY NEBIUS_TASK_IDENTITY_READY NEBIUS_GUEST_RUNTIME_READY; do
               case "${!setting}" in
                 true|false) ;;
                 *) echo "Invalid runtime readiness setting: $setting" >&2; exit 1 ;;
@@ -138,6 +141,16 @@ jobs:
             if [[ "$NEBIUS_TASK_WEB_EGRESS_READY" == true ]]; then publication_args+=(--supports-task-web-egress); fi
             if [[ "$NEBIUS_SERVICE_LIFECYCLE_READY" == true ]]; then publication_args+=(--service-lifecycle-ready); fi
             if [[ "$NEBIUS_TASK_IDENTITY_READY" == true ]]; then publication_args+=(--supports-task-identity); fi
+            if [[ "$NEBIUS_GUEST_RUNTIME_READY" == true ]]; then
+              test -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB"
+              test -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES"
+              publication_args+=(--guest-runtime qemu-tcg-v1
+                --guest-runtime-volume-mib "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB"
+                --guest-max-artifact-bytes "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES")
+            elif [[ -n "$NEBIUS_GUEST_RUNTIME_VOLUME_MIB" || -n "$NEBIUS_GUEST_MAX_ARTIFACT_BYTES" ]]; then
+              echo "Guest budgets require explicit guest runtime readiness" >&2
+              exit 1
+            fi
           fi
           uv run --no-sync python scripts/ops/nebius_candidate.py build \
             "${publication_args[@]}" \

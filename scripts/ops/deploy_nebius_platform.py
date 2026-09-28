@@ -484,6 +484,12 @@ def validate_target_replacement(
     """Require an exact operator decision before replacing an immutable target."""
     data = current.get("data", {})
     previous = json.loads(data["environment.json"]) if "environment.json" in data else None
+    previous_guest = previous.get("guest_execution_target") if previous else None
+    proposed_guest = config.get("guest_execution_target")
+    if previous_guest is not None and previous_guest != proposed_guest:
+        raise DeploymentError("installed guest target cannot be removed or renamed by platform rollout")
+    if retire_target is not None and (previous_guest is not None or proposed_guest is not None):
+        raise DeploymentError("primary replacement with a guest sibling requires a separate retirement protocol")
     if retire_target is None:
         if previous and previous["target_id"] != config["target_id"]:
             raise DeploymentError("changed primary target requires --retire-target naming the installed target")
