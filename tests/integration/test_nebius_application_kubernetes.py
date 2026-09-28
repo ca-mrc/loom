@@ -130,11 +130,12 @@ async def test_stop_reconciles_late_predecessor_create_without_resending(provide
     stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
         action="suspend", expected_generation=1)
     current = await registry.claim(stopped.operation_id)
-    api.hide_objects = True
+    path = "/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service"
+    late = api.objects.pop(path)  # Keep the already-recorded namespace visible.
     with pytest.raises(ProviderWaitingError):
         await client.reconcile(current, lease.operation_id, "api", document=document)
     assert len(api.mutations) == 2
-    api.hide_objects = False
+    api.objects[path] = late
     damaged = copy.deepcopy(document)
     damaged["spec"]["replicas"] = 9
     with pytest.raises(ProviderBlockedError, match="application_kubernetes_request_conflict"):
