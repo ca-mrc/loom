@@ -11,6 +11,12 @@ ExecutionCapability = Literal[
     "nested_docker", "singularity_mounts", "isolated_kernel_settings",
     "external_cluster", "pkcs11_authentication", "dpdk_networking",
 ]
+GuestExecutionCapability = Literal[
+    "nested_docker", "singularity_mounts", "isolated_kernel_settings",
+]
+GUEST_EXECUTION_CAPABILITIES: frozenset[GuestExecutionCapability] = frozenset({
+    "nested_docker", "singularity_mounts", "isolated_kernel_settings",
+})
 
 
 class ExecutionPrerequisiteV1(BaseModel):
@@ -83,16 +89,21 @@ _CAPABILITY_ACTIONS: dict[ExecutionCapability, tuple[str, str]] = {
 
 def execution_requirement_diagnostics(
     requirements: TaskExecutionRequirementsV1 | None,
+    *,
+    supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
 ) -> tuple[ExecutionRequirementDiagnostic, ...]:
-    """Fail closed until both a runtime class and live prerequisites are qualified.
+    """Compare declarations with explicit class support; leave prerequisites unresolved.
 
-    References are recorded, never resolved here. All current service classes
-    lack these capabilities; task data cannot select or authorize a new class.
+    References are recorded, never resolved here. Omitting class support retains
+    the fail-closed behavior. Task data cannot select or authorize a new class,
+    and a capability match is not evidence of deployed runtime readiness.
     """
     if requirements is None:
         return ()
     diagnostics = []
     for capability in requirements.capabilities:
+        if capability in supported_capabilities:
+            continue
         reason, action = _CAPABILITY_ACTIONS[capability]
         diagnostics.append(ExecutionRequirementDiagnostic(
             code=f"{capability}_unqualified", field=f"capabilities.{capability}",
