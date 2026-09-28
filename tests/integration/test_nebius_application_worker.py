@@ -14,6 +14,7 @@ from loom_service.environment_management.provider import (
     ProviderRetryError,
     ProviderWaitingError,
 )
+from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_credentials import database_access as database_access
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
 from tests.integration.test_nebius_application_effects import expire
@@ -145,6 +146,8 @@ async def test_heartbeat_renews_then_cancels_stale_work_without_changing_success
 
 @pytest.mark.parametrize('error,code', [(ProviderRetryError('test_unavailable'), 'test_unavailable'),
     (ProviderBlockedError('test_conflict'), 'test_conflict'),
+    (ManagementError('application_completion_evidence_conflict'), 'application_completion_evidence_conflict'),
+    (ManagementError('password=never-journal'), 'provider_internal_error'),
     (RuntimeError('password=never-journal'), 'provider_internal_error')])
 async def test_failure_budget_is_bounded_and_exception_details_are_not_persisted(applications, error, code):
     from loom_service.application_management.worker import ApplicationWorker
@@ -223,9 +226,10 @@ async def test_loop_progresses_other_owner_and_shutdown_clears_health_and_drains
 
 
 async def test_loop_database_outage_cancels_active_work_and_recovers_health(applications):
-    from loom_service.application_management.worker import ApplicationWorker
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from loom_service.application_management.worker import ApplicationWorker
 
     registry, factory, (alice, _), prepare, _, _ = applications
     operation = await registry.create(principal=alice, idempotency_key='outage', **prepare())
