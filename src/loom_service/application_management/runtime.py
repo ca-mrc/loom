@@ -82,6 +82,22 @@ class ApplicationRuntimeProvider:
         document = await self._fence(lease)
         namespace = document["metadata"]["namespace"]
         for effect in await self._history(lease):
+            if effect.phase == "prepared" and effect.operation_id == lease.operation_id:
+                # Resume the original unsent request before considering a new
+                # RV-derived key. A controller may have changed status since
+                # preparation; only the API can definitively reject its old RV.
+                try:
+                    if effect.intent.action == "create":
+                        await self.kubernetes.create(lease, effect.key, document)
+                    elif effect.intent.action == "patch":
+                        assert effect.intent.uid is not None and effect.intent.resource_version is not None
+                        await self.kubernetes.patch_spec(lease, effect.key, document,
+                            uid=effect.intent.uid, resource_version=effect.intent.resource_version)
+                    else:
+                        # Closing admission never sends an unfence request.
+                        raise ProviderWaitingError("application_pod_fence_pending")
+                except KubernetesEffectRejectedError:
+                    raise ProviderWaitingError("application_pod_fence_pending") from None
             if effect.phase == "dispatched":
                 original = (None if effect.intent.action == "delete"
                             else await self._fence(lease, operation_id=effect.operation_id))
