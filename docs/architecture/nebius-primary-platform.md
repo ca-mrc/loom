@@ -443,6 +443,38 @@ and readiness before releasing reservations. The API does not claim that a cloud
 resource snapshot fences a privileged external administrator, proves S3 access
 denial, or completes personal-environment acceptance.
 
+### Application credential integration
+
+`application_management.credentials.ApplicationCredentialProvider` composes the
+shared SQL/IAM adapters with the encrypted material journal. Protected installation
+supplies the shared development CA, SecretStore keyring, database identity and
+existing IAM groups; it does not generate a new CA/keyring for a personal API.
+The delivered DB URL names the frozen shared PostgreSQL service and uses
+`verify-full`, an ordinary generation login and the shared CA mount. Only DB,
+storage and auth generation bundles are constructed; manager, backup and cloud
+provisioning credentials never enter them.
+
+Permissionless account/key creation precedes material persistence. Exact DB login
+and group membership grants follow successful encrypted commit and semantic bundle
+validation. Retry and lease takeover reuse the same password/key. Changed shared
+material or malformed persisted credentials fail closed rather than replacing a
+generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL off
+the heartbeat loop using private, bounded autocommit connections. The protected
+caller must qualify the manager's database/TLS route; construction grants nothing.
+
+Credential delivery uses three immutable, generation-named Kubernetes Secrets in
+the already-observed personal namespace. The existing effect journal stores only
+request hashes and object identities, not Secret values; a lost response reconciles
+the same Secret instead of reposting it. These observations are historical write
+evidence, not a substitute for live resource/readiness checks before API startup.
+
+Database retirement commits revocation before draining existing sessions. It needs
+the same data/application identity but not a still-deliverable CA/keyring, so
+expired delivery material cannot itself prevent revocation. SQL cancellation may
+leave an in-flight request; monotonic shared-side tombstones fence late grants.
+This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
+users, coordinate migrations, mark readiness or release platform reservations.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

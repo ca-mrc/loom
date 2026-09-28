@@ -22,7 +22,12 @@ from tests.integration.conftest import (
     migration_template_postgres_url as migration_template_postgres_url,
 )
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.integration.test_nebius_application_credentials import setup as credential_setup
+from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
+from tests.integration.test_nebius_application_database import access_postgres as access_postgres
+from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_effects import started
+from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
@@ -94,5 +99,44 @@ async def test_journal_drives_real_create_preconditioned_patch_and_delete(applic
             assert len(history) == 4 + attempt
             assert sum(effect.phase == "rejected" for effect in history) == attempt
             assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
+async def test_composed_credentials_create_only_immutable_generation_secrets(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from kubernetes.client.exceptions import ApiException
+
+    credentials, registry, _, _, row, lease, _, _ = await credential_setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await registry.renew(lease, lease_seconds=180)
+    container = await asyncio.to_thread(_start_k3s)
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        config = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
+        trust.load_cert_chain(config.cert_file, config.key_file)
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False) as http:
+            kubernetes = ApplicationKubernetesProvider(registry, http)
+            await registry.renew(lease, lease_seconds=180)
+            plan = await registry.frozen_plan(lease)
+            namespace = next(doc for docs in plan["files"].values() for doc in docs if doc["kind"] == "Namespace")
+            await kubernetes.create(lease, "namespace", namespace)
+            await credentials.deliver(lease, kubernetes)
+            await credentials.deliver(lease, kubernetes)
+        material = await registry.load_material(lease)
+        actual = (await asyncio.to_thread(core.list_namespaced_secret, row.application_namespace)).items
+        assert {secret.metadata.name for secret in actual} == set(material)
+        for secret in actual:
+            assert secret.immutable is True
+            assert set(secret.data) == set(material[secret.metadata.name])
+        with pytest.raises(ApiException) as failure:
+            await asyncio.to_thread(core.patch_namespaced_secret, actual[0].metadata.name,
+                                   row.application_namespace, {"data": {"injected": "eA=="}})
+        assert failure.value.status == 422
+        assert (await asyncio.to_thread(core.list_namespaced_pod, row.application_namespace)).items == []
+        assert len(await registry.effect_history(lease)) == 4
     finally:
         await asyncio.to_thread(container.stop)
