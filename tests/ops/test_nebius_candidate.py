@@ -158,6 +158,8 @@ def test_cli_create_plain_candidate_and_check_shape(
             "--output",
             str(output),
             *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
+            *(["--guest-runtime", "qemu-tcg-v1", "--guest-runtime-volume-mib", "1024",
+               "--guest-max-artifact-bytes", "6442450944"] if enabled else []),
         ],
         capture_output=True,
         text=True,
@@ -165,6 +167,11 @@ def test_cli_create_plain_candidate_and_check_shape(
     )
     assert create.returncode == 0, create.stderr
     profile = json.loads((output / "runtime-profile.json").read_text())
+    assert profile.get("guest_runtime") == ("qemu-tcg-v1" if enabled else None)
+    assert profile.get("guest_runtime_volume_mib") == (1024 if enabled else None)
+    assert profile.get("guest_max_artifact_bytes") == (6 * 1024**3 if enabled else None)
+    assert profile["runtime_volume_mib"] == 32
+    assert profile["max_artifact_bytes"] == 1024**3
     assert profile["execution_class_id"] == (
         "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"
     )

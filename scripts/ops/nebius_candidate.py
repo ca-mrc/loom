@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -238,6 +238,9 @@ def create_candidate(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    guest_runtime: Literal["qemu-tcg-v1"] | None = None,
+    guest_runtime_volume_mib: int | None = None,
+    guest_max_artifact_bytes: int | None = None,
     node_share_resources: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validate_identity(document, require_current_images=True)
@@ -273,6 +276,9 @@ def create_candidate(
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_identity=supports_task_identity,
+        guest_runtime=guest_runtime,
+        guest_runtime_volume_mib=guest_runtime_volume_mib,
+        guest_max_artifact_bytes=guest_max_artifact_bytes,
         resource_allocation_policy="node-share-v1" if node_share_resources else None,
         image_admission=ExecutionImageAdmissionBundleV1(
             schema_version="loom.execution-image-admission.v1",
@@ -666,6 +672,9 @@ def build(args: argparse.Namespace) -> None:
                 supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
                 service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
                 supports_task_identity=getattr(args, "supports_task_identity", False),
+                guest_runtime=getattr(args, "guest_runtime", None),
+                guest_runtime_volume_mib=getattr(args, "guest_runtime_volume_mib", None),
+                guest_max_artifact_bytes=getattr(args, "guest_max_artifact_bytes", None),
                 node_share_resources=True,
             )
             write_json(args.output / "candidate.json", manifest)
@@ -705,6 +714,9 @@ def main() -> int:
         command.add_argument("--supports-task-web-egress", action="store_true")
         command.add_argument("--service-lifecycle-ready", action="store_true")
         command.add_argument("--supports-task-identity", action="store_true")
+        command.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
+        command.add_argument("--guest-runtime-volume-mib", type=int)
+        command.add_argument("--guest-max-artifact-bytes", type=int)
     create.add_argument("--node-share-resources", action="store_true",
                         help="Only for a build record whose runtime supports node-share-v1")
     args = parser.parse_args()
@@ -727,6 +739,9 @@ def main() -> int:
                 supports_task_web_egress=args.supports_task_web_egress,
                 service_lifecycle_ready=args.service_lifecycle_ready,
                 supports_task_identity=args.supports_task_identity,
+                guest_runtime=args.guest_runtime,
+                guest_runtime_volume_mib=args.guest_runtime_volume_mib,
+                guest_max_artifact_bytes=args.guest_max_artifact_bytes,
                 node_share_resources=args.node_share_resources,
             )
             args.output.mkdir(parents=True, exist_ok=False)

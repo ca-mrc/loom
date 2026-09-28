@@ -341,6 +341,9 @@ source_paths = [
   ".dockerignore",
   "cmd/loom-execution-runtime/**",
   "cmd/loom-sandbox-runtime/**",
+  "cmd/loom-guest-runtime/**",
+  "internal/guestchannel/**",
+  "deploy/guest-runtime/**",
   "deploy/Dockerfile.execution-runtime",
   "go.mod",
   "go.sum",
@@ -839,6 +842,7 @@ exclude_paths = [
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_sandbox_network_docker.py",
+  "tests/integration/test_guest_sandbox_runtime.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
@@ -901,6 +905,7 @@ include_paths = [
   "tests/integration/test_pipeline_multipart_minio.py",
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_sandbox_network_docker.py",
+  "tests/integration/test_guest_sandbox_runtime.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
@@ -962,7 +967,7 @@ include_paths = ["packages/loom-benchmark-terminal-bench-2/tests/fixtures/**/*.p
 id = "go-gateway-sandbox"
 language = "go"
 lane = "go-checks"
-include_paths = ["cmd/**/*_test.go"]
+include_paths = ["cmd/**/*_test.go", "internal/**/*_test.go"]
 
 [[test_suites]]
 id = "web-unit"
