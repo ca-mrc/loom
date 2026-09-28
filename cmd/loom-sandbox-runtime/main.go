@@ -19,6 +19,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -355,9 +357,13 @@ func main() {
 	}
 	var channel io.ReadWriteCloser
 	if *guest {
-		device, err := os.OpenFile("/dev/vport0p1", os.O_RDWR, 0)
+		path, err := guestChannelDevice("/sys/class/virtio-ports", "/dev")
 		if err != nil {
-			log.Fatal("guest channel unavailable")
+			log.Fatal(err)
+		}
+		device, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			log.Fatalf("guest channel unavailable: %v", err)
 		}
 		channel = device
 	}
@@ -397,4 +403,33 @@ func sandboxListener(socket string, channel io.ReadWriteCloser) (net.Listener, e
 		return nil, err
 	}
 	return listener, nil
+}
+
+func guestChannelDevice(sysRoot, devRoot string) (string, error) {
+	entries, err := os.ReadDir(sysRoot)
+	if err != nil {
+		return "", errors.New("guest serial ports unavailable")
+	}
+	pattern := regexp.MustCompile(`^vport[0-9]+p[0-9]+$`)
+	result := ""
+	for _, entry := range entries {
+		if !pattern.MatchString(entry.Name()) {
+			continue
+		}
+		name, err := os.ReadFile(filepath.Join(sysRoot, entry.Name(), "name"))
+		if err != nil {
+			return "", errors.New("cannot inspect guest serial port")
+		}
+		if strings.TrimSpace(string(name)) != "loom.rpc" {
+			continue
+		}
+		if result != "" {
+			return "", errors.New("ambiguous guest RPC port")
+		}
+		result = filepath.Join(devRoot, entry.Name())
+	}
+	if result == "" {
+		return "", errors.New("guest RPC port missing")
+	}
+	return result, nil
 }
