@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -17,28 +16,7 @@ from loom.trajectory.storage import bundle_file_metadata_sha256
 from loom_benchmark_tool.dockerfile_safety import validate_task_dir_dockerfiles
 from loom_benchmark_tool.import_cmd import _select_instances, _validate_instance_id
 from loom_benchmark_tool.manifest import load_task_config_from_bundle
-
-
-@dataclass(frozen=True)
-class AdapterBenchmarkEntry:
-    id: str
-    display_name: str
-    series: str | None
-    license_spdx: str
-
-
-@dataclass(frozen=True)
-class PreparedAdapterBenchmark:
-    entry: AdapterBenchmarkEntry
-    task_root: Path
-    task_tomls: tuple[Path, ...]
-    manifest: dict[str, Any]
-    tasks: dict[str, dict[str, Any]]
-    warnings: tuple[str, ...]
-
-    @property
-    def task_count(self) -> int:
-        return len(self.task_tomls)
+from loom_cli.benchmark_types import AdapterBenchmarkEntry, PreparedAdapterBenchmark
 
 
 def prepare_adapter_benchmark(

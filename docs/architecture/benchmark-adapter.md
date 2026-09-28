@@ -202,6 +202,12 @@ loom datasets publish --benchmark humaneval
 loom datasets publish ./team-evals
 ```
 
+Local-folder publication works with the base installation and does not load
+upstream adapters. The `--benchmark` form needs the optional adapter packages;
+from the repository, install them with `uv sync --locked --extra rollout` and
+invoke the command with `uv run loom datasets publish --benchmark SLUG`.
+Missing adapter dependencies produce an installation hint before publication.
+
 The adapter input downloads its upstream, selects instances, and converts them
 into temporary task bundles. The common publisher validates and uploads those
 bundles, writes the service execution input binding, and registers catalog rows.
