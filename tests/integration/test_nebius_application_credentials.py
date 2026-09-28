@@ -292,8 +292,9 @@ async def test_permissionless_undelivered_key_retires_without_invented_probe_mat
     assert cloud.resources == {} and len(cloud.mutations) == 4
 
 
+@pytest.mark.parametrize("outcome", ["observed", "dispatched", "unexplained"])
 async def test_peer_completed_retirement_is_not_misclassified_as_missing_resource(
-    applications, platform_inputs, database_access, shared_ca, monkeypatch,
+    applications, platform_inputs, database_access, shared_ca, monkeypatch, outcome,
 ):
     from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 
@@ -315,13 +316,24 @@ async def test_peer_completed_retirement_is_not_misclassified_as_missing_resourc
         if first:
             first = False
             await provider.cloud.reconcile(active, lease.operation_id, "account")
-            await provider.cloud.delete(active, lease.operation_id, "account")
+            if outcome == "observed":
+                await provider.cloud.delete(active, lease.operation_id, "account")
+            else:
+                if outcome == "dispatched":
+                    cloud.delay_delete = True
+                    with pytest.raises(ProviderRetryError):
+                        await provider.cloud.delete(active, lease.operation_id, "account")
+                cloud.resources.pop(value["metadata"]["id"])
         return result
 
     monkeypatch.setattr(registry, "cloud_history", peer_retires)
     async with httpx.AsyncClient(base_url="https://storage.test") as http:
-        await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
-    assert cloud.resources == {} and len(cloud.mutations) == 2
+        if outcome == "unexplained":
+            with pytest.raises(ProviderBlockedError, match="application_cloud_recorded_resource_missing"):
+                await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+        else:
+            await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.resources == {} and len(cloud.mutations) == (1 if outcome == "unexplained" else 2)
 
 
 @pytest.mark.parametrize("damage", ["data", "ca", "keyring"])

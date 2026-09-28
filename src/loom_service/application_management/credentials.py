@@ -168,7 +168,25 @@ class ApplicationCredentialProvider:
                 plans[effect.operation_id] = await self.registry.frozen_plan(lease, operation_id=effect.operation_id)
             source = self._registration(plans[effect.operation_id])
             if source.access_generation <= through and effect.action == "create" and effect.phase == "dispatched":
-                await self.cloud.reconcile(lease, effect.operation_id, effect.key)
+                try:
+                    await self.cloud.reconcile(lease, effect.operation_id, effect.key)
+                except ProviderBlockedError as exc:
+                    if exc.code != "application_cloud_recorded_resource_missing":
+                        raise
+                    # A peer can observe and retire this CREATE after our first
+                    # snapshot. Only its exact dispatched deletion explains the
+                    # disappearance; unrelated/missing evidence remains blocked.
+                    latest = await self.cloud.registry.cloud_history(lease)
+                    recorded = next((item for item in latest if item.operation_id == effect.operation_id
+                        and item.key == effect.key and item.phase == "observed"), None)
+                    retired = next((item for item in latest if recorded is not None
+                        and item.key == f"retire:{effect.operation_id.hex}:{effect.key}"
+                        and item.action == "delete" and item.phase in {"dispatched", "observed"}
+                        and item.resource_id == recorded.observed_resource_id
+                        and item.expected == recorded.expected), None)
+                    if retired is None:
+                        raise
+                    await self.cloud.reconcile(lease, retired.operation_id, retired.key)
         history = await self.cloud.registry.cloud_history(lease)
         targets = [effect for effect in history if effect.action == "create" and effect.phase == "observed"
                    and self._registration(plans[effect.operation_id]).access_generation <= through]

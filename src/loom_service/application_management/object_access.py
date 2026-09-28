@@ -50,11 +50,11 @@ class ApplicationObjectAccessVerifier:
         S3SigV4Auth(Credentials(storage["access-key"], storage["secret-key"]), "s3", region).add_auth(request)
         try:
             response = await self.http.get(str(url), headers=dict(request.headers),
-                                           follow_redirects=False, timeout=30)
+                                           auth=None, follow_redirects=False, timeout=30)
             if response.status_code == 403 and len(response.content) <= 16384:
                 root = ET.fromstring(response.content)
                 if root.tag == "Error" and root.findtext("Code") == "InvalidAccessKeyId":
                     return
-        except (httpx.TransportError, ET.ParseError):
+        except (httpx.TransportError, ET.ParseError, LookupError):
             pass
         raise ProviderWaitingError("application_object_access_retirement_pending")
