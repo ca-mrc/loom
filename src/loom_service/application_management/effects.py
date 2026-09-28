@@ -6,9 +6,10 @@ An uncertain dispatch is never automatically re-authorized after lease expiry.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -29,6 +30,7 @@ _APIS = {
     "RoleBinding": "rbac.authorization.k8s.io/v1",
     "Ingress": "networking.k8s.io/v1", "NetworkPolicy": "networking.k8s.io/v1",
 }
+_ACTIVATION_PREFIX = "activate:unfence:"
 
 
 class KubernetesEffectIntent(BaseModel):
@@ -130,7 +132,36 @@ async def _validate_target(session: AsyncSession, operation: NebiusApplicationOp
         raise ManagementError("invalid_application_effect", 422)
 
 
+def _activation_intent(operation: NebiusApplicationOperation, key: str, intent: KubernetesEffectIntent) -> bool:
+    quota_delete = intent.kind == "ResourceQuota" and intent.action == "delete"
+    if not key.startswith("activate:") and not quota_delete:
+        return False
+    expected_key = _ACTIVATION_PREFIX + hashlib.sha256(f"{intent.uid}:{intent.resource_version}".encode()).hexdigest()
+    if (not quota_delete or intent.name != "loom-application-retired" or key != expected_key
+            or operation.action not in {"create", "update", "resume"}
+            or operation.plan_json["registration"]["desired_state"] != "active"):
+        raise ManagementError("invalid_application_effect", 422)
+    return True
+
+
+async def _activation_effect(session: AsyncSession, operation_id: UUID) -> NebiusApplicationEffect | None:
+    return cast(NebiusApplicationEffect | None, await session.scalar(select(NebiusApplicationEffect).where(
+        NebiusApplicationEffect.operation_id == operation_id,
+        NebiusApplicationEffect.effect_key.startswith(_ACTIVATION_PREFIX),
+    ).order_by(NebiusApplicationEffect.sequence.desc()).limit(1)))
+
+
 class ApplicationEffectJournal(ApplicationOperationJournal):
+    async def activation_started(self, lease: ApplicationLease) -> bool:
+        """Current generation crossed preparation; not Pod or API readiness.
+
+        Even a rejected unfence retains this phase. A fresh exact precondition
+        may retry opening admission, but peers cannot re-enter old retirement.
+        """
+        async with self.session_factory.begin() as session:
+            await self._leased(session, lease)
+            return await _activation_effect(session, lease.operation_id) is not None
+
     async def prepare_effect(self, lease: ApplicationLease, key: str, intent: dict[str, Any]) -> ApplicationEffect:
         """Persist a no-secret locator and request digest before authorizing I/O."""
         try:
@@ -142,12 +173,21 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
         async with self.session_factory.begin() as session:
             operation, _ = await self._leased(session, lease)
             await _validate_target(session, operation, parsed)
+            activation = _activation_intent(operation, key, parsed)
             existing = await session.get(NebiusApplicationEffect, (lease.operation_id, key))
             value = parsed.model_dump(mode="json")
             if existing is not None:
                 if existing.intent_json != value:
                     raise ManagementError("application_effect_conflict")
                 return _view(existing)
+            opening = await _activation_effect(session, lease.operation_id)
+            if opening is not None and (
+                key.startswith("retire:") or (parsed.kind == "ResourceQuota" and not activation)
+                or (activation and opening.phase != "rejected")
+            ):
+                # Atomic with preparation under the application/operation locks:
+                # a stale same-lease peer must not stop the just-started runtime.
+                raise ManagementError("application_activation_started")
             previous = await session.scalar(select(NebiusApplicationEffect).where(
                 NebiusApplicationEffect.operation_id == lease.operation_id,
             ).order_by(NebiusApplicationEffect.sequence.desc()).limit(1))
