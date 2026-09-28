@@ -6,9 +6,11 @@ LOOM_NEBIUS_WEB_IMAGE=loom-web-tls:test uv run --extra dev pytest -q -s \
 
 from __future__ import annotations
 
+import gzip
 import http.client
 import json
 import os
+import re
 import socket
 import ssl
 import subprocess
@@ -16,6 +18,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pytest
 from cryptography import x509
@@ -215,6 +218,18 @@ HTTPServer(('0.0.0.0',8090),Handler).serve_forever()
         assert status == 200 and headers["Content-Security-Policy"].startswith("default-src 'self'")
         assert headers["X-Content-Type-Options"] == "nosniff"
         assert headers["Strict-Transport-Security"] == "max-age=31536000"
+        # Follow the real published entry through Caddy and nginx. Caddy adds
+        # Via; nginx's default gzip_proxied=off used to disable compression here.
+        _, _, shell = request()
+        entry = re.search(rb'<script[^>]+src="([^"]+)"', shell)
+        assert entry is not None
+        asset = urljoin("/", entry.group(1).decode())
+        status, _, plain = request(asset, headers={"Accept-Encoding": "identity"})
+        assert status == 200
+        status, compressed_headers, compressed = request(asset, headers={"Accept-Encoding": "gzip"})
+        assert status == 200 and compressed_headers.get("Content-Encoding") == "gzip"
+        assert gzip.decompress(compressed) == plain and len(compressed) < len(plain)
+        assert "Accept-Encoding" in compressed_headers["Vary"]
         status, _, payload = request(
             "/api/v1/echo?key=a%2Fb", b"hello", {"X-Forwarded-For": "spoofed"}
         )
