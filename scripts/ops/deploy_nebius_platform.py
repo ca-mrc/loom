@@ -74,7 +74,8 @@ def load_render(
             policy_docs = list(yaml.safe_load_all(policy_file.read_text()))
         except OSError as exc:
             raise DeploymentError("task identity policy artifact is missing") from exc
-        if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"]):
+        if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"],
+                guest_target_id=config.get("guest_execution_target", {}).get("target_id")):
             raise DeploymentError("task identity policy differs from the target-bound contract")
         files[policy_file.name] = policy_docs
     elif policy_file.exists():

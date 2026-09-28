@@ -1,6 +1,6 @@
 """A guest target shares physical capacity, never collectors or broad root authority."""
-from copy import deepcopy
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -53,7 +53,7 @@ def test_guest_render_has_independent_catalog_and_actuator_with_one_physical_own
     assert len([doc for doc in docs if doc["kind"] == "ResourceQuota"]) == 1
     assert len([doc for doc in files["00-task-identity-policy.yaml"] if doc["kind"] == "ValidatingAdmissionPolicy"]) == 1
     write_platform(files, config, candidate, tmp_path)
-    observed_config, _, _ = load_render(tmp_path)
+    _, observed_config, _ = load_render(tmp_path)
     assert observed_config["guest_execution_target"] == config["guest_execution_target"]
 
 

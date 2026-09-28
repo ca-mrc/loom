@@ -283,6 +283,7 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
     namespace = "loom-guest-policy-test"
     policies = identity_policy_documents(namespace, "disposable-k3s", guest_target_id="disposable-guest")
     container = _start_k3s()
+    _load_client(container)
 
     def apply(documents, *, dry_run=False):
         path = tmp_path / "guest-policy.yaml"
