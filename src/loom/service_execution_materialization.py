@@ -766,12 +766,8 @@ def _compile_terminus_plan(
     from loom.task_fixtures import fixture_sidecars
 
     sidecars = list(fixture_sidecars(task))
-    # separate keeps the idle verifier sidecar. shared grades in task-sandbox.
-    sandbox_roles = (
-        ("task-sandbox",)
-        if resolve_verifier_env_mode(task, trial) == "shared"
-        else ("task-sandbox", "verifier-sandbox")
-    )
+    shared = resolve_verifier_env_mode(task, trial) == "shared"
+    sandbox_roles = ("task-sandbox",)
     for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
@@ -812,7 +808,7 @@ def _compile_terminus_plan(
         ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", True),
+        ("verifier/output.json", "verifier/output.json", "verifier", shared),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -865,13 +861,62 @@ def _compile_terminus_plan(
             total_bytes=binding.total_bytes,
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
         main=phase("agent", "terminus-2", agent_timeout),
-        verifier_execution="in_attempt",
-        verifier_after_agent_timeout=True,
-        in_place_verifier=resolve_verifier_env_mode(task, trial) == "shared",
-        verifier=phase("verifier", "verify-sandbox", verifier_timeout),
+        verifier_execution="in_attempt" if shared else "separate_execution",
+        verifier_after_agent_timeout=shared,
+        in_place_verifier=shared,
+        verifier=phase("verifier", "verify-sandbox", verifier_timeout) if shared else None,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=profile.max_artifact_bytes,
     )
+
+
+def compile_deferred_verifier_plan(
+    agent_plan: ExecutionRuntimePlanV1, task: TaskConfig, *, verifier_timeout_seconds: int,
+) -> ExecutionRuntimePlanV1:
+    """Verifier pod that grades a committed workspace after the agent pod is gone."""
+    task_sandbox = next(
+        sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == "task-sandbox"
+    )
+    user = task.verifier.user if task.verifier.user is not None else task.environment.user
+    identity = resolve_sandbox_identity(
+        user, task.environment.environment.get("HOME"),
+        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+    )
+    verifier_sandbox = task_sandbox.model_copy(update={
+        "role_name": "verifier-sandbox", "identity": identity,
+    })
+    argv = tuple(
+        "verify-sandbox" if item == "terminus-2" else item for item in agent_plan.main.argv
+    )
+    outputs = []
+    for item in agent_plan.output_declarations:
+        required = item.required
+        if item.relative_path == "verifier/output.json":
+            required = True
+        elif item.relative_path == "artifacts/workspace.tar":
+            required = False
+        outputs.append(item.model_copy(update={"required": required}))
+    return agent_plan.model_copy(update={
+        "execution_role": "verifier",
+        "verifier_execution": "skipped",
+        "verifier": None,
+        "verifier_after_agent_timeout": False,
+        "in_place_verifier": False,
+        "sidecars": (
+            *(
+                sidecar for sidecar in agent_plan.sidecars
+                if not sidecar.private_sandbox and not sidecar.task_fixture
+            ),
+            verifier_sandbox,
+        ),
+        "main": agent_plan.main.model_copy(update={
+            "role": "verifier", "argv": argv, "timeout_seconds": verifier_timeout_seconds,
+        }),
+        "output_declarations": tuple(outputs),
+        "resource_requests": None,
+        "task_image_materialization_id": None,
+        "node_resource_allocation": None,
+    })
 
 
 __all__ = [
@@ -887,6 +932,7 @@ __all__ = [
     "TaskExecutionResourceRequestsV1",
     "automatic_service_execution_rejections",
     "build_service_execution_input_manifest",
+    "compile_deferred_verifier_plan",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
     "prepare_service_execution_input_manifest",

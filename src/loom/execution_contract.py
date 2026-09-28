@@ -511,10 +511,12 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         "web-allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
-    # shared and separate both grade inside this attempt. separate keeps the
-    # verifier sandbox; shared injects tests into the task sandbox. A second
-    # execution lease is a different contract and is not selected here.
-    verifier_topology = VerifierTopology.IN_ATTEMPT
+    # separate means a later verifier pod. shared grades in this attempt.
+    verifier_topology = (
+        VerifierTopology.SEPARATE_EXECUTION
+        if task.verifier.env_mode == "separate"
+        else VerifierTopology.IN_ATTEMPT
+    )
     return WorkloadRequirementsV1(
         operating_system=env.os,
         cpu_architecture=env.cpu_arch,

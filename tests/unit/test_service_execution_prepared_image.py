@@ -70,7 +70,7 @@ def test_ready_task_compiles_and_renders_without_platform_image_publication():
     containers = pod["containers"]
     assert next(item for item in containers if item["name"] == "execution")["image"] == _CONTROLLER
     sandboxes = [item for item in pod["initContainers"] if "sandbox" in item["name"]]
-    assert len(sandboxes) == 2
+    assert len(sandboxes) == 1
     assert all(item["image"] == _PREPARED_IMAGE for item in sandboxes)
 
 

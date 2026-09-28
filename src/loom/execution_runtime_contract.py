@@ -352,16 +352,28 @@ class ExecutionRuntimePlanV1(_Strict):
             cls._images_are_immutable(value)
         return value
 
+    def resident_private_roles(self) -> set[str]:
+        """Sandboxes that exist in this pod, not ones admitted later."""
+        if self.execution_role == "verifier":
+            return {"verifier-sandbox"}
+        if (
+            self.in_place_verifier
+            or self.verifier_execution == VerifierExecution.SEPARATE_EXECUTION
+        ):
+            return {"task-sandbox"}
+        return {"task-sandbox", "verifier-sandbox"}
+
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
         fixtures = [sidecar for sidecar in self.sidecars if sidecar.task_fixture]
+        private = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+        expected = self.resident_private_roles()
         if fixtures and (
             len(fixtures) != 1 or self.task_image_materialization_id is None
             or self.agent_image_ref is None or self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
-            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
-            != {"task-sandbox", "verifier-sandbox"}
-            or len(self.sidecars) != 3 or not self.sidecars[0].task_fixture
+            or private != expected
+            or len(self.sidecars) != 1 + len(expected) or not self.sidecars[0].task_fixture
         ):
             raise ValueError("one prepared fixture requires an isolated attempt controller and both sandboxes")
         if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
@@ -415,11 +427,7 @@ class ExecutionRuntimePlanV1(_Strict):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
         private_roles = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
-        expected_roles = (
-            {"task-sandbox"}
-            if self.in_place_verifier
-            else {"task-sandbox", "verifier-sandbox"}
-        )
+        expected_roles = self.resident_private_roles()
         if self.verifier_after_agent_timeout and (
             self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
@@ -432,13 +440,9 @@ class ExecutionRuntimePlanV1(_Strict):
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
                 self.agent_image_ref is None
-                or self.execution_role != "attempt"
+                or self.execution_role not in {"attempt", "verifier"}
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes} != (
-                    {"task-sandbox"}
-                    if self.in_place_verifier
-                    else {"task-sandbox", "verifier-sandbox"}
-                )
+                or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
             ):
                 raise ValueError("controller resources require an isolated attempt controller")
             if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
@@ -451,13 +455,9 @@ class ExecutionRuntimePlanV1(_Strict):
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
                 self.agent_image_ref is None
-                or self.execution_role != "attempt"
+                or self.execution_role not in {"attempt", "verifier"}
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes} != (
-                    {"task-sandbox"}
-                    if self.in_place_verifier
-                    else {"task-sandbox", "verifier-sandbox"}
-                )
+                or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
                 or any(sidecar.resources != self.task_resources for sidecar in sandboxes)
             ):
                 raise ValueError("resource requests require an isolated attempt controller")

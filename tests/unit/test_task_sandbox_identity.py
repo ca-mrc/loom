@@ -89,7 +89,10 @@ def test_verifier_identity_is_preserved_separately():
         task=task, trial=trial, profile=profile, source_provenance=_provenance(),
         task_revision_sha256="sha256:" + "c" * 64,
     )
-    assert [item.identity.run_as_user for item in plan.sidecars] == [1001, 0]
+    assert [item.identity.run_as_user for item in plan.sidecars] == [1001]
+    from loom.service_execution_materialization import compile_deferred_verifier_plan
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120)
+    assert verifier.sidecars[-1].identity.run_as_user == 0
 
 
 def test_identity_cannot_apply_to_an_ordinary_sidecar_or_the_controller():

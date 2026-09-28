@@ -55,7 +55,51 @@ def test_terminus_plan_preserves_task_environment_and_has_fresh_private_verifier
     )
     assert plan.agent_image_ref == _CONTROLLER
     assert plan.task_image_ref == task.environment.docker_image
-    assert [s.role_name for s in plan.sidecars] == ["task-sandbox", "verifier-sandbox"]
+    assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
+    assert plan.verifier_execution == "separate_execution"
+    assert plan.verifier is None
+    assert plan.verifier_after_agent_timeout is False
+
+
+def test_deferred_verifier_plan_restores_committed_workspace():
+    from loom.service_execution_materialization import compile_deferred_verifier_plan
+
+    task, trial, profile = _inputs()
+    agent = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert any(
+        item.relative_path == "artifacts/workspace.tar" and item.required
+        for item in agent.output_declarations
+    )
+    verifier = compile_deferred_verifier_plan(agent, task, verifier_timeout_seconds=120)
+    assert verifier.execution_role == "verifier"
+    assert verifier.verifier_execution == "skipped"
+    assert [sidecar.role_name for sidecar in verifier.sidecars if sidecar.private_sandbox] == [
+        "verifier-sandbox",
+    ]
+    assert verifier.main.argv[4] == "verify-sandbox"
+    assert any(
+        item.relative_path == "verifier/output.json" and item.required
+        for item in verifier.output_declarations
+    )
+
+
+def test_verifier_restores_committed_workspace_archive(tmp_path):
+    from loom.service_execution_sandbox_task import (
+        ServiceExecutionTaskError,
+        stage_committed_workspace_archive,
+    )
+
+    with pytest.raises(ServiceExecutionTaskError, match="handoff archive is missing"):
+        stage_committed_workspace_archive(tmp_path)
+    committed = tmp_path / "artifacts" / "workspace.tar"
+    committed.parent.mkdir()
+    committed.write_bytes(b"committed-workspace")
+    staged = stage_committed_workspace_archive(tmp_path)
+    assert staged == tmp_path / ".loom" / "workspace.tar"
+    assert staged.read_bytes() == b"committed-workspace"
 
 
 def test_shared_terminus_plan_omits_idle_verifier_sidecar():
@@ -68,6 +112,8 @@ def test_shared_terminus_plan_omits_idle_verifier_sidecar():
     )
     assert [s.role_name for s in plan.sidecars] == ["task-sandbox"]
     assert all(s.private_sandbox and s.image_ref == _TASK_IMAGE for s in plan.sidecars)
+    assert plan.in_place_verifier is True
+    assert plan.verifier_execution == "in_attempt"
     assert plan.main.argv[4] == "terminus-2"
     assert plan.verifier.argv[4] == "verify-sandbox"
     assert plan.main.argv[-2:] == plan.verifier.argv[-2:] == ("--workspace", "/workspace")
@@ -175,7 +221,7 @@ def test_controller_resources_are_frozen_independently_of_large_task():
     old_plan = compile(legacy)
     assert "controller_resources" not in old_plan.canonical_payload()
     assert ExecutionRuntimePlanV1.model_validate(old_plan.canonical_payload()).canonical_payload() == old_plan.canonical_payload()
-    assert runtime_pod_resources(old_plan).cpu_millis == 24_000
+    assert runtime_pod_resources(old_plan).cpu_millis == 16_000
     profile = profile.model_copy(update={
         "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=2048),
     })
@@ -188,9 +234,9 @@ def test_controller_resources_are_frozen_independently_of_large_task():
     assert plan.controller_resources.memory_mib == 2048
     assert plan.controller_resources.ephemeral_storage_mib == plan.workspace_mib == 10_240
     assert all(s.resources == plan.task_resources for s in plan.sidecars)
-    assert runtime_pod_resources(plan).cpu_millis == 17_000
-    assert runtime_pod_resources(plan).memory_mib == 34_816
-    assert runtime_pod_resources(plan).ephemeral_storage_mib == 30_720
+    assert runtime_pod_resources(plan).cpu_millis == 9_000
+    assert runtime_pod_resources(plan).memory_mib == 18_432
+    assert runtime_pod_resources(plan).ephemeral_storage_mib == 20_480
     changed_profile = profile.model_copy(update={
         "controller_resources": ControllerComputeResourcesV1(cpu_millis=2000, memory_mib=4096),
     })
@@ -220,7 +266,11 @@ def test_controller_sizing_cannot_weaken_task_contract(mutation, reason):
     if mutation == "missing_controller":
         payload["agent_image_ref"] = None
     elif mutation == "missing_verifier":
-        payload["sidecars"] = payload["sidecars"][:1]
+        payload["verifier_execution"] = "in_attempt"
+        verifier = dict(payload["main"])
+        verifier["role"] = "verifier"
+        payload["verifier"] = verifier
+        payload["in_place_verifier"] = False
     elif mutation == "smaller_sandbox":
         payload["sidecars"][0]["resources"]["cpu_millis"] = 1
     else:

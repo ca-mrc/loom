@@ -49,7 +49,7 @@ def test_prepared_fixture_socket_source_and_hostname_are_trial_private(tmp_path:
     spec = render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,
     ))["spec"]["template"]["spec"]
-    materializer, fixture_spec, *sandboxes = spec["initContainers"]
+    materializer, fixture_spec, agent_spec = spec["initContainers"]
     assert not fixture_spec["volumeMounts"]
     assert "hostAliases" not in spec
     client = docker.from_env()
@@ -94,9 +94,8 @@ def test_prepared_fixture_socket_source_and_hostname_are_trial_private(tmp_path:
                 mounts=mounts(materializer) + [docker.types.Mount("/" + name, str(binaries / name),
                     type="bind", read_only=True) for name in ("loom-execution-runtime", "loom-sandbox-runtime")])
             assert initialized.wait(timeout=30)["StatusCode"] == 0, initialized.logs()
-            agent, verifier = [run("python:3.11-slim", ["python3", "-c", "import time; time.sleep(120)"],
-                user="65532:65532", network_mode=f"container:{controller.id}", mounts=mounts(sandbox),
-            ) for sandbox in sandboxes]
+            agent = run("python:3.11-slim", ["python3", "-c", "import time; time.sleep(120)"],
+                user="65532:65532", network_mode=f"container:{controller.id}", mounts=mounts(agent_spec))
             # The other trial may already be listening on TCP23. This trial's
             # identical loopback address and alias must still have no server.
             execute(agent, "import socket; s=socket.socket(); s.settimeout(1); "
@@ -129,13 +128,11 @@ def test_prepared_fixture_socket_source_and_hostname_are_trial_private(tmp_path:
                 " except ConnectionRefusedError:\n  time.sleep(.1)\nelse:\n raise AssertionError('fixture not ready')")
             probe = fixture.exec_run(fixture_spec["startupProbe"]["exec"]["command"])
             assert probe.exit_code == 0, probe.output
-            execute(verifier, "from pathlib import Path; Path('/loom/sandboxes/verifier-sandbox/private-test').write_text('private')")
-            for reader in (agent, verifier):
-                execute(reader, "from pathlib import Path; assert not Path('/server.py').exists(); "
-                    "assert not Path('/healthcheck.py').exists(); assert not Path('/fixture-source').exists()")
-                execute(reader, "import socket; c=socket.create_connection(('fixture.example',23),1); "
-                    f"assert c.recv(256) == {secret.encode()!r}; c.close()")
-            execute(agent, "from pathlib import Path; assert not Path('/loom/sandboxes/verifier-sandbox/private-test').exists()")
+            execute(agent, "from pathlib import Path; assert not Path('/server.py').exists(); "
+                "assert not Path('/healthcheck.py').exists(); assert not Path('/fixture-source').exists()")
+            execute(agent, "import socket; c=socket.create_connection(('fixture.example',23),1); "
+                f"assert c.recv(256) == {secret.encode()!r}; c.close()")
+            execute(agent, "from pathlib import Path; assert not Path('/loom/sandboxes/verifier-sandbox').exists()")
             assert execute(controller, "print(open('/etc/hosts').read(), end='')") == original_hosts
             assert b"fixture.example" not in original_hosts
             fixture.reload()

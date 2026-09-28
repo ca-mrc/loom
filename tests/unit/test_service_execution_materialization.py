@@ -935,18 +935,17 @@ def test_compiler_opts_only_isolated_terminus_into_timeout_verification(agent: s
         task_revision_sha256=_REVISION,
     )
     assert plan.main.timeout_seconds == 900
-    assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
     if agent == "terminus-2":
-        # A custom sandbox cwd must never move the trusted Python controller
-        # into task-controlled inputs or disable isolated import resolution.
-        assert plan.main.working_directory == plan.verifier.working_directory == "/app"
-        assert plan.main.argv[:3] == plan.verifier.argv[:3] == ("python", "-I", "-m")
-        assert plan.canonical_payload()["verifier_after_agent_timeout"] is True
+        assert plan.verifier is None
+        assert plan.verifier_execution == "separate_execution"
+        assert plan.main.working_directory == "/app"
+        assert plan.main.argv[:3] == ("python", "-I", "-m")
+        assert "verifier_after_agent_timeout" not in plan.canonical_payload()
         assert plan.agent_image_ref == controller
         assert {sidecar.role_name for sidecar in plan.sidecars if sidecar.private_sandbox} == {
             "task-sandbox",
-            "verifier-sandbox",
         }
     else:
+        assert plan.verifier is not None and plan.verifier.timeout_seconds == 1200
         assert not plan.verifier_after_agent_timeout
         assert "verifier_after_agent_timeout" not in plan.canonical_payload()

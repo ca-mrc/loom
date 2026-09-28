@@ -26,6 +26,10 @@ capability that would be silently weakened fail admission.
 Configured slots, a registered worker, and Nebius quota are not equivalent to
 fresh executable capacity.
 
+## Verifier pods
+
+Shared grading stays in the agent pod's task sandbox. Separate grading does not reserve a verifier sandbox there. After the agent result and `artifacts/workspace.tar` are durable and the agent pod's cleanup is complete, a child lease starts a verifier pod with only `verifier-sandbox`. That pod restores the committed workspace archive before tests are injected. `node-share-v1` sizes the agent sandbox with the two-role share and does not add the deferred verifier share to the task. Live before/after reservation measurements are still pending a deployed run; CI does not record them.
+
 ## Authority topology
 
 | State | Authority | Rule |

@@ -103,7 +103,7 @@ def test_only_one_self_contained_fixture_is_admitted() -> None:
 
 def test_compiled_fixture_preserves_probe_resources_and_separate_image_authority() -> None:
     plan = _plan()
-    fixture, agent, verifier = plan.sidecars
+    fixture, agent = plan.sidecars
     assert fixture.role_name == "fixture-server" and fixture.task_fixture
     assert fixture.task_image_component == "sidecar:server"
     assert fixture.hostname == "fixture.example" and fixture.image_ref == FIXTURE_IMAGE
@@ -114,11 +114,11 @@ def test_compiled_fixture_preserves_probe_resources_and_separate_image_authority
     assert fixture.startup_probe.timeout_seconds == 5 and fixture.startup_probe.period_seconds == 2
     assert fixture.startup_probe.failure_threshold == 15
     assert fixture.resources.cpu_millis == 100 and fixture.resources.memory_mib == 128
-    assert agent.private_sandbox and verifier.private_sandbox
+    assert agent.private_sandbox
     assert FIXTURE_IMAGE not in plan.published_image_refs()
     assert TASK_IMAGE not in plan.published_image_refs()
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
-    without_fixture = plan.model_copy(update={"sidecars": (agent, verifier)})
+    without_fixture = plan.model_copy(update={"sidecars": (agent,)})
     assert runtime_pod_resources(plan).cpu_millis == runtime_pod_resources(without_fixture).cpu_millis + 100
 
 
@@ -197,7 +197,7 @@ def test_fixture_job_orders_native_roles_without_pod_wide_hostname_aliases() -> 
         target_id=lease.target_id, namespace=lease.namespace_name,
     ))["spec"]["template"]["spec"]
     assert [item["name"] for item in pod["initContainers"]] == [
-        "runtime-materializer", "fixture-server", "task-sandbox", "verifier-sandbox",
+        "runtime-materializer", "fixture-server", "task-sandbox",
     ]
     assert "hostAliases" not in pod and "hostname" not in pod
     assert not pod["initContainers"][1].get("volumeMounts")
