@@ -7,8 +7,8 @@ Subcommands:
 - refresh-catalog
 - import <slug> [--db-url --minio-* --bucket --cache-dir --limit ...]
 - provision-catalog [--source-db-url --target-db-url --source-minio-* --target-minio-*]
-- publish-local <path> [--db-url env:VAR --minio-* --bucket ...]
-- publish <slug> [--hf-org --hf-token --cache-dir --limit --private]
+- publish-local: alias of publish for existing local-folder callers
+- publish [PATH | --benchmark SLUG] [--db-url --minio-* --cache-dir --refresh ...]
 - register <slug> [--hf-org --hf-token --db-url --revision --mirror-to-object-store --minio-*]
 - verify <slug> [--limit --minio-* --bucket --seed]
 - audit [--all | <slug>] [--db-url] [--json] [--tb21-audit-json PATH]
@@ -95,72 +95,6 @@ def _add_import_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--refresh", action="store_true")
 
 
-def _add_publish_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("benchmark")
-    p.add_argument(
-        "--target",
-        choices=("hf", "object-store"),
-        default="hf",
-        help=(
-            "Where to publish: 'hf' (default, HuggingFace dataset repo) "
-            "or 'object-store' (direct to MinIO/R2/S3, skipping HF entirely)."
-        ),
-    )
-    p.add_argument(
-        "--hf-org",
-        default=os.environ.get("LOOM_HF_ORG", "PRHW"),
-        help="HF namespace to publish under (default: env LOOM_HF_ORG, falling back to 'PRHW').",
-    )
-    p.add_argument(
-        "--hf-token",
-        default=os.environ.get("HF_TOKEN"),
-        help="HF write token (env: HF_TOKEN). Required when --target=hf.",
-    )
-    p.add_argument(
-        "--minio-endpoint",
-        default=_target_minio_env("ENDPOINT"),
-        help=(
-            "Object-store endpoint for --target=object-store "
-            "(env LOOM_MINIO_ENDPOINT, then LOOM_SVC_MINIO_ENDPOINT)."
-        ),
-    )
-    p.add_argument(
-        "--minio-access-key",
-        default=_target_minio_env("ACCESS_KEY"),
-        help="Object-store access key (env LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY).",
-    )
-    p.add_argument(
-        "--minio-secret-key",
-        default=_target_minio_env("SECRET_KEY"),
-        help="Object-store secret key (env LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY).",
-    )
-    p.add_argument(
-        "--bucket",
-        default=os.environ.get("LOOM_BENCHMARK_BUCKET", "loom-benchmarks"),
-        help="Target bucket for --target=object-store.",
-    )
-    p.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path(
-            os.environ.get(
-                "LOOM_BENCHMARK_CACHE",
-                "/tmp/loom-benchmark-cache",
-            ),
-        ),
-    )
-    p.add_argument("--limit", type=int, default=None)
-    p.add_argument(
-        "--instance-id",
-        dest="instance_ids",
-        action="append",
-        default=None,
-        help="Publish only the requested adapter instance id. Repeat for multiple ids.",
-    )
-    p.add_argument("--private", action="store_true")
-    p.add_argument("--refresh", action="store_true")
-
-
 def _add_register_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("benchmark")
     p.add_argument(
@@ -171,7 +105,7 @@ def _add_register_args(p: argparse.ArgumentParser) -> None:
             "Where to read the manifest from: 'hf' (default, HuggingFace "
             "dataset repo) or 'object-store' (direct read from MinIO/R2/S3, "
             "no HF hop). With 'object-store' the operator must pass the "
-            "explicit --revision emitted by `publish --target=object-store`."
+            "explicit --revision of an already-published historical manifest."
         ),
     )
     p.add_argument(
@@ -428,12 +362,18 @@ def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("path", type=Path)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("path", type=Path, nargs="?")
+    source.add_argument("--benchmark", help="Installed adapter slug to fetch and convert before publication.")
+    p.add_argument("--cache-dir", type=Path, default=None, help="Upstream cache (default: LOOM_BENCHMARK_CACHE or user cache).")
+    p.add_argument("--refresh", action="store_true", help="Refresh the selected adapter's upstream cache.")
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--instance-id", dest="instance_ids", action="append", default=None)
     p.add_argument(
         "--db-url",
         default=None,
         help=(
-            "Postgres URL source for publish-local. Prefer LOOM_DB_URL "
+            "Postgres URL source for publish. Prefer LOOM_DB_URL "
             "(then LOOM_SVC_DB_URL) in the environment; explicit values must "
             "use env:LOOM_DB_URL, file:PATH, or -. Literal values are rejected "
             "because argv is visible through process listings."
@@ -536,7 +476,7 @@ def _resolve_secret_source_or_env(
     env_names: tuple[str, ...],
     errors: list[str],
 ) -> str | None:
-    """Resolve a secret-bearing publish-local argument without encouraging argv."""
+    """Resolve a secret-bearing publication argument without encouraging argv."""
 
     if value is None:
         return _env_first(*env_names)
@@ -645,12 +585,6 @@ def _build_parser() -> argparse.ArgumentParser:
             help="Convert a benchmark's tasks + upload to MinIO + insert task rows.",
         )
     )
-    _add_publish_args(
-        sub.add_parser(
-            "publish",
-            help="Convert + push a benchmark to a HuggingFace dataset repo (Loom-team operation).",
-        )
-    )
     _add_register_args(
         sub.add_parser(
             "register",
@@ -699,8 +633,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_publish_local_args(
         sub.add_parser(
-            "publish-local",
-            help="Upload a validated local benchmark folder to object storage and register it.",
+            "publish",
+            aliases=["publish-local"],
+            help="Publish a local folder or --benchmark SLUG to object storage and register it.",
         )
     )
 
@@ -898,88 +833,6 @@ def _cmd_import(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(f"converted={stats['converted']} warnings={stats['warnings']}")
-    return 0
-
-
-def _cmd_publish(args: argparse.Namespace) -> int:
-    from loom.security.redaction import redact_text
-    from loom.trajectory.storage import MinioObjectStore
-    from loom_benchmark_tool.publish_cmd import run_publish
-
-    object_store = None
-    if args.target == "hf":
-        if not args.hf_token:
-            print(
-                "error: --target=hf requires --hf-token / env HF_TOKEN",
-                file=sys.stderr,
-            )
-            return 2
-    else:  # target == "object-store"
-        missing = [
-            flag
-            for flag, value in (
-                (
-                    "--minio-endpoint / LOOM_MINIO_ENDPOINT / LOOM_SVC_MINIO_ENDPOINT",
-                    args.minio_endpoint,
-                ),
-                (
-                    "--minio-access-key / LOOM_MINIO_ACCESS_KEY / LOOM_SVC_MINIO_ACCESS_KEY",
-                    args.minio_access_key,
-                ),
-                (
-                    "--minio-secret-key / LOOM_MINIO_SECRET_KEY / LOOM_SVC_MINIO_SECRET_KEY",
-                    args.minio_secret_key,
-                ),
-            )
-            if not value
-        ]
-        if missing:
-            print(
-                f"error: --target=object-store requires: {', '.join(missing)}",
-                file=sys.stderr,
-            )
-            return 2
-        object_store = MinioObjectStore(
-            endpoint_url=args.minio_endpoint,
-            access_key=args.minio_access_key,
-            secret_key=args.minio_secret_key,
-        )
-    try:
-        result = asyncio.run(
-            run_publish(
-                benchmark=args.benchmark,
-                target=args.target,
-                hf_org=args.hf_org,
-                hf_token=args.hf_token,
-                cache_dir=args.cache_dir,
-                limit=args.limit,
-                instance_ids=set(args.instance_ids) if args.instance_ids else None,
-                private=args.private,
-                refresh=args.refresh,
-                object_store=object_store,
-                bucket=args.bucket,
-            )
-        )
-    except ValueError as exc:
-        print(f"error: {redact_text(str(exc))}", file=sys.stderr)
-        return 2
-    except Exception as exc:
-        message = redact_text(str(exc))
-        if args.hf_token:
-            message = message.replace(args.hf_token, "[REDACTED:hf-token]")
-        print(
-            f"error: publish failed for {args.benchmark}: {message}",
-            file=sys.stderr,
-        )
-        return 1
-    print(
-        f"publish {args.benchmark}: "
-        f"target={result['target']} "
-        f"published={result['published']} "
-        f"warnings={result['warnings']} "
-        f"repo={result['repo_id']} "
-        f"rev={result['revision']}",
-    )
     return 0
 
 
@@ -1546,7 +1399,7 @@ def _cmd_validate_local(args: argparse.Namespace) -> int:
 
 def _cmd_publish_local(args: argparse.Namespace) -> int:
     from loom.trajectory.storage import MinioObjectStore
-    from loom_cli.local_benchmark_publish import publish_local_benchmark
+    from loom_cli.benchmark_publish import publish_benchmark
     from loom_cli.local_benchmark_validate import LocalBenchmarkValidationError
 
     secret_source_errors: list[str] = []
@@ -1570,7 +1423,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     )
     if secret_source_errors:
         print(
-            "error: publish-local refuses secret values in command-line argv; "
+            f"error: {args.subcmd} refuses secret values in command-line argv; "
             "use LOOM_* environment variables or env:VAR/file:PATH/- references.",
             file=sys.stderr,
         )
@@ -1599,7 +1452,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     ]
     if missing:
         print(
-            f"error: publish-local requires: {', '.join(missing)}",
+            f"error: {args.subcmd} requires: {', '.join(missing)}",
             file=sys.stderr,
         )
         return 2
@@ -1617,8 +1470,13 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     )
     try:
         stats = asyncio.run(
-            publish_local_benchmark(
+            publish_benchmark(
                 args.path,
+                benchmark=args.benchmark,
+                cache_dir=args.cache_dir,
+                refresh=args.refresh,
+                limit=args.limit,
+                instance_ids=set(args.instance_ids) if args.instance_ids else None,
                 db_url=db_url,
                 object_store=store,
                 bucket=args.bucket,
@@ -1636,9 +1494,17 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
     except LocalBenchmarkValidationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.exit_code
+    except (ValueError, OSError) as exc:
+        from loom.security.redaction import redact_text
+        message = redact_text(str(exc))
+        for secret in (db_url, minio_access_key, minio_secret_key):
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        print(f"error: publish failed: {message}", file=sys.stderr)
+        return 1
 
     summary = (
-        f"publish-local {stats.benchmark_id}: "
+        f"{args.subcmd} {stats.benchmark_id}: "
         f"tasks={stats.task_count} "
         f"inserted={stats.inserted} "
         f"updated={stats.updated} "
@@ -1657,6 +1523,8 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
             f" preflight_passed={ps.preflight_passed}"
         )
     print(summary)
+    for warning in getattr(stats, "warnings", ()):
+        print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
@@ -1806,7 +1674,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "install": _cmd_install,
     "refresh-catalog": _cmd_refresh,
     "import": _cmd_import,
-    "publish": _cmd_publish,
+    "publish": _cmd_publish_local,
     "register": _cmd_register,
     "verify": _cmd_verify,
     "audit": _cmd_audit,

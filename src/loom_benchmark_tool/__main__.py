@@ -5,10 +5,9 @@ moved to `loom datasets <subcommand>` (modular-D). This entry-point
 stays for back-compat: prints a one-line deprecation note to stderr,
 then re-runs the same argv under `loom_cli.datasets_cmd.dispatch`.
 
-The library modules (`loom_benchmark_tool.import_cmd`, `.publish_cmd`,
-`.register_cmd`, `.verify_cmd`, `.list_cmd`) keep their public
-surface unchanged — tests + third-party callers that import
-`run_publish` etc. continue to work.
+The old HF/direct publication implementation is retired. Publication now uses
+`loom datasets publish PATH` or `loom datasets publish --benchmark SLUG`.
+Other historical lifecycle modules remain available.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import sys
 def main() -> None:
     sys.stderr.write(
         "warning: `python -m loom_benchmark_tool` is deprecated; use "
-        "`loom datasets <subcommand>` instead. Behavior is unchanged; "
+        "`loom datasets <subcommand>` instead. "
         "this shim simply forwards to the new entry point.\n",
     )
 

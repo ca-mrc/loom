@@ -94,9 +94,20 @@ class ApplicationOperationJournal:
             operation, now = await self._leased(session, lease)
             operation.lease_expires_at = now + duration
 
-    async def frozen_plan(self, lease: ApplicationLease) -> dict[str, Any]:
+    @staticmethod
+    async def _historical_operation(session: AsyncSession, current: NebiusApplicationOperation,
+                                     operation_id: UUID) -> NebiusApplicationOperation:
+        target = await session.get(NebiusApplicationOperation, operation_id)
+        if (target is None or target.application_id != current.application_id
+                or target.deployment_generation > current.deployment_generation):
+            raise ManagementError("application_history_forbidden", 403)
+        return target
+
+    async def frozen_plan(self, lease: ApplicationLease, *, operation_id: UUID | None = None) -> dict[str, Any]:
         async with self.session_factory.begin() as session:
             operation, _ = await self._leased(session, lease)
+            if operation_id is not None:
+                operation = await self._historical_operation(session, operation, operation_id)
             return copy.deepcopy(operation.plan_json)
 
     async def finish_attempt(self, lease: ApplicationLease, *, error_code: str, retry: bool) -> None:

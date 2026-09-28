@@ -184,6 +184,17 @@ claims retirement or releases resources. Reopening admission requires its record
 UID/resourceVersion delete preconditions after prior-generation retirement. No
 installer or lifecycle worker activates this primitive yet.
 
+`ApplicationRuntimeProvider.close_admission` composes this quota with the
+application effect journal and protected installation identity. It reconciles
+outstanding quota dispatches before changing anything, never recreates a missing
+recorded quota, and advances an older gate only with its observed UID and exact
+resourceVersion. Live generation/operation/identity and unscoped zero-Pod spec
+must match, and the quota controller's status must acknowledge `pods: 0` before
+the call returns. Definitive patch conflicts wait for new preconditions; uncertain
+writes are never resent. This adapter neither removes the gate nor proves that
+existing processes, object access or SQL connections have retired. It is not a
+completed lifecycle worker or capacity-release authority.
+
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
 and only then grant bootstrap authority. The manager must still authenticate owners,
@@ -329,6 +340,17 @@ proof, and malformed readback is rejected. An uncertain dispatch only reads on
 subsequent calls, including after lease takeover. A confirmed409/422 is retained
 as rejection so trusted orchestration can use a new key after fresh observation.
 
+After supersession, the current lease can also reconcile an old same-application
+dispatch using its original operation, generation, effect key and request digest.
+CREATE/PATCH reconciliation requires the exact original document; a different body
+cannot satisfy the recorded request. This path makes no Kubernetes writes and
+cannot dispatch a predecessor's prepared request. DELETE reconciliation confirms
+absence of the original UID, without deleting any replacement. Terminal effects
+remain immutable history, not a fresh readiness or retirement check. Stale leases
+and sibling applications cannot inspect frozen predecessor plans or record their
+effects. The disposable Kubernetes lane exercises a real successful CREATE whose
+reply is lost, followed by suspension and reconciliation without another POST.
+
 This internal adapter receives qualified manifests/material from trusted lifecycle
 code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE
 target ownership and history before supplying UID/resourceVersion, including Pod
@@ -339,6 +361,141 @@ observed effects are historical evidence, not a new health check. Kubernetes chi
 CREATE has no namespace-UID precondition: readback detects namespace replacement,
 but does not claim to fence a privileged external administrator replacing it.
 The application manager itself has no namespace replacement/delete authority.
+
+### Shared application database access
+
+`loom.nebius_application_database` supplies a protected shared-side credential
+interface, not an installed lifecycle worker. Its administrator-installed private
+SQL schema binds one development data UUID, database identity and dedicated manager
+login. That ordinary manager can invoke the credential routines but cannot perform
+general role/schema administration or write the private records directly.
+
+Each application incarnation/access generation gets a separate ordinary login.
+PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
+and `ADMIN FALSE`; the login cannot assume the common runtime role. The common
+role has no schema ownership/DDL or migration-head writes. It is separate from
+the historical service role. Protected shared migrations must reapply its grants
+for new tables. Developer-controlled APIs remain trusted development code with
+shared-data DML, not mutually adversarial database tenants.
+
+Grant/revoke serialize on a private application row. A committed monotonic
+revocation record prevents an earlier delayed grant from reopening retired access,
+including a generation that had never finished provisioning. Revocation removes
+LOGIN, password and membership without deleting users, tasks or data. A separate
+committed call terminates existing connections and checks their absence; successor
+access waits for predecessor connections to disappear. The SQL routine itself
+rejects a retirement made in its current transaction before terminating anything;
+rolling back a later drain cannot undo the prior revocation. `NOLOGIN` alone is never
+retirement evidence. An authentication already in flight may outlive a backend
+snapshot, but after revocation it has no shared runtime membership or data grants.
+
+The interface preserves exact role OIDs, rejects role replacement/privilege drift,
+and never rotates an unknown credential on replay. PUBLIC data privileges that
+would defeat revocation are rejected. Private records retain only credential
+fingerprints, not raw passwords. The protected caller must generate high-entropy
+credentials and retain them in protected material for retry. This code has no
+live installation/dispatch entry point and does not retire object-store keys,
+close Pods, qualify application schema compatibility, or release capacity.
+
+### Recoverable application credential material
+
+The internal application registry persists a generation's credential bundles in
+the existing management `LocalEncryptedSecretStore` before a trusted lifecycle
+caller prepares or dispatches external grants or Kubernetes Secret delivery.
+Migration0164 atomically links each operation to its unique encrypted record;
+foreign keys retain both the operation and ciphertext, and downgrade refuses to
+erase material history. Provider-secret collection recognizes these references,
+preserving any referenced retired key without aborting unrelated collection.
+Plans and public operation progress contain neither raw
+material nor secret references. Management's encryption key remains separate from
+the shared-development keyring delivered to APIs.
+
+`ensure_material` validates the current operation lease and serializes competing
+callers. Its synchronous, side-effect-free factory runs only when no committed
+material exists; retries and lease takeover decrypt the original material without
+rotating credentials. Factory/transaction failure leaves no partial reference.
+New credentials require an active create/update/resume with exactly its frozen
+generation-specific DB, storage and auth Secret targets. Historical fixed-name
+plans and stop operations cannot generate new material. `load_material` requires
+a current lease even to read earlier operations of the same application, allowing
+retirement without granting sibling/future access. Missing or corrupted material
+fails closed rather than generating a replacement.
+
+This is encrypted persistence, not semantic validation of a password, CA, cloud
+key or shared keyring. The trusted lifecycle provider still must qualify those
+values, protect delivery and coordinate revocation; no credential provisioning,
+runtime activation, readiness or capacity release is enabled by this journal.
+
+### Application object-store access
+
+`application_management.cloud_effects` journals fixed-purpose IAM effects separately
+from retained full-environment provisioning. A protected storage binding identifies
+the shared development data UUID, dedicated provisioning project and existing
+data/source access groups. Each application incarnation/access generation creates
+one service account and one EXPLICIT access key; it creates no buckets, policies,
+groups or backup credentials. Membership requests require the recorded key and
+successfully decrypted, committed application material. The trusted lifecycle
+caller qualifies the material and shared groups before using this interface.
+
+Migration0165 retains cloud request identities, dispatch epochs and observed IDs.
+One current-lease caller wins dispatch. Lost responses remain uncertain: absence
+does not authorize another CREATE or DELETE. Current authority can reconcile earlier
+same-application dispatches and delete exact observed predecessor identities, but
+cannot dispatch a superseded CREATE or adopt unrelated/sibling resources. A
+matching resource without recorded dispatch is not silently adopted. Downgrade
+refuses to erase cloud history.
+Retirement retains one deletion intent across superseding operations (for example,
+suspend followed by destroy). A successor may dispatch a still-prepared retirement
+once under its current lease; a previously dispatched retirement only reconciles.
+
+`ApplicationCloudProvider` uses the existing native Nebius SDK with transport and
+native renewable-credential authentication retries disabled, 30-second request and
+authentication deadlines, and deterministic idempotency keys. Reads validate frozen names, project/group,
+labels, specification and recorded resource ID. Observed resources that disappear
+or change identity fail closed. Delete addresses only an exact recorded ID, after
+ownership readback, and confirms absence without automatically resending uncertain
+requests. EXPLICIT access-key material is retrieved separately for encrypted
+persistence; no key values enter the cloud journal or public progress.
+
+This adapter supplies bounded IAM I/O, not an activated lifecycle worker. Protected
+installation still must qualify shared group/prefix grants and credential authority.
+Lifecycle orchestration must reconcile all outstanding grants, retire credentials
+and processes, verify object-store revocation propagation, and coordinate schema
+and readiness before releasing reservations. The API does not claim that a cloud
+resource snapshot fences a privileged external administrator, proves S3 access
+denial, or completes personal-environment acceptance.
+
+### Application credential integration
+
+`application_management.credentials.ApplicationCredentialProvider` composes the
+shared SQL/IAM adapters with the encrypted material journal. Protected installation
+supplies the shared development CA, SecretStore keyring, database identity and
+existing IAM groups; it does not generate a new CA/keyring for a personal API.
+The delivered DB URL names the frozen shared PostgreSQL service and uses
+`verify-full`, an ordinary generation login and the shared CA mount. Only DB,
+storage and auth generation bundles are constructed; manager, backup and cloud
+provisioning credentials never enter them.
+
+Permissionless account/key creation precedes material persistence. Exact DB login
+and group membership grants follow successful encrypted commit and semantic bundle
+validation. Retry and lease takeover reuse the same password/key. Changed shared
+material or malformed persisted credentials fail closed rather than replacing a
+generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL off
+the heartbeat loop using private, bounded autocommit connections. The protected
+caller must qualify the manager's database/TLS route; construction grants nothing.
+
+Credential delivery uses three immutable, generation-named Kubernetes Secrets in
+the already-observed personal namespace. The existing effect journal stores only
+request hashes and object identities, not Secret values; a lost response reconciles
+the same Secret instead of reposting it. These observations are historical write
+evidence, not a substitute for live resource/readiness checks before API startup.
+
+Database retirement commits revocation before draining existing sessions. It needs
+the same data/application identity but not a still-deliverable CA/keyring, so
+expired delivery material cannot itself prevent revocation. SQL cancellation may
+leave an in-flight request; monotonic shared-side tombstones fence late grants.
+This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
+users, coordinate migrations, mark readiness or release platform reservations.
 
 ## Managed environment identity and rendering
 

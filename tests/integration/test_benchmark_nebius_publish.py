@@ -28,8 +28,9 @@ from loom_execution_actuator.task_image_runtime import download_bundle
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("command_name", ["publish", "publish-local"])
 async def test_cli_republish_repairs_legacy_prefix_and_feeds_native_builder(
-    postgres_url: str, shared_minio, tmp_path: Path,
+    postgres_url: str, shared_minio, tmp_path: Path, command_name: str,
 ) -> None:
     root = tmp_path / "native-benchmark"
     task_dir = root / "tasks" / "alpha"
@@ -81,7 +82,20 @@ instruction_file = "instruction.md"
     )
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    command = [sys.executable, "-m", "loom_cli", "datasets", "publish-local", str(root),
+    # A fresh interpreter prevents other tests' adapter imports from hiding the
+    # service/base installation boundary. Exercise the real CLI, DB and MinIO.
+    without_adapters = """
+import importlib.abc
+import runpy
+import sys
+class NoAdapters(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'loom_benchmarks', 'loom_benchmark_terminal_bench_2', 'datasets'}:
+            raise ModuleNotFoundError(f"No module named '{fullname}'", name=fullname)
+sys.meta_path.insert(0, NoAdapters())
+runpy.run_module('loom_cli', run_name='__main__')
+"""
+    command = [sys.executable, "-c", without_adapters, "datasets", command_name, str(root),
                "--bucket", bucket]
     env = {
         **os.environ,

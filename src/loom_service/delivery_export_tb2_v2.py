@@ -24,6 +24,7 @@ from loom.models.trajectory import (
     Terminus2TurnEvent,
     TrajectoryEvent,
 )
+from loom.terminal_result_semantics import is_scored_agent_timeout
 
 MAX_JSONL_BYTES = 50 * 1024 * 1024
 MAX_JSONL_LINES = 100_000
@@ -230,7 +231,9 @@ def validate_v2_eligibility(events: list[TrajectoryEvent], trial: Trial) -> None
         )
 
 
-def validate_v2_joins(events: list[TrajectoryEvent]) -> list[str]:
+def validate_v2_joins(
+    events: list[TrajectoryEvent], *, committed_native_trajectory: bool = False,
+) -> list[str]:
     errors = Terminus2TrajectoryMapper.validate_turn_joins(events)
     turn_events = [
         event
@@ -248,7 +251,7 @@ def validate_v2_joins(events: list[TrajectoryEvent]) -> list[str]:
     has_trajectory_ref = any(
         ref.artifact_kind == "terminus_2.pane" for ref in artifact_refs
     )
-    if not has_trajectory_ref:
+    if not has_trajectory_ref and not committed_native_trajectory:
         errors.append(
             "missing terminus2_artifact_ref for native harbor trajectory",
         )
@@ -1158,7 +1161,23 @@ def build_per_trial_v2_bundle(
     agent_version: str = "1.0",
 ) -> Tb2V2TrialBundle:
     validate_v2_eligibility(events, trial)
-    join_errors = validate_v2_joins(events)
+    committed_native = None
+    if not any(isinstance(event, Terminus2ArtifactRefEvent)
+               and event.artifact_kind == "terminus_2.pane" for event in events) and is_scored_agent_timeout(
+        state=str(trial.state), result=trial.result, failure_reason=trial.failure_reason,
+    ):
+        from loom_service.delivery_export_timeout_native import resolve_timeout_native_artifacts
+
+        # Any existing references must still validate; only the missing final
+        # trajectory reference can use the committed runtime-output authority.
+        committed_native = resolve_native_artifacts(
+            trial, events, client=client, artifacts_bucket=artifacts_bucket,
+        ) | resolve_timeout_native_artifacts(
+            trial, client=client, artifacts_bucket=artifacts_bucket,
+        )
+    join_errors = validate_v2_joins(
+        events, committed_native_trajectory=committed_native is not None,
+    )
     if join_errors:
         raise Tb2V2ExportError(
             "join_validation_failed",
@@ -1192,7 +1211,9 @@ def build_per_trial_v2_bundle(
         trial_id=str(trial.id),
         join_errors=join_errors,
     )
-    native_artifacts = resolve_native_artifacts(
+    if committed_native is not None:
+        export_provenance["native_artifact_authority"] = "committed_runtime_output"
+    native_artifacts = committed_native if committed_native is not None else resolve_native_artifacts(
         trial,
         events,
         client=client,

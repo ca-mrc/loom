@@ -194,37 +194,43 @@ agent.
 
 ## Publish/Register Boundary
 
-Adapters convert upstream data into local bundles. Publication turns
-those bundles into a durable dataset repo, and registration turns the
-published manifest into catalog rows:
+Both input forms use the same publication backend:
 
 ```bash
-loom datasets publish humaneval --hf-org PRHW
-loom datasets register humaneval --hf-org PRHW --mirror-to-object-store
+# LOOM_DB_URL and LOOM_MINIO_* identify the destination; keep secrets in env.
+loom datasets publish --benchmark humaneval
+loom datasets publish ./team-evals
 ```
 
-The publish command validates every generated `task.toml` against
-`TaskConfig` before upload. Schema v3 manifests include the validated
-raw `task_config` for each task, alongside the bundle checksum,
-`hf_path`, split, tags, and license metadata. The register command
-validates that payload again, verifies `task_config.task.id` matches
-the manifest `task_id`, and writes it to `tasks.config`. In
-staging/production, registration should also mirror the exact HF
-revision into internal object storage and write `s3://...` task sources so
-workers do not need HF tokens or direct HF egress.
+Local-folder publication works with the base installation and does not load
+upstream adapters. The `--benchmark` form needs the optional adapter packages;
+from the repository, install them with `uv sync --locked --extra rollout` and
+invoke the command with `uv run loom datasets publish --benchmark SLUG`.
+Missing adapter dependencies produce an installation hint before publication.
 
-That stored config is the runnable boundary used by the service,
-batch runner, and SPA. Legacy manifests that lack `task_config` are
-still registered for metadata and provenance, but their rows keep
-`config = {}` and are counted as `legacy_placeholders` in CLI output.
-They are not runnable until the benchmark is republished with a v3
-manifest or explicitly backfilled.
+The adapter input downloads its upstream, selects instances, and converts them
+into temporary task bundles. The common publisher validates and uploads those
+bundles, writes the service execution input binding, and registers catalog rows.
+Original adapter task IDs, splits, tags, licenses, upstream provenance, and
+workspace isolation policy are retained. `--execution-profile nebius-terminus`
+uses the same optional adaptation and admission preflight for either input.
+Publication does not activate the TB2.1 public alias; that still requires the
+existing audit/activation operation. An existing physical profile cannot be
+rewritten through the new input path.
 
-This same boundary is the intended scaling path for user-owned
-benchmarks: validate a folder of Loom task bundles, publish the bundle
-tree to a supported object store or dataset repo, register the manifest,
-then smoke a small sample. Browser upload and admin APIs should wrap
-these primitives instead of inventing separate ingestion behavior.
+The upstream cache defaults to `$XDG_CACHE_HOME/loom/benchmarks` (or
+`~/.cache/loom/benchmarks`). `LOOM_BENCHMARK_CACHE` and `--cache-dir` override it;
+`--refresh` replaces the selected upstream cache. A permission failure reports
+the cache directory and asks the operator to choose a writable cache.
+
+Migration: replace `publish SLUG --target=...` followed by `register` with
+`publish --benchmark SLUG` against the intended database and object store.
+`publish-local PATH` remains an alias of the common command for current callers.
+The separate HF writer and its GitHub workflow have been retired. `register`
+remains available to consume already-published historical HF/object-store
+manifests; it is not required after a new publication. To publish into another
+environment, use the same pinned adapter source or local folder with that
+environment's database/object-store settings.
 
 If a generated task config uses `agent.name = "oracle"`, the bundle
 must include an executable `solution/solve.sh`. Code-completion
@@ -667,7 +673,7 @@ sources require an explicit package repair; validation never invents an empty
 directory. Unknown runtime needs embedded in task instructions or arbitrary
 scripts require author review and are not inferred by this static report.
 
-For production, use `loom datasets publish-local <folder>` instead of
+For production, use `loom datasets publish <folder>` instead of
 `sync-config` when workers should materialize from object storage rather than a
 shared fixture mount. It uploads bundle files under
 `s3://<bucket>/<benchmark-id>/<task-id>/` and upserts DB rows with those

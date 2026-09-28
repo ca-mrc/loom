@@ -186,21 +186,6 @@ def test_batch_shape_supports_200_trials_without_exceeding_api_sample_limit() ->
     assert [Combination.model_validate(row).n_per_task for row in combinations] == [100, 100]
 
 
-def test_large_gateway_model_batch_needs_no_provider_connection() -> None:
-    _, _, combinations = _batch_shape(
-        trials_per_task=250,
-        agent_name="litellm",
-        agent_model={"provider": "openai", "name": "local/model", "source": "api"},
-        provider_connection_id=None,
-        provider_model_id="local/model",
-    )
-    assert [Combination.model_validate(row).n_per_task for row in combinations] == [100, 100, 50]
-    assert all(
-        "provider_connection_id" not in row and "provider_model_id" not in row
-        for row in combinations
-    )
-
-
 def test_required_outputs_match_real_canonical_export_layout() -> None:
     validate_trial_bundle(
         _bundle(), trial_id=_TRIAL_ID, required_outputs=_ACCEPTANCE_REQUIRED_OUTPUTS
@@ -268,7 +253,7 @@ def test_validate_trial_bundle_checks_manifest_and_every_member() -> None:
     "target_id", [None, "nebius-eu-north1-integration", "nebius-eu-west1-integration"]
 )
 @pytest.mark.parametrize("cleanup_state", ["complete", "retained", "running"])
-@pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}, None])
+@pytest.mark.parametrize("connection", [{"id": _CONNECTION_ID}])
 @pytest.mark.parametrize("observed_running", [0, 1, 2])
 def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
     tmp_path: Path,
@@ -309,9 +294,8 @@ def test_run_acceptance_uses_public_api_and_persists_complete_evidence(
             submitted = json.loads(request.content)
             assert submitted["backend"] == "nebius"
             assert submitted["n_per_task"] == 1
-            if connection is None:
-                assert "provider_connection_id" not in submitted
-                assert "provider_model_id" not in submitted
+            # #2054: model-backed acceptance always names its connection.
+            assert submitted["provider_connection_id"] == connection["id"]
             return httpx.Response(
                 201,
                 json={
@@ -659,7 +643,7 @@ def test_run_acceptance_cancels_nonterminal_batch_on_timeout(tmp_path: Path) -> 
     assert len(progress["current_stage"]["capacity_samples"]) == 1
 
 
-def test_parser_supports_gateway_model_and_read_only_cleanup_resume() -> None:
+def test_parser_defaults_to_testing_connection_and_read_only_cleanup_resume() -> None:
     parser = argparse.ArgumentParser()
     configure_parser(parser.add_subparsers())
     fresh = parser.parse_args(
@@ -675,11 +659,11 @@ def test_parser_supports_gateway_model_and_read_only_cleanup_resume() -> None:
             "new-evidence",
         ]
     )
-    assert fresh.provider is None
+    assert fresh.provider == "az-gateway-loom-testing"
     resume = parser.parse_args(
         ["nebius-acceptance", "--resume-cleanup", "old-evidence", "--output", "cleanup-evidence"]
     )
-    assert resume.provider is None and resume.model is None and resume.candidate_sha is None
+    assert resume.model is None and resume.candidate_sha is None
 
 
 def test_cli_reports_local_taskset_error_before_login(

@@ -1,8 +1,8 @@
 """Model catalog — GET /api/v1/models.
 
 Returns legacy rate-card model tuples plus BYO provider-connection
-models visible to the caller's team. Default view is launch-safe:
-agent-capable/recommended models only. `view=raw` keeps noisy provider
+models visible to the caller's team (owned or shared with it). Default
+view is launch-safe: agent-capable/recommended models only. `view=raw` keeps noisy provider
 entries for debugging with classifier reasons.
 """
 
@@ -11,9 +11,14 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
-from loom.db.schema import ProviderConnection, ProviderModelCache, RateCard
+from loom.db.schema import (
+    ProviderConnection,
+    ProviderConnectionShare,
+    ProviderModelCache,
+    RateCard,
+)
 from loom_service.auth_guards import is_admin
 from loom_service.dependencies import SessionAndCtx
 from loom_service.provider_connection_lookup import OPENAI_SHAPED_PROVIDER_TYPES
@@ -141,7 +146,17 @@ async def list_models(
         .where(ProviderConnection.deleted_at.is_(None))
     )
     if not is_admin(ctx):
-        stmt = stmt.where(ProviderConnection.team_id == ctx.team_id)
+        # Same visibility as GET /provider-connections: the team's own
+        # connections plus those explicitly shared with it (#2054).
+        shared_ids = select(ProviderConnectionShare.provider_connection_id).where(
+            ProviderConnectionShare.target_team_id == ctx.team_id,
+        )
+        stmt = stmt.where(
+            or_(
+                ProviderConnection.team_id == ctx.team_id,
+                ProviderConnection.id.in_(shared_ids),
+            ),
+        )
     byo_rows = (await s.execute(stmt)).all()
     for conn, cache in byo_rows:
         item = _byo_model_item(conn, cache)
