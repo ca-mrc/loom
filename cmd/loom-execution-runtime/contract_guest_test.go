@@ -1,0 +1,113 @@
+package main
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func guestPlanPayload(t *testing.T) map[string]any {
+	t.Helper()
+	p := preparedTaskPlan()
+	p.RuntimeVolumeMiB = 1024
+	p.ExecutionClassID = "linux-amd64-cpu-guest-v1"
+	p.TaskResources = resources{CPUMillis: 1000, MemoryMiB: 1024, EphemeralStorageMiB: 2048}
+	for i := range p.Sidecars {
+		s := &p.Sidecars[i]
+		socket := "/loom/sandboxes/" + s.RoleName + "/sandbox.sock"
+		s.Argv = []string{"/loom/bin/loom-sandbox-runtime", "--socket", socket, "--exec-timeout-seconds", "60"}
+		s.StartupProbe.Argv = []string{"/loom/bin/loom-sandbox-runtime", "--check-socket", socket}
+		s.ReadinessProbe.Argv = append([]string(nil), s.StartupProbe.Argv...)
+		s.Resources = p.TaskResources
+		zero := int64(0)
+		s.Identity = &sandboxIdentity{RunAsUser: &zero, RunAsGroup: &zero, Home: "/root"}
+	}
+	raw, _ := json.Marshal(p)
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range result["sidecars"].([]any) {
+		item.(map[string]any)["guest_execution"] = map[string]any{
+			"schema_version": "loom.guest-execution.v1", "runtime": "qemu-tcg-v1",
+			"capabilities": []any{"nested_docker", "singularity_mounts"},
+		}
+	}
+	return result
+}
+
+func TestGuestPlanStrictRoundTripAndOrdinaryOmission(t *testing.T) {
+	raw, _ := json.Marshal(guestPlanPayload(t))
+	p, err := decodePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundtrip, _ := json.Marshal(p)
+	var got map[string]any
+	_ = json.Unmarshal(roundtrip, &got)
+	if got["sidecars"].([]any)[0].(map[string]any)["guest_execution"] == nil {
+		t.Fatal("guest authority lost")
+	}
+	p = preparedTaskPlan()
+	raw, _ = json.Marshal(p)
+	_ = json.Unmarshal(raw, &got)
+	if _, present := got["sidecars"].([]any)[0].(map[string]any)["guest_execution"]; present {
+		t.Fatal("legacy bytes changed")
+	}
+}
+
+func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
+	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime"} {
+		t.Run(damage, func(t *testing.T) {
+			p := guestPlanPayload(t)
+			sides := p["sidecars"].([]any)
+			s := sides[0].(map[string]any)
+			g := s["guest_execution"].(map[string]any)
+			switch damage {
+			case "ordinary_class":
+				p["execution_class_id"] = "linux-amd64-cpu-pod-v1"
+			case "missing_guest":
+				for _, x := range sides {
+					delete(x.(map[string]any), "guest_execution")
+				}
+			case "one_guest":
+				delete(s, "guest_execution")
+			case "empty_caps":
+				g["capabilities"] = []any{}
+			case "unknown_cap":
+				g["capabilities"] = []any{"external_cluster"}
+			case "different_caps":
+				g["capabilities"] = []any{"nested_docker"}
+			case "duplicate_caps":
+				g["capabilities"] = []any{"nested_docker", "nested_docker"}
+			case "unsorted_caps":
+				g["capabilities"] = []any{"singularity_mounts", "nested_docker"}
+			case "nonroot":
+				s["identity"].(map[string]any)["run_as_user"] = 65532
+			case "short_volume":
+				p["runtime_volume_mib"] = 1023
+			case "wrong_socket":
+				s["argv"].([]any)[2] = "/tmp/foreign.sock"
+			case "wrong_probe":
+				s["startup_probe"].(map[string]any)["argv"].([]any)[2] = "/tmp/foreign.sock"
+			case "small_memory":
+				s["resources"].(map[string]any)["memory_mib"] = 511
+			case "small_storage":
+				s["resources"].(map[string]any)["ephemeral_storage_mib"] = 159
+			case "small_cpu":
+				s["resources"].(map[string]any)["cpu_millis"] = 999
+			case "bad_timeout":
+				s["argv"].([]any)[4] = "86401"
+			case "foreign_sidecar":
+				p["sidecars"] = append(sides, sides[0])
+			case "wrong_schema":
+				g["schema_version"] = "future"
+			case "wrong_runtime":
+				g["runtime"] = "host-docker"
+			}
+			raw, _ := json.Marshal(p)
+			if _, err := decodePlan(raw); err == nil {
+				t.Fatal("unsafe guest launch accepted")
+			}
+		})
+	}
+}
