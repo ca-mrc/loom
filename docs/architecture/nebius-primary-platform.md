@@ -199,6 +199,14 @@ create the empty retained personal namespace under its current operation, so
 retirement uses the same quota path. An existing unrecorded namespace is never
 adopted, and a disappeared observed namespace is never recreated.
 
+`ensure_resource_authority` then creates the exact frozen bootstrap RoleBinding
+to the protected application resource role. It reconciles lost replies, never
+dispatches an unsent predecessor create, and refuses foreign, missing-recorded or
+changed bindings. It cannot patch/delete a RoleBinding or broaden its role/subject.
+A read-only self-access review confirms quota-create authorization has propagated
+before resource operations begin; denial or evaluation uncertainty remains pending.
+This uses the installed application provisioner token, not an administrator token.
+
 `stop_workloads` then removes exact journal-owned personal Ingress/Service objects
 and scales retained Deployment names to zero. Requests use original frozen
 templates and UID/resourceVersion preconditions; a prepared request resumes its

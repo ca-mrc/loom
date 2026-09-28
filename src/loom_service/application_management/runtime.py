@@ -16,6 +16,7 @@ from uuid import UUID
 from loom.nebius_application_authority import (
     APPLICATION_INSTALLATION_LABEL,
     ApplicationNamespaceAuthorityV1,
+    application_namespace_binding,
     application_pod_fence,
 )
 from loom.nebius_application_contract import ApplicationRegistrationV1
@@ -207,7 +208,7 @@ class ApplicationRuntimeProvider:
         Shared data, access revocation and reservation accounting are deliberately
         not changed here. Even foreign/terminating Pods retain the retirement gate.
         """
-        await self.ensure_namespace(lease)
+        await self.ensure_resource_authority(lease)
         await self._resume_retirement(lease)
         await self.close_admission(lease)
         for effect in await self.registry.effect_history(lease):
@@ -285,6 +286,74 @@ class ApplicationRuntimeProvider:
             identity=ApplicationRetirementIdentity.for_lease(lease, UUID(plan["registration"]["data_environment_id"])),
             namespace=_observation(actual_namespace, namespace_source), fence=fence,
             pods_resource_version=pods["metadata"]["resourceVersion"], deployments=tuple(deployments))
+
+    async def ensure_resource_authority(self, lease: ApplicationLease) -> None:
+        """Bootstrap the frozen exact binding, then observe effective permission.
+
+        Namespace creation alone grants no namespaced resource authority. Binding
+        writes are journaled once; authorization reviews are read-only and do not
+        consume effect slots or turn a lost mutation into retry permission.
+        """
+        await self.ensure_namespace(lease)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        document = next((doc for docs in plan["files"].values() for doc in docs
+            if doc["kind"] == "RoleBinding" and doc["metadata"]["name"] == self.authority.name), None)
+        if document is None or not _contains(document, application_namespace_binding(self.authority, namespace)):
+            raise ProviderBlockedError("application_resource_authority_conflict")
+        for effect in await self.registry.effect_history(lease):
+            if effect.intent.kind != "RoleBinding":
+                continue
+            if effect.intent.action != "create" or effect.intent.name != self.authority.name:
+                raise ProviderBlockedError("application_resource_authority_conflict")
+            if effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key,
+                    document=await self._request_document(lease, effect))
+            elif effect.phase == "prepared" and effect.operation_id == lease.operation_id:
+                await self.kubernetes.create(lease, effect.key, document)
+        path = f"/apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/rolebindings/{self.authority.name}"
+        actual = await self.kubernetes._read(path)
+        history = [item for item in await self.registry.effect_history(lease) if item.intent.kind == "RoleBinding"]
+        if any(item.phase == "dispatched" or (item.phase == "prepared" and item.operation_id == lease.operation_id)
+               for item in history):
+            raise ProviderWaitingError("application_resource_authority_pending")
+        observed = [item for item in history if item.phase == "observed"]
+        if not observed:
+            if actual is not None:
+                raise ProviderBlockedError("application_resource_authority_conflict")
+            recorded = await self.kubernetes.create(lease, "resource-authority:create", document)
+            actual = await self.kubernetes._read(path)
+        else:
+            if len(observed) != 1:
+                raise ProviderBlockedError("application_resource_authority_conflict")
+            recorded = observed[0]
+            # A same-lease peer can create and observe after our absent GET but
+            # before this journal snapshot. Re-read; never turn that progress
+            # into a blocked conflict or authority for another CREATE.
+            if actual is None:
+                actual = await self.kubernetes._read(path)
+        original = await self.registry.frozen_plan(lease, operation_id=recorded.operation_id)
+        expected = self.kubernetes._document(lease, recorded.key, document, operation_id=recorded.operation_id,
+            deployment_generation=original["registration"]["deployment_generation"])
+        if (actual is None or actual["metadata"]["uid"] != recorded.observed_uid
+                or actual["metadata"].get("deletionTimestamp") or not _contains(actual, expected)):
+            raise ProviderBlockedError("application_resource_authority_conflict")
+        await self.kubernetes._namespace(lease, "RoleBinding", namespace)
+        response = await self.kubernetes._request("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", {
+            "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": {"namespace": namespace, "group": "", "resource": "resourcequotas",
+                                             "verb": "create"}},
+        })
+        try:
+            result = response.json()
+            status = result["status"]
+            if result.get("kind") != "SelfSubjectAccessReview" or type(status.get("allowed")) is not bool:
+                raise ValueError
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise ProviderBlockedError("application_kubernetes_invalid_response") from None
+        if not status["allowed"] or status.get("denied") or status.get("evaluationError"):
+            raise ProviderWaitingError("application_resource_authority_pending")
+        await self.registry.frozen_plan(lease)
 
     async def _identity(self, lease: ApplicationLease, actual: dict[str, Any],
                          history: list[ApplicationEffect]) -> ApplicationEffect:
