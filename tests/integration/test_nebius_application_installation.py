@@ -148,6 +148,7 @@ async def test_configured_management_starts_one_application_worker_and_supervise
         public_base_url='https://management.example.com'))
     async with app.router.lifespan_context(app):
         runtime = app.state.application_runtime
+        assert app.state.application_login.registry is app.state.application_manager.registry
         assert not hasattr(app.state, 'environment_runtime')
         assert runtime.worker.registry is app.state.application_manager.registry
         async with asyncio.timeout(5):
@@ -174,7 +175,7 @@ async def test_configured_management_starts_one_application_worker_and_supervise
     assert len(created) == 1 and created[0].closed
     assert runtime.kubernetes.http.is_closed and runtime.object_verifier.http.is_closed
     assert runtime.task.cancelled() and not runtime.ready
-    for attribute in ('application_runtime', 'application_manager', 'session_factory'):
+    for attribute in ('application_runtime', 'application_manager', 'application_login', 'session_factory'):
         assert not hasattr(app.state, attribute)
 
 
@@ -193,7 +194,7 @@ async def test_failed_runtime_startup_never_exposes_owner_admission_and_closes_s
         async with app.router.lifespan_context(app):
             pytest.fail('started with unusable provider credentials')
     assert sdk.closed
-    for attribute in ('application_runtime', 'application_manager', 'session_factory'):
+    for attribute in ('application_runtime', 'application_manager', 'application_login', 'session_factory'):
         assert not hasattr(app.state, attribute)
 
 

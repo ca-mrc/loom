@@ -25,7 +25,9 @@ from tests.integration.test_nebius_application_material import management_key as
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_application_preparation import preparation as preparation
 from tests.integration.test_nebius_application_ready import ready_context as ready_context
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -44,7 +46,7 @@ async def login_context(ready_context, database_access, tmp_path, monkeypatch):
     def local_engine(url, **kwargs):
         # Replace only unavailable cluster DNS/TLS with the disposable SQL route.
         # Keep actual generation username/password so grants and revocation are real.
-        assert url.host == 'loom-postgres.loom-dev.svc' and url.port == 5432
+        assert url.host == 'loom-postgres.loom-nebius-platform.svc' and url.port == 5432
         assert url.query == {'sslmode': 'verify-full', 'sslrootcert': str(ca)}
         assert url.username == f'lap_{row.incarnation.hex}_g1'
         opened.append(url)
@@ -76,12 +78,14 @@ def audience(row):
 
 def child(factory, row, override=None):
     scope = audience(row) if override is None else override
+    origin = scope['origin'] if scope else 'https://' + row.public_host
     settings = LoomServiceSettings(_env_file=None, minio_access_key='x', minio_secret_key='y',
-        public_base_url='https://' + row.public_host, auth_local_http=False,
+        db_url=factory.kw['bind'].url.render_as_string(hide_password=False),
+        public_base_url=origin, auth_local_http=False,
         auth_session_audience_json=json.dumps(scope) if scope else None)
     app = create_app(settings)
     app.state.settings, app.state.session_factory = settings, factory
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://' + row.public_host)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=origin)
 
 
 async def test_ready_owner_without_password_enters_exact_team_with_current_shared_role(login_context):
@@ -205,3 +209,38 @@ async def test_pending_lifecycle_has_no_login_material(applications):
     operation = await registry.create(principal=alice, idempotency_key='pending-login', **prepare())
     with pytest.raises(ManagementError, match='application_not_ready'):
         await registry.ready_access(operation.application_id, principal=replace(alice, auth_kind='session'))
+
+
+async def test_retired_sql_role_blocks_issuance_with_secret_free_error(login_context, database_access):
+    bridge, alice, row, factory, _, _ = login_context
+    database_access[2].revoke(row.application_id, row.incarnation, 1)
+    with pytest.raises(ManagementError) as caught:
+        await bridge.issue(alice, row.application_id)
+    assert str(caught.value) == 'application_login_unavailable'
+    async with factory() as session:
+        assert list(await session.scalars(select(LoginChallenge))) == []
+
+
+async def test_management_login_route_uses_existing_auth_csrf_and_no_store(login_context):
+    from loom_service.password_auth import hash_password
+
+    bridge, alice, row, _, _, registry = login_context
+    async with registry.session_factory.begin() as session:
+        (await session.get(User, alice.user_id)).password_hash = hash_password('management-test-passphrase')
+    settings = LoomServiceSettings(_env_file=None, service_mode='management',
+        db_url=registry.session_factory.kw['bind'].url.render_as_string(hide_password=False),
+        auth_local_http=False, public_base_url='https://management.example.com')
+    app = create_app(settings)
+    app.state.settings, app.state.session_factory = settings, registry.session_factory
+    app.state.application_login = bridge
+    path = f'/api/v1/applications/{row.application_id}/login'
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://management.example.com') as http:
+        assert (await http.post(path)).status_code == 401
+        response = await http.post('/api/v1/auth/login', json={'username': 'alice', 'password': 'management-test-passphrase'})
+        assert response.status_code == 200, response.text
+        assert (await http.post(path)).status_code == 403
+        proof = await http.post(path, headers={'X-Loom-CSRF': response.json()['csrf_token']})
+        assert proof.status_code == 200 and proof.headers['Cache-Control'] == 'no-store'
+        assert proof.json()['application_id'] == str(row.application_id)
+        del app.state.application_login
+        assert (await http.post(path, headers={'X-Loom-CSRF': response.json()['csrf_token']})).status_code == 503
