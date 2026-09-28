@@ -116,6 +116,35 @@ class ApplicationRegistrationV1(_Binding):
                                             origin="https://" + self.public_host)
 
 
+class ApplicationCreateRequestV1(_Binding):
+    slug: str = Field(min_length=1, max_length=54, pattern="^" + _LABEL + "$")
+    release_id: UUID
+
+    @field_validator("slug")
+    @classmethod
+    def _personal_slug(cls, value: str) -> str:
+        if value in _RESERVED_SLUGS:
+            raise ValueError("application requires a personal slug")
+        return value
+
+
+class ApplicationOperationRequestV1(_Binding):
+    action: Literal["update", "suspend", "resume", "destroy_retained"]
+    expected_generation: int = Field(ge=1, strict=True)
+    release_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _update_release(self) -> Self:
+        if (self.action == "update") != (self.release_id is not None):
+            raise ValueError("only update requires a release identity")
+        return self
+
+
+class ApplicationStatusV1(_Binding):
+    registration: ApplicationRegistrationV1
+    operation: ApplicationOperationV1 | None
+
+
 def new_application_registration(
     foundation: FoundationBinding, shared: SharedDevelopmentBindingV1, *,
     application_id: UUID, incarnation: UUID, owner_user_id: UUID, owner_team_id: UUID,

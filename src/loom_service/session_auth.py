@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -196,6 +197,27 @@ async def _membership_for_team(
     return membership, team
 
 
+async def create_application_login_challenge(
+    session: AsyncSession, *, user_id: UUID, team_id: UUID, audience: ApplicationSessionAudienceV1,
+) -> str:
+    """Internal owner-session exchange; never enroll or widen shared authority.
+
+    The exact starting team travels inside the hashed proof, not an untrusted
+    completion-body selector. Existing challenge/session tables remain unchanged.
+    """
+    user = await session.get(User, user_id, with_for_update=True)
+    membership = await _membership_for_team(session, user_id=user_id, team_id=team_id)
+    if (user is None or user.status != "active" or user.disabled_at is not None or user.is_platform_admin
+            or membership is None or membership[1].disabled_at is not None
+            or membership[0].role not in {"owner", "member", "viewer"}):
+        raise HTTPException(status_code=403, detail="application owner unavailable")
+    now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+    raw = _raw_secret("loom_app_login_" + team_id.hex)
+    session.add(LoginChallenge(challenge_hash=hash_browser_secret(raw, audience=audience, purpose="login_challenge"),
+        user_id=user_id, issued_at=now, expires_at=now + timedelta(seconds=90)))
+    return raw
+
+
 def _ctx_from_session(
     *,
     user: User,
@@ -224,6 +246,12 @@ async def consume_login_challenge(
     session_ttl_seconds: int,
     audience: ApplicationSessionAudienceV1 | None = None,
 ) -> CreatedSession:
+    starting_team: UUID | None = None
+    if raw_token.startswith("loom_app_login_"):
+        match = re.fullmatch(r"loom_app_login_([0-9a-f]{32})_[A-Za-z0-9_-]{43}", raw_token)
+        if audience is None or match is None:
+            raise HTTPException(status_code=400, detail="invalid login token")
+        starting_team = UUID(hex=match.group(1))
     challenge = (await session.execute(
         select(LoginChallenge).where(
             LoginChallenge.challenge_hash == hash_browser_secret(
@@ -245,13 +273,18 @@ async def consume_login_challenge(
         raise HTTPException(status_code=400, detail="invalid login token")
     if user.status != "active" or user.disabled_at is not None:
         raise HTTPException(status_code=403, detail="user is disabled or inactive")
+    if starting_team is not None and user.is_platform_admin:
+        raise HTTPException(status_code=403, detail="application owner unavailable")
     role = "platform_admin" if user.is_platform_admin else None
     team_id: UUID | None = None
     if role is None:
-        first = await _first_membership(session, user.id)
+        first = (await _membership_for_team(session, user_id=user.id, team_id=starting_team)
+                 if starting_team is not None else await _first_membership(session, user.id))
         if first is None:
             raise HTTPException(status_code=403, detail="user has no teams")
         membership, _team = first
+        if starting_team is not None and membership.role not in {"owner", "member", "viewer"}:
+            raise HTTPException(status_code=403, detail="application owner unavailable")
         if _team.disabled_at is not None:
             raise HTTPException(status_code=403, detail="team is disabled")
         role = membership.role

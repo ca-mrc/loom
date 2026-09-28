@@ -27,14 +27,20 @@ def render_application_shared_access(
     if (authority.cluster_id != shared.cluster_id or authority.data_environment_id != shared.data_environment_id
             or authority.shared_namespace != shared.platform_namespace):
         raise ValueError("shared network authority differs from protected development binding")
+    return application_shared_network_policies(authority)
+
+
+def application_shared_network_policies(authority: ApplicationNamespaceAuthorityV1) -> list[dict[str, Any]]:
+    """Exact protected policy shape for both installation and live observation."""
+    authority = ApplicationNamespaceAuthorityV1.model_validate(authority.model_dump())
     return [{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": {
-        "name": authority.name + "-" + purpose, "namespace": shared.platform_namespace,
+        "name": authority.name + "-" + purpose, "namespace": authority.shared_namespace,
     }, "spec": {
         "podSelector": {"matchLabels": {"app": app}}, "policyTypes": ["Ingress"],
         "ingress": [{"from": [{
             "namespaceSelector": {
                 "matchLabels": {APPLICATION_INSTALLATION_LABEL: str(authority.installation_id),
-                                "loom.nebius/data-environment-id": str(shared.data_environment_id),
+                                "loom.nebius/data-environment-id": str(authority.data_environment_id),
                                 "pod-security.kubernetes.io/enforce": "restricted"},
                 "matchExpressions": [{"key": key, "operator": "Exists"} for key in (
                     "loom.nebius/application-id", "loom.nebius/incarnation")],

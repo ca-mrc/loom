@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom.db.nebius_environment_schema import NebiusPlatformBudget
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.nebius_environment_contract import FoundationBinding
+from loom_service.application_management.installation import ApplicationInstallation
 from loom_service.environment_management.candidates import (
     GitHubCandidateCatalog,
     ProtectedPublication,
@@ -48,9 +49,15 @@ class ManagementInstallation(BaseModel):
     publications: tuple[ProtectedPublication, ...] = Field(max_length=1000)
     platform_budget: PlatformBudget
     provider_runtime: ProviderRuntimeSettings | None = None
+    # Preserve legacy installation/recovery fingerprints when omitted.
+    applications: ApplicationInstallation | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def validate_publications(self) -> ManagementInstallation:
+        if self.applications is not None:
+            if self.provider_runtime is not None:
+                raise ValueError("legacy and application runtime cannot be activated together")
+            self.applications.validate_foundation(self.foundation)
         if self.provider_runtime is not None and self.foundation.provisioning_project_id is None:
             raise ValueError("provider runtime requires an explicit dedicated provisioning project")
         if (self.foundation.namespace_authority is not None and self.provider_runtime is not None

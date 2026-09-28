@@ -39,6 +39,9 @@ from loom.startup_retry import retry_startup_dependency
 from loom.system_identities import assert_pipeline_controller_identity
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
+from loom_service.application_management.manager import ApplicationManager
+from loom_service.application_management.registry import ApplicationRegistry
+from loom_service.application_management.service_runtime import ApplicationServiceRuntime
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
@@ -55,6 +58,7 @@ from loom_service.provider_secret_gc import run_loop as provider_secret_gc_run_l
 from loom_service.routes import (
     admin_audit,
     agents,
+    applications,
     atif,
     auth,
     backends,
@@ -157,6 +161,7 @@ def register_api_routes(
     app.include_router(teams.router, prefix="/api/v1")
     if management:
         app.include_router(environments.router, prefix="/api/v1")
+        app.include_router(applications.router, prefix="/api/v1")
     if not management:
         app.include_router(managed_child.router, prefix="/api/v1")
         for workload_router in (
@@ -212,11 +217,25 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     app.state.environment_runtime = await resources.enter_async_context(EnvironmentRuntime.open(
                         installation.provider_runtime, app.state.environment_manager.registry, child_http=client,
                     ))
+                if installation.applications is not None:
+                    application = installation.applications
+                    manager = ApplicationManager(ApplicationRegistry(session_factory), foundation=installation.foundation,
+                        shared=application.shared, authority=application.authority, releases=application.releases)
+                    runtime = await resources.enter_async_context(ApplicationServiceRuntime.open(application, manager))
+                    app.state.application_runtime = runtime
+                    app.state.application_manager = manager
+                    app.state.application_login = runtime.login
             try:
                 yield
             finally:
                 if hasattr(app.state, "environment_runtime"):
                     del app.state.environment_runtime
+                if hasattr(app.state, "application_manager"):
+                    del app.state.application_manager
+                if hasattr(app.state, "application_runtime"):
+                    del app.state.application_runtime
+                if hasattr(app.state, "application_login"):
+                    del app.state.application_login
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -390,6 +409,10 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             # access before closing its resources, including failed startup.
             if hasattr(app.state, "environment_manager"):
                 del app.state.environment_manager
+            if hasattr(app.state, "application_manager"):
+                del app.state.application_manager
+            if hasattr(app.state, "application_login"):
+                del app.state.application_login
             if hasattr(app.state, "session_factory"):
                 del app.state.session_factory
             for attribute in (

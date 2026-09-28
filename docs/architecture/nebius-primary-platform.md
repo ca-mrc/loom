@@ -583,14 +583,177 @@ with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
 
+Before startup, credential `qualify` requires retained material and the four
+already-observed current IAM grants. It reconciles their live identities without
+new cloud mutations, validates the protected CA/keyring and original object key,
+and requalifies schema, SQL login and actual shared membership under the current
+source/lease checks. Positive catalog checks require every individual runtime
+table/sequence privilege; missing grants are never repaired here. Qualification
+reuses bounded grant/enrollment replay, not a new administrative SQL interface.
+Its returned evidence contains identities and an access-key hash, not credentials.
+
+### Closed-admission application preparation
+
+The runtime recovers the current operation's interrupted ServiceAccount,
+NetworkPolicy and immutable Secret requests from frozen plans/encrypted material.
+Prepared requests retain their original key and UID/resourceVersion; dispatched
+requests only reconcile. Historical prepared requests never dispatch. This path
+does not create workloads or routes, and stopped operations cannot invoke it.
+
+`prepare_static` establishes protected namespace/resource authority and observes
+the zero-Pod quota before installing the frozen ServiceAccount/network policies.
+It retains the account's original observed identity and updates a prior owned
+NetworkPolicy only through an exact preconditioned patch. Live disappearance,
+replacement, spec drift or termination blocks preparation rather than recreating
+or repairing unqualified resources. Historical write success is not readiness.
+
+`read_prepared` separately observes current network resources and the three exact
+immutable generation Secrets, including complete data equality, without writes
+or material generation. The retained ServiceAccount keeps its original UID;
+network/Secret observations must belong to the current operation. It works before
+and after unfencing and returns only lease-bound resource references, so readiness
+can refresh evidence without closing admission or exposing credential contents.
+
+An exact current-operation quota DELETE intent is the durable activation boundary,
+including when that request is rejected or awaiting observation. Under the journal
+lock, this phase prevents new retirement, quota-closing and static/Secret writes
+in the same operation. The single unresolved-effect slot prevents an earlier
+prepared request crossing that boundary. A stopped successor can still close its
+own generation's admission. New `start:` workload intents require an observed
+opening under the same journal lock; preparation success alone cannot admit them.
+
+The protected shared installer may separately grant the provisioner a namespaced
+Role allowing GET of only the three installation-specific PostgreSQL, Control
+Plane and Gateway ingress policies. It grants no policy list/write or shared
+Secret access; the provisioner cannot install its own shared Role/RoleBinding.
+`read_shared_network` verifies those exact live policy specifications against the
+frozen development binding, rejects absence/drift/termination, and returns only
+name/UID/resourceVersion observations under the current lease. This read authority
+is not part of bootstrap and is not yet activated by a live installer.
+
+`ApplicationLifecycleCoordinator.prepare` composes these concrete adapters: resume
+current preparation, stop prior personal processes, retire prior SQL/object access,
+prepare static resources, verify shared ingress, enroll/deliver and qualify current
+credentials, then refresh live resource/network/process evidence. Missing
+prerequisites keep admission closed. It returns internal typed preparation evidence
+without starting Deployments/routes, completing the operation, or releasing its
+reservation. The active coordinator below consumes these prerequisites; an installed
+worker and owner-facing deployment flow remain separate unfinished steps.
+
+### Active application startup and completion
+
+`ApplicationLifecycleCoordinator.activate` invokes preparation only before the
+first activation intent. Recovery refreshes shared access, immutable resources and
+shared ingress rules without re-entering retirement/static writes. The runtime's
+`read_retired` is observation-only: current zero-Pod admission, observed zero-replica
+controllers, absent routes and a complete empty PodList must still hold before an
+unsent quota deletion. Prepared deletion retains its original UID/resourceVersion;
+only definitive409/422 rejection permits a fresh precondition key. Dispatched
+deletion only reconciles, and observed deletion requires actual quota absence. A
+replacement quota is a conflict, never permission for another deletion.
+
+`start_workloads` installs the frozen current Deployments and Services, preserving
+retained Deployment UIDs through exact preconditioned patches from zero replicas.
+Routes may be recreated only after their recorded prior identities retired.
+Interrupted current requests recover the original frozen document and preconditions;
+uncertain requests never resend. A current template/image match and controller
+observed generation are required. Execution fields must match after normalizing
+known Kubernetes API defaults; unplanned commands, lifecycle hooks, init containers
+or scheduling changes cannot qualify as the frozen version. Updated/ready/available/total replicas all
+equal to desired and no unavailable or terminating replicas. Only then is the
+Ingress created. `read_ready` repeats live checks without resource writes.
+
+`ApplicationLifecycleCoordinator.start` composes activation, workloads, refreshed
+access/static/network/retirement observations, and durable ready completion.
+`complete_ready` takes budget, application and operation locks in that order,
+requires a current unexpired lease, settled journals, current activation and exact
+workload/static references, schema/owner/access-key evidence, and prior access
+retirement. Its secret-free immutable receipt completes the operation and clears
+the lease. The current frozen CPU/memory/ephemeral reservation stays charged;
+only excess held for an old/new transition is released. Shared storage stays0.
+Exact receipt replay changes neither timestamp nor reservation.
+
+This is internal lifecycle implementation, not installed acceptance. It does not
+by itself enable a polling worker or live installer. Protected installation,
+four distinct versions/fifth-owner onboarding, real execution provenance,
+authorization, recovery/teardown isolation and scale-to-zero still need live proof.
+
+### Personal application control
+
+The management-only `/api/v1/applications` API accepts a personal slug and release
+ID for creation. Owner-scoped detail/list and operation status expose registration
+and progress, never frozen plans, credentials or completion evidence. The
+`/applications/{id}/operations` endpoint accepts `update`, `suspend`, `resume` or
+`destroy_retained` with an expected generation; only update supplies a release ID.
+Mutation requests use idempotency keys. Exact replay returns the same operation's
+current status, including when a peer commits it during request planning.
+`/application-operations/{id}/retry` retries a blocked current operation.
+
+`ApplicationManager` uses protected installation-pinned release records, foundation,
+shared-development binding and namespace authority. Owners cannot supply images,
+provider authority, storage ownership or readiness assertions through these APIs.
+Update/resume preserve identity and derive the next deployment/access generation;
+the transactional registry rechecks generation, ownership, state and capacity.
+Stop and replay do not require the release to remain in the catalog. These routes
+reuse existing authentication/CSRF checks and close the auth transaction before
+independent registry work. Unconfigured application management returns 503.
+
+`ApplicationWorker` polls only current nonpurged operations with absent/expired
+DB-time leases. One successful claim drives one concrete start/stop coroutine;
+different owners have independent bounded concurrency. Lease heartbeats, readiness
+deadlines and retry limits prevent unbounded execution. Lease loss, shutdown and
+database outages cancel/drain work while preserving durable effects and charges.
+Worker database calls, including polling, renewal and failure reporting, have a
+five-second maximum further limited to one-sixth of the lease duration. Together
+with the one-third-lease heartbeat interval this reserves time for response latency
+and cancellation before expiry. A database deadline is an infrastructure failure,
+not a provider retry: uncertain operation state remains retained for reconciliation.
+Failure reporting happens after cancellation; only concrete coordinator evidence
+can complete an operation. Poll health becomes false on DB failure or shutdown.
+
+Protected management configuration may include `applications`, binding the shared
+development environment, namespace authority, immutable release catalog and storage
+access groups to explicit runtime inputs. It cannot activate the legacy environment
+provisioner at the same time. `ApplicationServiceRuntime` composes the existing
+cloud, SQL, Kubernetes and object-access adapters with one supervised worker.
+Kubernetes authentication uses a projected ServiceAccount; cloud authentication
+uses an explicit protected credentials file, with no ambient fallback. Shared
+verify-full SQL credentials and CA/keyring material come from bounded private
+files, not owner requests. Invalid startup material exposes no application manager.
+Shutdown removes owner admission and drains the worker before closing its clients.
+Management readiness includes actual application-worker poll health when configured.
+
+`POST /applications/{id}/login` exchanges the owning management **user session**
+for a 90-second one-use proof, never a shared password or database credential.
+Delegable bearer tokens cannot request a full browser session, which could otherwise
+widen their team-limited authority. The internal bridge requires the current active,
+completed generation and uses its existing SQL role, with the management-mounted
+shared CA. It rechecks the generation before returning the proof and uses bounded
+connections without retaining a pool. Retiring old processes/SQL access remains
+the lifecycle fence; this exchange is not a cross-database atomic operation.
+
+The proof is hashed with application ID, origin and access generation. Its starting
+team is included in the hashed token, so `/auth/login/complete` selects that exact
+current shared membership rather than the first alphabetical team. Disabled or
+missing identities/memberships and platform-admin promotion fail closed; ordinary
+shared role changes are honored. No email, password copy or new login table is
+required. The existing `/auth/managed` browser route accepts the proof through its
+scrubbed fragment and requires an explicit sign-in click. Management login responses
+use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
+
+Protected live installation, application CLI wiring and arbitrary-source publication
+remain unfinished. The existing legacy `loom dev` client does not invoke these
+application APIs. This source capability does not enable the installed management
+service or prove an owner can use a deployed personal application.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
 close Pod admission and stop personal workloads, revoke/drain SQL access, retire
 exact IAM identities and probe retained keys, then refresh the live workload and
 admission observations. Only this internal path supplies completion attestations;
-owner requests cannot submit evidence or a success flag. Active startup and a
-polling worker are not enabled by this coordinator.
+owner requests cannot submit evidence or a success flag. No polling worker or
+owner-facing deployment flow is enabled by the coordinator itself.
 
 The adapters return immutable, secret-free evidence bound to the application,
 incarnation, shared data environment, operation/generations and lease epoch/token
