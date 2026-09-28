@@ -184,6 +184,17 @@ claims retirement or releases resources. Reopening admission requires its record
 UID/resourceVersion delete preconditions after prior-generation retirement. No
 installer or lifecycle worker activates this primitive yet.
 
+`ApplicationRuntimeProvider.close_admission` composes this quota with the
+application effect journal and protected installation identity. It reconciles
+outstanding quota dispatches before changing anything, never recreates a missing
+recorded quota, and advances an older gate only with its observed UID and exact
+resourceVersion. Live generation/operation/identity and unscoped zero-Pod spec
+must match, and the quota controller's status must acknowledge `pods: 0` before
+the call returns. Definitive patch conflicts wait for new preconditions; uncertain
+writes are never resent. This adapter neither removes the gate nor proves that
+existing processes, object access or SQL connections have retired. It is not a
+completed lifecycle worker or capacity-release authority.
+
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
 and only then grant bootstrap authority. The manager must still authenticate owners,
@@ -328,6 +339,17 @@ CREATE/PATCH readback verifies the expected document; DELETE202 is not retiremen
 proof, and malformed readback is rejected. An uncertain dispatch only reads on
 subsequent calls, including after lease takeover. A confirmed409/422 is retained
 as rejection so trusted orchestration can use a new key after fresh observation.
+
+After supersession, the current lease can also reconcile an old same-application
+dispatch using its original operation, generation, effect key and request digest.
+CREATE/PATCH reconciliation requires the exact original document; a different body
+cannot satisfy the recorded request. This path makes no Kubernetes writes and
+cannot dispatch a predecessor's prepared request. DELETE reconciliation confirms
+absence of the original UID, without deleting any replacement. Terminal effects
+remain immutable history, not a fresh readiness or retirement check. Stale leases
+and sibling applications cannot inspect frozen predecessor plans or record their
+effects. The disposable Kubernetes lane exercises a real successful CREATE whose
+reply is lost, followed by suspension and reconciliation without another POST.
 
 This internal adapter receives qualified manifests/material from trusted lifecycle
 code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE

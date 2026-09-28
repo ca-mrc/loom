@@ -159,11 +159,14 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
             await session.flush()
             return _view(row)
 
-    async def _effect(self, session: AsyncSession, lease: ApplicationLease, key: str) -> NebiusApplicationEffect:
-        await self._leased(session, lease)
+    async def _effect(self, session: AsyncSession, lease: ApplicationLease, key: str, *,
+                      operation_id: UUID | None = None) -> NebiusApplicationEffect:
+        current, _ = await self._leased(session, lease)
+        if operation_id is not None:
+            await self._historical_operation(session, current, operation_id)
         # Application/operation locks serialize all journal writers, including
         # callers sharing a lease. Never take a platform budget lock after this.
-        row = await session.get(NebiusApplicationEffect, (lease.operation_id, key))
+        row = await session.get(NebiusApplicationEffect, (operation_id or lease.operation_id, key))
         if row is None:
             raise ManagementError("application_effect_missing")
         return row
@@ -182,15 +185,17 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
             return True
 
     async def observe_effect(self, lease: ApplicationLease, key: str, *, uid: str,
-                             resource_version: str | None) -> None:
+                             resource_version: str | None, operation_id: UUID | None = None) -> None:
         """Trusted provider confirms effect, NOT readiness or process retirement.
 
         For DELETE, uid identifies the retired object and resource_version is
         None. Other actions require the observed UID/RV. Preconditioned actions
         cannot be confirmed against a replacement object with a different UID.
+        A current lease may record a predecessor effect for the same application;
+        this grants no permission to dispatch that predecessor's request.
         """
         async with self.session_factory.begin() as session:
-            row = await self._effect(session, lease, key)
+            row = await self._effect(session, lease, key, operation_id=operation_id)
             intent = KubernetesEffectIntent.model_validate(row.intent_json)
             if (not isinstance(uid, str) or re.fullmatch(_IDENTITY, uid) is None
                     or (intent.uid is not None and uid != intent.uid)
