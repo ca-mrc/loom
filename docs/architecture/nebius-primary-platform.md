@@ -606,6 +606,15 @@ prepared request crossing that boundary. A stopped successor can still close its
 own generation's admission. These are preparation primitives; active orchestration,
 live shared-access qualification and installed owner acceptance remain required.
 
+The protected shared installer may separately grant the provisioner a namespaced
+Role allowing GET of only the three installation-specific PostgreSQL, Control
+Plane and Gateway ingress policies. It grants no policy list/write or shared
+Secret access; the provisioner cannot install its own shared Role/RoleBinding.
+`read_shared_network` verifies those exact live policy specifications against the
+frozen development binding, rejects absence/drift/termination, and returns only
+name/UID/resourceVersion observations under the current lease. This read authority
+is not part of bootstrap and is not yet activated by a live installer.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:

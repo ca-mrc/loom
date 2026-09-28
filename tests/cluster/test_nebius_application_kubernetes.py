@@ -215,6 +215,43 @@ async def test_application_preparation_and_stop_use_only_protected_manager_autho
             assert (await http.get('/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/ingresses/loom-web')).status_code == 404
             assert (await http.get('/api/v1/namespaces/loom-dev/services')).status_code == 403
             assert (await http.delete('/api/v1/namespaces/loom-dev-alice')).status_code == 403
+            if active:
+                from loom.nebius_application_authority import render_application_shared_observer
+                from loom.nebius_application_network import application_shared_network_policies
+
+                shared_ns = authority.shared_namespace
+                await asyncio.to_thread(core.create_namespace, {'metadata': {'name': shared_ns}})
+                shared_policies = application_shared_network_policies(authority)
+                observer = render_application_shared_observer(authority)
+                network_path = f'/apis/networking.k8s.io/v1/namespaces/{shared_ns}/networkpolicies'
+                first_path = network_path + '/' + shared_policies[0]['metadata']['name']
+                assert (await http.get(first_path)).status_code == 403
+                for doc in observer:
+                    collection = 'roles' if doc['kind'] == 'Role' else 'rolebindings'
+                    denied = await http.post(f'/apis/rbac.authorization.k8s.io/v1/namespaces/{shared_ns}/{collection}', json=doc)
+                    assert denied.status_code == 403, (collection, denied.text)  # No Secret/request credential content.
+                    if doc['kind'] == 'Role':
+                        # A binding to a missing Role returns404 during RBAC
+                        # escalation checking, before admission can reject it.
+                        # Install just the Role to test the actual binding denial.
+                        await asyncio.to_thread(utils.create_from_dict, core.api_client, doc)
+                for doc in [*shared_policies, observer[1]]:
+                    await asyncio.to_thread(utils.create_from_dict, core.api_client, doc)
+                deadline = time.monotonic() + 20
+                while (await http.get(first_path)).status_code != 200:
+                    assert time.monotonic() < deadline, 'named shared observation did not become available'
+                    await asyncio.sleep(0.1)
+                shared_proof = await provider.read_shared_network(lease)
+                assert {item.name for item in shared_proof} == {doc['metadata']['name'] for doc in shared_policies}
+                assert all(item.uid and item.resource_version for item in shared_proof)
+                for path in (network_path, network_path + '/arbitrary',
+                             '/apis/networking.k8s.io/v1/namespaces/loom-dev-foreign/networkpolicies/' + shared_proof[0].name,
+                             f'/api/v1/namespaces/{shared_ns}/secrets/private'):
+                    assert (await http.get(path)).status_code == 403
+                assert (await http.post(network_path, json=shared_policies[0])).status_code == 403
+                assert (await http.patch(first_path, json={'spec': {'ingress': [{}]}},
+                    headers={'Content-Type': 'application/merge-patch+json'})).status_code == 403
+                assert (await http.delete(first_path)).status_code == 403
     finally:
         await asyncio.to_thread(container.stop)
 

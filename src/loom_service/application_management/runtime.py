@@ -20,6 +20,7 @@ from loom.nebius_application_authority import (
     application_pod_fence,
 )
 from loom.nebius_application_contract import ApplicationRegistrationV1
+from loom.nebius_application_network import application_shared_network_policies
 from loom_service.application_management.effects import ApplicationEffect
 from loom_service.application_management.kubernetes import (
     ApplicationKubernetesProvider,
@@ -30,6 +31,7 @@ from loom_service.application_management.proofs import (
     ApplicationDeploymentRetirement,
     ApplicationResourceObservation,
     ApplicationRetirementIdentity,
+    ApplicationSharedPolicyObservation,
     ApplicationWorkloadRetirement,
 )
 from loom_service.application_management.registry import ApplicationRegistry
@@ -212,6 +214,28 @@ class ApplicationRuntimeProvider:
                     raise ProviderBlockedError("application_static_resource_conflict")
         if await self.registry.activation_started(lease):
             raise ProviderBlockedError("application_activation_started")
+
+    async def read_shared_network(self, lease: ApplicationLease) -> tuple[ApplicationSharedPolicyObservation, ...]:
+        """Observe only the protected installation's three shared ingress rules.
+
+        Uses separately installed named GET authority. It grants no shared
+        mutation, namespace adoption, Pod admission or application readiness.
+        """
+        await self._fence(lease)
+        plan = await self.registry.frozen_plan(lease)
+        if plan["registration"]["desired_state"] != "active":
+            raise ProviderBlockedError("application_preparation_not_requested")
+        observations = []
+        for document in application_shared_network_policies(self.authority):
+            metadata = document["metadata"]
+            actual = await self.kubernetes._read(
+                f"/apis/networking.k8s.io/v1/namespaces/{metadata['namespace']}/networkpolicies/{metadata['name']}")
+            await self._fence(lease)
+            if actual is None or actual["metadata"].get("deletionTimestamp") or not _contains(actual, document):
+                raise ProviderBlockedError("application_shared_network_conflict")
+            observations.append(ApplicationSharedPolicyObservation(name=metadata["name"],
+                uid=actual["metadata"]["uid"], resource_version=actual["metadata"]["resourceVersion"]))
+        return tuple(observations)
 
     async def _resume_retirement(self, lease: ApplicationLease) -> None:
         # A prepared request owns the current operation's journal slot. Resume

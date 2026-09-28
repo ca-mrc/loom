@@ -48,6 +48,12 @@ class ApplicationResourceObservation(_Proof):
     resource_version: Identifier
 
 
+class ApplicationSharedPolicyObservation(_Proof):
+    name: Identifier
+    uid: Identifier
+    resource_version: Identifier
+
+
 class ApplicationDeploymentRetirement(ApplicationResourceObservation):
     generation: Positive
     observed_generation: Positive
