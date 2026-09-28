@@ -718,8 +718,27 @@ files, not owner requests. Invalid startup material exposes no application manag
 Shutdown removes owner admission and drains the worker before closing its clients.
 Management readiness includes actual application-worker poll health when configured.
 
-A browser login bridge, protected live installation and arbitrary-source publication
-remain unfinished. This source capability does not enable the installed management
+`POST /applications/{id}/login` exchanges the owning management **user session**
+for a 90-second one-use proof, never a shared password or database credential.
+Delegable bearer tokens cannot request a full browser session, which could otherwise
+widen their team-limited authority. The internal bridge requires the current active,
+completed generation and uses its existing SQL role, with the management-mounted
+shared CA. It rechecks the generation before returning the proof and uses bounded
+connections without retaining a pool. Retiring old processes/SQL access remains
+the lifecycle fence; this exchange is not a cross-database atomic operation.
+
+The proof is hashed with application ID, origin and access generation. Its starting
+team is included in the hashed token, so `/auth/login/complete` selects that exact
+current shared membership rather than the first alphabetical team. Disabled or
+missing identities/memberships and platform-admin promotion fail closed; ordinary
+shared role changes are honored. No email, password copy or new login table is
+required. The existing `/auth/managed` browser route accepts the proof through its
+scrubbed fragment and requires an explicit sign-in click. Management login responses
+use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
+
+Protected live installation, application CLI wiring and arbitrary-source publication
+remain unfinished. The existing legacy `loom dev` client does not invoke these
+application APIs. This source capability does not enable the installed management
 service or prove an owner can use a deployed personal application.
 
 ### Stopped application completion

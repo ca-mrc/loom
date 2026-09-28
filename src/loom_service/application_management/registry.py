@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
+from loom.db.nebius_application_material_schema import NebiusApplicationMaterial
 from loom.db.nebius_application_operation_schema import (
     NebiusApplicationOperation,
     NebiusApplicationReservation,
@@ -30,8 +31,10 @@ from loom.nebius_application_contract import (
     ApplicationStatusV1,
     SharedDevelopmentBindingV1,
 )
+from loom.nebius_application_credentials import application_credential_names
 from loom.nebius_application_render import RenderedApplication
 from loom_service.application_management.completion import ApplicationCompletionJournal
+from loom_service.application_management.material import _load
 from loom_service.application_management.plans import freeze_plan
 from loom_service.environment_management.platform_accounting import ENVELOPE_FIELDS, platform_usage
 from loom_service.environment_management.registry import ManagementError, owner_identity
@@ -190,6 +193,39 @@ class ApplicationRegistry(ApplicationCompletionJournal):
             if owned is None:
                 raise ManagementError("application_forbidden", 403)
             return await self._replay(session, owner, idempotency_key, fingerprint)
+
+    async def ready_access(self, application_id: UUID, *, principal: AuthContext,
+                           ) -> tuple[ApplicationRegistrationV1, dict[str, str]]:
+        """Internal generation SQL material for session exchange, never an API body.
+
+        A browser session can switch teams. Converting a delegated team-scoped
+        bearer to one would widen its authority, regardless of its role scopes.
+        """
+        owner, team = owner_identity(principal)
+        if principal.auth_kind != "session" or principal.type != "user":
+            raise ManagementError("application_login_session_required", 403)
+        async with self.session_factory.begin() as session:
+            row = await session.scalar(select(NebiusApplication).where(
+                NebiusApplication.application_id == application_id,
+                NebiusApplication.owner_user_id == owner, NebiusApplication.owner_team_id == team,
+                NebiusApplication.purged_at.is_(None),
+            ).with_for_update())
+            if row is None:
+                raise ManagementError("application_forbidden", 403)
+            operation = await session.scalar(select(NebiusApplicationOperation).where(
+                NebiusApplicationOperation.application_id == application_id,
+                NebiusApplicationOperation.deployment_generation == row.deployment_generation,
+                NebiusApplicationOperation.access_generation == row.access_generation,
+            ))
+            if (row.desired_state != "active" or operation is None or operation.phase != "completed"
+                    or operation.action not in {"create", "update", "resume"} or operation.completion_json is None):
+                raise ManagementError("application_not_ready")
+            material = await session.get(NebiusApplicationMaterial, operation.operation_id)
+            if material is None:
+                raise ManagementError("application_material_missing", 503)
+            registration = registration_view(row)
+            bundles = await _load(session, operation, material)
+            return registration, bundles[application_credential_names(registration)["db"]]
 
     async def transition(
         self, application_id: UUID, *, principal: AuthContext, idempotency_key: str,

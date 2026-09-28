@@ -5,8 +5,10 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 
 import httpx
+from psycopg.conninfo import conninfo_to_dict
 
 from loom.nebius_kubernetes import NebiusKubernetesCredentials
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
@@ -18,6 +20,7 @@ from loom_service.application_management.installation import (
     read_protected_file,
 )
 from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
+from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.runtime import ApplicationRuntimeProvider
@@ -32,8 +35,9 @@ _LOG = logging.getLogger(__name__)
 
 
 class ApplicationServiceRuntime:
-    def __init__(self, worker: ApplicationWorker, installation: ApplicationInstallation):
+    def __init__(self, worker: ApplicationWorker, installation: ApplicationInstallation, login: ApplicationLogin):
         self.worker = worker
+        self.login = login
         self.kubernetes = worker.coordinator.runtime.kubernetes
         self.object_verifier = worker.coordinator.object_verifier
         self.task = asyncio.create_task(worker.run(concurrency=installation.runtime.concurrency,
@@ -89,6 +93,8 @@ class ApplicationServiceRuntime:
                 AsyncApplicationDatabaseAccess(dsn, installation.shared.data_environment_id),
                 storage_binding=installation.storage.model_dump(mode="json"), shared=shared_credentials)
             coordinator = ApplicationLifecycleCoordinator(registry, provider, access, ApplicationObjectAccessVerifier(objects))
-            runtime = cls(ApplicationWorker(registry, coordinator), installation)
+            login = ApplicationLogin(registry, shared=installation.shared, credentials=shared_credentials,
+                ca_file=Path(str(conninfo_to_dict(dsn)["sslrootcert"])))
+            runtime = cls(ApplicationWorker(registry, coordinator), installation, login)
             resources.push_async_callback(runtime.close)  # Drain before HTTP, SDK or parent DB closes.
             yield runtime

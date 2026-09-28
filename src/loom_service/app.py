@@ -224,6 +224,7 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     runtime = await resources.enter_async_context(ApplicationServiceRuntime.open(application, manager))
                     app.state.application_runtime = runtime
                     app.state.application_manager = manager
+                    app.state.application_login = runtime.login
             try:
                 yield
             finally:
@@ -233,6 +234,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     del app.state.application_manager
                 if hasattr(app.state, "application_runtime"):
                     del app.state.application_runtime
+                if hasattr(app.state, "application_login"):
+                    del app.state.application_login
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -408,6 +411,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 del app.state.environment_manager
             if hasattr(app.state, "application_manager"):
                 del app.state.application_manager
+            if hasattr(app.state, "application_login"):
+                del app.state.application_login
             if hasattr(app.state, "session_factory"):
                 del app.state.session_factory
             for attribute in (

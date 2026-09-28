@@ -1,10 +1,10 @@
 """Authenticated application-only controls, without caller-supplied authority."""
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, Request, Response
 
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
@@ -13,6 +13,7 @@ from loom.nebius_application_contract import (
     ApplicationRegistrationV1,
     ApplicationStatusV1,
 )
+from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.environment_management.registry import ManagementError
 from loom_service.routes.environments import ManagementPrincipal
@@ -42,6 +43,17 @@ async def list_applications(request: Request, principal: ManagementPrincipal) ->
 @router.get("/applications/{application_id}")
 async def application_status(request: Request, application_id: UUID, principal: ManagementPrincipal) -> ApplicationStatusV1:
     return await manager(request).registry.status(application_id, principal=principal)
+
+
+@router.post("/applications/{application_id}/login")
+async def application_login(request: Request, response: Response, application_id: UUID,
+                            principal: ManagementPrincipal) -> dict[str, Any]:
+    login = getattr(request.app.state, "application_login", None)
+    if not isinstance(login, ApplicationLogin):
+        raise ManagementError("application_login_not_configured", 503)
+    proof = await login.issue(principal, application_id)
+    response.headers["Cache-Control"] = "no-store"
+    return proof
 
 
 @router.post("/applications/{application_id}/operations", status_code=202)
