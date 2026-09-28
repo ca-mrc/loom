@@ -57,13 +57,29 @@ def test_guest_render_has_independent_catalog_and_actuator_with_one_physical_own
     assert observed_config["guest_execution_target"] == config["guest_execution_target"]
 
 
-@pytest.mark.parametrize("damage", ["no-target", "same-target", "wrong-scope", "no-policy", "unknown-runtime"])
+def test_guest_actuator_retains_the_published_image_and_shared_credentials(platform_inputs):  # noqa: F811
+    config, candidate, profile = guest_inputs(platform_inputs)
+    image = "cr.eu-north1.nebius.cloud/project/loom-execution-actuator@sha256:" + "a" * 64
+    candidate["images"]["execution_actuator"]["image_ref"] = image
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    deployments = [row for row in files["60-execution.yaml"] if row["kind"] == "Deployment"]
+    ordinary, guest = (row["spec"]["template"]["spec"] for row in deployments)
+    assert guest["containers"][0]["image"] == ordinary["containers"][0]["image"] == image
+    assert guest["serviceAccountName"] == ordinary["serviceAccountName"]
+    assert guest["volumes"] == ordinary["volumes"]
+    ordinary_secrets = [entry for entry in ordinary["containers"][0]["env"] if "valueFrom" in entry]
+    assert [entry for entry in guest["containers"][0]["env"] if "valueFrom" in entry] == ordinary_secrets
+
+
+@pytest.mark.parametrize("damage", ["no-target", "same-target", "actuator-collision", "wrong-scope", "no-policy", "unknown-runtime"])
 def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_inputs, damage):  # noqa: F811
     config, candidate, profile = guest_inputs(platform_inputs)
     if damage == "no-target":
         del config["guest_execution_target"]
     elif damage == "same-target":
         config["guest_execution_target"]["target_id"] = config["target_id"]
+    elif damage == "actuator-collision":
+        config["guest_execution_target"]["target_id"] = "loom-execution"
     elif damage == "wrong-scope":
         config["guest_execution_target"]["namespace"] = "foreign"
     elif damage == "no-policy":
