@@ -44,11 +44,11 @@ class ApplicationKubernetesProvider:
             raise ValueError("application Kubernetes endpoint must be an HTTPS origin")
         self.registry, self.http = registry, http
 
-    async def _namespace(self, lease: ApplicationLease, kind: str, namespace: str | None) -> None:
+    async def _namespace(self, lease: ApplicationLease, kind: str, namespace: str | None) -> dict[str, Any] | None:
         plan = await self.registry.frozen_plan(lease)
         name = plan["registration"]["application_namespace"]
         if kind == "Namespace" and namespace is None:
-            return
+            return None
         if namespace != name:
             raise ProviderBlockedError("application_namespace_identity_conflict")
         history = await self.registry.effect_history(lease)
@@ -70,6 +70,8 @@ class ApplicationKubernetesProvider:
                 or actual.get("metadata", {}).get("deletionTimestamp")
                 or not _contains(actual, expected) or not _contains(actual, planned)):
             raise ProviderBlockedError("application_namespace_identity_conflict")
+
+        return actual
 
     @staticmethod
     def _document(lease: ApplicationLease, key: str, document: dict[str, Any], *,

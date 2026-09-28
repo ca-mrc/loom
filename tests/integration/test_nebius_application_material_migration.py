@@ -23,7 +23,7 @@ def test_empty_material_downgrade_preserves_operations_and_orm_shape(application
         operation(connection)
         before = connection.execute(select(NebiusApplicationOperation)).mappings().all()
     migrate(application_database, "downgrade", "0163")
-    migrate(application_database, "upgrade", "0164")
+    migrate(application_database, "upgrade", "head")
     with application_database.connect() as connection:
         assert connection.execute(select(NebiusApplicationOperation)).mappings().all() == before
     assert {col["name"] for col in inspect(application_database).get_columns("nebius_application_material")} == set(
@@ -44,7 +44,7 @@ def test_material_history_cannot_be_downgraded_or_orphaned(application_database)
                                   (NebiusApplicationOperation, NebiusApplicationOperation.operation_id == owner)):
             with pytest.raises(IntegrityError), connection.begin_nested():
                 connection.execute(delete(target).where(condition))
-        second = dict(connection.execute(select(NebiusApplicationOperation)).mappings().one()) | {
+        second = dict(connection.execute(text("SELECT * FROM nebius_application_operations")).mappings().one()) | {
             "operation_id": uuid4(), "idempotency_key": "second", "deployment_generation": 2, "access_generation": 2,
         }
         connection.execute(insert(NebiusApplicationOperation).values(**second))

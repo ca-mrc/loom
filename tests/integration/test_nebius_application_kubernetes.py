@@ -30,9 +30,14 @@ class KubernetesAPI:
         self.changing_read_versions = False
         self.replace_uid_on_read = False
         self.read_version = 0
+        self.resource_access_ready = True
 
     def handle(self, request):
         path = request.url.path
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews':
+            assert request.method == 'POST'
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1',
+                'kind': 'SelfSubjectAccessReview', 'status': {'allowed': self.resource_access_ready}})
         if request.method == "GET":
             value = None if self.hide_objects else self.objects.get(path)
             if value is not None and self.changing_read_versions:

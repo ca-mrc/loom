@@ -28,14 +28,15 @@ class AsyncApplicationDatabaseAccess:
         self.data_environment_id = data_environment_id
 
     def _call(self, action: str, lease: ApplicationLease, generation: int,
-              password: str | None = None) -> str | bool | None:
+              password: str | None = None, schema_revision: str | None = None) -> str | bool | None:
         try:
             with psycopg.connect(self._connection_url, autocommit=True, connect_timeout=10,
                                   options="-c statement_timeout=30000 -c lock_timeout=10000") as connection:
                 access = ApplicationDatabaseAccess(connection, self.data_environment_id)
                 if action == "grant":
-                    assert password is not None
-                    return access.grant(lease.application_id, lease.incarnation, generation, password)
+                    assert password is not None and schema_revision is not None
+                    return access.grant(lease.application_id, lease.incarnation, generation, password,
+                                        schema_revision=schema_revision)
                 if action == "revoke":
                     access.revoke(lease.application_id, lease.incarnation, generation)
                     return None
@@ -49,8 +50,8 @@ class AsyncApplicationDatabaseAccess:
         except psycopg.Error:
             raise ProviderRetryError("application_database_unavailable") from None
 
-    async def grant(self, lease: ApplicationLease, password: str) -> str:
-        value = await asyncio.to_thread(self._call, "grant", lease, lease.access_generation, password)
+    async def grant(self, lease: ApplicationLease, password: str, *, schema_revision: str) -> str:
+        value = await asyncio.to_thread(self._call, "grant", lease, lease.access_generation, password, schema_revision)
         if not isinstance(value, str):
             raise ProviderBlockedError("application_database_result_invalid")
         return value

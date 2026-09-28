@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -18,7 +19,11 @@ from sqlalchemy.engine import make_url
 from loom.nebius_application_render import render_application
 from loom_service.application_management.cloud_provider import ApplicationCloudProvider
 from loom_service.environment_management.credentials import generate_material
-from loom_service.environment_management.provider import ProviderBlockedError
+from loom_service.environment_management.provider import (
+    ProviderBlockedError,
+    ProviderRetryError,
+    ProviderWaitingError,
+)
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_provider import Cloud
 from tests.integration.test_nebius_application_database import access_postgres as access_postgres
@@ -40,7 +45,7 @@ def shared_ca():
     return generate_material(namespace="loom-dev", tls_secret_name="test-tls")["loom-platform-db"]["ca.crt"]
 
 
-async def setup(applications, platform_inputs, database_access, shared_ca, *, slug="alice", cloud=None):
+async def setup(applications, platform_inputs, database_access, shared_ca, *, slug="alice", cloud=None, authority=None):
     from loom_service.application_management.credentials import (
         ApplicationCredentialProvider,
         SharedApplicationCredentials,
@@ -53,7 +58,9 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
-    prepared = render_application(row, release, shared, foundation)
+    release = release.model_copy(update={"schema_revision": "test_revision"})
+    shared = shared.model_copy(update={"schema_revision": "test_revision"})
+    prepared = render_application(row, release, shared, foundation, authority=authority)
     operation = await registry.create(principal=alice, idempotency_key=slug,
                                       prepared=prepared, release=release, shared=shared)
     lease = await registry.claim(operation.operation_id)
@@ -99,6 +106,19 @@ async def test_prepare_commits_real_revocable_login_and_reuses_shared_material(
     assert url.password not in (await registry.get_operation(lease.operation_id, principal=alice)).model_dump_json()
 
 
+async def test_preparation_rejects_schema_changed_since_publication(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, _, _, _, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    database_access[0].execute("UPDATE public.alembic_version SET version_num='different'")
+    with pytest.raises(ProviderBlockedError, match="application_database_schema_mismatch"):
+        await provider.prepare(lease)
+    assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone() == (0,)
+    assert await registry.load_material(lease) is not None
+    assert len(cloud.mutations) == 2  # No shared-data membership granted.
+
+
 async def test_sql_failure_after_material_commit_retries_same_password_without_new_iam(
     applications, platform_inputs, database_access, shared_ca,
 ):
@@ -130,15 +150,215 @@ async def test_stop_retires_database_generation_without_breaking_sibling(
         stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
             idempotency_key="stop", expected_generation=1)
         current = await registry.claim(stopped.operation_id)
-        await provider.retire_database(current)
+        proof = await provider.retire_database(current)
+        assert proof.identity.operation_id == current.operation_id
+        assert proof.identity.application_id == row.application_id
+        assert proof.identity.data_environment_id == database_access[3]
+        assert proof.retired_through == 2
         with pytest.raises(psycopg.OperationalError):
             old_connection.execute("SELECT 1")
         assert other.execute("SELECT 1").fetchone() == (1,)
         with pytest.raises(psycopg.OperationalError):
             login(database_access[1], first.username, first.password)
         with pytest.raises(ProviderBlockedError, match="application_database_retired"):
-            await provider.database.grant(lease, first.password)
+            await provider.database.grant(lease, first.password, schema_revision="test_revision")
     assert len(cloud.mutations) == 8  # SQL-only retirement does not claim S3 denial.
+
+
+async def test_stop_retires_only_owned_cloud_generation_and_requires_data_plane_denial(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await provider.prepare(lease)
+    sibling, _, _, _, _, sibling_lease, _, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca, slug="alice-second", cloud=cloud)
+    await sibling.prepare(sibling_lease)
+    sibling_ids = set(cloud.resources) - {"resource-1", "resource-2", "resource-3", "resource-4"}
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    original = await registry.frozen_plan(current, operation_id=lease.operation_id)
+    env = next(doc for docs in original["files"].values() for doc in docs
+               if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")["spec"]["template"]["spec"]["containers"][0]["env"]
+    endpoint = next(entry["value"] for entry in env if entry["name"] == "LOOM_SVC_MINIO_ENDPOINT")
+    code = "AccessDenied"
+    requests = []
+
+    def rejection(request):
+        requests.append(request)
+        return httpx.Response(403, text=f"<Error><Code>{code}</Code></Error>")
+
+    async with httpx.AsyncClient(base_url=endpoint, transport=httpx.MockTransport(rejection)) as http:
+        verifier = ApplicationObjectAccessVerifier(http)
+        with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
+            await provider.retire_cloud(current, verifier)
+        assert set(cloud.resources) == sibling_ids
+        assert [entry[1:3] for entry in cloud.mutations[8:]] == [
+            ("membership", "resource-4"), ("membership", "resource-3"),
+            ("access_key", "resource-2"), ("service_account", "resource-1")]
+        code = "InvalidAccessKeyId"
+        proof = await provider.retire_cloud(current, verifier)
+        assert proof.identity.operation_id == current.operation_id
+        assert len(proof.keys) == 1
+        assert proof.keys[0].operation_id == lease.operation_id
+        assert proof.keys[0].access_key_sha256 == hashlib.sha256(b'test-access-key').hexdigest()
+        assert 'test-access-key' not in proof.model_dump_json()
+        destroyed = await registry.transition(row.application_id, principal=alice, action="destroy_retained",
+            idempotency_key="destroy", expected_generation=2)
+        latest = await registry.claim(destroyed.operation_id)
+        await provider.retire_cloud(latest, verifier)
+    assert len(cloud.mutations) == 12 and len(requests) == 3
+    assert all("Credential=test-access-key/" in request.headers["Authorization"] for request in requests)
+
+
+async def test_stop_does_not_dispatch_prepared_cloud_creation(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await registry.prepare_cloud_create(lease, "account", provider.storage.model_dump(mode="json"))
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+
+    def unexpected(request):
+        raise AssertionError("unsent account has no delivered object key to probe")
+
+    async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(unexpected)) as http:
+        await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.mutations == []
+
+
+async def test_active_generation_created_during_retirement_scan_is_not_retired(
+    applications, platform_inputs, database_access, shared_ca, monkeypatch,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, _, _, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    history = registry.cloud_history
+    first = True
+
+    async def peer_prepares(current):
+        nonlocal first
+        result = await history(current)
+        if first:
+            first = False
+            await provider.prepare(current)
+        return result
+
+    monkeypatch.setattr(registry, "cloud_history", peer_prepares)
+    async with httpx.AsyncClient(base_url="https://storage.test") as http:
+        await provider.retire_cloud(lease, ApplicationObjectAccessVerifier(http))
+    assert len(cloud.mutations) == 4 and all(entry[0] == "create" for entry in cloud.mutations)
+
+
+async def test_cloud_retirement_recovers_lost_delete_across_destroy_without_resending(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    await provider.prepare(lease)
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    original = await registry.frozen_plan(current)
+    env = next(doc for docs in original["files"].values() for doc in docs
+               if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")["spec"]["template"]["spec"]["containers"][0]["env"]
+    endpoint = next(entry["value"] for entry in env if entry["name"] == "LOOM_SVC_MINIO_ENDPOINT")
+    requests = []
+
+    def rejection(request):
+        requests.append(request)
+        return httpx.Response(403, text="<Error><Code>InvalidAccessKeyId</Code></Error>")
+
+    async with httpx.AsyncClient(base_url=endpoint, transport=httpx.MockTransport(rejection)) as http:
+        verifier = ApplicationObjectAccessVerifier(http)
+        cloud.delay_delete = True
+        with pytest.raises(ProviderRetryError):
+            await provider.retire_cloud(current, verifier)
+        destroyed = await registry.transition(row.application_id, principal=alice, action="destroy_retained",
+            idempotency_key="destroy", expected_generation=2)
+        latest = await registry.claim(destroyed.operation_id)
+        cloud.delay_delete = False
+        with pytest.raises(ProviderWaitingError):
+            await provider.retire_cloud(latest, verifier)
+        assert len(cloud.mutations) == 5 and requests == []
+        del cloud.resources["resource-4"]  # The single original DELETE takes effect late.
+        await provider.retire_cloud(latest, verifier)
+    assert cloud.resources == {} and len(cloud.mutations) == 8 and len(requests) == 1
+
+
+async def test_permissionless_undelivered_key_retires_without_invented_probe_material(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    for key in ("account", "key"):
+        await provider.cloud.create(lease, key, provider.storage.model_dump(mode="json"))
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+
+    def unexpected(request):
+        raise AssertionError("a never-delivered permissionless key needs no fabricated material")
+
+    async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(unexpected)) as http:
+        await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.resources == {} and len(cloud.mutations) == 4
+
+
+@pytest.mark.parametrize("outcome", ["observed", "dispatched", "unexplained"])
+async def test_peer_completed_retirement_is_not_misclassified_as_missing_resource(
+    applications, platform_inputs, database_access, shared_ca, monkeypatch, outcome,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    cloud.delay_create = True
+    with pytest.raises(ProviderRetryError):
+        await provider.cloud.create(lease, "account", provider.storage.model_dump(mode="json"))
+    kind, value = cloud.pending
+    cloud.resources[value["metadata"]["id"]] = kind, value
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    history, first = registry.cloud_history, True
+
+    async def peer_retires(active):
+        nonlocal first
+        result = await history(active)
+        if first:
+            first = False
+            await provider.cloud.reconcile(active, lease.operation_id, "account")
+            if outcome == "observed":
+                await provider.cloud.delete(active, lease.operation_id, "account")
+            else:
+                if outcome == "dispatched":
+                    cloud.delay_delete = True
+                    with pytest.raises(ProviderRetryError):
+                        await provider.cloud.delete(active, lease.operation_id, "account")
+                cloud.resources.pop(value["metadata"]["id"])
+        return result
+
+    monkeypatch.setattr(registry, "cloud_history", peer_retires)
+    async with httpx.AsyncClient(base_url="https://storage.test") as http:
+        if outcome == "unexplained":
+            with pytest.raises(ProviderBlockedError, match="application_cloud_recorded_resource_missing"):
+                await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+        else:
+            await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.resources == {} and len(cloud.mutations) == (1 if outcome == "unexplained" else 2)
 
 
 @pytest.mark.parametrize("damage", ["data", "ca", "keyring"])

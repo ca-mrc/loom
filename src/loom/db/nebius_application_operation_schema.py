@@ -53,6 +53,10 @@ class NebiusApplicationOperation(Base):
                         name="nebius_application_operation_plan_check"),
         CheckConstraint("(phase = 'running') = (lease_token IS NOT NULL) AND (lease_token IS NULL) = (lease_expires_at IS NULL)",
                         name="nebius_application_operation_lease_check"),
+        CheckConstraint("(completion_json IS NULL) = (completed_at IS NULL) AND "
+                        "(completion_json IS NULL OR (jsonb_typeof(completion_json) = 'object' "
+                        "AND phase IN ('completed','superseded')))",
+                        name="nebius_application_operation_completion_check"),
     )
     operation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
     application_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_applications.application_id", ondelete="RESTRICT"), nullable=False)
@@ -65,6 +69,8 @@ class NebiusApplicationOperation(Base):
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     error_code: Mapped[str | None] = mapped_column(Text)
     plan_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    completion_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     runner_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
     lease_token: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))

@@ -191,9 +191,32 @@ recorded quota, and advances an older gate only with its observed UID and exact
 resourceVersion. Live generation/operation/identity and unscoped zero-Pod spec
 must match, and the quota controller's status must acknowledge `pods: 0` before
 the call returns. Definitive patch conflicts wait for new preconditions; uncertain
-writes are never resent. This adapter neither removes the gate nor proves that
-existing processes, object access or SQL connections have retired. It is not a
-completed lifecycle worker or capacity-release authority.
+writes are never resent. Closing admission alone does not prove process shutdown.
+
+`ensure_namespace` reconciles lost bootstrap replies and resumes only current
+prepared creation intent. An early stop with no dispatched Namespace request can
+create the empty retained personal namespace under its current operation, so
+retirement uses the same quota path. An existing unrecorded namespace is never
+adopted, and a disappeared observed namespace is never recreated.
+
+`ensure_resource_authority` then creates the exact frozen bootstrap RoleBinding
+to the protected application resource role. It reconciles lost replies, never
+dispatches an unsent predecessor create, and refuses foreign, missing-recorded or
+changed bindings. It cannot patch/delete a RoleBinding or broaden its role/subject.
+A read-only self-access review confirms quota-create authorization has propagated
+before resource operations begin; denial or evaluation uncertainty remains pending.
+This uses the installed application provisioner token, not an administrator token.
+
+`stop_workloads` then removes exact journal-owned personal Ingress/Service objects
+and scales retained Deployment names to zero. Requests use original frozen
+templates and UID/resourceVersion preconditions; a prepared request resumes its
+original preconditions before a new intent can be derived. Lost earlier replies
+are reconciled, never resent. Completion requires current Deployment controller
+observations and a live, unfiltered empty Pod list; terminating or foreign Pods
+keep retirement pending without being manually deleted. Replaced or drifted
+workload identities block cleanup. Shared resources are never cleanup targets.
+These methods do not remove the admission gate, retire object/SQL access, release
+capacity or constitute a completed lifecycle worker.
 
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
@@ -370,6 +393,31 @@ SQL schema binds one development data UUID, database identity and dedicated mana
 login. That ordinary manager can invoke the credential routines but cannot perform
 general role/schema administration or write the private records directly.
 
+Grants require an explicit release schema revision. The schema-qualified routine
+takes a shared transaction advisory lock and accepts only one matching live
+`public.alembic_version` row; the manager cannot invoke the internal unqualified
+grant. This uses read-committed isolation to avoid stale snapshots after waiting.
+The protected installer takes the matching exclusive lock, including first
+installation. Upgrading a legacy unqualified installation requires the dedicated
+manager to be `NOLOGIN` with no sessions; the installer neither kills sessions nor
+re-enables the manager. Existing binding and routine drift is never overwritten.
+
+Online Alembic runs hold the matching exclusive **session** lock on their own
+direct PostgreSQL connection, including across migration commits, and physically
+close that connection on exit. A changed revision or purge is refused while any
+personal generation remains unretired or a tracked login has a backend. Exact-head
+no-op commands and read-only diagnostics remain possible. The guard checks the
+complete Alembic migration plan, not only the first requested target; version-table
+purge or recreation is checked before Alembic's plan callback. The database owner uses
+a bounded, read-only `migration_ready()` routine, not access to private credential
+records. A legacy installation without that routine must be upgraded before a
+schema change. Lock contention and stale transaction isolation fail closed.
+
+This admission boundary is not a process-retirement proof: the protected rollout
+still coordinates the full personal stop lifecycle, shared/background services,
+compatible candidates and reapplication of runtime grants before reopening access.
+Personal deployment and rollback never migrate the shared database themselves.
+
 Each application incarnation/access generation gets a separate ordinary login.
 PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
 and `ADMIN FALSE`; the login cannot assume the common runtime role. The common
@@ -395,7 +443,8 @@ would defeat revocation are rejected. Private records retain only credential
 fingerprints, not raw passwords. The protected caller must generate high-entropy
 credentials and retain them in protected material for retry. This code has no
 live installation/dispatch entry point and does not retire object-store keys,
-close Pods, qualify application schema compatibility, or release capacity.
+close Pods or release capacity. Schema qualification establishes exact database
+revision equality, not the correctness of arbitrary developer application code.
 
 ### Recoverable application credential material
 
@@ -478,7 +527,8 @@ provisioning credentials never enter them.
 
 Permissionless account/key creation precedes material persistence. Exact DB login
 and group membership grants follow successful encrypted commit and semantic bundle
-validation. Retry and lease takeover reuse the same password/key. Changed shared
+validation and equality with the frozen release's schema revision. Retry and lease
+takeover reuse the same password/key. Changed shared
 material or malformed persisted credentials fail closed rather than replacing a
 generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL off
 the heartbeat loop using private, bounded autocommit connections. The protected
@@ -496,6 +546,48 @@ expired delivery material cannot itself prevent revocation. SQL cancellation may
 leave an in-flight request; monotonic shared-side tombstones fence late grants.
 This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
 users, coordinate migrations, mark readiness or release platform reservations.
+
+Cloud retirement separately reconciles prior-generation grants and deletes exact
+owned memberships, keys and accounts in dependency order. Prepared predecessor
+creates are never sent; uncertain deletion intents survive suspend-to-destroy
+without another request. Shared groups, buckets and policies remain untouched.
+Retained encrypted material supplies a signed, read-only object-service probe
+after IAM retirement. The protected HTTPS client must match the original frozen
+endpoint. Only an explicit HTTP403 `InvalidAccessKeyId` response proves key
+rejection; generic access denial, successful reads, redirects, malformed responses
+and transport failures keep retirement pending. An interrupted permissionless key
+with no committed material or membership intent is deleted without fabricating
+probe credentials. This composes access retirement, not installed readiness or
+permission to release capacity.
+
+### Stopped application completion
+
+`ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
+close Pod admission and stop personal workloads, revoke/drain SQL access, retire
+exact IAM identities and probe retained keys, then refresh the live workload and
+admission observations. Only this internal path supplies completion attestations;
+owner requests cannot submit evidence or a success flag. Active startup and a
+polling worker are not enabled by this coordinator.
+
+The adapters return immutable, secret-free evidence bound to the application,
+incarnation, shared data environment, operation/generations and lease epoch/token
+digest. It identifies the observed namespace/quota and Deployment UIDs, live
+resource versions, controller generations, empty unfiltered PodList version,
+revoked SQL generation and original probed access-key hashes. These are trusted
+adapter attestations, not cryptographic provider receipts or installed acceptance.
+
+`ApplicationRegistry.complete_stopped` acquires budget, application and operation
+locks in that order. It requires the current unexpired lease, matching attestations,
+the exact recorded resource/deletion identities and encrypted original key material.
+Current prepared effects and any dispatched effects prevent completion. Historical
+unsent creates grant no external authority. Any error keeps the reservation charged.
+One transaction records `completion_json`/`completed_at`, completes the operation,
+clears its lease and zeros only its personal CPU/memory/ephemeral reservation.
+Registration, namespace/name claims, encrypted history and the zero-storage reservation
+row remain. Shared users, accepted work, data, services and sibling reservations
+are not removed. Exact receipt replay is read-only; a different proof/token or a
+later transition cannot replay the old completion. Supersession retains the receipt,
+and schema downgrade refuses to discard retained completion evidence.
 
 ## Managed environment identity and rendering
 
