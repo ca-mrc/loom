@@ -25,6 +25,12 @@ from loom_service.application_management.kubernetes import (
     KubernetesEffectRejectedError,
 )
 from loom_service.application_management.leases import ApplicationLease
+from loom_service.application_management.proofs import (
+    ApplicationDeploymentRetirement,
+    ApplicationResourceObservation,
+    ApplicationRetirementIdentity,
+    ApplicationWorkloadRetirement,
+)
 from loom_service.application_management.registry import ApplicationRegistry
 from loom_service.environment_management.kubernetes_provider import _contains
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
@@ -33,6 +39,12 @@ _FENCE = "loom-application-retired"
 _WORKLOAD_RESOURCES = {"Deployment": ("apps/v1", "deployments"),
     "Ingress": ("networking.k8s.io/v1", "ingresses"), "Service": ("v1", "services")}
 _SCALE_KEY = re.compile(r"retire:scale:([0-9a-f]{32}):[0-9a-f]{64}\Z")
+
+
+def _observation(actual: dict[str, Any], recorded: ApplicationEffect) -> ApplicationResourceObservation:
+    metadata = actual["metadata"]
+    return ApplicationResourceObservation(operation_id=recorded.operation_id, key=recorded.key,
+        name=metadata["name"], uid=metadata["uid"], resource_version=metadata["resourceVersion"])
 
 
 class ApplicationRuntimeProvider:
@@ -189,7 +201,7 @@ class ApplicationRuntimeProvider:
         await self.kubernetes.create(lease, "namespace:create", document)
         await self.kubernetes._namespace(lease, "Pod", namespace)
 
-    async def stop_workloads(self, lease: ApplicationLease) -> None:
+    async def stop_workloads(self, lease: ApplicationLease) -> ApplicationWorkloadRetirement:
         """Fence admission, retire routes and prove personal processes have exited.
 
         Shared data, access revocation and reservation accounting are deliberately
@@ -233,10 +245,11 @@ class ApplicationRuntimeProvider:
                     raise ProviderWaitingError("application_workloads_retirement_pending") from None
         # Separate live evidence from historical success. A controller can lag
         # behind its accepted scale-down; terminating Pods still run processes.
+        deployments: list[ApplicationDeploymentRetirement] = []
         for doc in documents:
             if doc["kind"] not in _WORKLOAD_RESOURCES:
                 continue
-            actual, _ = await self._workload(lease, doc["kind"], namespace, doc["metadata"]["name"])
+            actual, recorded = await self._workload(lease, doc["kind"], namespace, doc["metadata"]["name"])
             if actual is None:
                 continue
             generation = actual["metadata"].get("generation")
@@ -244,20 +257,34 @@ class ApplicationRuntimeProvider:
             if (doc["kind"] != "Deployment" or actual["spec"]["replicas"] != 0
                     or type(generation) is not int or type(observed) is not int or observed < generation):
                 raise ProviderWaitingError("application_workloads_retirement_pending")
+            assert recorded is not None
+            deployments.append(ApplicationDeploymentRetirement(**_observation(actual, recorded).model_dump(),
+                generation=generation, observed_generation=observed))
         await self.kubernetes._namespace(lease, "Pod", namespace)
         response = await self.kubernetes._request("GET", f"/api/v1/namespaces/{namespace}/pods")
         try:
             pods = response.json()
             if (response.status_code != 200 or not isinstance(pods, dict) or pods.get("kind") != "PodList"
                     or not isinstance(pods.get("items"), list) or not isinstance(pods.get("metadata"), dict)
-                    or not pods["metadata"].get("resourceVersion") or pods["metadata"].get("continue")):
+                    or not isinstance(pods["metadata"].get("resourceVersion"), str)
+                    or re.fullmatch(r"[A-Za-z0-9._:-]{1,256}", pods["metadata"]["resourceVersion"]) is None
+                    or pods["metadata"].get("continue")):
                 raise ValueError
         except ValueError:
             raise ProviderBlockedError("application_kubernetes_invalid_response") from None
         if pods["items"]:
             raise ProviderWaitingError("application_workloads_retirement_pending")
-        await self.kubernetes._namespace(lease, "Pod", namespace)
+        actual_namespace = await self.kubernetes._namespace(lease, "Pod", namespace)
+        assert actual_namespace is not None
+        namespace_source = next(item for item in await self.registry.effect_history(lease)
+            if item.intent.kind == "Namespace" and item.intent.action == "create"
+            and item.phase == "observed" and item.observed_uid == actual_namespace["metadata"]["uid"])
+        fence = await self.close_admission(lease)
         await self.registry.frozen_plan(lease)
+        return ApplicationWorkloadRetirement(
+            identity=ApplicationRetirementIdentity.for_lease(lease, UUID(plan["registration"]["data_environment_id"])),
+            namespace=_observation(actual_namespace, namespace_source), fence=fence,
+            pods_resource_version=pods["metadata"]["resourceVersion"], deployments=tuple(deployments))
 
     async def _identity(self, lease: ApplicationLease, actual: dict[str, Any],
                          history: list[ApplicationEffect]) -> ApplicationEffect:
@@ -283,7 +310,7 @@ class ApplicationRuntimeProvider:
             raise ProviderBlockedError("application_pod_fence_conflict")
         return recorded
 
-    async def close_admission(self, lease: ApplicationLease) -> None:
+    async def close_admission(self, lease: ApplicationLease) -> ApplicationResourceObservation:
         """Close and confirm the fixed zero-Pod quota without ever unfencing."""
         document = await self._fence(lease)
         namespace = document["metadata"]["namespace"]
@@ -345,3 +372,4 @@ class ApplicationRuntimeProvider:
                 or actual.get("status", {}).get("hard", {}).get("pods") != "0"):
             raise ProviderWaitingError("application_pod_fence_pending")
         await self.registry.frozen_plan(lease)
+        return _observation(actual, recorded)

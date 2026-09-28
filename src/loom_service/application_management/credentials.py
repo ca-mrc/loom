@@ -7,6 +7,7 @@ release capacity or mark an application ready.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import secrets
 from dataclasses import dataclass
@@ -30,6 +31,12 @@ from loom_service.application_management.material import (
     ApplicationMaterialJournal,
 )
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+from loom_service.application_management.proofs import (
+    ApplicationCloudRetirement,
+    ApplicationDatabaseRetirement,
+    ApplicationKeyRetirement,
+    ApplicationRetirementIdentity,
+)
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
 
@@ -139,21 +146,22 @@ class ApplicationCredentialProvider:
                 "data": {key: base64.b64encode(value.encode()).decode() for key, value in material[name].items()},
             })
 
-    async def retire_database(self, lease: ApplicationLease) -> None:
+    async def retire_database(self, lease: ApplicationLease) -> ApplicationDatabaseRetirement:
         plan = await self.registry.frozen_plan(lease)
         # Retirement needs exact DB identity, not material suitable for a NEW
         # delivery. An expired CA/keyring must not keep old SQL access alive.
         row = self._registration(plan)
         through = lease.access_generation - (1 if row.desired_state == "active" else 0)
-        if through == 0:
-            return
-        await self.database.revoke(lease, through)
+        if through:
+            await self.database.revoke(lease, through)
+            await self.registry.frozen_plan(lease)
+            if not await self.database.drain(lease, through):
+                raise ProviderWaitingError("application_database_retirement_pending")
         await self.registry.frozen_plan(lease)
-        if not await self.database.drain(lease, through):
-            raise ProviderWaitingError("application_database_retirement_pending")
-        await self.registry.frozen_plan(lease)
+        return ApplicationDatabaseRetirement(
+            identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id), retired_through=through)
 
-    async def retire_cloud(self, lease: ApplicationLease, verifier: ApplicationObjectAccessVerifier) -> None:
+    async def retire_cloud(self, lease: ApplicationLease, verifier: ApplicationObjectAccessVerifier) -> ApplicationCloudRetirement:
         """Retire prior-generation IAM and prove rejection of delivered keys.
 
         The lifecycle caller must stop old processes separately. Shared groups,
@@ -190,7 +198,7 @@ class ApplicationCredentialProvider:
         history = await self.cloud.registry.cloud_history(lease)
         targets = [effect for effect in history if effect.action == "create" and effect.phase == "observed"
                    and self._registration(plans[effect.operation_id]).access_generation <= through]
-        proofs: list[tuple[dict[str, Any], dict[str, str]]] = []
+        proofs: list[tuple[ApplicationKeyRetirement, dict[str, Any], dict[str, str]]] = []
         for effect in targets:
             if effect.kind != "access_key":
                 continue
@@ -208,13 +216,18 @@ class ApplicationCredentialProvider:
                     raise
             else:
                 name = application_credential_names(self._registration(plan))["storage"]
-                proofs.append((plan, material[name]))
+                storage = material[name]
+                proof = ApplicationKeyRetirement(operation_id=effect.operation_id, key=effect.key,
+                    access_key_sha256=hashlib.sha256(storage["access-key"].encode()).hexdigest())
+                proofs.append((proof, plan, storage))
         # Journal history follows generation/sequence, so reversing it removes
         # memberships before keys before their service account. Existing exact
         # deletion intent is reused even across suspend->destroy transitions.
         for effect in reversed(targets):
             await self.cloud.delete(lease, effect.operation_id, effect.key)
-        for plan, storage in proofs:
+        for _, plan, storage in proofs:
             await self.registry.frozen_plan(lease)
             await verifier.verify_retired(plan, storage)
         await self.registry.frozen_plan(lease)
+        return ApplicationCloudRetirement(identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id),
+            keys=tuple(proof for proof, _, _ in proofs))
