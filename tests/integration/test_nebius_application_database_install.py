@@ -1,6 +1,10 @@
 """Protected SQL setup reuses credentials, preserves data and installs narrow grants."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from secrets import token_urlsafe
 from uuid import uuid4
 
@@ -135,3 +139,41 @@ def test_setup_never_recreates_a_lost_bound_manager_identity(shared_database):
     with pytest.raises(ApplicationDatabaseInstallError):
         install_shared_manager(url, data_environment_id=data, schema_revision='test_revision', manager_password=password)
     assert admin.execute('SELECT oid FROM pg_roles WHERE rolname=%s', (role,)).fetchone() is None
+
+
+def test_fixed_setup_entrypoint_installs_real_manager_from_protected_inputs(shared_database, monkeypatch, tmp_path, capsys):
+    from loom import nebius_application_database_install as setup
+
+    url, admin, data, password = shared_database
+    config = tmp_path / 'setup.json'
+    config.write_text(json.dumps({'namespace': 'loom-nebius-platform', 'data_environment_id': str(data),
+        'schema_revision': 'test_revision'}))
+    monkeypatch.setenv('LOOM_APPLICATION_SETUP_CONFIG', str(config))
+    monkeypatch.setenv('LOOM_DB_URL', url)
+    monkeypatch.setenv('LOOM_APPLICATION_MANAGER_PASSWORD', password)
+    # This disposable database is host-exposed; the protected Job renderer must
+    # supply the existing namespace-local verify-full route in installed use.
+    monkeypatch.setattr(setup, 'database_url', lambda value, namespace: url, raising=False)
+    assert setup.main() == 0
+    assert json.loads(capsys.readouterr().out) == {'status': 'application_database_installed'}
+    assert admin.execute('SELECT manager_role FROM loom_application_access.binding').fetchone() == (
+        'loom_app_manager_' + data.hex,)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'malformed', 'extra', 'oversized', 'foreign-route'])
+def test_setup_module_rejects_unqualified_inputs_without_leaking_secrets(tmp_path, damage):
+    path = tmp_path / 'setup.json'
+    value = {'namespace': 'loom-nebius-platform', 'data_environment_id': str(uuid4()), 'schema_revision': 'test_revision'}
+    if damage == 'extra':
+        value['sql'] = 'secret-must-not-appear'
+    if damage != 'missing':
+        path.write_text('secret-must-not-appear' if damage == 'malformed' else 'x' * 16385 if damage == 'oversized'
+                        else json.dumps(value))
+    result = subprocess.run([sys.executable, '-m', 'loom.nebius_application_database_install'],
+        env=os.environ | {'LOOM_APPLICATION_SETUP_CONFIG': str(path),
+            'LOOM_DB_URL': 'postgresql://secret-must-not-appear@foreign.invalid/loom',
+            'LOOM_APPLICATION_MANAGER_PASSWORD': 'secret-must-not-appear'},
+        capture_output=True, text=True, timeout=10)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {'status': 'application_database_setup_failed'}
+    assert result.stderr == '' and 'secret-must-not-appear' not in result.stdout
