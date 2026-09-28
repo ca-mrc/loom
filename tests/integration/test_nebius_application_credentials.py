@@ -292,6 +292,38 @@ async def test_permissionless_undelivered_key_retires_without_invented_probe_mat
     assert cloud.resources == {} and len(cloud.mutations) == 4
 
 
+async def test_peer_completed_retirement_is_not_misclassified_as_missing_resource(
+    applications, platform_inputs, database_access, shared_ca, monkeypatch,
+):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    cloud.delay_create = True
+    with pytest.raises(ProviderRetryError):
+        await provider.cloud.create(lease, "account", provider.storage.model_dump(mode="json"))
+    kind, value = cloud.pending
+    cloud.resources[value["metadata"]["id"]] = kind, value
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="stop", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    history, first = registry.cloud_history, True
+
+    async def peer_retires(active):
+        nonlocal first
+        result = await history(active)
+        if first:
+            first = False
+            await provider.cloud.reconcile(active, lease.operation_id, "account")
+            await provider.cloud.delete(active, lease.operation_id, "account")
+        return result
+
+    monkeypatch.setattr(registry, "cloud_history", peer_retires)
+    async with httpx.AsyncClient(base_url="https://storage.test") as http:
+        await provider.retire_cloud(current, ApplicationObjectAccessVerifier(http))
+    assert cloud.resources == {} and len(cloud.mutations) == 2
+
+
 @pytest.mark.parametrize("damage", ["data", "ca", "keyring"])
 async def test_changed_shared_material_is_not_silently_delivered_on_replay(
     applications, platform_inputs, database_access, shared_ca, damage,
