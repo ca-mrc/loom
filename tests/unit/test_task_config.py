@@ -177,6 +177,7 @@ def test_service_execution_binding_is_strict_and_matches_task_resources() -> Non
         ),
     )
     raw = _minimal_config().model_dump(mode="json")
+    raw["verifier"]["env_mode"] = "shared"
     raw["environment"].update(
         {
             "docker_image": task_image,

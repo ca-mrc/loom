@@ -18,6 +18,7 @@ from psycopg import sql
 from sqlalchemy.engine import make_url
 
 from loom.db.schema import TeamMembership
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_application_database import (
     ApplicationDatabaseAccess,
     install_application_database_access,
@@ -83,8 +84,8 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
-    release = release.model_copy(update={"schema_revision": "0166"})
-    shared = shared.model_copy(update={"schema_revision": "0166"})
+    release = release.model_copy(update={"schema_revision": service_schema_head()})
+    shared = shared.model_copy(update={"schema_revision": service_schema_head()})
     prepared = render_application(row, release, shared, foundation, authority=authority)
     operation = await registry.create(principal=alice, idempotency_key=slug,
                                       prepared=prepared, release=release, shared=shared)
@@ -186,7 +187,7 @@ async def test_stop_retires_database_generation_without_breaking_sibling(
         with pytest.raises(psycopg.OperationalError):
             login(database_access[1], first.username, first.password)
         with pytest.raises(ProviderBlockedError, match="application_database_retired"):
-            await provider.database.grant(lease, first.password, schema_revision="0166")
+            await provider.database.grant(lease, first.password, schema_revision=service_schema_head())
     assert len(cloud.mutations) == 8  # SQL-only retirement does not claim S3 denial.
 
 

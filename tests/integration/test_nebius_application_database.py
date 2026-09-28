@@ -11,6 +11,7 @@ from psycopg import sql
 from sqlalchemy.engine import make_url
 from testcontainers.postgres import PostgresContainer
 
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_application_database import (
     ApplicationDatabaseAccess,
     ApplicationDatabaseAccessError,
@@ -342,9 +343,9 @@ def test_actual_application_schema_supports_shared_reads_without_migration_autho
         with psycopg.connect(manager_url, autocommit=True) as manager_connection:
             access = ApplicationDatabaseAccess(manager_connection, data_id)
             password, app, incarnation = token_urlsafe(48), uuid4(), uuid4()
-            role = access.grant(app, incarnation, 1, password, schema_revision="0166")
+            role = access.grant(app, incarnation, 1, password, schema_revision=service_schema_head())
             with login(manager_url, role, password) as client:
-                assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0166",)
+                assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == (service_schema_head(),)
                 for table in ("teams", "users", "tasks", "trials", "tokens", "secrets"):
                     assert client.execute(sql.SQL("SELECT count(*) FROM public.{}").format(sql.Identifier(table))).fetchone() is not None
                 with pytest.raises(psycopg.errors.InsufficientPrivilege):
