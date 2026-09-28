@@ -23,8 +23,8 @@ from tests.integration.test_nebius_application_runtime import (
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
-from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_application_render import named
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 NS = "loom-dev-alice"
 PODS = f"/api/v1/namespaces/{NS}/pods"
@@ -204,6 +204,11 @@ async def test_stop_recovers_lost_namespace_create_before_closing_admission(appl
         stopped = await registry.transition(lease.application_id, principal=alice,
             idempotency_key="stop", action="suspend", expected_generation=1)
         current = await registry.claim(stopped.operation_id)
+        namespace = api.objects.pop("/api/v1/namespaces/" + NS)
+        with pytest.raises(ProviderWaitingError, match="application_kubernetes_unconfirmed"):
+            await provider.stop_workloads(current)
+        assert len(api.mutations) == 1
+        api.objects["/api/v1/namespaces/" + NS] = namespace
         with pytest.raises(ProviderWaitingError, match="application_pod_fence_pending"):
             await provider.stop_workloads(current)
         api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}

@@ -166,6 +166,13 @@ class ApplicationRuntimeProvider:
         not changed here. Even foreign/terminating Pods retain the retirement gate.
         """
         await self._fence(lease)  # Qualify installation before any resumed mutation.
+        # Namespace identity is needed for every namespaced call, including the
+        # fence. A lost bootstrap reply must be observed before using that gate.
+        # This never dispatches a predecessor's unsent bootstrap request.
+        for effect in await self.registry.effect_history(lease):
+            if effect.intent.kind == "Namespace" and effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key,
+                    document=await self._request_document(lease, effect))
         await self._resume_retirement(lease)
         await self.close_admission(lease)
         for effect in await self.registry.effect_history(lease):
