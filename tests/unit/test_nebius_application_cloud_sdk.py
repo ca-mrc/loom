@@ -49,3 +49,44 @@ async def test_application_exact_mutation_primitive_excludes_shared_resources(ki
         await api.get_resource(kind, "not-owned")
     with pytest.raises(ValueError, match="unsupported application IAM kind"):
         await api.delete_resource(kind, "not-owned", idempotency_key="not-authorized")
+
+
+@pytest.mark.parametrize("action", ["create", "delete"])
+async def test_native_sdk_authentication_rejection_does_not_repeat_mutation(action):
+    import grpc
+    from nebius.aio.token.renewable import Bearer as RenewableBearer
+    from nebius.aio.token.static import Bearer as StaticBearer
+    from nebius.base.options import INSECURE
+    from nebius.base.resolver import Constant
+    from nebius.sdk import SDK
+
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    attempts = []
+
+    async def rejected(request, context):
+        attempts.append(request)
+        await context.abort(grpc.StatusCode.UNAUTHENTICATED, "controlled token rejection")
+
+    server = grpc.aio.server()
+    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+        "nebius.iam.v1.ServiceAccountService",
+        {action.title(): grpc.unary_unary_rpc_method_handler(rejected)},
+    ),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    sdk = SDK(credentials=RenewableBearer(StaticBearer("test-only-token")),
+              resolver=Constant(f"127.0.0.1:{port}"), options=[(INSECURE, True)])
+    try:
+        api = NebiusSdkEnvironmentApi(sdk)
+        with pytest.raises(ProviderBlockedError, match="nebius_request_rejected"):
+            if action == "create":
+                await api.create("service_account", {"metadata": {
+                    "parent_id": "test-project", "name": "test-account"}, "spec": {}},
+                    idempotency_key="test-request")
+            else:
+                await api.delete_resource("service_account", "test-account", idempotency_key="test-request")
+        assert len(attempts) == 1
+    finally:
+        await sdk.close()
+        await server.stop(None)
