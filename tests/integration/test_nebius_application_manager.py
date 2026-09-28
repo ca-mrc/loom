@@ -63,7 +63,9 @@ async def test_manager_replay_and_stop_do_not_depend_on_available_release_catalo
     assert (await registry.status(operation.application_id, principal=alice)).operation == stopped
 
 
-async def test_update_from_actual_ready_completion_preserves_identity_and_freezes_new_images(ready_context, platform_inputs):
+@pytest.mark.parametrize('concurrent_replay', [False, True])
+async def test_update_from_actual_ready_completion_preserves_identity_and_freezes_new_images(
+        ready_context, platform_inputs, monkeypatch, concurrent_replay):
     from loom.nebius_application_contract import ApplicationOperationRequestV1
 
     coordinator, registry, _, alice, lease, _, _, _ = ready_context
@@ -74,8 +76,20 @@ async def test_update_from_actual_ready_completion_preserves_identity_and_freeze
         'service_image_ref': 'cr.eu-north1.nebius.cloud/test/feature@sha256:' + '2' * 64})
     service, _ = manager(registry, platform_inputs, plan=plan, releases=(release,), authority=coordinator.runtime.authority)
     request = ApplicationOperationRequestV1(action='update', expected_generation=1, release_id=release.release_id)
+    winner = []
+    if concurrent_replay:
+        read_status = registry.status
+
+        async def peer_wins_before_snapshot(*args, **kwargs):
+            monkeypatch.setattr(registry, 'status', read_status)
+            winner.append(await service.transition(alice, lease.application_id, request, idempotency_key='update'))
+            return await read_status(*args, **kwargs)
+
+        monkeypatch.setattr(registry, 'status', peer_wins_before_snapshot)
     operation = await service.transition(replace(alice, scopes=['submit']), lease.application_id,
         request, idempotency_key='update')
+    if winner:
+        assert winner[0].operation_id == operation.operation_id
     current = await registry.claim(operation.operation_id)
     new_plan = await registry.frozen_plan(current)
     assert new_plan['registration']['incarnation'] == plan['registration']['incarnation']
