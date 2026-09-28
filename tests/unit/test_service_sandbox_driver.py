@@ -350,3 +350,33 @@ async def test_stop_cancels_reference_symlink_read(tmp_path):
         assert closed.is_set() and not driver._requests
     finally:
         await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_upload_streams_bounded_chunks_with_exact_content_length(tmp_path: Path) -> None:
+    import hashlib
+
+    import httpx
+
+    size = 9 * 1024 * 1024 + 31
+    source = tmp_path / "large-artifact"
+    with source.open("wb") as output:
+        output.truncate(size)
+    observed = hashlib.sha256()
+    sizes = []
+
+    class Receiver(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            assert int(request.headers["Content-Length"]) == size
+            async for chunk in request.stream:
+                sizes.append(len(chunk))
+                assert len(chunk) <= 1024 * 1024
+                observed.update(chunk)
+            return httpx.Response(204)
+
+    driver = driver_for(tmp_path / "unused.sock", limit=size)
+    async with httpx.AsyncClient(transport=Receiver(), base_url="http://sandbox") as client:
+        driver._client = client
+        await driver.upload(source, PurePosixPath("/app/large-artifact"))
+    assert sum(sizes) == size
+    assert observed.hexdigest() == hashlib.file_digest(source.open("rb"), "sha256").hexdigest()
