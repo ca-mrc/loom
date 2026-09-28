@@ -1163,6 +1163,21 @@ operator or runtime credentials through Actions. Installed restoration, credenti
 renewal and multi-owner acceptance must still be completed before this source-level
 installer can be described as an operational environment.
 
+The fixed application-runtime upgrade composes the existing setup stages and
+management Deployment switch without replaying bootstrap. It validates the
+original input digest, completed phase journals, namespace UID and retained
+Deployment snapshot. Separate upgrade state preserves the original configuration,
+database, credentials and journals. The publication catalog may add a qualified
+candidate but cannot remove or rewrite retained entries. New application
+configuration/account and shared-access setup precede retirement; the fixed
+management migration waits for the old process to stop. Only then may the new
+template activate. A resumed operation never retires the new process or
+automatically restarts the legacy worker. Public verification explicitly requires
+`application_provisioner` readiness and authenticated management routes; legacy or
+absent worker health is insufficient. The protected entry still needs to connect
+this upgrade to live shared-material/IAM and actual-subject qualification before
+it can establish installed personal-application readiness.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

@@ -75,8 +75,12 @@ def render_application_setup(deployment: ManagementDeployment, *, candidate: dic
         {'apiVersion': 'admissionregistration.k8s.io/v1', 'kind': 'ValidatingAdmissionPolicyBinding',
             'metadata': {'name': retirement_name}, 'spec': {'policyName': retirement_name, 'validationActions': ['Deny']}},
     ]
-    phases = {'admission': admission, 'permissions': permissions, 'network': network, 'database': [config, job],
-        'retirement': retirement}
+    management_config = [doc for doc in rendered.files['10-config-network.yaml']
+        if (doc['kind'], doc['metadata']['name']) in {
+            ('ConfigMap', 'loom-management-applications-' + suffix), ('ServiceAccount', 'loom-application-provisioner')}]
+    phases = {'config': management_config, 'admission': admission, 'permissions': permissions,
+        'network': network, 'database': [config, job], 'retirement': retirement,
+        'migration': rendered.files['30-migrate.yaml']}
     for phase in phases.values():
         for doc in phase:
             doc['metadata'].setdefault('labels', {})[APPLICATION_INSTALLATION_LABEL] = str(deployment.installation_id)

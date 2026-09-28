@@ -45,6 +45,7 @@ _PATHS = {
     'Role': ('rbac.authorization.k8s.io/v1', 'roles'), 'RoleBinding': ('rbac.authorization.k8s.io/v1', 'rolebindings'),
     'NetworkPolicy': ('networking.k8s.io/v1', 'networkpolicies'),
     'ConfigMap': ('v1', 'configmaps'), 'Job': ('batch/v1', 'jobs'), 'Secret': ('v1', 'secrets'),
+    'ServiceAccount': ('v1', 'serviceaccounts'),
 }
 
 
@@ -199,7 +200,7 @@ def application_setup_ready(*, request: ApplicationSetupRequest, phase: str,
                             api: ManagementStageAPI, state_dir: Path) -> bool:
     """Only recorded, unchanged admission and SQL Job observations count."""
     try:
-        if phase not in {'admission', 'database', 'retirement'}:
+        if phase not in {'admission', 'database', 'retirement', 'migration'}:
             raise ManagementStageError('application setup phase has no readiness barrier')
         documents = _documents(request, phase)
         identity = {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(request.binding),

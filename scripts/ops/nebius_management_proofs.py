@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import ssl
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import httpx
@@ -22,7 +22,10 @@ from loom.nebius_environment_contract import _hostname
 class ManagementPublicProbe(ManagementKubernetesTransport):
     error_type = ManagementInstallError
 
-    def __init__(self, *, host: str):
+    def __init__(self, *, host: str, runtime: Literal['legacy', 'applications'] = 'legacy'):
+        if runtime not in {'legacy', 'applications'}:
+            raise ManagementInstallError('management public runtime differs')
+        self.runtime = runtime
         super().__init__(api_server="https://" + _hostname(host), ssl_context=ssl.create_default_context())
 
     def _get(self, path: str, *, token: str | None = None) -> tuple[int, bytes]:
@@ -50,11 +53,16 @@ class ManagementPublicProbe(ManagementKubernetesTransport):
                 raise ValueError()
             code, payload = self._get("/api/v1/health/ready")
             if code != 200 or json.loads(payload) != {
-                "status": "ready", "mode": "management", "postgres": "ready", "provisioner": "ready",
+                "status": "ready", "mode": "management", "postgres": "ready",
+                "application_provisioner" if self.runtime == 'applications' else "provisioner": "ready",
             }:
                 raise ValueError()
             if self._get("/api/v1/environments")[0] not in {401, 403}:
                 raise ValueError()
+            if self.runtime == 'applications':
+                for path in ('/api/v1/applications', '/api/v1/application-operations/' + str(uuid4())):
+                    if self._get(path)[0] not in {401, 403}:
+                        raise ValueError()
             path = "/api/v1/admin/audit-events?limit=1"
             if self._get(path)[0] not in {401, 403} or self._get(path, token="invalid-" + uuid4().hex)[0] not in {401, 403}:
                 raise ValueError()
