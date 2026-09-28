@@ -404,3 +404,94 @@ async def test_static_preparation_cannot_cross_stopped_or_activation_boundary(ru
     with pytest.raises(ProviderBlockedError, match=r"application_preparation_not_requested|application_activation_started"):
         await runtime(runtime_context).prepare_static(lease)
     assert len(api.mutations) == 1
+
+
+def shared_network_objects(context, platform_inputs):
+    from loom.nebius_application_network import render_application_shared_access
+    from tests.unit.test_nebius_application_render import inputs
+
+    authority, api = context[2:4]
+    _, _, shared, foundation = inputs(platform_inputs)
+    policies = render_application_shared_access(authority, shared, foundation)
+    paths = []
+    for index, policy in enumerate(policies):
+        policy["metadata"].update(uid=f"shared-policy-{index}", resourceVersion=str(index + 10))
+        path = f"/apis/networking.k8s.io/v1/namespaces/{shared.platform_namespace}/networkpolicies/{policy['metadata']['name']}"
+        api.objects[path] = policy
+        paths.append(path)
+    return paths
+
+
+async def test_shared_network_preflight_reads_only_exact_protected_policies(runtime_context, platform_inputs, monkeypatch):
+    _, client, authority, api, lease, _ = runtime_context
+    paths = shared_network_objects(runtime_context, platform_inputs)
+    request, reads = client._request, []
+
+    async def track(method, path, body=None):
+        if f"/namespaces/{authority.shared_namespace}/" in path:
+            assert method == "GET"
+            reads.append(path)
+        return await request(method, path, body)
+
+    monkeypatch.setattr(client, "_request", track)
+    proof = await runtime(runtime_context).read_shared_network(lease)
+    assert reads == paths
+    assert [(item.name, item.uid, item.resource_version) for item in proof] == [
+        (authority.name + "-postgres", "shared-policy-0", "10"),
+        (authority.name + "-control-plane", "shared-policy-1", "11"),
+        (authority.name + "-gateway", "shared-policy-2", "12")]
+    assert len(api.mutations) == 1
+
+
+@pytest.mark.parametrize("damage", ["missing", "broadened", "wrong-owner", "wrong-target", "terminating", "wrong-kind", "bad-version"])
+async def test_shared_network_preflight_rejects_missing_or_changed_live_policy(runtime_context, platform_inputs, damage):
+    _, _, _, api, lease, _ = runtime_context
+    paths = shared_network_objects(runtime_context, platform_inputs)
+    policy = api.objects[paths[0]]
+    if damage == "missing":
+        del api.objects[paths[0]]
+    elif damage == "broadened":
+        policy["spec"]["ingress"].append({})
+    elif damage == "wrong-owner":
+        policy["spec"]["ingress"][0]["from"][0]["namespaceSelector"]["matchLabels"]["loom.nebius/application-installation"] = str(uuid4())
+    elif damage == "wrong-target":
+        policy["spec"]["podSelector"] = {}
+    elif damage == "terminating":
+        policy["metadata"]["deletionTimestamp"] = "2026-09-28T00:00:00Z"
+    elif damage == "wrong-kind":
+        policy["kind"] = "Service"
+    else:
+        policy["metadata"]["resourceVersion"] = ""
+    with pytest.raises(ProviderBlockedError, match=r"application_shared_network_conflict|application_kubernetes_invalid_response"):
+        await runtime(runtime_context).read_shared_network(lease)
+    assert len(api.mutations) == 1
+
+
+async def test_shared_network_preflight_cannot_return_evidence_after_supersession(runtime_context, platform_inputs, monkeypatch):
+    registry, client, _, api, lease, alice = runtime_context
+    paths = shared_network_objects(runtime_context, platform_inputs)
+    request = client._request
+
+    async def supersede(method, path, body=None):
+        result = await request(method, path, body)
+        if path == paths[-1]:
+            await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+                action="suspend", expected_generation=1)
+        return result
+
+    monkeypatch.setattr(client, "_request", supersede)
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await runtime(runtime_context).read_shared_network(lease)
+    assert len(api.mutations) == 1
+
+
+async def test_shared_network_preflight_does_not_follow_foreign_authority(runtime_context, platform_inputs):
+    from loom_service.application_management.runtime import ApplicationRuntimeProvider
+
+    registry, client, authority, api, lease, _ = runtime_context
+    shared_network_objects(runtime_context, platform_inputs)
+    other = authority.model_copy(update={"shared_namespace": "loom-foreign"})
+    provider = ApplicationRuntimeProvider(registry, client, authority=other)
+    with pytest.raises(ProviderBlockedError, match="application_runtime_authority_conflict"):
+        await provider.read_shared_network(lease)
+    assert len(api.mutations) == 1
