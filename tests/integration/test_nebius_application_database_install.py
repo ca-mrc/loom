@@ -55,7 +55,10 @@ def test_setup_replays_without_rotating_login_or_copying_shared_data(shared_data
 
 
 def test_wrong_schema_creates_no_manager_role(shared_database):
-    from loom.nebius_application_database_install import ApplicationDatabaseInstallError, install_shared_manager
+    from loom.nebius_application_database_install import (
+        ApplicationDatabaseInstallError,
+        install_shared_manager,
+    )
 
     url, admin, data, password = shared_database
     with pytest.raises(ApplicationDatabaseInstallError):
@@ -66,7 +69,10 @@ def test_wrong_schema_creates_no_manager_role(shared_database):
 
 @pytest.mark.parametrize('damage', ['password', 'privileges'])
 def test_existing_manager_mismatch_is_rejected_without_rotation_or_adoption(shared_database, damage):
-    from loom.nebius_application_database_install import ApplicationDatabaseInstallError, install_shared_manager
+    from loom.nebius_application_database_install import (
+        ApplicationDatabaseInstallError,
+        install_shared_manager,
+    )
 
     url, admin, data, password = shared_database
     role = 'loom_app_manager_' + data.hex
@@ -103,7 +109,10 @@ def test_interrupted_setup_reuses_the_retained_manager_credential(shared_databas
 
 
 def test_setup_does_not_race_a_shared_schema_migration(shared_database):
-    from loom.nebius_application_database_install import ApplicationDatabaseInstallError, install_shared_manager
+    from loom.nebius_application_database_install import (
+        ApplicationDatabaseInstallError,
+        install_shared_manager,
+    )
 
     url, admin, data, password = shared_database
     with admin.transaction():
@@ -114,7 +123,10 @@ def test_setup_does_not_race_a_shared_schema_migration(shared_database):
 
 
 def test_setup_never_recreates_a_lost_bound_manager_identity(shared_database):
-    from loom.nebius_application_database_install import ApplicationDatabaseInstallError, install_shared_manager
+    from loom.nebius_application_database_install import (
+        ApplicationDatabaseInstallError,
+        install_shared_manager,
+    )
 
     url, admin, data, password = shared_database
     role = install_shared_manager(url, data_environment_id=data, schema_revision='test_revision', manager_password=password)
