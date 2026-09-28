@@ -16,6 +16,7 @@ from loom.nebius_application_database import (
     ApplicationDatabaseAccess,
     ApplicationDatabaseAccessError,
 )
+from loom.nebius_application_identity import ApplicationDatabaseIdentity, ApplicationPrincipalV1
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderRetryError
 
@@ -28,7 +29,8 @@ class AsyncApplicationDatabaseAccess:
         self.data_environment_id = data_environment_id
 
     def _call(self, action: str, lease: ApplicationLease, generation: int,
-              password: str | None = None, schema_revision: str | None = None) -> str | bool | None:
+              password: str | None = None, schema_revision: str | None = None,
+              principal: ApplicationPrincipalV1 | None = None) -> str | bool | None:
         try:
             with psycopg.connect(self._connection_url, autocommit=True, connect_timeout=10,
                                   options="-c statement_timeout=30000 -c lock_timeout=10000") as connection:
@@ -37,6 +39,10 @@ class AsyncApplicationDatabaseAccess:
                     assert password is not None and schema_revision is not None
                     return access.grant(lease.application_id, lease.incarnation, generation, password,
                                         schema_revision=schema_revision)
+                if action == "enroll":
+                    assert principal is not None and schema_revision is not None
+                    return ApplicationDatabaseIdentity(access).enroll(lease.application_id, lease.incarnation,
+                        generation, schema_revision=schema_revision, principal=principal)
                 if action == "revoke":
                     access.revoke(lease.application_id, lease.incarnation, generation)
                     return None
@@ -58,6 +64,13 @@ class AsyncApplicationDatabaseAccess:
 
     async def revoke(self, lease: ApplicationLease, through_generation: int) -> None:
         await asyncio.to_thread(self._call, "revoke", lease, through_generation)
+
+    async def enroll(self, lease: ApplicationLease, principal: ApplicationPrincipalV1, *, schema_revision: str) -> str:
+        value = await asyncio.to_thread(self._call, "enroll", lease, lease.access_generation,
+                                       schema_revision=schema_revision, principal=principal)
+        if not isinstance(value, str) or value not in {"owner", "member", "viewer"}:
+            raise ProviderBlockedError("application_database_result_invalid")
+        return value
 
     async def drain(self, lease: ApplicationLease, through_generation: int) -> bool:
         value = await asyncio.to_thread(self._call, "drain", lease, through_generation)
