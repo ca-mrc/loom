@@ -37,7 +37,7 @@ func TestGuestConfigurationRejectsUnsafePathsAndUnboundedResources(t *testing.T)
 func TestQEMUUsesSoftwareGuestAndReadOnlyExports(t *testing.T) {
 	c := configForTest(t)
 	args := strings.Join(c.qemuArgs(), " ")
-	for _, expected := range []string{"tcg,thread=multi", "-nodefaults", "-no-reboot", "readonly=on", "-monitor none", "-smp 1", "-m 768", "mount_tag=taskroot", "mount_tag=payload", "virtserialport", "-netdev user,id=net"} {
+	for _, expected := range []string{"tcg,thread=multi,tb-size=64", "-nodefaults", "-no-reboot", "readonly=on", "-monitor none", "-smp 1", "-m 768", "mount_tag=taskroot", "mount_tag=payload", "virtserialport", "-netdev user,id=net"} {
 		if !strings.Contains(args, expected) {
 			t.Errorf("missing %s in %s", expected, args)
 		}
