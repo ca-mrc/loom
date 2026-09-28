@@ -50,6 +50,10 @@ unsupported and may return cached data. They contain no controller credentials,
 foreign sandbox state or private verifier inputs. QID remapping keeps inodes on
 different outer mounts distinct. The sandbox server runs as PID 1 of an
 inner guest PID namespace, so process cleanup excludes guest kernel threads.
+The guest mounts its own `/dev/shm` tmpfs for POSIX shared memory and named
+semaphores, including Python multiprocessing. Its limit is half of guest RAM,
+within the existing memory envelope; it disappears with the guest. No host or
+other trial's shared-memory mount is exposed.
 
 RPC streams use yamux over the named `loom.rpc` virtio-serial device. The outer
 Unix socket preserves the existing sandbox API. There is no host TCP RPC

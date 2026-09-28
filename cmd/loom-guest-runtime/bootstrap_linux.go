@@ -135,6 +135,10 @@ func sandboxInit() {
 	bootMust(os.MkdirAll("/dev/pts", 0755))
 	bootMust(syscall.Mount("devpts", "/dev/pts", "devpts", 0, "newinstance,ptmxmode=0666,mode=0620"))
 	bootMust(syscall.Mount("/dev/pts/ptmx", "/dev/ptmx", "", syscall.MS_BIND, ""))
+	// devtmpfs does not provide the POSIX shared-memory filesystem. Keep named
+	// semaphores and shared memory private to this guest and its RAM envelope.
+	bootMust(os.MkdirAll("/dev/shm", 01777))
+	bootMust(syscall.Mount("shm", "/dev/shm", "tmpfs", syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, "mode=1777,size=50%"))
 	for _, link := range [][2]string{{"/proc/self/fd", "/dev/fd"}, {"/proc/self/fd/0", "/dev/stdin"}, {"/proc/self/fd/1", "/dev/stdout"}, {"/proc/self/fd/2", "/dev/stderr"}} {
 		if err := os.Symlink(link[0], link[1]); err != nil && !os.IsExist(err) {
 			bootMust(err)
