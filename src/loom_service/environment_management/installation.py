@@ -49,7 +49,8 @@ class ManagementInstallation(BaseModel):
     publications: tuple[ProtectedPublication, ...] = Field(max_length=1000)
     platform_budget: PlatformBudget
     provider_runtime: ProviderRuntimeSettings | None = None
-    applications: ApplicationInstallation | None = None
+    # Preserve legacy installation/recovery fingerprints when omitted.
+    applications: ApplicationInstallation | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def validate_publications(self) -> ManagementInstallation:
