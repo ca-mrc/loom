@@ -266,3 +266,18 @@ def test_prepare_readiness_round_trips_through_renderer(
     assert catalog["execution_class"].get("supports_task_web_egress", False) is enabled
     assert catalog["topology"]["execution_class_id"] == expected
     assert all(row["execution_class_id"] == expected for row in catalog["topology"]["targets"])
+
+
+def test_prepare_guest_settings_preserve_ordinary_profile_budgets(tmp_path: Path) -> None:
+    args = _inputs(tmp_path)
+    args.guest_runtime = "qemu-tcg-v1"
+    args.guest_runtime_volume_mib = 1024
+    args.guest_max_artifact_bytes = 6 * 1024**3
+    args.supports_task_identity = True
+    prepare.prepare(args)
+    profile = ServiceExecutionRuntimeProfileV1.model_validate_json(args.output_profile.read_text())
+    assert profile.guest_runtime == "qemu-tcg-v1"
+    assert profile.guest_runtime_volume_mib == 1024
+    assert profile.guest_max_artifact_bytes == 6 * 1024**3
+    assert profile.runtime_volume_mib == 32
+    assert profile.max_artifact_bytes == 1024**3

@@ -162,10 +162,21 @@ func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, diges
 }
 
 func (b *workloadBroker) startTaskEgress(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
+	return b.startTaskEgressAt(parent, policy, digest, evidence, "127.0.0.1:0", evidenceLimits...)
+}
+
+// The guest Docker daemon starts before the controller phase. A stable,
+// Pod-local endpoint lets it use the same phase-fenced allowlist without a
+// restart, credentials, or an additional listener outside the Pod.
+func (b *workloadBroker) startGuestTaskEgress(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
+	return b.startTaskEgressAt(parent, policy, digest, evidence, "127.0.0.1:18791", evidenceLimits...)
+}
+
+func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, address string, evidenceLimits ...int64) (string, func() error, error) {
 	if err := policy.validate(); err != nil {
 		return "", nil, err
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return "", nil, err
 	}

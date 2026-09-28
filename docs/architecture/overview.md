@@ -33,6 +33,7 @@ establish live deployment or workload acceptance.
 | Adapters | `packages/` | Benchmark ingestion and agent harnesses |
 
 See [native service execution](nebius-service-execution.md),
+[trial-owned guest kernels](guest-execution.md),
 [task-image materialization](task-image-materialization.md), and
 [service mode](service-mode.md) for the execution and user-facing contracts.
 

@@ -50,3 +50,7 @@ schemas and manifests stay with their documented consumers. Minimal history is
 clearly marked under `historical/`; older files are recoverable from Git history.
 Implementation plans, session notes and generated run reports do not belong in
 the repository. See [documentation policy](../CONTRIBUTING.md#documentation-and-repository-layout).
+
+The [trial-owned guest kernel contract](architecture/guest-execution.md) describes
+optional isolated Docker, image-build and core-generation mechanisms and their
+deployment qualification boundary.

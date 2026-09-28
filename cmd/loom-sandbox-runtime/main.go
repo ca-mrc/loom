@@ -19,11 +19,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/qianyi-sun/loom/internal/guestchannel"
 )
 
 const maxOutput = 10 * 1024 * 1024
@@ -338,6 +342,7 @@ func checkSocket(path string) error {
 func main() {
 	socket := flag.String("socket", "", "Unix socket path in dedicated emptyDir")
 	check := flag.String("check-socket", "", "check an existing Unix socket and exit")
+	guest := flag.Bool("guest-channel", false, "serve the private guest virtio-serial channel")
 	limit := flag.Int64("max-transfer-bytes", 256*1024*1024, "maximum file transfer size")
 	timeout := flag.Int("exec-timeout-seconds", 900, "maximum and default exec deadline")
 	flag.Parse()
@@ -347,18 +352,26 @@ func main() {
 		}
 		return
 	}
-	if *socket == "" || *limit <= 0 || *timeout <= 0 {
+	if (*socket == "" && !*guest) || (*socket != "" && *guest) || *limit <= 0 || *timeout <= 0 {
 		log.Fatal("socket and positive limits required")
 	}
-	// Do not unlink an unknown existing entry. A fresh Pod uses a fresh emptyDir.
-	listener, err := net.Listen("unix", *socket)
+	var channel io.ReadWriteCloser
+	if *guest {
+		path, err := guestChannelDevice("/sys/class/virtio-ports", "/dev")
+		if err != nil {
+			log.Fatal(err)
+		}
+		device, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			log.Fatalf("guest channel unavailable: %v", err)
+		}
+		channel = device
+	}
+	listener, err := sandboxListener(*socket, channel)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer listener.Close()
-	if err := os.Chmod(*socket, 0660); err != nil {
-		log.Fatal(err)
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	server := &http.Server{Handler: (runtimeServer{*limit, time.Duration(*timeout) * time.Second}).handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return ctx }}
@@ -371,4 +384,52 @@ func main() {
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func sandboxListener(socket string, channel io.ReadWriteCloser) (net.Listener, error) {
+	if (socket == "") == (channel == nil) {
+		return nil, errors.New("exactly one sandbox transport is required")
+	}
+	if channel != nil {
+		return guestchannel.Serve(channel)
+	}
+	// Never unlink an unknown entry: a new Pod has a fresh private emptyDir.
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(socket, 0660); err != nil {
+		listener.Close()
+		return nil, err
+	}
+	return listener, nil
+}
+
+func guestChannelDevice(sysRoot, devRoot string) (string, error) {
+	entries, err := os.ReadDir(sysRoot)
+	if err != nil {
+		return "", errors.New("guest serial ports unavailable")
+	}
+	pattern := regexp.MustCompile(`^vport[0-9]+p[0-9]+$`)
+	result := ""
+	for _, entry := range entries {
+		if !pattern.MatchString(entry.Name()) {
+			continue
+		}
+		name, err := os.ReadFile(filepath.Join(sysRoot, entry.Name(), "name"))
+		if err != nil {
+			return "", errors.New("cannot inspect guest serial port")
+		}
+		if strings.TrimSpace(string(name)) != "loom.rpc" {
+			continue
+		}
+		if result != "" {
+			return "", errors.New("ambiguous guest RPC port")
+		}
+		result = filepath.Join(devRoot, entry.Name())
+	}
+	if result == "" {
+		return "", errors.New("guest RPC port missing")
+	}
+	return result, nil
 }
