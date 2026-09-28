@@ -18,6 +18,8 @@ func materialize(arguments []string) error {
 	planDestination := flags.String("plan-dest", "/loom/runtime/execution-plan.json", "plan destination")
 	sandboxSource := flags.String("sandbox-source", "/loom-sandbox-runtime", "bundled sandbox binary")
 	sandboxDestination := flags.String("sandbox-dest", "/loom/runtime/loom-sandbox-runtime", "sandbox binary destination")
+	guestSource := flags.String("guest-source", "/guest", "bundled guest payload")
+	guestDestination := flags.String("guest-dest", "/loom/runtime/guest", "guest payload destination")
 	sandboxRoot := flags.String("sandbox-root", "/loom/sandboxes", "private sandbox volume root")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -84,6 +86,17 @@ func materialize(arguments []string) error {
 			return err
 		}
 		if err := writeExclusive(*sandboxDestination, sandbox, 0o555); err != nil {
+			return err
+		}
+		break
+	}
+	for _, sidecar := range p.Sidecars {
+		if sidecar.GuestExecution == nil {
+			continue
+		}
+		// Leave 128 MiB for ordinary binaries, the immutable plan and metadata.
+		// The validated guest class already requires a >=1024 MiB runtime volume.
+		if err := materializeGuestPayload(*guestSource, *guestDestination, (p.RuntimeVolumeMiB-128)*1024*1024); err != nil {
 			return err
 		}
 		break

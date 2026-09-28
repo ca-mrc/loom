@@ -104,6 +104,11 @@ func TestMaterializeGuestPayloadOnlyForExplicitGuestPlan(t *testing.T) {
 				t.Fatal(err)
 			}
 			destination := filepath.Join(dir, "payload")
+			for _, role := range []string{"task-sandbox", "verifier-sandbox"} {
+				if err := os.MkdirAll(filepath.Join(dir, "sandboxes", role), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			err = materialize([]string{"--encoded-plan", base64.RawURLEncoding.EncodeToString(encoded),
 				"--runtime-dest", filepath.Join(dir, "runtime"), "--plan-dest", filepath.Join(dir, "plan.json"),
 				"--sandbox-source", sandbox, "--sandbox-dest", filepath.Join(dir, "sandbox"),

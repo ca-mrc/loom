@@ -653,7 +653,7 @@ def evaluate_execution_admission(
             ("cpu", requirements.cpu_millis, 1000, "cpus", "CPU millis"),
             ("memory", requirements.memory_mib, 512, "memory_mb", "MiB"),
             (
-                "ephemeral_storage", requirements.ephemeral_storage_mib, 128,
+                "ephemeral_storage", requirements.ephemeral_storage_mib, 160,
                 "storage_mb", "MiB",
             ),
         ):
