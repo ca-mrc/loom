@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import httpx
 import pytest
-
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.unit.test_nebius_application_setup import ROOT, render_setup
 from tests.unit.test_nebius_management_render import (
@@ -75,8 +74,37 @@ def test_setup_recovery_cannot_rebind_a_recreated_shared_namespace(setup_request
     assert len(api.creates) == 4
 
 
+@pytest.mark.parametrize('api_group', ['', 'rbac.authorization.k8s.io'])
+def test_shared_binding_accepts_only_service_account_api_group_default(setup_request, tmp_path, api_group):
+    from scripts.ops.nebius_application_setup import stage_application_setup
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    request, api = setup_request
+
+    def default_subject(doc):
+        if doc['kind'] == 'RoleBinding':
+            for subject in doc['subjects']:
+                subject['apiGroup'] = api_group
+
+    api.default_change = default_subject
+    args = dict(request=request, phase='permissions', api=api, state_dir=tmp_path / 'state')
+    if api_group:
+        with pytest.raises(ManagementStageError, match='defaulting'):
+            stage_application_setup(**args)
+        assert not api.creates
+    else:
+        first = stage_application_setup(**args)
+        assert stage_application_setup(**args) == first
+        binding = next(doc for doc in api.resources.values() if doc['kind'] == 'RoleBinding')
+        assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-application-provisioner',
+            'namespace': request.binding.namespace, 'apiGroup': ''}]
+
+
 def test_admission_readiness_requires_current_typechecking_and_keeps_bootstrap_ungranted(setup_request, tmp_path):
-    from scripts.ops.nebius_application_setup import application_setup_ready, stage_application_setup
+    from scripts.ops.nebius_application_setup import (
+        application_setup_ready,
+        stage_application_setup,
+    )
     from scripts.ops.nebius_management_stage import ManagementStageError
 
     request, api = setup_request
@@ -99,7 +127,10 @@ def test_admission_readiness_requires_current_typechecking_and_keeps_bootstrap_u
 
 @pytest.mark.parametrize('damage', ['failed', 'uid', 'command'])
 def test_setup_job_readiness_cannot_hide_failure_or_drift(setup_request, tmp_path, damage):
-    from scripts.ops.nebius_application_setup import application_setup_ready, stage_application_setup
+    from scripts.ops.nebius_application_setup import (
+        application_setup_ready,
+        stage_application_setup,
+    )
     from scripts.ops.nebius_management_stage import ManagementStageError
 
     request, api = setup_request
