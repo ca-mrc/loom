@@ -9,6 +9,7 @@ import {
   AgentModelPickerProps,
   ALL_SOURCES,
   CUSTOM_MODEL_KEY,
+  findAgent,
   firstSource,
   modelKey,
   ModelSource,
@@ -55,14 +56,8 @@ export function useAgentModelPicker({
     staleTime: 5 * 60 * 1000,
   });
 
-  const localServers = useQuery({
-    queryKey: queryKeys["local-servers"](),
-    queryFn: () => api.listLocalServers(),
-    staleTime: 5 * 60 * 1000,
-  });
-
   const selectedAgent: AgentEntry | undefined = useMemo(
-    () => agents.data?.items.find((a) => a.name === value.agentName),
+    () => findAgent(agents.data?.items, value.agentName),
     [agents.data, value.agentName],
   );
 
@@ -83,7 +78,7 @@ export function useAgentModelPicker({
     if (!agents.data) return;
     if (specificAgentToggle && value.useSpecificAgent) {
       if (!value.agentName) return;
-      const current = agents.data.items.find((a) => a.name === value.agentName);
+      const current = findAgent(agents.data.items, value.agentName);
       if (current && agentServiceModeReady(current)) return;
       onChange({ ...value, agentName: "", agentVersion: undefined });
       return;
@@ -91,7 +86,7 @@ export function useAgentModelPicker({
 
     if (specificAgentToggle) {
       if (!defaultAgent) return;
-      const current = agents.data.items.find((a) => a.name === value.agentName);
+      const current = findAgent(agents.data.items, value.agentName);
       if (current?.name === defaultAgent.name && agentServiceModeReady(current)) {
         return;
       }
@@ -109,10 +104,10 @@ export function useAgentModelPicker({
       return;
     }
 
-    const current = agents.data.items.find((a) => a.name === value.agentName);
-    if (current && agentServiceModeReady(current)) {
-      return;
-    }
+    // Only fill an empty selection. A restored agent that is unknown or no
+    // longer selectable stays as-is so the form can say so, instead of being
+    // silently swapped for a different agent (#2054).
+    if (value.agentName) return;
     const fallback = agents.data.items.find(agentServiceModeReady) ?? agents.data.items[0];
     if (!fallback) return;
     onChange({
@@ -187,62 +182,41 @@ export function useAgentModelPicker({
     [connectionList, value.providerConnectionId],
   );
 
-  const filteredModels: ModelEntry[] = useMemo(() => {
-    const items = models.data?.items ?? [];
-    const q = modelSearch.trim().toLocaleLowerCase();
+  // Every model on the selected connection that this agent can use. Search
+  // only narrows what the dropdown lists; the selected model's identity and
+  // preflight diagnostics never depend on the search text (#2054).
+  const connectionModels: ModelEntry[] = useMemo(() => {
+    if (!value.providerConnectionId) return [];
     const allowed = compatibilityAgent?.supported_providers.includes("*")
       ? null
       : new Set(compatibilityAgent?.supported_providers ?? []);
-    return items.filter((m) => {
-      if (m.provider_connection_id !== value.providerConnectionId) {
-        return false;
-      }
-      if (allowed !== null && !allowed.has(m.provider)) {
-        return false;
-      }
-      if (q && !m.name.toLocaleLowerCase().includes(q)) {
-        return false;
-      }
-      return true;
-    });
-  }, [models.data, modelSearch, compatibilityAgent, value.providerConnectionId]);
+    return (models.data?.items ?? []).filter(
+      (m) =>
+        m.provider_connection_id === value.providerConnectionId &&
+        (allowed === null || allowed.has(m.provider)),
+    );
+  }, [models.data, compatibilityAgent, value.providerConnectionId]);
 
-  const fallbackCatalogModels: ModelEntry[] = useMemo(() => {
-    const items = (models.data?.items ?? []).filter((m) => !m.provider_connection_id);
-    if (!compatibilityAgent || compatibilityAgent.supported_providers.includes("*")) {
-      return items;
-    }
-    const allowed = new Set(compatibilityAgent.supported_providers);
-    return items.filter((m) => allowed.has(m.provider));
-  }, [models.data, compatibilityAgent]);
+  const selectedCatalogModel = useMemo(() => {
+    if (!value.modelProvider || !value.modelName) return undefined;
+    return connectionModels.find(
+      (m) => m.provider === value.modelProvider && m.name === value.modelName,
+    );
+  }, [connectionModels, value.modelProvider, value.modelName]);
+
+  const filteredModels: ModelEntry[] = useMemo(() => {
+    const q = modelSearch.trim().toLocaleLowerCase();
+    if (!q) return connectionModels;
+    return connectionModels.filter(
+      (m) => m.name.toLocaleLowerCase().includes(q) || m === selectedCatalogModel,
+    );
+  }, [connectionModels, modelSearch, selectedCatalogModel]);
 
   const needsModel = compatibilityAgent?.needs_model ?? true;
 
   const selectedAgentReady = selectedAgent ? agentServiceModeReady(selectedAgent) : true;
 
-  const inCatalog = useMemo(() => {
-    if (!models.data) return false;
-    return [...filteredModels, ...fallbackCatalogModels].some(
-      (m) => m.provider === value.modelProvider && m.name === value.modelName,
-    );
-  }, [models.data, filteredModels, fallbackCatalogModels, value.modelProvider, value.modelName]);
-
-  const selectedCatalogModel = useMemo(() => {
-    if (!models.data || !value.modelProvider || !value.modelName) return undefined;
-    return [...filteredModels, ...fallbackCatalogModels].find(
-      (m) =>
-        m.provider === value.modelProvider &&
-        m.name === value.modelName &&
-        (m.provider_connection_id ?? undefined) === (value.providerConnectionId ?? undefined),
-    );
-  }, [
-    models.data,
-    filteredModels,
-    fallbackCatalogModels,
-    value.modelProvider,
-    value.modelName,
-    value.providerConnectionId,
-  ]);
+  const inCatalog = selectedCatalogModel !== undefined;
 
   const [customMode, setCustomMode] = useState(false);
 
@@ -346,11 +320,9 @@ export function useAgentModelPicker({
     enterCustomMode,
     selectedConnection,
     filteredModels,
-    fallbackCatalogModels,
     customMode,
     leaveCustomMode,
     selectedCatalogModel,
-    localServers,
     specificAgentToggle,
     agents,
     defaultAgent,

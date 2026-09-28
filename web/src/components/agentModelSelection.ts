@@ -27,28 +27,12 @@ export function buildAgentModel(
 } | null {
   if (!needsModel) return null;
   const name = value.modelName.trim();
-  if (!name) return null;
-  if (value.source === "api") {
-    const provider = value.modelProvider.trim();
-    if (!provider) return null;
-    return { provider, name, source: "api" };
-  }
-  if (value.source === "hf") {
-    return {
-      provider: "hf",
-      name,
-      source: "hf",
-      hf_execution: value.hfExecution ?? "local-vllm",
-    };
-  }
-  const ls = value.localServer?.trim();
-  if (!ls) return null;
-  return {
-    provider: value.modelProvider.trim() || "local",
-    name,
-    source: "local-server",
-    local_server: ls,
-  };
+  // Hosted submissions only use Provider Connections (`api`); the
+  // HuggingFace and local-server sources are retired (#2054).
+  if (!name || value.source !== "api") return null;
+  const provider = value.modelProvider.trim();
+  if (!provider) return null;
+  return { provider, name, source: "api" };
 }
 
 export function buildProviderOverride(

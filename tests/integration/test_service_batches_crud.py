@@ -6116,3 +6116,75 @@ async def test_post_batch_allows_workspace_agent_for_workspace_task(
 def hosted_environment(camp_setup, monkeypatch):
     """Native target records use a supported hosted environment identity."""
     monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
+
+
+async def test_rerun_failed_rejects_old_conflicting_selection_and_keeps_parent(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """#2054: a rerun creates new trials, so an old batch whose stored
+    provider_model_id disagrees with the model that runs cannot be rerun.
+    The accepted parent batch is left untouched."""
+    app, raw, team_id = camp_setup
+    batch_id = uuid4()
+    connection_id = _seed_connection(postgres_url, team_id, "qwen", "qwen-mini")
+    combinations = [
+        {
+            "agent_name": "litellm",
+            "agent_model": {"provider": "openai", "name": "qwen"},
+            "n_per_task": 1,
+            "label": "old-conflict",
+            "provider_connection_id": connection_id,
+            "provider_model_id": "qwen-mini",
+        },
+    ]
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.begin() as conn:
+        conn.execute(
+            insert(Batch).values(
+                id=batch_id,
+                team_id=team_id,
+                name="pre-2054 conflict",
+                task_filter={"task_ids": ["local/mit-0"], "subset_kind": "explicit"},
+                trial_config={},
+                combinations=combinations,
+                state="finished",
+                created_by_token_prefix="abcdef12",
+                expected_trial_count=1,
+                n_per_task=1,
+                result_status="all_failed",
+                finished_at=datetime.now(UTC),
+            )
+        )
+        conn.execute(
+            insert(Trial).values(
+                id=uuid4(),
+                task_id="local/mit-0",
+                team_id=team_id,
+                state="failed",
+                failure_reason="gateway_error",
+                failure_message="Loom gateway returned HTTP 503.",
+                config={},
+                requires_caps={},
+                submitted_at=datetime.now(UTC),
+                batch_id=batch_id,
+                sample_idx=0,
+                combination_idx=0,
+                result=None,
+            )
+        )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        r = await ac.post(
+            f"/api/v1/batches/{batch_id}/rerun-failed",
+            headers={"Authorization": f"Bearer {raw}"},
+        )
+
+    assert r.status_code == 400, r.text
+    assert "conflicts with provider_model_id 'qwen-mini'" in r.json()["detail"]
+    with sessionmaker(sync_engine)() as s:
+        parent = s.execute(select(Batch).where(Batch.id == batch_id)).scalar_one()
+        assert parent.combinations == combinations
+        assert s.execute(select(Batch).where(Batch.rerun_of_batch_id == batch_id)).first() is None
+    sync_engine.dispose()

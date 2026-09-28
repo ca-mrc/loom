@@ -18,11 +18,16 @@ const INITIAL_PICKER: AgentModelValue = {
 };
 
 export interface ComboRow {
+  /** Stable identity for React keys; row state must follow the row, not its index. */
+  id: string;
   picker: AgentModelValue;
   nPerTask: string;
   label: string;
 }
 
+let nextRowId = 0;
+
 export function newRow(): ComboRow {
-  return { picker: { ...INITIAL_PICKER }, nPerTask: "1", label: "" };
+  nextRowId += 1;
+  return { id: `combination-row-${nextRowId}`, picker: { ...INITIAL_PICKER }, nPerTask: "1", label: "" };
 }
