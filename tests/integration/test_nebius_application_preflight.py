@@ -8,6 +8,7 @@ from psycopg import sql
 from sqlalchemy.engine import make_url
 
 from loom.db.schema import User
+from loom.db.schema_startup import service_schema_head
 from loom_service.environment_management.provider import ProviderBlockedError
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_credentials import database_access as database_access
@@ -39,7 +40,7 @@ async def test_qualification_preserves_material_shared_profile_and_actual_role(p
     before = admin.execute("SELECT (SELECT count(*) FROM public.users),(SELECT count(*) FROM public.teams)").fetchone()
     proof = await provider.qualify(lease)
     assert proof.identity.operation_id == lease.operation_id and proof.identity.data_environment_id == row.data_environment_id
-    assert proof.schema_revision == "0166" and proof.database_role == f"lap_{row.incarnation.hex}_g1"
+    assert proof.schema_revision == service_schema_head() and proof.database_role == f"lap_{row.incarnation.hex}_g1"
     assert (proof.user_id, proof.team_id, proof.membership_role) == (row.owner_user_id, row.owner_team_id, "viewer")
     assert proof.access_key_sha256 == hashlib.sha256(b"test-access-key").hexdigest()
     assert "test-access-key" not in proof.model_dump_json() and "test-private-key" not in proof.model_dump_json()
