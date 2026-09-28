@@ -59,7 +59,7 @@ def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, An
         for rule in constraints["resourceRules"]:
             if rule.pop("scope", "*") != "*":
                 raise ManagementStageError("authority defaulting changed admission scope")
-    elif desired["kind"] == "ClusterRoleBinding":
+    elif desired["kind"] in {"ClusterRoleBinding", "RoleBinding"}:
         for subject in comparison["subjects"]:
             if subject.pop("apiGroup", "") != "":
                 raise ManagementStageError("authority defaulting changed subject")
