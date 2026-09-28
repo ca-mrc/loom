@@ -256,3 +256,20 @@ def test_raw_grant_and_enrollment_share_transaction_and_rollback(migration_acces
             raise RuntimeError("rollback")
     assert admin.execute("SELECT count(*) FROM public.users WHERE id=%s", (owner.user_id,)).fetchone() == (0,)
     assert admin.execute("SELECT count(*) FROM loom_application_access.applications WHERE application_id=%s", (app,)).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("object_kind", ["TABLES", "FUNCTIONS"])
+def test_installer_cannot_inherit_unrelated_default_privileges(migration_access, object_kind):
+    admin, url, access, _ = migration_access
+    # Simulate adding this extension to a prior installation, under a role with
+    # unsafe defaults. Its private provenance and enrollment must stay private.
+    admin.execute("DROP FUNCTION loom_application_access.enroll_principal(uuid,uuid,uuid,bigint,text,uuid,uuid,text,text,text,text,text)")
+    admin.execute("DROP TABLE loom_application_access.principal_enrollments,loom_application_access.principal_identities")
+    unrelated = "unrelated_" + uuid4().hex
+    admin.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(unrelated)))
+    privilege = "SELECT" if object_kind == "TABLES" else "EXECUTE"
+    admin.execute(sql.SQL("ALTER DEFAULT PRIVILEGES GRANT {} ON {} TO {}").format(
+        sql.SQL(privilege), sql.SQL(object_kind), sql.Identifier(unrelated)))
+    with pytest.raises(ApplicationDatabaseAccessError, match="private_authority"):
+        install_application_database_access(admin, data_environment_id=access.data_environment_id, manager_role=make_url(url).username)
+    assert admin.execute("SELECT to_regclass('loom_application_access.principal_enrollments')").fetchone() == (None,)
