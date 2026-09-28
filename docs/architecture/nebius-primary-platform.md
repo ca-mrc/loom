@@ -733,6 +733,16 @@ the initial installer remains create-only and legacy-runtime-only. Protected
 upgrade, old-process retirement and first-owner installed qualification remain
 required before enabling this configuration live.
 
+The fixed shared SQL setup command, `loom.nebius_application_database_install`,
+accepts only protected namespace/data/schema configuration and Secret-provided
+credentials. It qualifies the namespace-local TLS database route, coordinates
+with the existing schema lock, creates a missing ordinary manager login and
+installs the existing access routines. Retries authenticate the retained password
+and preserve the role identity; mismatches or a lost bound role fail rather than
+rotating or adopting credentials. It preserves business records and runs no
+business-schema migration. Its protected setup-Job and upgrade wiring are not yet
+installed; personal APIs must never invoke this administrator command.
+
 `POST /applications/{id}/login` exchanges the owning management **user session**
 for a 90-second one-use proof, never a shared password or database credential.
 Delegable bearer tokens cannot request a full browser session, which could otherwise

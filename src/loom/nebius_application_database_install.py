@@ -1,6 +1,10 @@
 """Fixed shared SQL setup for the protected installer, never personal API startup."""
 from __future__ import annotations
 
+import json
+import os
+import re
+from pathlib import Path
 from uuid import UUID
 
 import psycopg
@@ -13,6 +17,7 @@ from loom.nebius_application_database import (
     install_application_database_access,
 )
 from loom.nebius_application_schema import APPLICATION_SCHEMA_LOCK
+from loom.nebius_platform_bootstrap import database_url
 
 
 class ApplicationDatabaseInstallError(RuntimeError):
@@ -59,3 +64,29 @@ def install_shared_manager(admin_url: str, *, data_environment_id: UUID,
         return role
     except Exception:
         raise ApplicationDatabaseInstallError('application_database_setup_failed') from None
+
+
+def main() -> int:
+    """The protected Job supplies fixed config and Secret references, not SQL."""
+    try:
+        with Path(os.environ['LOOM_APPLICATION_SETUP_CONFIG']).open('rb') as stream:
+            raw = stream.read(16385)
+        if not 0 < len(raw) <= 16384:
+            raise ValueError
+        config = json.loads(raw)
+        if (not isinstance(config, dict) or set(config) != {'namespace', 'data_environment_id', 'schema_revision'}
+                or not all(isinstance(value, str) for value in config.values())
+                or re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', config['namespace']) is None):
+            raise ValueError
+        install_shared_manager(database_url(os.environ['LOOM_DB_URL'], config['namespace']),
+            data_environment_id=UUID(config['data_environment_id']), schema_revision=config['schema_revision'],
+            manager_password=os.environ['LOOM_APPLICATION_MANAGER_PASSWORD'])
+    except Exception:
+        print(json.dumps({'status': 'application_database_setup_failed'}))
+        return 1
+    print(json.dumps({'status': 'application_database_installed'}))
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
