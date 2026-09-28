@@ -1195,20 +1195,20 @@ def _execution_documents(
         # on the ordinary owner; cloning either would duplicate its authority.
         guest = deepcopy(next(doc for doc in execution_docs if doc["kind"] == "Deployment"
                               and doc["metadata"]["name"] == "loom-execution-actuator"))
-        guest = _replace_tree(guest, {"loom-execution-actuator": guest_id + "-actuator"})
+        guest_name = guest_id + "-actuator"
+        guest["metadata"]["name"] = guest_name
+        guest["metadata"]["labels"]["app.kubernetes.io/name"] = guest_name
+        guest["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] = guest_name
+        guest["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] = guest_name
         pod = guest["spec"]["template"]["spec"]
-        pod["serviceAccountName"] = "loom-execution-actuator"
-        for volume in pod.get("volumes", []):
-            if volume.get("secret", {}).get("secretName") == guest_id + "-actuator-db":
-                volume["secret"]["secretName"] = "loom-execution-actuator-db"
+        if "affinity" in pod:
+            pod["affinity"] = _replace_tree(pod["affinity"], {"loom-execution-actuator": guest_name})
         for container in pod["containers"]:
             container["env"] = [entry for entry in container["env"]
                                 if entry["name"] != "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]
             for entry in container["env"]:
                 if entry["name"] == "LOOM_EXECUTION_ACTUATOR_TARGET_ID":
                     entry["value"] = guest_id
-                if entry.get("valueFrom", {}).get("secretKeyRef", {}).get("name") == guest_id + "-actuator-db":
-                    entry["valueFrom"]["secretKeyRef"]["name"] = "loom-execution-actuator-db"
         execution_docs.append(guest)
     return execution_docs
 

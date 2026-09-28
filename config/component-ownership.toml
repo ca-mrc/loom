@@ -315,6 +315,7 @@ source_paths = [
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/execution_admission.py",
   "src/loom_control_plane/execution_capacity.py",
+  "src/loom_control_plane/execution_capacity_targets.py",
   "src/loom_control_plane/execution_finance.py",
   "src/loom_control_plane/execution_placement.py",
   "src/loom_control_plane/metrics.py",

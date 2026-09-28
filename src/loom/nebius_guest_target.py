@@ -16,6 +16,8 @@ def guest_target_id(config: dict[str, Any]) -> str | None:
         raise ValueError("guest target_id must be a DNS label of at most 54 characters")
     if target_id == config["target_id"]:
         raise ValueError("guest execution target must be distinct from its physical owner")
+    if target_id == "loom-execution":
+        raise ValueError("guest target_id collides with the ordinary actuator Deployment")
     if config.get("regional_execution_targets") or config.get("schema_version") != "loom.nebius-platform.v1":
         raise ValueError("guest execution is qualified only for one independent physical target")
     return target_id

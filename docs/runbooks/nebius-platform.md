@@ -232,6 +232,48 @@ through the rollout guard, and remove this configuration in a fresh render to
 restore restricted PSS. The stronger namespace policy may retain the old VAP
 until separately reviewed removal; never remove it while baseline PSS remains.
 
+### Guest kernel target
+
+The [guest runtime](../architecture/guest-execution.md) requires an explicit
+`guest_execution_target` object containing only a distinct `target_id` (a DNS
+label, at most 54 characters, excluding the reserved `loom-execution`). Keep the existing ordinary `target_id` and
+`task_identity_policy` unchanged. Managed/regional deployments are not supported
+by this configuration. The renderer creates a guest catalog and actuator, extends
+the single namespace admission policy, and retains one physical collector, quota
+and native builder. Bootstrap registers the ordinary owner before its guest and
+binds both to the same immutable price snapshot. A newly registered guest stays
+disabled; a repeated bootstrap preserves its operator intent.
+
+Configure the protected `nebius-candidate` workflow explicitly:
+
+- `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_GUEST_RUNTIME_VOLUME_MIB` supplies 1024–4096 MiB for the runtime payload.
+- `NEBIUS_GUEST_MAX_ARTIFACT_BYTES` supplies the guest transfer/output limit,
+  at most 10 GiB. The 4000 MiB Singularity workflow needs a limit above its full
+  image size and sufficient task storage for build and export copies.
+- Existing task identity, lifecycle and optional web-egress readiness still apply.
+
+Without guest readiness, both guest budget variables must be empty. Harness-only
+publication ignores these platform settings. Guest budgets affect only guest
+plans; ordinary plan budgets remain unchanged. Preserve the settings on later
+publications while the installation uses this runtime.
+
+Deploy the matching candidate/profile and declared target through the normal
+idle guard. Before activating it, require a fresh owner capacity observation
+whose `placement.target_scope` contains both IDs, observed guest actuator health,
+and installed capability/lifecycle qualification. Use the existing authenticated
+`POST /admin/service-execution/targets/{target_id}/health` API to change guest
+intent; preserve the current observed health fields rather than inventing a
+healthy result. Never activate a guest with a database write. Record the candidate,
+input identities, capacity scope, qualifier results and owned-resource cleanup.
+
+For a guest rollback, disable or drain the guest through that API and retain its
+declaration, actuator and capacity membership until all owned cleanup completes.
+Ordinary rollout rejects guest removal/renaming and primary-owner replacement
+when a guest is declared; it does not implement guest retirement. Removing the
+namespace root policy also requires that no guest declaration remains, so do not
+use the ordinary identity-policy removal procedure to retire a guest target.
+
 The example execution price records the September 8, 2026 cpu-e2 eu-north1
 [official rates](https://docs.nebius.com/compute/resources/pricing): 12,000 micro-USD/vCPU-hour,
 3,200 micro-USD/GiB-hour RAM, and a conservative 98 micro-USD/GiB-hour

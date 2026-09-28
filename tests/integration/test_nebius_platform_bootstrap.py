@@ -599,6 +599,16 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             guest_row = next(item for item in rows if item["target_id"] == "nebius-guest-fixture")
             assert guest_row["desired_state"] == "disabled"
             assert guest_row["health_status"] == "unknown"
+        # A later bootstrap must retain an operator's drain and real health.
+        api("POST", "service-execution/targets/nebius-guest-fixture/health", {
+            "desired_state": "draining", "observed_state": "ready",
+            "health_status": "healthy", "observed_at": datetime.now(UTC).isoformat(),
+        })
+        bootstrap.configure_platform(guest_environment, config_dir=tmp_path, admin_secret=admin_path)
+        rows = api("GET", "execution-capacity/status")["targets"]
+        guest_row = next(item for item in rows if item["target_id"] == "nebius-guest-fixture")
+        assert guest_row["desired_state"] == "draining"
+        assert guest_row["health_status"] == "healthy"
         client.portal.call(engine.dispose)
     with psycopg.connect(platform_database) as connection:
         assert connection.execute(
@@ -612,6 +622,14 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
             "SELECT enabled FROM execution_target_price_bindings WHERE target_id=%s",
             (environment["target_id"],),
         ).fetchone() == (True,)
+        assert connection.execute(
+            "SELECT count(*) FROM execution_capacity_policies WHERE target_id=%s",
+            ("nebius-guest-fixture",),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT count(DISTINCT price_snapshot_id) FROM execution_target_price_bindings WHERE target_id=ANY(%s)",
+            ([environment["target_id"], "nebius-guest-fixture"],),
+        ).fetchone() == (1,)
     # Replaying bootstrap must not rebind, broaden, extend or revive a token.
     asyncio.run(_exercise_native_builder_role(platform_database))
     with psycopg.connect(platform_database) as connection:
