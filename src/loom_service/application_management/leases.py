@@ -94,6 +94,21 @@ class ApplicationOperationJournal:
             operation, now = await self._leased(session, lease)
             operation.lease_expires_at = now + duration
 
+    async def runnable_operations(self, *, limit: int = 4) -> list[UUID]:
+        if type(limit) is not int or not 1 <= limit <= 16:
+            raise ValueError("invalid application operation batch limit")
+        async with self.session_factory() as session:
+            return list((await session.scalars(select(NebiusApplicationOperation.operation_id).join(
+                NebiusApplication, NebiusApplication.application_id == NebiusApplicationOperation.application_id,
+            ).where(
+                NebiusApplication.purged_at.is_(None),
+                NebiusApplication.deployment_generation == NebiusApplicationOperation.deployment_generation,
+                NebiusApplication.access_generation == NebiusApplicationOperation.access_generation,
+                NebiusApplicationOperation.phase.in_(("pending", "running")),
+                (NebiusApplicationOperation.lease_expires_at.is_(None)
+                 | (NebiusApplicationOperation.lease_expires_at <= func.clock_timestamp())),
+            ).order_by(NebiusApplicationOperation.created_at, NebiusApplicationOperation.operation_id).limit(limit))).all())
+
     @staticmethod
     async def _historical_operation(session: AsyncSession, current: NebiusApplicationOperation,
                                      operation_id: UUID) -> NebiusApplicationOperation:
