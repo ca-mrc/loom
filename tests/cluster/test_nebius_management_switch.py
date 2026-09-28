@@ -118,6 +118,16 @@ def test_fixed_switch_retires_running_old_pods_and_preserves_deployment_uid(swit
             assert core.create_namespaced_pod(binding.namespace, allowed, dry_run='All').metadata.uid
         request = ManagementSwitchRequest(setup=setup, original=original)
         with HTTPSManagementSwitchAPI(request=request, api_server=endpoint, ssl_context=trust) as api:
+            # Characterize the real API's JSON Patch test rejection. A stale RV
+            # must be a definite non-write, allowing the journal to reobserve.
+            statuses = []
+            api.client.event_hooks['response'].append(
+                lambda response: statuses.append(response.status_code) if response.request.method == 'PATCH' else None)
+            stale = copy.deepcopy(original)
+            stale['metadata']['resourceVersion'] = '0'
+            assert api.patch(stale, 'retire', str(uuid4())) is False
+            assert statuses == [422]
+            assert api.read()['spec']['replicas'] == 1
             args = dict(request=request, api=api, state_dir=tmp_path / 'switch')
             deadline = time.monotonic() + 30
             while not retire_management(**args):

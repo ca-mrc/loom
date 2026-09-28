@@ -93,7 +93,7 @@ class HTTPSManagementSwitchAPI(HTTPSApplicationSetupAPI):
                                     headers={'Content-Type': 'application/json-patch+json'}) as response:
                 if response.status_code == 409:
                     return None  # Definite precondition failure, not a lost outcome.
-                if response.status_code != 200 or response.headers.get('content-encoding', 'identity').lower() != 'identity':
+                if response.status_code not in {200, 422} or response.headers.get('content-encoding', 'identity').lower() != 'identity':
                     raise ValueError
                 raw = bytearray()
                 for chunk in response.iter_bytes(chunk_size=16384):
@@ -101,6 +101,15 @@ class HTTPSManagementSwitchAPI(HTTPSApplicationSetupAPI):
                         raise ValueError
                     raw.extend(chunk)
                 observed = json.loads(raw)
+                if response.status_code == 422:
+                    # Kubernetes JSON Patch test failures are Invalid/422, not
+                    # Conflict/409. Only a complete API rejection can clear the
+                    # intent; truncated/proxy replies remain unknown outcomes.
+                    if (isinstance(observed, dict) and observed.get('apiVersion') == 'v1'
+                            and observed.get('kind') == 'Status' and observed.get('status') == 'Failure'
+                            and observed.get('code') == 422 and observed.get('reason') == 'Invalid'):
+                        return None
+                    raise ValueError
                 if (not isinstance(observed, dict) or observed.get('kind') != 'Deployment'
                         or _uid(observed) != _uid(self.switch.original)):
                     raise ValueError
