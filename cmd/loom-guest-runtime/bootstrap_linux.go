@@ -56,14 +56,20 @@ func guestInit() {
 	}
 	bootMust(syscall.Mount("overlay", "/root", "overlay", 0, "lowerdir=/lower,upperdir=/state/upper,workdir=/state/work"))
 	for _, name := range []string{"proc", "sys", "dev", "dev/pts", "sys/fs/cgroup", "run", "var/run", "loom/guest-tools", "lib/modules", "var/lib/docker", "tmp"} {
-		bootMust(os.MkdirAll("/root/"+name, 0755))
+		target, err := guestRootPath("/root", name)
+		bootMust(err)
+		bootMust(os.MkdirAll(target, 0755))
 	}
 	for _, mount := range [][2]string{{"/payload", "/root" + guestPayload}, {"/payload/modules", "/root/lib/modules"}, {"/dev", "/root/dev"}, {"/sys", "/root/sys"}, {"/state/docker", "/root/var/lib/docker"}} {
-		bootMust(syscall.Mount(mount[0], mount[1], "", syscall.MS_BIND|syscall.MS_REC, ""))
+		target, err := guestRootPath("/root", strings.TrimPrefix(mount[1], "/root"))
+		bootMust(err)
+		bootMust(syscall.Mount(mount[0], target, "", syscall.MS_BIND|syscall.MS_REC, ""))
 	}
 	raw, err := os.ReadFile("/config.json")
 	bootMust(err)
-	bootMust(os.WriteFile("/root"+guestConfigPath, raw, 0600))
+	configPath, err := guestRootPath("/root", guestConfigPath)
+	bootMust(err)
+	bootMust(os.WriteFile(configPath, raw, 0600))
 	// Switch the guest's initial mount namespace to the task root too. Kernel
 	// usermode helpers (notably module autoload) must see the same module tree
 	// and helper path as the sandbox, rather than the discarded initramfs.

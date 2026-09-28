@@ -41,6 +41,8 @@ def guest(*, docker: bool = False) -> Iterator[tuple[httpx.Client, subprocess.Po
         (root / "bin/busybox").chmod(0o755)
         for applet in ("sh", "cat", "sleep", "uname", "kill", "reboot", "ls", "test"):
             (root / "bin" / applet).symlink_to("busybox")
+        # Standard distro absolute link must resolve inside the task root.
+        (root / "var/run").symlink_to("/run")
         socket = directory / "sandbox.sock"
         state = directory / "state"
         command = [
