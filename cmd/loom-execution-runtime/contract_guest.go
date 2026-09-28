@@ -39,6 +39,9 @@ func (p plan) validateGuestExecution() error {
 		if s.Identity == nil || s.Identity.RunAsUser == nil || *s.Identity.RunAsUser != 0 || s.Identity.RunAsGroup == nil || *s.Identity.RunAsGroup != 0 {
 			return fmt.Errorf("guest runtime requires explicit root task identity")
 		}
+		if s.Resources != p.TaskResources || s.ImageRef != p.TaskImageRef {
+			return fmt.Errorf("guest sandbox resources and image must match task")
+		}
 		if s.Resources.CPUMillis < 1000 || s.Resources.MemoryMiB < 512 || s.Resources.EphemeralStorageMiB < 160 {
 			return fmt.Errorf("guest resources cannot cover runtime overhead")
 		}
@@ -57,8 +60,21 @@ func (p plan) validateGuestExecution() error {
 			}
 		}
 	}
-	if guestClass && (guests != 2 || len(p.Sidecars) != 2 || p.RuntimeVolumeMiB < 1024 || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload") {
+	if guestClass && (guests != 2 || len(p.Sidecars) != 2 || p.RuntimeVolumeMiB < 1024 || p.ControllerResources == nil || p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload") {
 		return fmt.Errorf("guest class requires two private guests and bounded runtime payload storage")
+	}
+	if guestClass {
+		declared := p.TaskResources
+		if p.NodeResourceAllocation != nil {
+			declared = p.NodeResourceAllocation.DeclaredTask
+		}
+		request := *p.ControllerResources
+		if p.ResourceRequests != nil && p.ResourceRequests.Controller != nil {
+			request = *p.ResourceRequests.Controller
+		}
+		if p.ControllerResources.EphemeralStorageMiB < declared.EphemeralStorageMiB+p.RuntimeVolumeMiB || request.EphemeralStorageMiB <= p.RuntimeVolumeMiB {
+			return fmt.Errorf("guest payload storage must be reserved in controller allocation and request")
+		}
 	}
 	return nil
 }

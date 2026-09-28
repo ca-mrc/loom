@@ -16,6 +16,7 @@ def test_task_proxy_address_follows_sandbox_network_namespace(monkeypatch, guest
     }
     if guest:
         raw["environment"]["execution_requirements"] = {"capabilities": ["nested_docker"]}
+    monkeypatch.setenv("LOOM_SANDBOX_MAX_TRANSFER_BYTES", str(6 * 1024**3))
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:18791")
     driver = sandbox_driver("task-sandbox", TaskConfig.model_validate(raw))
     expected = "http://10.0.2.2:18791" if guest else "http://127.0.0.1:18791"

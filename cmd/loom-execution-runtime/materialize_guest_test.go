@@ -79,6 +79,7 @@ func TestMaterializeGuestPayloadOnlyForExplicitGuestPlan(t *testing.T) {
 			raw := guestPlanPayload(t)
 			if !guest {
 				raw["execution_class_id"] = "linux-amd64-cpu-pod-v1"
+				delete(raw, "controller_resources")
 				for _, s := range raw["sidecars"].([]any) {
 					delete(s.(map[string]any), "guest_execution")
 				}

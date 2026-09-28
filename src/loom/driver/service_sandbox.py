@@ -15,7 +15,7 @@ import re
 import shlex
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -211,17 +211,26 @@ class ServiceSandboxDriver:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or info.st_size > self._max_transfer:
                 raise DriverError("upload requires a regular file within transfer limit")
-            data = stream.read(self._max_transfer + 1)
-            if len(data) > self._max_transfer:
-                raise DriverError("upload exceeds transfer limit")
-        await self._request(
-            "PUT",
-            "/file",
-            params={"path": str(dst)},
-            headers={"X-File-Mode": format(stat.S_IMODE(info.st_mode) & 0o777, "o")},
-            content=data,
-            timeout=120,
-        )
+            async def chunks() -> AsyncIterator[bytes]:
+                remaining = info.st_size
+                while remaining:
+                    chunk = await asyncio.to_thread(stream.read, min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise DriverError("upload source shrank during transfer")
+                    remaining -= len(chunk)
+                    yield chunk
+                if stream.read(1):
+                    raise DriverError("upload source grew during transfer")
+
+            await self._request(
+                "PUT",
+                "/file",
+                params={"path": str(dst)},
+                headers={"X-File-Mode": format(stat.S_IMODE(info.st_mode) & 0o777, "o"),
+                         "Content-Length": str(info.st_size)},
+                content=chunks(),
+                timeout=120,
+            )
 
     async def download(self, src: PurePosixPath, dst: Path) -> None:
         client = self._running_client()

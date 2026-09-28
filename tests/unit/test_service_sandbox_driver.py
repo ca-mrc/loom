@@ -379,4 +379,5 @@ async def test_upload_streams_bounded_chunks_with_exact_content_length(tmp_path:
         driver._client = client
         await driver.upload(source, PurePosixPath("/app/large-artifact"))
     assert sum(sizes) == size
-    assert observed.hexdigest() == hashlib.file_digest(source.open("rb"), "sha256").hexdigest()
+    with source.open("rb") as stream:
+        assert observed.hexdigest() == hashlib.file_digest(stream, "sha256").hexdigest()

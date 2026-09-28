@@ -212,7 +212,7 @@ def test_guest_docker_registry_traffic_uses_outer_allowlist_proxy() -> None:
             response.raise_for_status()
             result = response.json()
             assert result["return_code"] != 0
-            assert "403" in base64.b64decode(result["stderr"] or "").decode()
+            assert "fixture allowlist denied" in base64.b64decode(result["stderr"] or "").decode()
             assert destinations == ["registry.example.org:443"]
     finally:
         proxy.shutdown()

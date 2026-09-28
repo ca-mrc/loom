@@ -25,7 +25,7 @@ func TestGuestEgressUsesStableLoopbackAndRetainsAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 403 {
+	if response.StatusCode != 504 || response.Header.Get("X-Loom-Egress-Error") != "task_egress_deadline" {
 		t.Fatalf("inactive phase permitted: %d", response.StatusCode)
 	}
 }

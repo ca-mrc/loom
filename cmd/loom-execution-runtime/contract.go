@@ -362,7 +362,14 @@ func (p plan) validate() error {
 		if !sandboxes["task-sandbox"] || !sandboxes["verifier-sandbox"] {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
-		if p.NodeResourceAllocation == nil && p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
+		expectedControllerStorage := p.TaskResources.EphemeralStorageMiB
+		for _, sidecar := range p.Sidecars {
+			if sidecar.GuestExecution != nil {
+				expectedControllerStorage += p.RuntimeVolumeMiB
+				break
+			}
+		}
+		if p.NodeResourceAllocation == nil && p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != expectedControllerStorage {
 			return fmt.Errorf("controller sizing must preserve task-derived storage")
 		}
 		if p.ResourceRequests != nil {
