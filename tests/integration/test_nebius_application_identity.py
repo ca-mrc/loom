@@ -219,7 +219,7 @@ def test_installer_refuses_identity_drift_without_overwriting_it(migration_acces
     else:
         admin.execute(sql.SQL("GRANT SELECT ON loom_application_access.principal_enrollments TO {}").format(sql.Identifier(manager)))
     before = admin.execute("SELECT to_regclass('loom_application_access.principal_identities'),(SELECT count(*) FROM loom_application_access.principal_enrollments)").fetchone()
-    with pytest.raises(ApplicationDatabaseAccessError, match="drift|private_authority"):
+    with pytest.raises(ApplicationDatabaseAccessError, match=r"drift|private_authority"):
         install_application_database_access(admin, data_environment_id=access.data_environment_id, manager_role=manager)
     assert admin.execute("SELECT to_regclass('loom_application_access.principal_identities'),(SELECT count(*) FROM loom_application_access.principal_enrollments)").fetchone() == before
 
