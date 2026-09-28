@@ -21,10 +21,9 @@ from loom_service.application_management.proofs import ApplicationStopEvidence
 from loom_service.application_management.runtime import ApplicationRuntimeProvider
 from loom_service.environment_management.provider import ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
+from tests.integration.test_nebius_application_credentials import database_access as database_access
 from tests.integration.test_nebius_application_credentials import setup
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
-from tests.integration.test_nebius_application_database import access_postgres as access_postgres
-from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_effects import expire
 from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
 from tests.integration.test_nebius_application_material import management_key as management_key
