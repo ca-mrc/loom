@@ -285,7 +285,8 @@ def container_guest(*, memory_mib: int = 1024) -> Iterator[tuple[httpx.Client, s
         rpc.chmod(0o2770)  # inherit the caller's group for the root-owned socket
         command = [
             "docker", "run", "--name", name, "--read-only", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE",
-            "--security-opt=no-new-privileges", "--cpus=1", f"--memory={memory_mib}m", "--pids-limit=128",
+            "--security-opt=no-new-privileges", "--cpus=1", f"--memory={memory_mib}m",
+            f"--memory-swap={memory_mib}m", "--pids-limit=128",
             "--tmpfs", "/left", "--tmpfs", "/right", "--tmpfs", "/state:size=1g",
             "--volume", f"{payload}:/payload:ro", "--volume", f"{rpc}:/rpc",
             name, "/bin/busybox", "sh", "-ec",
@@ -352,4 +353,9 @@ def test_container_guest_stays_within_memory_limit_under_ram_and_disk_pressure(
         ], check=True, capture_output=True, text=True).stdout
         counts = dict(line.split() for line in events.splitlines())
         assert counts["oom"] == counts["oom_kill"] == "0", events
+        swap = subprocess.run([
+            "docker", "exec", name, "/bin/busybox", "cat",
+            "/sys/fs/cgroup/memory.swap.max", "/sys/fs/cgroup/memory.swap.current",
+        ], check=True, capture_output=True, text=True).stdout
+        assert swap.splitlines() == ["0", "0"], swap
         assert execute(client, "echo alive") == "alive\n"
