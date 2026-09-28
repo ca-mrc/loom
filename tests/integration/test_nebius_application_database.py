@@ -49,6 +49,58 @@ def login(manager_url, role, password):
     return psycopg.connect(url.render_as_string(hide_password=False), autocommit=True, connect_timeout=2)
 
 
+@pytest.mark.parametrize("actual", [("different",), (), ("test_revision", "different")])
+def test_schema_mismatch_cannot_create_application_access(database_access, actual):
+    admin, _, access, _ = database_access
+    admin.execute("DELETE FROM public.alembic_version")
+    for revision in actual:
+        admin.execute("INSERT INTO public.alembic_version VALUES (%s)", (revision,))
+    with pytest.raises(ApplicationDatabaseAccessError, match="schema_mismatch"):
+        access.grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision="test_revision")
+    assert admin.execute("SELECT count(*) FROM loom_application_access.generations").fetchone() == (0,)
+
+
+def test_raw_unqualified_grants_are_not_manager_authority(database_access):
+    _, _, access, data_id = database_access
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        access.connection.execute("SELECT loom_application_access.grant_access(%s,%s,%s,%s,%s)",
+                                  (data_id, uuid4(), uuid4(), 1, token_urlsafe(48)))
+
+
+def test_schema_qualified_grant_replays_only_at_the_declared_revision(database_access):
+    admin, url, access, _ = database_access
+    app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
+    role = access.grant(app, incarnation, 1, password, schema_revision="test_revision")
+    assert access.grant(app, incarnation, 1, password, schema_revision="test_revision") == role
+    with login(url, role, password) as client:
+        assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("test_revision",)
+    with pytest.raises(ApplicationDatabaseAccessError, match="schema_mismatch"):
+        access.grant(app, incarnation, 1, password, schema_revision="another_revision")
+    assert admin.execute("SELECT count(*) FROM loom_application_access.generations").fetchone() == (1,)
+
+
+def test_legacy_grant_upgrade_requires_quiescent_disabled_manager(database_access):
+    admin, url, access, data_id = database_access
+    manager = make_url(url).username
+    admin.execute("DROP FUNCTION IF EXISTS loom_application_access.grant_access_at_schema(uuid,uuid,uuid,bigint,text,text)")
+    admin.execute(sql.SQL("GRANT EXECUTE ON FUNCTION loom_application_access.grant_access(uuid,uuid,uuid,bigint,text) TO {}").format(sql.Identifier(manager)))
+    with pytest.raises(ApplicationDatabaseAccessError, match="upgrade_requires_quiescence"):
+        install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+    admin.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(manager)))
+    with pytest.raises(ApplicationDatabaseAccessError, match="upgrade_requires_quiescence"):
+        install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+    access.connection.close()
+    install_application_database_access(admin, data_environment_id=data_id, manager_role=manager)
+    assert admin.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname=%s", (manager,)).fetchone() == (False,)
+    admin.execute(sql.SQL("ALTER ROLE {} LOGIN").format(sql.Identifier(manager)))
+    with psycopg.connect(url, autocommit=True) as connection:
+        upgraded = ApplicationDatabaseAccess(connection, data_id)
+        assert upgraded.grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision="test_revision")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            connection.execute("SELECT loom_application_access.grant_access(%s,%s,%s,%s,%s)",
+                               (data_id, uuid4(), uuid4(), 1, token_urlsafe(48)))
+
+
 def test_two_apps_share_dml_without_schema_or_provisioning_authority(database_access):
     admin, url, access, _ = database_access
     passwords = [token_urlsafe(48), token_urlsafe(48)]
