@@ -72,8 +72,12 @@ or hosted cleanup qualification.
 
 Minimum declared resources are 1000 CPU millicores, 512 MiB RAM and 160 MiB
 storage. These are boot minima, not recommended budgets for Docker, a debugger,
-or large image builds. QEMU reserves 256 MiB of the memory limit; 32 MiB of each
-sandbox storage allocation covers launcher metadata/initramfs. The TCG translation
+or large image builds. The launcher reserves one eighth of the memory limit,
+with a 256 MiB minimum, for QEMU, host page tables and disk writeback. Guest page
+cache occupies QEMU anonymous memory and cannot be reclaimed by the outer host;
+the reserve must remain available even when every guest RAM page is touched.
+Thus an 8 GiB sandbox exposes 7 GiB of guest RAM without enlarging its outer limit.
+32 MiB of each sandbox storage allocation covers launcher metadata/initramfs. The TCG translation
 cache is explicitly bounded to 64 MiB within the emulator reservation. The remaining
 storage bounds the guest disk, including Docker layers, containers and cache.
 The controller allocation and request also reserve the shared runtime volume,

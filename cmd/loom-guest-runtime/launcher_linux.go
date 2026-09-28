@@ -48,11 +48,17 @@ func (c guestConfig) validate() error {
 }
 
 func (c guestConfig) qemuArgs() []string {
+	// Guest page cache is anonymous QEMU memory from the outer cgroup's
+	// perspective: host reclaim cannot evict it. Keep proportional room for
+	// emulator/launcher allocations, host page tables and disk writeback even
+	// when every guest RAM page has been touched. A fixed 256 MiB reserve OOMs
+	// an 8 GiB sandbox during complete image-archive restore.
+	overheadMiB := max(256, (c.MemoryMiB+7)/8)
 	return []string{
 		// QEMU's automatic translation cache can consume hundreds of MiB beyond
 		// guest RAM. Pin its bound inside the reserved emulator envelope.
 		"-L", filepath.Join(c.Payload, "share/qemu"), "-accel", "tcg,thread=multi,tb-size=64", "-machine", "q35", "-cpu", "max",
-		"-smp", strconv.Itoa((c.CPUMillis + 999) / 1000), "-m", strconv.Itoa(c.MemoryMiB - 256),
+		"-smp", strconv.Itoa((c.CPUMillis + 999) / 1000), "-m", strconv.Itoa(c.MemoryMiB - overheadMiB),
 		"-nographic", "-nodefaults", "-no-reboot", "-serial", "stdio", "-monitor", "none",
 		"-bios", filepath.Join(c.Payload, "share/seabios/bios-256k.bin"), "-kernel", filepath.Join(c.Payload, "kernel"),
 		"-initrd", filepath.Join(c.State, "initrd"), "-append", "console=ttyS0 panic=-1 rdinit=/init loom_guest=1 quiet",
