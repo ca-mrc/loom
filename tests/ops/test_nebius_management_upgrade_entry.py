@@ -132,6 +132,7 @@ def test_bad_upgrade_input_never_opens_live_connection(private_upgrade, monkeypa
 
 def test_upgrade_qualifies_current_foundation_without_rewriting_historical_pins(private_upgrade, monkeypatch):
     from scripts.ops import nebius_management_entry as entry
+    from scripts.ops.nebius_ingress_image import DIGEST
     from scripts.ops.nebius_ingress_operation import LiveIngressAPI
 
     metadata, _, _, _ = private_upgrade
@@ -146,7 +147,10 @@ def test_upgrade_qualifies_current_foundation_without_rewriting_historical_pins(
     monkeypatch.setattr(entry, '_operator_transport', operator)
     monkeypatch.setattr(entry.private_state, 'load_installation', lambda path: {})
     Path(old.operator_connection.ca_file).write_text(request.setup.material.ca_pem)
+    Path(ingress['kubeconfig']).write_text('fixture-kubeconfig')
+    Path(ingress['kubeconfig']).chmod(0o600)
     config = request.setup.deployment.installation.foundation.platform_config
+    ingress['image'] = 'cr.eu-north1.nebius.cloud/registry/loom-shared-ingress@' + DIGEST
     ingress['binding'].update(namespace=config['namespace'], child_domain='dev.example.test')
     monkeypatch.setattr(LiveIngressAPI, 'verify_identity', lambda *args: None)
     monkeypatch.setattr(LiveIngressAPI, '_run', lambda *args: json.dumps({'clusters': [{

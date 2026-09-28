@@ -82,6 +82,7 @@ class UpgradePrivateInputs(BaseModel):
     candidate: dict[str, Any]
     profile: dict[str, Any]
     prerequisites: UpgradePrerequisiteSettings
+    foundation_candidate: str = Field(pattern=r'^[0-9a-f]{40}$')
     material_files: dict[str, Path]
 
 
@@ -187,13 +188,15 @@ async def _operator_transport(connection: NebiusKubernetesConnection) -> tuple[s
 
 
 @contextmanager
-def connected_checks(inputs: PrivateInputs, ingress: dict[str, Any]) -> Iterator[tuple[HTTPSManagementPrerequisites, ssl.SSLContext, str]]:
+def connected_checks(inputs: PrivateInputs, ingress: dict[str, Any], *,
+        foundation_candidate: str | None = None) -> Iterator[tuple[HTTPSManagementPrerequisites, ssl.SSLContext, str]]:
     # Obtain a bounded operator bearer token through its explicit SDK; never use
     # it in runtime subject checks or copy the credential into any workload.
     connection = inputs.operator_connection
     context, token = asyncio.run(_operator_transport(connection))
     installed_ingress = LiveIngressAPI(Path(ingress["kubeconfig"]), binding=TLSBinding(**ingress["binding"]),
-        executable=Path(ingress["kubectl"]), candidate=inputs.foundation_candidate,
+        executable=Path(ingress["kubectl"]),
+        candidate=inputs.foundation_candidate if foundation_candidate is None else foundation_candidate,
         cluster_id=ingress["cluster_id"], api_server=ingress["api_server"],
         ingress_class=ingress["ingress_class"], image=ingress["image"])
     certificate = private_state.load_installation(Path(ingress["certificate_config"]))
@@ -216,7 +219,7 @@ def connected_api(inputs: PrivateInputs, request: ManagementInstallRequest,
 @contextmanager
 def connected_upgrade_api(inputs: UpgradePrivateInputs, request: ManagementUpgradeRequest,
         original_inputs: PrivateInputs, ingress: dict[str, Any]) -> Iterator[HTTPSManagementUpgradeAPI]:
-    with connected_checks(original_inputs, ingress) as (base, context, token):
+    with connected_checks(original_inputs, ingress, foundation_candidate=inputs.foundation_candidate) as (base, context, token):
         connection = original_inputs.operator_connection
         checks = ApplicationUpgradePrerequisites(base=base, settings=inputs.prerequisites)
         with HTTPSManagementUpgradeAPI(request=request, api_server=connection.endpoint, ssl_context=context,

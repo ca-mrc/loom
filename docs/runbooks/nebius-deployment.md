@@ -793,11 +793,14 @@ The new private input schema is
 `loom.nebius-management-upgrade-private-inputs.v1`. It contains the original
 v1 `original_operation` (including its input digest), the new `deployment`,
 published `candidate` and `profile`, the retained management `binding`,
-`shared_namespace_uid`, typed `prerequisites`, and five distinct private
+`shared_namespace_uid`, typed `prerequisites`, the current shared platform's
+40-character `foundation_candidate` commit, and five distinct private
 `material_files`: `manager_password`, `database_name`, `ca_pem`,
 `secret_store_master_keys`, and `cloud_credentials_json`. Operator access and
 ingress configuration come from the original private inputs, not new workload
 credentials. Do not place these private values in the public operation metadata.
+The new foundation pin qualifies the current shared deployment; do not rewrite
+the original input or historical ingress candidate pins after a publication.
 
 Prerequisites bind the management candidate ID, shared ConfigMap/service/database
 Secret/auth Secret UIDs, existing business bucket IDs and application IAM scope.
