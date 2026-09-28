@@ -63,6 +63,10 @@ function TrialSectionLink({ section, children, className }: { section: string; c
 
 function artifactLabel(artifact: TrialArtifact): string {
   const key = artifact.key || artifact.step_name || "artifact";
+  // Preserve the bundle-relative namespace: canonical projections and raw
+  // source files may legitimately have the same basename and different bytes.
+  const bundle = key.match(/\/bundles\/[^/]+\/(.+)$/);
+  if (bundle) return bundle[1];
   const marker = key.lastIndexOf("/artifacts/");
   if (marker >= 0) return key.slice(marker + "/artifacts/".length);
   return key.startsWith("s3://") || key.split("/").length > 4 ? key.split("/").slice(-2).join("/") : key;
