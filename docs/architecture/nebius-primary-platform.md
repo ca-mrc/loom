@@ -184,6 +184,17 @@ claims retirement or releases resources. Reopening admission requires its record
 UID/resourceVersion delete preconditions after prior-generation retirement. No
 installer or lifecycle worker activates this primitive yet.
 
+`ApplicationRuntimeProvider.close_admission` composes this quota with the
+application effect journal and protected installation identity. It reconciles
+outstanding quota dispatches before changing anything, never recreates a missing
+recorded quota, and advances an older gate only with its observed UID and exact
+resourceVersion. Live generation/operation/identity and unscoped zero-Pod spec
+must match, and the quota controller's status must acknowledge `pods: 0` before
+the call returns. Definitive patch conflicts wait for new preconditions; uncertain
+writes are never resent. This adapter neither removes the gate nor proves that
+existing processes, object access or SQL connections have retired. It is not a
+completed lifecycle worker or capacity-release authority.
+
 This is not an installed management upgrade: the protected installer must create
 the distinct management ServiceAccount, verify the policies and their enforcement,
 and only then grant bootstrap authority. The manager must still authenticate owners,
@@ -329,6 +340,17 @@ proof, and malformed readback is rejected. An uncertain dispatch only reads on
 subsequent calls, including after lease takeover. A confirmed409/422 is retained
 as rejection so trusted orchestration can use a new key after fresh observation.
 
+After supersession, the current lease can also reconcile an old same-application
+dispatch using its original operation, generation, effect key and request digest.
+CREATE/PATCH reconciliation requires the exact original document; a different body
+cannot satisfy the recorded request. This path makes no Kubernetes writes and
+cannot dispatch a predecessor's prepared request. DELETE reconciliation confirms
+absence of the original UID, without deleting any replacement. Terminal effects
+remain immutable history, not a fresh readiness or retirement check. Stale leases
+and sibling applications cannot inspect frozen predecessor plans or record their
+effects. The disposable Kubernetes lane exercises a real successful CREATE whose
+reply is lost, followed by suspension and reconciliation without another POST.
+
 This internal adapter receives qualified manifests/material from trusted lifecycle
 code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE
 target ownership and history before supplying UID/resourceVersion, including Pod
@@ -442,6 +464,38 @@ and processes, verify object-store revocation propagation, and coordinate schema
 and readiness before releasing reservations. The API does not claim that a cloud
 resource snapshot fences a privileged external administrator, proves S3 access
 denial, or completes personal-environment acceptance.
+
+### Application credential integration
+
+`application_management.credentials.ApplicationCredentialProvider` composes the
+shared SQL/IAM adapters with the encrypted material journal. Protected installation
+supplies the shared development CA, SecretStore keyring, database identity and
+existing IAM groups; it does not generate a new CA/keyring for a personal API.
+The delivered DB URL names the frozen shared PostgreSQL service and uses
+`verify-full`, an ordinary generation login and the shared CA mount. Only DB,
+storage and auth generation bundles are constructed; manager, backup and cloud
+provisioning credentials never enter them.
+
+Permissionless account/key creation precedes material persistence. Exact DB login
+and group membership grants follow successful encrypted commit and semantic bundle
+validation. Retry and lease takeover reuse the same password/key. Changed shared
+material or malformed persisted credentials fail closed rather than replacing a
+generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL off
+the heartbeat loop using private, bounded autocommit connections. The protected
+caller must qualify the manager's database/TLS route; construction grants nothing.
+
+Credential delivery uses three immutable, generation-named Kubernetes Secrets in
+the already-observed personal namespace. The existing effect journal stores only
+request hashes and object identities, not Secret values; a lost response reconciles
+the same Secret instead of reposting it. These observations are historical write
+evidence, not a substitute for live resource/readiness checks before API startup.
+
+Database retirement commits revocation before draining existing sessions. It needs
+the same data/application identity but not a still-deliverable CA/keyring, so
+expired delivery material cannot itself prevent revocation. SQL cancellation may
+leave an in-flight request; monotonic shared-side tombstones fence late grants.
+This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
+users, coordinate migrations, mark readiness or release platform reservations.
 
 ## Managed environment identity and rendering
 

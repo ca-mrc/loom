@@ -47,6 +47,7 @@ from loom.terminal_bench_normalize import (
 from loom.trajectory.storage import ObjectStore, bundle_file_metadata_sha256
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
+from loom_cli.benchmark_prepare import AdapterBenchmarkEntry, PreparedAdapterBenchmark
 from loom_cli.local_benchmark_validate import (
     LocalBenchmarkValidationError,
     validate_local_benchmark,
@@ -69,6 +70,7 @@ class LocalBenchmarkPublishStats:
     source_prefix: str
     execution_profile: str | None = None
     profile_stats: NebiusTerminusProfileStats | None = None
+    warnings: tuple[str, ...] = ()
 
 
 async def publish_local_benchmark(
@@ -87,6 +89,7 @@ async def publish_local_benchmark(
     source_registration_mode: str = "legacy",
     create_bucket: bool = False,
     execution_profile: str | None = None,
+    prepared_adapter: PreparedAdapterBenchmark | None = None,
 ) -> LocalBenchmarkPublishStats:
     """Publish to an existing bucket; bucket creation is an explicit bootstrap option."""
 
@@ -97,7 +100,7 @@ async def publish_local_benchmark(
     except ValueError as exc:
         raise LocalBenchmarkValidationError(str(exc), exit_code=2) from exc
 
-    result = validate_local_benchmark(
+    result = prepared_adapter or validate_local_benchmark(
         root,
         benchmark_id=benchmark_id,
         display_name=display_name,
@@ -106,6 +109,8 @@ async def publish_local_benchmark(
         source_subdir=source_subdir,
     )
     if source_registration_mode == "versioned-v1":
+        if isinstance(result, PreparedAdapterBenchmark):
+            raise ValueError("adapter publication uses the current catalog publisher")
         from loom_cli.local_benchmark_source_publish import publish_versioned_local_benchmark
 
         return await publish_versioned_local_benchmark(
@@ -130,14 +135,17 @@ async def publish_local_benchmark(
     source_prefix = f"s3://{bucket}/{entry.id}/"
     try:
         async with session_factory() as session:
-            await _upsert_benchmark(
-                session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
-            )
-
+            prepared_rows = []
             for task_toml in result.task_tomls:
                 bundle_dir = task_toml.parent
                 rel = bundle_dir.relative_to(result.task_root)
-                task_id = entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
+                adapter_task = (
+                    prepared_adapter.tasks[rel.as_posix()] if prepared_adapter else {}
+                )
+                task_id = adapter_task.get("task_id") or (
+                    entry.id if rel == Path(".") else f"{entry.id}/{rel.as_posix()}"
+                )
+                publication_rel = Path(task_id.removeprefix(entry.id + "/")) if prepared_adapter else rel
 
                 # #369: bundles whose files live under `environment/` but
                 # whose Dockerfile does `COPY . /app/` and references
@@ -192,7 +200,7 @@ async def publish_local_benchmark(
                     )
                     revision_prefix = _task_revision_prefix(
                         entry.id,
-                        rel,
+                        publication_rel,
                         checksum,
                         metadata_digest,
                     )
@@ -221,6 +229,7 @@ async def publish_local_benchmark(
                     )
                     uploaded_objects += 1
                     source_provenance = {
+                        **adapter_task.get("source_provenance", {}),
                         "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
                         **sei_provenance,
                     }
@@ -239,48 +248,53 @@ async def publish_local_benchmark(
                             adapt_stats,
                             preflight_ok=True,
                         )
-                existing = await _get_task(session, task_id)
-                if existing is None:
-                    inserted += 1
-                elif (
-                    existing.checksum != checksum
-                    or existing.source != source
-                    or existing.source_provenance != source_provenance
-                    or existing.benchmark_id != entry.id
-                    or existing.license != entry.license_spdx
-                ):
-                    updated += 1
-                else:
-                    unchanged += 1
+                prepared_rows.append({
+                    "id": task_id, "checksum": checksum, "config": raw_cfg,
+                    "source": source, "source_provenance": source_provenance,
+                    "license": adapter_task.get("license_spdx", entry.license_spdx),
+                    "benchmark_id": entry.id,
+                    **({"tags": adapter_task["tags"]} if prepared_adapter else {}),
+                })
 
-                task_row = (
-                    await session.execute(
-                        pg_insert(TaskRow)
-                        .values(
-                            id=task_id,
-                            checksum=checksum,
-                            config=raw_cfg,
-                            source=source,
-                            source_provenance=source_provenance,
-                            license=entry.license_spdx,
-                            benchmark_id=entry.id,
-                        )
-                        .on_conflict_do_update(
+            # Register only after every upload/preflight succeeded. Reuse the
+            # historical physical-profile lock rather than bypassing activation.
+            exact_existing = False
+            if entry.id == "terminal-bench-2@tb2.1-r6":
+                from loom_benchmark_tool.register_cmd import (
+                    _locked_tb21_registration_preflight,
+                    _PreparedTask,
+                )
+                assert prepared_adapter is not None
+                exact_existing = await _locked_tb21_registration_preflight(
+                    session, manifest=prepared_adapter.manifest,
+                    prepared_tasks=[_PreparedTask(
+                        task_id=row["id"], checksum=row["checksum"], config=row["config"],
+                        source=row["source"], license_spdx=row["license"], benchmark_id=entry.id,
+                        tags=row["tags"], source_provenance=row["source_provenance"],
+                    ) for row in prepared_rows],
+                )
+            if exact_existing:
+                unchanged = len(prepared_rows)
+            else:
+                await _upsert_benchmark(
+                    session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
+                    adapter_manifest=prepared_adapter.manifest if prepared_adapter else None,
+                )
+                for values in prepared_rows:
+                    existing = await _get_task(session, values["id"])
+                    if existing is None:
+                        inserted += 1
+                    elif any(getattr(existing, key) != value for key, value in values.items()):
+                        updated += 1
+                    else:
+                        unchanged += 1
+                    task_row = (await session.execute(
+                        pg_insert(TaskRow).values(**values).on_conflict_do_update(
                             index_elements=["id"],
-                            set_={
-                                "checksum": checksum,
-                                "config": raw_cfg,
-                                "source": source,
-                                "source_provenance": source_provenance,
-                                "license": entry.license_spdx,
-                                "benchmark_id": entry.id,
-                            },
-                        )
-                        .returning(TaskRow)
-                        .execution_options(populate_existing=True),
-                    )
-                ).scalar_one()
-                await ensure_task_image_materializations(session, task_row=task_row)
+                            set_={key: value for key, value in values.items() if key != "id"},
+                        ).returning(TaskRow).execution_options(populate_existing=True),
+                    )).scalar_one()
+                    await ensure_task_image_materializations(session, task_row=task_row)
 
             await session.commit()
     finally:
@@ -298,17 +312,19 @@ async def publish_local_benchmark(
         source_prefix=source_prefix,
         execution_profile=profile,
         profile_stats=profile_stats if profile is not None else None,
+        warnings=prepared_adapter.warnings if prepared_adapter else (),
     )
 
 
 async def _upsert_benchmark(
     session: AsyncSession,
     *,
-    entry: LocalBenchmarkEntry,
+    entry: LocalBenchmarkEntry | AdapterBenchmarkEntry,
     source_prefix: str,
     imported_by: str | None,
+    adapter_manifest: dict[str, Any] | None = None,
 ) -> None:
-    values = dict(
+    values: dict[str, Any] = dict(
         display_name=entry.display_name,
         upstream_kind=S3_FOLDER_KIND,
         upstream_locator=source_prefix,
@@ -319,6 +335,14 @@ async def _upsert_benchmark(
         splits=[],
         imported_by=imported_by or PUBLISH_IMPORTED_BY,
     )
+    if adapter_manifest is not None:
+        values.update({key: adapter_manifest.get(key, "") for key in (
+            "upstream_kind", "upstream_locator", "upstream_revision", "license_url",
+        )})
+        values["splits"] = adapter_manifest["splits"]
+        values["profile_provenance"] = adapter_manifest["benchmark_profile_provenance"]
+        if entry.id == "terminal-bench-2@tb2.1-r6":
+            values["execution_state"] = "pending"
     await session.execute(
         pg_insert(Benchmark).values(id=entry.id, **values).on_conflict_do_update(
             index_elements=["id"], set_=values,

@@ -21,7 +21,6 @@ Graph entry has no workflow YAML in this repository and is maintained separately
 | Required CI | `staging-smoke.yml` | Credential-free Compose system checks on PRs, merge groups, and manual dispatch. |
 | Contributor compatibility | `macos-locked-environment.yml` | macOS ARM64 locked workspace installation, daily at 09:17 UTC or manually. |
 | CI operations | `ci-retry.yml` | Manual bounded retry of a failed/cancelled required-source run, with root-cause classification and evidence. |
-| Catalog publication | `publish-benchmarks.yml` | Manual benchmark publication to Hugging Face through the protected `huggingface-publish` Environment. |
 | Production promotion | `release-promotion-gate.yml` | Manual validation of release evidence for an exact candidate SHA and image. |
 | Production promotion | `main-promotion-gate.yml` | Manual verification that the open `dev` to `main` PR, current candidate SHA, and successful release evidence agree. |
 | Nebius publication | `nebius-candidate.yml` | Automatic `dev` push publication or manual platform/Harbor runtime publication, controlled by `NEBIUS_RELEASE_ENABLED`. |
