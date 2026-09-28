@@ -70,6 +70,13 @@ class ApplicationManager:
         if request.action in {"update", "resume"}:
             current = await self.registry.status(application_id, principal=principal, for_mutation=True)
             if current.registration.deployment_generation != request.expected_generation:
+                # A peer may have committed this exact request after our first
+                # replay read. Return that operation before declaring a conflict.
+                replay = await self.registry.replay_transition(application_id, principal=principal,
+                    idempotency_key=idempotency_key, action=request.action,
+                    expected_generation=request.expected_generation, release_id=request.release_id)
+                if replay is not None:
+                    return replay
                 raise ManagementError("application_generation_conflict")
             row = current.registration.model_copy(update={
                 "deployment_generation": current.registration.deployment_generation + 1,

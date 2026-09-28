@@ -674,9 +674,41 @@ only excess held for an old/new transition is released. Shared storage stays0.
 Exact receipt replay changes neither timestamp nor reservation.
 
 This is internal lifecycle implementation, not installed acceptance. It does not
-enable a polling worker, owner endpoint or live installer. Protected installation,
+by itself enable a polling worker or live installer. Protected installation,
 four distinct versions/fifth-owner onboarding, real execution provenance,
 authorization, recovery/teardown isolation and scale-to-zero still need live proof.
+
+### Personal application control
+
+The management-only `/api/v1/applications` API accepts a personal slug and release
+ID for creation. Owner-scoped detail/list and operation status expose registration
+and progress, never frozen plans, credentials or completion evidence. The
+`/applications/{id}/operations` endpoint accepts `update`, `suspend`, `resume` or
+`destroy_retained` with an expected generation; only update supplies a release ID.
+Mutation requests use idempotency keys. Exact replay returns the same operation's
+current status, including when a peer commits it during request planning.
+`/application-operations/{id}/retry` retries a blocked current operation.
+
+`ApplicationManager` uses protected installation-pinned release records, foundation,
+shared-development binding and namespace authority. Owners cannot supply images,
+provider authority, storage ownership or readiness assertions through these APIs.
+Update/resume preserve identity and derive the next deployment/access generation;
+the transactional registry rechecks generation, ownership, state and capacity.
+Stop and replay do not require the release to remain in the catalog. These routes
+reuse existing authentication/CSRF checks and close the auth transaction before
+independent registry work. Unconfigured application management returns 503.
+
+`ApplicationWorker` polls only current nonpurged operations with absent/expired
+DB-time leases. One successful claim drives one concrete start/stop coroutine;
+different owners have independent bounded concurrency. Lease heartbeats, readiness
+deadlines and retry limits prevent unbounded execution. Lease loss, shutdown and
+database outages cancel/drain work while preserving durable effects and charges.
+Failure reporting happens after cancellation; only concrete coordinator evidence
+can complete an operation. Poll health becomes false on DB failure or shutdown.
+
+The worker and owner controls do not yet compose protected installation/runtime
+configuration, a browser login bridge or arbitrary-source publication. They are
+not enabled on the installed management service by this source change.
 
 ### Stopped application completion
 
