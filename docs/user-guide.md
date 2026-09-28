@@ -443,6 +443,13 @@ zero) and all required evidence is complete. Other failures (including runtime
 and verifier failures), cancellation, and incomplete outputs remain excluded.
 Export preserves the selected attempt's
 original state and failure reason; a scored timeout is not rewritten as success.
+For native scored timeouts, the agent event writer stops at its deadline. If
+that leaves no final native-artifact reference event, v2 export validates the
+retained Harbor file against the committed runtime output and the same
+team/Trial/attempt bundle as the independent verifier. The frozen event log
+remains unchanged, and export provenance records
+`native_artifact_authority=committed_runtime_output`. Missing files, mismatched
+bytes or identities, sharing blocks, and broken turn joins still reject export.
 
 The command downloads the archive, verifies the exposed
 SHA-256, writes `<archive>.sha256`, and exits non-zero with the service's
