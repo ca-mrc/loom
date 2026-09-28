@@ -208,3 +208,12 @@ additional route static closures (minified decimal kB):
 The Monitor default view and selected admin tab can add their own lazy modules;
 these static-closure numbers should not be substituted for browser request
 totals or summed without deduplication.
+
+The web image uses the same `npm ci` lockfile graph as local/CI builds. Linux
+native bindings for both supported architectures are pinned in that lockfile
+and checked during the image build. Do not add a second unlocked `npm install`
+to repair optional bindings: that silently upgraded Vite 8.0.16 to 8.3.1 and
+71 dependencies, changing chunk composition and invalidating the measured
+baseline. Fix missing binding declarations/lockfile entries instead. Browser
+handoff tests wait for the destination viewer's content, not just its route
+header, because those now load at different times.

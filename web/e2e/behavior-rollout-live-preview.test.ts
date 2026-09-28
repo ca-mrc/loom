@@ -183,6 +183,9 @@ test("Stage 1 preview is bounded, accessible, conditional, and hands off to the 
 
   await expect(page).toHaveURL(new RegExp(`/pipelines/${runId}/stages/${stageId}/artifacts/${artifactId}$`, "u"), { timeout: 2_000 });
   await expect(page.getByText("behavior_rollout_bundle.v1")).toBeVisible();
+  // The route header precedes the lazy viewer. Wait for its semantic request
+  // and rendered result before tearing down the browser/closed fixture ledger.
+  await expect(page.getByRole("alert")).toContainText("Rollout semantic contract is invalid");
   expect(frameIndex).toBe(2);
   expect(metadataRequests).toBe(3);
 });

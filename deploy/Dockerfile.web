@@ -14,21 +14,19 @@ ARG TARGETARCH
 ARG LOOM_BUILD_SHA=unknown
 ARG LOOM_SOURCE_REF=unknown
 COPY web/package.json web/package-lock.json ./
+# Native bindings are already pinned in the lockfile. A second npm install
+# with --package-lock=false upgrades unrelated dependencies after npm ci.
 RUN npm ci
 RUN set -eux; \
     case "${TARGETARCH}" in \
       amd64) \
-        lightningcss_pkg="lightningcss-linux-x64-gnu@1.32.0"; \
         rolldown_binding="@rolldown/binding-linux-x64-gnu" \
         ;; \
       arm64) \
-        lightningcss_pkg="lightningcss-linux-arm64-gnu@1.32.0"; \
         rolldown_binding="@rolldown/binding-linux-arm64-gnu" \
         ;; \
       *) echo "unsupported web image TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    npm install --no-save --package-lock=false \
-      "${lightningcss_pkg}" "${rolldown_binding}@1.0.3"; \
     node -e "require('lightningcss'); require('${rolldown_binding}')"
 COPY web/ ./
 RUN VITE_BUILD_REVISION="${LOOM_BUILD_SHA}" \
