@@ -98,6 +98,20 @@ async def test_definitive_rejection_allows_fresh_unfence_but_not_return_to_retir
     assert (await registry.prepare_effect(lease, "start:api", intent(plan))).phase == "prepared"
 
 
+@pytest.mark.parametrize('phase', ['none', 'prepared', 'dispatched', 'rejected'])
+async def test_new_start_effect_requires_observed_admission_opening(applications, phase):
+    registry, _, _, plan, _, lease = await started(applications)
+    if phase != 'none':
+        key, value = unfence(plan)
+        await registry.prepare_effect(lease, key, value)
+        if phase != 'prepared':
+            await registry.dispatch_effect(lease, key)
+        if phase == 'rejected':
+            await registry.reject_effect(lease, key, status_code=422)
+    with pytest.raises(ManagementError, match='application_activation_pending'):
+        await registry.prepare_effect(lease, 'start:api', intent(plan))
+
+
 async def test_stop_successor_can_close_admission_without_inheriting_active_phase(applications):
     registry, _, alice, plan, operation, lease = await started(applications)
     key, value = unfence(plan)

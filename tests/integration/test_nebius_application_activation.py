@@ -11,10 +11,11 @@ from loom_service.environment_management.provider import ProviderBlockedError, P
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_effects import expire
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_application_retirement import API, PODS
+from tests.integration.test_nebius_application_retirement import API, PODS, WEB
 from tests.integration.test_nebius_application_retirement import retirement as retirement
 from tests.integration.test_nebius_application_runtime import FENCE_PATH, close_ready
 from tests.integration.test_nebius_application_runtime import runtime_context as runtime_context
+from tests.integration.test_nebius_application_startup import next_static_generation
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
@@ -199,3 +200,137 @@ async def test_open_refuses_running_pods_and_stopped_successor(active_retired):
     with pytest.raises(ManagementError, match='stale_operation_lease'):
         await provider.open_admission(lease)
     assert api.mutations == before
+
+
+def ready_backends(api):
+    for path in (API, WEB):
+        api.objects[path]['metadata']['generation'] = 1
+        api.objects[path]['status'] = {'observedGeneration': 1, 'replicas': 1,
+            'updatedReplicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}
+
+
+async def pending_backends(active_retired):
+    context, provider, _ = active_retired
+    await provider.open_admission(context[4])
+    with pytest.raises(ProviderWaitingError, match='application_workloads_readiness_pending'):
+        await provider.start_workloads(context[4])
+    return context, provider
+
+
+async def test_start_requires_observed_activation_before_any_workload_mutation(active_retired):
+    context, provider, _ = active_retired
+    api, lease = context[3:5]
+    before = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderWaitingError, match='application_activation_pending'):
+        await provider.start_workloads(lease)
+    assert api.mutations == before
+
+
+async def test_start_waits_for_backends_then_publishes_exact_current_route_once(active_retired):
+    context, provider = await pending_backends(active_retired)
+    registry, _, _, api, lease, _ = context
+    assert sum(obj['kind'] == 'Deployment' for obj in api.objects.values()) == 2
+    assert sum(obj['kind'] == 'Service' for obj in api.objects.values()) == 2
+    assert not any(obj['kind'] == 'Ingress' for obj in api.objects.values())
+    ready_backends(api)
+    proof = await provider.start_workloads(lease)
+    assert {item.name for item in proof.deployments} == {'loom-service', 'loom-web'}
+    assert {item.name for item in proof.services} == {'loom-service', 'loom-web'}
+    assert proof.ingress.name == 'loom-web' and proof.identity.operation_id == lease.operation_id
+    assert all(item.replicas == 1 and item.generation == item.observed_generation == 1 for item in proof.deployments)
+    assert all(item.operation_id == lease.operation_id for item in (*proof.deployments, *proof.services, proof.ingress))
+    activation = next(item for item in await registry.effect_history(lease) if item.key == proof.activation_key)
+    assert activation.phase == 'observed' and activation.observed_uid == proof.retired_quota_uid
+    before = copy.deepcopy(api.mutations)
+    assert await provider.read_ready(lease) == proof
+    assert await provider.start_workloads(lease) == proof
+    assert api.mutations == before
+
+
+@pytest.mark.parametrize('field,value', [('observedGeneration', 0), ('updatedReplicas', 0),
+    ('readyReplicas', 0), ('availableReplicas', 0), ('replicas', 2), ('unavailableReplicas', 1),
+    ('terminatingReplicas', 1)])
+async def test_stale_or_partial_backend_readiness_never_publishes_route(active_retired, field, value):
+    context, provider = await pending_backends(active_retired)
+    api, lease = context[3:5]
+    ready_backends(api)
+    api.objects[API]['status'][field] = value
+    before = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderWaitingError, match='application_workloads_readiness_pending'):
+        await provider.start_workloads(lease)
+    assert api.mutations == before
+    assert not any(obj['kind'] == 'Ingress' for obj in api.objects.values())
+
+
+@pytest.mark.parametrize('damage', ['image', 'uid', 'quota'])
+async def test_ready_readback_rejects_live_drift_without_repair(active_retired, damage):
+    context, provider = await pending_backends(active_retired)
+    api, lease = context[3:5]
+    ready_backends(api)
+    await provider.start_workloads(lease)
+    if damage == 'image':
+        api.objects[API]['spec']['template']['spec']['containers'][0]['image'] = 'other@sha256:' + '9' * 64
+    elif damage == 'uid':
+        api.objects[API]['metadata']['uid'] = 'replacement'
+    else:
+        api.objects[FENCE_PATH] = {'metadata': {'name': 'loom-application-retired', 'uid': 'replacement', 'resourceVersion': '1'}}
+    before = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError):
+        await provider.read_ready(lease)
+    assert api.mutations == before
+
+
+@pytest.mark.parametrize('prepared', [True, False])
+async def test_interrupted_workload_create_recovers_original_request_without_duplicate(active_retired, monkeypatch, prepared):
+    context, provider, _ = active_retired
+    registry, _, _, api, lease, _ = context
+    await provider.open_admission(lease)
+    dispatch = registry.dispatch_effect
+
+    async def interrupt(*args):
+        raise asyncio.CancelledError
+
+    if prepared:
+        monkeypatch.setattr(registry, 'dispatch_effect', interrupt)
+        expected = asyncio.CancelledError
+    else:
+        api.lose_response = True
+        expected = ProviderWaitingError
+    with pytest.raises(expected):
+        await provider.start_workloads(lease)
+    interrupted = (await registry.effect_history(lease))[-1]
+    assert interrupted.phase == ('prepared' if prepared else 'dispatched')
+    monkeypatch.setattr(registry, 'dispatch_effect', dispatch)
+    api.lose_response = False
+    await expire(registry.session_factory, lease)
+    current = await registry.claim(lease.operation_id)
+    with pytest.raises(ProviderWaitingError, match='application_workloads_readiness_pending'):
+        await provider.start_workloads(current)
+    ready_backends(api)
+    await provider.start_workloads(current)
+    creates = [body['metadata']['name'] for method, _, body in api.mutations
+               if method == 'POST' and body.get('kind') == 'Deployment']
+    assert sorted(creates) == ['loom-service', 'loom-web']
+
+
+async def test_update_patches_retained_deployment_uids_and_recreates_only_retired_routes(active_retired, platform_inputs):
+    context, provider = await pending_backends(active_retired)
+    registry, _, _, api, lease, _ = context
+    ready_backends(api)
+    await provider.start_workloads(lease)
+    original = {path: api.objects[path]['metadata']['uid'] for path in (API, WEB)}
+    current = await next_static_generation(context, platform_inputs)
+    with pytest.raises(ProviderWaitingError, match='application_pod_fence_pending'):
+        await provider.stop_workloads(current)
+    api.objects[FENCE_PATH]['status'] = {'hard': {'pods': '0'}}
+    await provider.stop_workloads(current)
+    await provider.open_admission(current)
+    proof = await provider.start_workloads(current)
+    assert proof.identity.deployment_generation == 2
+    for path in (API, WEB):
+        assert api.objects[path]['metadata']['uid'] == original[path]
+        assert api.objects[path]['spec']['replicas'] == 1
+        assert api.objects[path]['metadata']['annotations']['loom.nebius/operation-id'] == str(current.operation_id)
+    assert sum(method == 'POST' and body.get('kind') == 'Deployment' for method, _, body in api.mutations) == 2
+    assert sum(method == 'POST' and body.get('kind') == 'Service' for method, _, body in api.mutations) == 4
+    assert all(item.phase == 'observed' for item in await registry.effect_history(current))
