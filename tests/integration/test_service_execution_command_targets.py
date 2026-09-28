@@ -331,3 +331,43 @@ async def test_reconcile_completes_precreate_cancel_after_dead_letter(
         assert kube.create_count == kube.delete_count == 0
     finally:
         await engine.dispose()
+
+
+async def test_sibling_actuators_preserve_foreign_jobs_without_false_orphan_drift(postgres_url):
+    from uuid import uuid4
+
+    from tests.integration.test_execution_shared_capacity import _family, _guest_reserve
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            ordinary, guest, _ = await _family(session, now)
+            native_lease = await fixtures._reserve(session, trial_id=ordinary[0], target=ordinary[1],
+                                                   now=now + timedelta(seconds=2))
+            guest_lease = await _guest_reserve(session, guest, now + timedelta(seconds=2))
+        kube = fixtures._FakeKubernetesJobApi()
+        actuators = [ExecutionActuator(
+            sessions=sessions, kubernetes=kube,
+            target=ExecutionTargetRuntime(target_id=pair[1].target_id, namespace=pair[1].namespace_name),
+            controller_id=pair[1].target_id,
+        ) for pair in (ordinary, guest)]
+        for actuator in actuators:
+            assert await actuator.run_commands_once(now=now + timedelta(seconds=3)) == 1
+        assert set(kube.jobs) == {native_lease.job_name, guest_lease.job_name}
+        before = dict(kube.jobs)
+        for actuator in actuators:
+            assert await actuator.reconcile_full_once(now=now + timedelta(seconds=4)) == 0
+            assert kube.jobs == before and kube.delete_count == 0
+        # Unregistered target annotations are still visible drift, never treated
+        # as a legitimate sibling or deleted by another target's reconciler.
+        foreign = next(iter(kube.jobs.values())).model_copy(update={
+            "target_id": "unknown-target", "lease_id": str(uuid4()), "job_name": "foreign-job",
+        })
+        kube.jobs[foreign.job_name] = foreign
+        for actuator in actuators:
+            assert await actuator.reconcile_full_once(now=now + timedelta(seconds=5)) == 1
+        assert kube.jobs[foreign.job_name] == foreign and kube.delete_count == 0
+    finally:
+        await engine.dispose()
