@@ -315,11 +315,11 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
             policy = json.loads(observed.output)
             status = policy.get("status", {})
             if (status.get("observedGeneration") == policy["metadata"]["generation"]
-                    and "typeChecking" in status):
+                    and status.get("observedGeneration", 0) > 0):
                 break
             assert time.monotonic() < deadline, "policy type checking did not finish"
             time.sleep(0.2)
-        assert not status["typeChecking"].get("expressionWarnings"), status
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
         guest = _guest_pod(namespace)
         for _ in range(60):
             result = apply([guest], dry_run=True)
