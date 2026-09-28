@@ -13,15 +13,16 @@ from loom_service.environment_management.provider import ProviderBlockedError, P
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_render import inputs, named
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 FENCE_PATH = "/api/v1/namespaces/loom-dev-alice/resourcequotas/loom-application-retired"
 
 
-@pytest.fixture
-async def runtime_context(applications, platform_inputs):
+async def runtime_inputs(applications, platform_inputs):
     registry, _, (alice, _), _, _, _ = applications
     row, release, shared, foundation = inputs(platform_inputs)
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id})
@@ -32,10 +33,16 @@ async def runtime_context(applications, platform_inputs):
     operation = await registry.create(principal=alice, idempotency_key="create",
         prepared=rendered, release=release, shared=shared)
     lease = await registry.claim(operation.operation_id)
+    return registry, authority, lease, alice, rendered
+
+
+@pytest.fixture
+async def runtime_context(applications, platform_inputs):
+    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
     api = KubernetesAPI()
     async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
         kubernetes = ApplicationKubernetesProvider(registry, http)
-        await kubernetes.create(lease, "namespace", named(rendered, "Namespace", row.application_namespace))
+        await kubernetes.create(lease, "namespace", named(rendered, "Namespace", rendered.registration.application_namespace))
         yield registry, kubernetes, authority, api, lease, alice
 
 
@@ -132,3 +139,22 @@ async def test_wrong_installation_cannot_close_admission(runtime_context):
     with pytest.raises(ProviderBlockedError, match="application_runtime_authority_conflict"):
         await provider.close_admission(lease)
     assert len(api.mutations) == 1
+
+
+async def test_destroy_reconciles_uncertain_suspend_patch_before_advancing_again(runtime_context):
+    provider = await close_ready(runtime_context)
+    registry, _, _, api, lease, alice = runtime_context
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    api.lose_response = True
+    with pytest.raises(ProviderWaitingError):
+        await provider.close_admission(current)
+    destroyed = await registry.transition(lease.application_id, principal=alice, idempotency_key="destroy",
+        action="destroy_retained", expected_generation=2)
+    latest = await registry.claim(destroyed.operation_id)
+    api.lose_response = False
+    await provider.close_admission(latest)
+    assert [method for method, _, _ in api.mutations] == ["POST", "POST", "PATCH", "PATCH"]
+    assert all(effect.phase == "observed" for effect in await registry.effect_history(latest))
+    assert api.objects[FENCE_PATH]["metadata"]["annotations"]["loom.nebius/deployment-generation"] == "3"

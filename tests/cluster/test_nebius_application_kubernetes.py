@@ -29,6 +29,7 @@ from tests.integration.test_nebius_application_database import database_access a
 from tests.integration.test_nebius_application_effects import started
 from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_operations import applications as applications
+from tests.integration.test_nebius_application_runtime import runtime_inputs
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
@@ -98,6 +99,55 @@ async def test_journal_drives_real_create_preconditioned_patch_and_delete(applic
             history = await registry.effect_history(lease)
             assert len(history) == 4 + attempt
             assert sum(effect.phase == "rejected" for effect in history) == attempt
+            assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
+async def test_runtime_closes_real_pod_admission_and_advances_fence(applications, platform_inputs):
+    from kubernetes.client.exceptions import ApiException
+
+    from loom_service.application_management.runtime import ApplicationRuntimeProvider
+
+    registry, authority, lease, alice, rendered = await runtime_inputs(applications, platform_inputs)
+    await registry.renew(lease, lease_seconds=180)
+    container = await asyncio.to_thread(_start_k3s)
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        config = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
+        trust.load_cert_chain(config.cert_file, config.key_file)
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False) as http:
+            kubernetes = ApplicationKubernetesProvider(registry, http)
+            runtime = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
+            await registry.renew(lease, lease_seconds=180)
+            await kubernetes.create(lease, "namespace", named(rendered, "Namespace", "loom-dev-alice"))
+            await kubernetes.create(lease, "account", named(rendered, "ServiceAccount", "loom-platform"))
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    await runtime.close_admission(lease)
+                    break
+                except ProviderWaitingError:
+                    assert time.monotonic() < deadline, "quota controller did not confirm the fixed gate"
+                    await asyncio.sleep(0.1)
+            deployment = named(rendered, "Deployment", "loom-service")
+            pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "gate-probe"},
+                   "spec": deployment["spec"]["template"]["spec"]}
+            # Dry run exercises admission without starting a process even if a
+            # broken gate unexpectedly accepts the request.
+            with pytest.raises(ApiException) as denied:
+                await asyncio.to_thread(core.create_namespaced_pod, "loom-dev-alice", pod, dry_run="All")
+            assert denied.value.status == 403 and "exceeded quota: loom-application-retired" in denied.value.body
+            before = await asyncio.to_thread(core.read_namespaced_resource_quota, "loom-application-retired", "loom-dev-alice")
+            stopped = await registry.transition(lease.application_id, principal=alice, action="suspend",
+                idempotency_key="stop", expected_generation=1)
+            current = await registry.claim(stopped.operation_id, lease_seconds=180)
+            await runtime.close_admission(current)
+            after = await asyncio.to_thread(core.read_namespaced_resource_quota, "loom-application-retired", "loom-dev-alice")
+            assert after.metadata.uid == before.metadata.uid
+            assert after.metadata.annotations["loom.nebius/deployment-generation"] == "2"
             assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
     finally:
         await asyncio.to_thread(container.stop)
