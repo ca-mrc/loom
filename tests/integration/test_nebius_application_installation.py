@@ -32,12 +32,12 @@ def application_installation(installation_file, connection, platform_inputs, tmp
     material = tmp_path / 'shared-material.json'
     material.write_text(json.dumps({'ca_pem': connection.ca_file.read_text(), 'database_name': 'loom',
         'secret_store_master_keys': base64.b64encode(b's' * 32).decode()}))
-    material.chmod(0o440)
+    material.chmod(0o640)
     dsn = tmp_path / 'shared-manager-dsn'
     dsn.write_text(make_conninfo(host=f'loom-postgres.{shared.platform_namespace}.svc', port='5432',
         dbname='loom', user='loom_application_manager', password='fixture-private-value',
         sslmode='verify-full', sslrootcert=str(connection.ca_file)))
-    dsn.chmod(0o440)
+    dsn.chmod(0o640)
     data = json.loads(installation_file.read_text())
     data['foundation'] = foundation.model_dump(mode='json') | {'provisioning_project_id': 'project-managed-storage'}
     data['applications'] = {

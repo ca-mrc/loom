@@ -706,9 +706,21 @@ database outages cancel/drain work while preserving durable effects and charges.
 Failure reporting happens after cancellation; only concrete coordinator evidence
 can complete an operation. Poll health becomes false on DB failure or shutdown.
 
-The worker and owner controls do not yet compose protected installation/runtime
-configuration, a browser login bridge or arbitrary-source publication. They are
-not enabled on the installed management service by this source change.
+Protected management configuration may include `applications`, binding the shared
+development environment, namespace authority, immutable release catalog and storage
+access groups to explicit runtime inputs. It cannot activate the legacy environment
+provisioner at the same time. `ApplicationServiceRuntime` composes the existing
+cloud, SQL, Kubernetes and object-access adapters with one supervised worker.
+Kubernetes authentication uses a projected ServiceAccount; cloud authentication
+uses an explicit protected credentials file, with no ambient fallback. Shared
+verify-full SQL credentials and CA/keyring material come from bounded private
+files, not owner requests. Invalid startup material exposes no application manager.
+Shutdown removes owner admission and drains the worker before closing its clients.
+Management readiness includes actual application-worker poll health when configured.
+
+A browser login bridge, protected live installation and arbitrary-source publication
+remain unfinished. This source capability does not enable the installed management
+service or prove an owner can use a deployed personal application.
 
 ### Stopped application completion
 
