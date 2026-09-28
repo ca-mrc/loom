@@ -36,7 +36,7 @@ def test_egress_policy_bound_to_plan_and_runtime_capability() -> None:
         "execution_class_id": "linux-amd64-cpu-web-pod-v1",
     })
     plan = compile_service_execution_plan(**kwargs)
-    requirements = workload_requirements_from_task(task)
+    requirements = workload_requirements_from_task(task, trial)
     assert plan.task_egress == requirements.task_egress == policy()
     assert TASK_EGRESS_OUTPUT in plan.output_declarations
     validate_runtime_plan_requirements(plan, requirements)

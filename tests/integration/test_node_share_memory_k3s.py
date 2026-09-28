@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 def test_node_share_memory_is_enforced_and_oom_has_kernel_evidence(capsys):
     # Scale memory down for a cheap local check; production 4 -> 7 GiB is also
     # checked through the full renderer. This is not the original paid task.
-    _, plan = _plan(64)
+    _, _, plan = _plan(64)
     payload = plan.canonical_payload()
     payload["controller_resources"]["memory_mib"] = 32
     plan = ExecutionRuntimePlanV1.model_validate(payload)
