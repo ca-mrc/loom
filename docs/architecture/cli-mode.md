@@ -285,11 +285,15 @@ Internals:
   `[sys.executable, "-m", "pip", "install", spec]` after rejecting
   shell metacharacters in spec (policy-only — `subprocess.run` with a
   list doesn't shell-expand).
-- **Lifecycle subcommands** (modular-D) — `import`, `publish`,
-  `register`, `verify` live in `src/loom_cli/datasets_cmd.py` and
-  delegate to `loom_benchmark_tool.{import_cmd, publish_cmd,
-  register_cmd, verify_cmd}`'s `run_*` functions. `python -m
-  loom_benchmark_tool` keeps working as a deprecation shim.
+- **Publication** — `loom datasets publish PATH` and
+  `loom datasets publish --benchmark SLUG` share `benchmark_publish.py` and the
+  existing local-folder publication backend. The upstream adapter only prepares
+  input. `publish-local` remains an alias; the independent HF/direct publisher
+  and HF publication workflow are retired.
+- **Historical lifecycle commands** — `import`, `register`, and `verify`
+  still delegate to the corresponding `loom_benchmark_tool` modules. `register`
+  can consume previously published manifests. `python -m loom_benchmark_tool`
+  remains a deprecated dispatcher, without the retired publication contract.
 
 ## Common pitfalls
 

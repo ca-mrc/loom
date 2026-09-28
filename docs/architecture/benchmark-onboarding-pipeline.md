@@ -18,8 +18,9 @@ creating native benchmark rows.
   separate `packages/loom-benchmark-terminal-bench-2/` workspace package.
 - Registered `benchmarks` and `tasks` rows are the service catalog used by the
   SPA and evaluation APIs.
-- Immutable object-store or Hugging Face manifests bind task IDs, checksums,
-  bundle locations, source revision, adapter version, and profile identity.
+- Catalog rows and immutable object-store bundles retain task IDs, checksums,
+  bundle locations, source revision, and profile identity. Historical
+  publications also have object-store or Hugging Face manifests.
 
 Registration never treats an unversioned mutable upstream dataset as runnable
 authority. Task IDs are normalized and unique within a benchmark, bundle
@@ -32,7 +33,8 @@ The `loom datasets` group provides the current lifecycle:
 ```text
 loom datasets sync-config
 loom datasets import
-loom datasets publish
+loom datasets publish --benchmark SLUG
+loom datasets publish PATH
 loom datasets register
 loom datasets audit
 loom datasets activate
@@ -42,10 +44,11 @@ loom datasets provision-catalog
 
 - `sync-config` reconciles `config/benchmarks.toml` with catalog rows.
 - `import` converts tasks, uploads bundles, and inserts rows directly.
-- `publish` converts and publishes an immutable dataset manifest for the Loom
-  catalog.
-- `register` verifies a published manifest, upserts benchmark/task rows, and
-  can mirror bundles into internal object storage.
+- `publish` accepts an upstream adapter or a prepared local folder. Both use
+  the same object-store publisher and catalog registration backend.
+- `register` verifies a historical published manifest, upserts benchmark/task
+  rows, and can mirror bundles into internal object storage. New publications
+  already register their rows and do not need this second command.
 - `audit` reports catalog, manifest, task-config, verifier, adapter,
   architecture, and readiness blockers. `audit --verify-bundles` downloads the
   complete internal bundle for every benchmark and TaskSet row, recomputes the

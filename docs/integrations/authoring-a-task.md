@@ -343,11 +343,9 @@ There are three supported task-registration shapes today:
   `loom datasets sync-config`. For a user-owned benchmark folder, first
   run `loom datasets validate-local <folder>`; it validates every
   `task.toml` and prints the `[[local]]` snippet to add to the registry.
-- Adapter-backed benchmarks should go through
-  `loom datasets publish` followed by `loom datasets register`.
-  Publish validates each generated `task.toml`, writes a schema v4
-  manifest with per-task `task_config` and optional source provenance, and
-  register persists that config and provenance into `tasks`.
+- Adapter-backed benchmarks use `loom datasets publish --benchmark SLUG`.
+  Publish validates each generated `task.toml`, uploads immutable bundles and
+  execution-input metadata, and persists config and provenance into `tasks`.
   Terminal-Bench 2.1 rev-6 publication additionally records a private
   workspace policy: normal agents do not receive `solution/`, `tests/`,
   `verifier/`, or `upstream-task.toml`; those files are staged only in a
@@ -399,29 +397,26 @@ benchmark with no registered task rows appears as `Needs publish`; a benchmark
 with raw legacy rows but no valid stored `TaskConfig` appears as
 `Needs republish` with the raw-versus-runnable count.
 
-For first-party adapter-backed benchmarks, prefer the manifest path:
+For first-party adapter-backed benchmarks, use the same publisher as local folders:
 
 ```bash
 # Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
-# These commands read them from env so credentials stay out of argv.
-loom datasets publish my-benchmark --hf-org "$LOOM_HF_ORG"
-loom datasets register my-benchmark --hf-org "$LOOM_HF_ORG" \
-    --mirror-to-object-store
+loom datasets publish --benchmark my-benchmark
 loom datasets audit my-benchmark --verify-bundles
+# For an already prepared directory:
+loom datasets publish ./my-benchmark
 ```
 
-`--verify-bundles` downloads and canonically hashes every file under each
-registered internal bundle prefix. It fails on checksum drift, an empty or
-malformed prefix, a missing `task.toml`, or an object-store read error; checking
-only that `task.toml` exists is not sufficient publication evidence.
+Both inputs upload immutable task bundles and register them in the selected
+environment, including the current execution-input binding. Use the optional
+`--execution-profile nebius-terminus` for that platform's ingest adaptation.
+The former HF publication workflow is retired; no HF write token is needed.
+The upstream input alone accepts `--cache-dir`, `--refresh`, `--limit`, and
+repeatable `--instance-id` filters. Its default cache is user-scoped.
 
-For first-party adapter publishes, the `Publish benchmarks to HF Hub` GitHub
-Actions workflow is the preferred protected path. It runs in the
-`huggingface-publish` environment, fails the selected benchmark job when
-`HF_TOKEN` is missing or the HF publish command exits non-zero, and writes only
-non-secret status lines such as token presence and target repo. A green workflow
-means the selected benchmark publish command succeeded; a failed workflow is a
-release/catalog gate that must be fixed before registration evidence is trusted.
+`--verify-bundles` checks the registered internal bundle bytes and required
+files. A successful upload is not execution acceptance; verify a representative
+task through the intended runtime after publication.
 
 Legacy manifests without `task_config` remain metadata placeholders.
 They must be republished or backfilled before users can launch them
@@ -465,7 +460,7 @@ depending on a worker fixture mount:
 ```bash
 # Export LOOM_DB_URL and LOOM_MINIO_* in the shell or process environment.
 # Do not pass credential values through argv; publish-local reads these env vars.
-loom datasets publish-local ./team-evals --bucket loom-benchmarks
+loom datasets publish ./team-evals --bucket loom-benchmarks
 ```
 
 That path registers immutable task sources such as

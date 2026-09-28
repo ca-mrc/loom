@@ -13,7 +13,6 @@ EXPLICIT_NON_CANCELLABLE_WORKFLOWS = {
     ".github/workflows/main-promotion-gate.yml": (
         "main-promotion-gate-${{ inputs.candidate_sha }}"
     ),
-    ".github/workflows/publish-benchmarks.yml": "publish-benchmarks-hf-hub",
     ".github/workflows/release-promotion-gate.yml": (
         "release-promotion-gate-${{ inputs.candidate_sha }}"
     ),

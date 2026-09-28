@@ -3,11 +3,76 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from loom_cli.datasets_cmd import dispatch
 from loom_cli.discovery import DatasetEntry
+
+
+@pytest.mark.parametrize("adapter", [False, True])
+def test_publish_selects_input_and_forwards_options(monkeypatch, capsys, tmp_path, adapter):
+    captured = {}
+    for key, value in {
+        "LOOM_DB_URL": "postgresql://fixture/db",
+        "LOOM_MINIO_ACCESS_KEY": "fixture-access",
+        "LOOM_MINIO_SECRET_KEY": "fixture-secret",
+    }.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", lambda **kw: object())
+
+    async def publish(path, **kwargs):
+        captured.update(path=path, **kwargs)
+        return SimpleNamespace(
+            benchmark_id="fixture", task_count=1, inserted=1, updated=0,
+            unchanged=0, uploaded_objects=3, compat_flattened_files=0,
+            source_prefix="s3://fixture/", execution_profile=None,
+            warnings=("fixture: optional attachment missing",),
+        )
+    monkeypatch.setattr("loom_cli.benchmark_publish.publish_benchmark", publish)
+    selection = [
+        "--benchmark", "humaneval", "--cache-dir", str(tmp_path / "cache"),
+        "--refresh", "--limit", "2", "--instance-id", "HumanEval/0",
+    ] if adapter else [str(tmp_path)]
+    assert dispatch(["publish", *selection, "--minio-endpoint", "https://example.test"]) == 0
+    assert captured["path"] == (None if adapter else Path(tmp_path))
+    assert captured["benchmark"] == ("humaneval" if adapter else None)
+    if adapter:
+        assert captured["cache_dir"] == tmp_path / "cache"
+        assert captured["refresh"] is True
+        assert captured["limit"] == 2
+        assert captured["instance_ids"] == {"HumanEval/0"}
+    output = capsys.readouterr()
+    assert "publish fixture:" in output.out
+    assert "optional attachment missing" in output.err
+
+
+def test_publish_error_redacts_resolved_credentials(monkeypatch, capsys):
+    secrets = {
+        "LOOM_DB_URL": "postgresql://fixture:db-password@db.example/loom",
+        "LOOM_MINIO_ACCESS_KEY": "resolved-access-secret",
+        "LOOM_MINIO_SECRET_KEY": "resolved-minio-secret",
+    }
+    for key, value in secrets.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", lambda **kw: object())
+
+    async def fail(*args, **kwargs):
+        raise ValueError("failed: " + " ".join(secrets.values()))
+    monkeypatch.setattr("loom_cli.benchmark_publish.publish_benchmark", fail)
+    assert dispatch(["publish", "--benchmark", "humaneval", "--minio-endpoint", "https://example.test"]) == 1
+    err = capsys.readouterr().err
+    for secret in (*secrets.values(), "db-password"):
+        assert secret not in err
+
+
+def test_publish_rejects_retired_writer_flags(capsys):
+    with pytest.raises(SystemExit) as error:
+        dispatch(["publish", "--benchmark", "humaneval", "--target=hf"])
+    assert error.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 @pytest.fixture()
@@ -687,149 +752,6 @@ def test_import_passes_instance_ids_to_benchmark_tool(
     assert rc == 0
     assert captured["instance_ids"] == {"HumanEval/0", "HumanEval/1"}
     assert "converted=2" in capsys.readouterr().out
-
-
-def test_publish_passes_instance_ids_to_benchmark_tool(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
-        captured.update(kwargs)
-        return {
-            "published": 1,
-            "warnings": 0,
-            "target": "hf",
-            "repo_id": "fake-org/loom-benchmark-humaneval",
-            "revision": "fake-rev",
-        }
-
-    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
-
-    rc = dispatch([
-        "publish",
-        "humaneval",
-        "--hf-org",
-        "fake-org",
-        "--hf-token",
-        "fake-token",
-        "--instance-id",
-        "HumanEval/1",
-    ])
-
-    assert rc == 0
-    assert captured["instance_ids"] == {"HumanEval/1"}
-    assert captured["target"] == "hf"
-    assert "published=1" in capsys.readouterr().out
-
-
-def test_publish_target_object_store_requires_minio_flags(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """--target=object-store bails cleanly when MinIO creds are missing."""
-    for var in (
-        "LOOM_MINIO_ENDPOINT",
-        "LOOM_MINIO_ACCESS_KEY",
-        "LOOM_MINIO_SECRET_KEY",
-        "LOOM_SVC_MINIO_ENDPOINT",
-        "LOOM_SVC_MINIO_ACCESS_KEY",
-        "LOOM_SVC_MINIO_SECRET_KEY",
-    ):
-        monkeypatch.delenv(var, raising=False)
-
-    rc = dispatch([
-        "publish",
-        "humaneval",
-        "--target",
-        "object-store",
-    ])
-
-    captured = capsys.readouterr()
-    assert rc == 2
-    assert "requires:" in captured.err
-
-
-def test_publish_target_object_store_builds_minio_client(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """--target=object-store instantiates MinIO client + threads flags through."""
-    captured: dict[str, object] = {}
-    minio_ctor_kwargs: dict[str, object] = {}
-
-    class FakeMinio:
-        def __init__(self, **kwargs: object) -> None:
-            minio_ctor_kwargs.update(kwargs)
-
-    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
-        captured.update(kwargs)
-        return {
-            "published": 5,
-            "warnings": 0,
-            "target": "object-store",
-            "repo_id": "s3://loom-benchmarks/humaneval",
-            "revision": "abc123",
-        }
-
-    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", FakeMinio)
-    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
-
-    rc = dispatch([
-        "publish",
-        "humaneval",
-        "--target",
-        "object-store",
-        "--minio-endpoint",
-        "http://minio.local:9000",
-        "--minio-access-key",
-        "minioadmin",
-        "--minio-secret-key",
-        "minioadmin123",
-        "--bucket",
-        "loom-benchmarks",
-    ])
-
-    assert rc == 0
-    assert captured["target"] == "object-store"
-    assert captured["object_store"] is not None
-    assert captured["bucket"] == "loom-benchmarks"
-    assert minio_ctor_kwargs == {
-        "endpoint_url": "http://minio.local:9000",
-        "access_key": "minioadmin",
-        "secret_key": "minioadmin123",
-    }
-    assert "target=object-store" in capsys.readouterr().out
-
-
-def test_publish_failure_redacts_hf_token_from_cli_error(
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    hf_token = "hf_1234567890abcdef1234"
-
-    async def fake_run_publish(**kwargs: object) -> dict[str, object]:
-        raise RuntimeError(f"403 Forbidden for token {kwargs['hf_token']}")
-
-    monkeypatch.setattr("loom_benchmark_tool.publish_cmd.run_publish", fake_run_publish)
-
-    rc = dispatch([
-        "publish",
-        "humaneval",
-        "--hf-org",
-        "PRHW",
-        "--hf-token",
-        hf_token,
-    ])
-
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert rc == 1
-    assert "publish failed" in captured.err
-    assert "403 Forbidden" in captured.err
-    assert "[REDACTED:hf-token]" in captured.err
-    assert hf_token not in combined
 
 
 def test_top_level_main_routes_to_datasets(
