@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { lazyRoute } from "../lib/lazyRoute";
+import LoadingState from "../components/LoadingState";
+import { Suspense, useState } from "react";
 import { AgentModelPicker } from "../components/AgentModelPicker";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import { agentLabel } from "../lib/agentLabel";
-import { BatchExportDialog, type BatchExportResult } from "./newBatch/BatchExportDialog";
+import type { BatchExportResult } from "./newBatch/BatchExportDialog";
 import { clampInt } from "./newBatch/advancedConfig";
 import { DEFAULT_AGENT_NAME } from "./newBatch/formState";
 import { FieldLabel } from "./NewBatchFields";
@@ -14,6 +16,8 @@ import { MAX_COMBINATIONS } from "./newBatchState";
 import { NewBatchAdvancedSettings } from "./NewBatchAdvancedSettings";
 import { NewBatchTaskSelection } from "./NewBatchTaskSelection";
 import { useNewBatch } from "./useNewBatch";
+
+const BatchExportDialog = lazyRoute(async () => ({ default: (await import("./newBatch/BatchExportDialog")).BatchExportDialog }));
 
 const ADVANCED_ERROR_FIELDS: Record<string, string> = {
   "Override agent timeout": "Agent timeout override (s)",
@@ -133,7 +137,7 @@ export default function NewBatch(): JSX.Element {
       </header>
 
       {exportError ? <p id="batch-export-error" tabIndex={-1} role="alert" className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{exportError}</p> : null}
-      {exportResult ? <BatchExportDialog result={exportResult} onClose={() => setExportResult(null)} /> : null}
+      {exportResult ? <Suspense fallback={<LoadingState label="Loading export…" />}><BatchExportDialog result={exportResult} onClose={() => setExportResult(null)} /></Suspense> : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
         {/* LEFT column */}

@@ -32,14 +32,20 @@ def test_web_declares_linux_lightningcss_bindings_for_multiarch_builds() -> None
     assert package_lock["packages"][""].get("optionalDependencies") == required
 
 
-def test_web_dockerfile_installs_target_arch_native_bindings() -> None:
+def test_web_dockerfile_uses_locked_target_arch_native_bindings() -> None:
     dockerfile = (ROOT / "deploy/Dockerfile.web").read_text()
 
     assert "ARG TARGETARCH" in dockerfile
-    assert "lightningcss-linux-arm64-gnu@1.32.0" in dockerfile
-    assert "lightningcss-linux-x64-gnu@1.32.0" in dockerfile
+    assert "RUN npm ci" in dockerfile
+    assert "npm install --no-save" not in dockerfile
     assert "@rolldown/binding-linux-arm64-gnu" in dockerfile
     assert "@rolldown/binding-linux-x64-gnu" in dockerfile
-    assert '"${rolldown_binding}@1.0.3"' in dockerfile
     assert "require('lightningcss')" in dockerfile
     assert "require('${rolldown_binding}')" in dockerfile
+
+    package_lock = json.loads((ROOT / "web/package-lock.json").read_text())
+    packages = package_lock["packages"]
+    for arch in ("arm64", "x64"):
+        binding = f"@rolldown/binding-linux-{arch}-gnu"
+        assert packages[f"node_modules/{binding}"]["version"] == packages["node_modules/rolldown"]["version"]
+        assert packages[f"node_modules/lightningcss-linux-{arch}-gnu"]["version"] == packages["node_modules/lightningcss"]["version"]

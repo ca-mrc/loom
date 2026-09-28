@@ -71,6 +71,7 @@ const runDetail = {
 function stagePage(start: number): {
   name: string;
   method: "GET";
+  count: number;
   path: string;
   response: { kind: "json"; status: 200; body: { items: FixtureStage[]; next_cursor: string | null } };
 } {
@@ -78,6 +79,7 @@ function stagePage(start: number): {
   const cursor = start === 0 ? "" : `cursor=stage-${start}&`;
   return {
     name: `StageRun page ${start / 200 + 1}`,
+    count: start === 0 ? 2 : 1,
     method: "GET",
     path: `/api/v1/pipeline-runs/${run.id}/stages?${cursor}limit=200`,
     response: {
@@ -96,11 +98,15 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   browserHarness,
   page,
 }) => {
+  const chunks = JSON.parse(readFileSync("dist/.vite/manifest.json", "utf8")) as Record<string, { file: string }>;
+  const scripts = new Set<string>();
+  page.on("request", request => scripts.add(new URL(request.url()).pathname));
   await apiHarness.install({
     role: "user",
     overrides: [
       {
         name: "1000-stage Pipeline detail",
+        count: 2,
         method: "GET",
         path: `/api/v1/pipeline-runs/${run.id}`,
         response: { kind: "json", status: 200, body: runDetail },
@@ -108,12 +114,14 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
       ...[0, 200, 400, 600, 800].map(stagePage),
       {
         name: "empty Artifact page",
+        count: 2,
         method: "GET",
         path: `/api/v1/pipeline-runs/${run.id}/artifacts?limit=100`,
         response: { kind: "json", status: 200, body: { items: [], next_cursor: null } },
       },
       {
         name: "terminal Pipeline event cursor",
+        count: 2,
         method: "GET",
         path: `/api/v1/pipeline-runs/${run.id}/events?after_seq=0&limit=500`,
         response: {
@@ -124,6 +132,7 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
       },
       {
         name: "selected Stage detail only",
+        count: 2,
         method: "GET",
         path: `/api/v1/pipeline-stage-runs/${String(lastStage.id)}`,
         response: {
@@ -143,6 +152,7 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
       },
       {
         name: "selected Stage Attempt list only",
+        count: 2,
         method: "GET",
         path: `/api/v1/pipeline-stage-runs/${String(lastStage.id)}/attempts`,
         response: { kind: "json", status: 200, body: { items: [] } },
@@ -183,4 +193,7 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
   await target.click();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
   expect(Date.now() - openedAt).toBeLessThanOrEqual(750);
+  expect(scripts.has(`${browserHarness.routePrefix}/${chunks["src/components/artifacts/BehaviorRolloutLivePreview.tsx"].file}`)).toBe(false);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
 });

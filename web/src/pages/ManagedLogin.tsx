@@ -23,7 +23,7 @@ export default function ManagedLogin(): JSX.Element {
   }
 
   return (
-    <main className="mx-auto my-16 max-w-lg space-y-4 px-4">
+    <div className="mx-auto my-16 max-w-lg space-y-4 px-4">
       <h1 className="text-2xl font-semibold">Personal environment login</h1>
       <p>This signs you into this environment only. Your management login stays separate.</p>
       {state === "ready" && (
@@ -37,6 +37,6 @@ export default function ManagedLogin(): JSX.Element {
       {state === "failed" && <p role="alert">
         Sign-in unavailable. Request a fresh browser login with <code>loom dev login ENVIRONMENT_ID --browser</code>.
       </p>}
-    </main>
+    </div>
   );
 }

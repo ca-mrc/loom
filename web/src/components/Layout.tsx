@@ -16,7 +16,7 @@ import { RouteRecoveryBoundary } from "./RouteRecoveryBoundary";
 import { SkipLink } from "./SkipLink";
 import { HelpProvider } from "./HelpProvider";
 import { HelpButton } from "./HelpButton";
-import { helpTopicForPath } from "../lib/helpContent";
+import { helpTopicForPath } from "../lib/helpTopicForPath";
 
 const SESSION_FAILURE_COPY = {
   network: "Loom could not reach the browser session service.",

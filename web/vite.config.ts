@@ -38,6 +38,12 @@ export default defineConfig(({ command }) => ({
   // `base: "./"` does not match `/api` proxy rules, so `/api/v1/auth/me`
   // 404s and the SPA shows "session service is temporarily unavailable".
   base: process.env.VITE_E2E_ROUTE_BASE ?? (command === "build" ? "./" : "/"),
+  build: {
+    manifest: true,
+    // The startup preload map contains every lazy dependency filename. Keep
+    // those URLs compact; the manifest retains source names for diagnostics.
+    rolldownOptions: { output: { chunkFileNames: "assets/[hash].js" } },
+  },
   server: {
     port: 5173,
     proxy: {

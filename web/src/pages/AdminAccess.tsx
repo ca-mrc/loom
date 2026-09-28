@@ -1,5 +1,6 @@
+import { Suspense } from "react";
+import { lazyRoute } from "../lib/lazyRoute";
 import { type InviteRole, type InviteStatus } from "../api";
-import AdminAuditLog from "../components/admin/AdminAuditLog";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
@@ -11,10 +12,12 @@ import { Tabs } from "../components/Tabs";
 import { downloadInviteLink, formatDate, statusClass } from "./adminAccessState";
 import { CliSetupCommands } from "./AdminCliSetup";
 
-import { AdminApiTokens } from "./AdminApiTokens";
-import { AdminTeams } from "./AdminTeams";
-import { AdminLegacyRegistrations } from "./AdminLegacyRegistrations";
 import { useAdminAccess } from "./useAdminAccess";
+
+const AdminAuditLog = lazyRoute(() => import("../components/admin/AdminAuditLog"));
+const AdminApiTokens = lazyRoute(async () => ({ default: (await import("./AdminApiTokens")).AdminApiTokens }));
+const AdminTeams = lazyRoute(async () => ({ default: (await import("./AdminTeams")).AdminTeams }));
+const AdminLegacyRegistrations = lazyRoute(async () => ({ default: (await import("./AdminLegacyRegistrations")).AdminLegacyRegistrations }));
 export default function AdminAccess(): JSX.Element {
   const state = useAdminAccess();
   const {
@@ -333,7 +336,7 @@ export default function AdminAccess(): JSX.Element {
         }
         panelClassName="space-y-6"
         renderPanel={() => (
-          <>
+          <Suspense fallback={<LoadingState label="Loading account section…" />}>
             {isAdmin && activeSection === "teams" ? <AdminTeams {...state} /> : null}
 
             {isAdmin && activeSection === "accounts" ? (
@@ -627,7 +630,7 @@ export default function AdminAccess(): JSX.Element {
             ) : null}
 
             {isAdmin && activeSection === "audit" ? <AdminAuditLog /> : null}
-          </>
+          </Suspense>
         )}
       />
       <DestructiveActionDialog

@@ -714,9 +714,10 @@ service pins `node:20.19.5-slim` and uses `npm ci` because
 `npm install` or a floating Node tag unless lockfile stability has
 been re-verified. The web package pins the Linux x64 and arm64
 Lightning CSS native optional packages at the root, and
-`deploy/Dockerfile.web` explicitly installs and validates the
-target-architecture binding after `npm ci` so Vite has the native module
-needed for both image platforms. Dev compose
+`deploy/Dockerfile.web` validates the target-architecture bindings installed
+by `npm ci` so Vite has the native modules needed for both image platforms.
+It does not run a second unlocked install, which would change the dependency
+graph after the lockfile-controlled installation. Dev compose
 host ports bind to
 `${LOOM_DEV_BIND_ADDR:-127.0.0.1}` by default; set
 `LOOM_DEV_BIND_ADDR=0.0.0.0` only for deliberate shared-dev exposure.

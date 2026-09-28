@@ -1,0 +1,200 @@
+{
+  "initial": {
+    "bytes": 247959,
+    "gzipBytes": 79886
+  },
+  "routes": {
+    "src/components/HelpDialog.tsx": {
+      "bytes": 14927,
+      "gzipBytes": 6499
+    },
+    "src/components/JsonTree.tsx": {
+      "bytes": 7885,
+      "gzipBytes": 2546
+    },
+    "src/components/VersionDetails.tsx": {
+      "bytes": 11306,
+      "gzipBytes": 4691
+    },
+    "src/components/admin/AdminAuditLog.tsx": {
+      "bytes": 27706,
+      "gzipBytes": 10425
+    },
+    "src/components/artifacts/BehaviorRolloutLivePreview.tsx": {
+      "bytes": 19914,
+      "gzipBytes": 6244
+    },
+    "src/components/artifacts/BehaviorRolloutViewer.tsx": {
+      "bytes": 25258,
+      "gzipBytes": 8202
+    },
+    "src/components/providers/DeleteConnectionModal.tsx": {
+      "bytes": 11152,
+      "gzipBytes": 5417
+    },
+    "src/components/providers/ModelsTab.tsx": {
+      "bytes": 41865,
+      "gzipBytes": 15108
+    },
+    "src/components/providers/ProviderForm.tsx": {
+      "bytes": 28599,
+      "gzipBytes": 9280
+    },
+    "src/components/providers/RotateKeyModal.tsx": {
+      "bytes": 11557,
+      "gzipBytes": 5648
+    },
+    "src/lib/taskSetManifestReview.ts": {
+      "bytes": 98074,
+      "gzipBytes": 30235
+    },
+    "src/pages/AdminAccess.tsx": {
+      "bytes": 66512,
+      "gzipBytes": 21787
+    },
+    "src/pages/AdminApiTokens.tsx": {
+      "bytes": 10733,
+      "gzipBytes": 4972
+    },
+    "src/pages/AdminLegacyRegistrations.tsx": {
+      "bytes": 9852,
+      "gzipBytes": 4722
+    },
+    "src/pages/AdminTeams.tsx": {
+      "bytes": 7368,
+      "gzipBytes": 3569
+    },
+    "src/pages/AuthLogin.tsx": {
+      "bytes": 28515,
+      "gzipBytes": 9805
+    },
+    "src/pages/BatchDetail.tsx": {
+      "bytes": 83569,
+      "gzipBytes": 30475
+    },
+    "src/pages/Benchmarks.tsx": {
+      "bytes": 28905,
+      "gzipBytes": 10736
+    },
+    "src/pages/GettingStarted.tsx": {
+      "bytes": 24613,
+      "gzipBytes": 9728
+    },
+    "src/pages/Home.tsx": {
+      "bytes": 15869,
+      "gzipBytes": 6089
+    },
+    "src/pages/InviteAccept.tsx": {
+      "bytes": 28782,
+      "gzipBytes": 10565
+    },
+    "src/pages/ManagedLogin.tsx": {
+      "bytes": 1931,
+      "gzipBytes": 1076
+    },
+    "src/pages/Monitor.tsx": {
+      "bytes": 43267,
+      "gzipBytes": 16082
+    },
+    "src/pages/MonitorBatches.tsx": {
+      "bytes": 34090,
+      "gzipBytes": 13691
+    },
+    "src/pages/MonitorCapacityDetails.tsx": {
+      "bytes": 38080,
+      "gzipBytes": 12832
+    },
+    "src/pages/MonitorTrials.tsx": {
+      "bytes": 41288,
+      "gzipBytes": 16338
+    },
+    "src/pages/NewBatch.tsx": {
+      "bytes": 99466,
+      "gzipBytes": 32120
+    },
+    "src/pages/NewBatchAdvancedFields.tsx": {
+      "bytes": 16797,
+      "gzipBytes": 4731
+    },
+    "src/pages/NotFound.tsx": {
+      "bytes": 548,
+      "gzipBytes": 340
+    },
+    "src/pages/PasswordAction.tsx": {
+      "bytes": 25779,
+      "gzipBytes": 9267
+    },
+    "src/pages/PipelineArtifactDetail.tsx": {
+      "bytes": 25944,
+      "gzipBytes": 8347
+    },
+    "src/pages/PipelineRunDetail.tsx": {
+      "bytes": 57225,
+      "gzipBytes": 20809
+    },
+    "src/pages/PipelineRuns.tsx": {
+      "bytes": 32959,
+      "gzipBytes": 12391
+    },
+    "src/pages/ProviderCreate.tsx": {
+      "bytes": 37798,
+      "gzipBytes": 12635
+    },
+    "src/pages/ProviderDetail.tsx": {
+      "bytes": 39374,
+      "gzipBytes": 14060
+    },
+    "src/pages/ProvidersList.tsx": {
+      "bytes": 24065,
+      "gzipBytes": 8421
+    },
+    "src/pages/RateCardsAdmin.tsx": {
+      "bytes": 42730,
+      "gzipBytes": 16641
+    },
+    "src/pages/RunLibrary.tsx": {
+      "bytes": 49493,
+      "gzipBytes": 17839
+    },
+    "src/pages/RunLibraryBatchDetail.tsx": {
+      "bytes": 69169,
+      "gzipBytes": 25453
+    },
+    "src/pages/Settings.tsx": {
+      "bytes": 42355,
+      "gzipBytes": 15680
+    },
+    "src/pages/TaskSetDetail.tsx": {
+      "bytes": 45852,
+      "gzipBytes": 17345
+    },
+    "src/pages/TaskSetSubmit.tsx": {
+      "bytes": 28102,
+      "gzipBytes": 9405
+    },
+    "src/pages/TaskSetsList.tsx": {
+      "bytes": 24399,
+      "gzipBytes": 8731
+    },
+    "src/pages/Tasks.tsx": {
+      "bytes": 61940,
+      "gzipBytes": 21539
+    },
+    "src/pages/TrialCompare.tsx": {
+      "bytes": 37966,
+      "gzipBytes": 14576
+    },
+    "src/pages/TrialDetail.tsx": {
+      "bytes": 74854,
+      "gzipBytes": 27744
+    },
+    "src/pages/UsageDashboard.tsx": {
+      "bytes": 42403,
+      "gzipBytes": 15546
+    },
+    "src/pages/newBatch/BatchExportDialog.tsx": {
+      "bytes": 12350,
+      "gzipBytes": 5783
+    }
+  }
+}
