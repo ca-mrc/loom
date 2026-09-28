@@ -213,9 +213,12 @@ async def test_loop_progresses_other_owner_and_shutdown_clears_health_and_drains
         await asyncio.wait_for(coordinator.entered.wait(), 2)
         second = await registry.create(principal=bob, idempotency_key='second', **prepare('bob', bob))
         async with asyncio.timeout(4):
-            while (await registry.get_operation(second.operation_id, principal=bob)).phase != 'running':
+            # Claim commits before the lifecycle starts. Wait for the actual
+            # second coroutine before asserting that shutdown drained both.
+            while second.operation_id not in {call[1].operation_id for call in coordinator.calls}:
                 await asyncio.sleep(0.05)
         assert worker.healthy
+        assert (await registry.get_operation(second.operation_id, principal=bob)).phase == 'running'
         assert (await registry.get_operation(first.operation_id, principal=alice)).phase == 'running'
     finally:
         task.cancel()
