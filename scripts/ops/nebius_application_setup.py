@@ -199,7 +199,7 @@ def application_setup_ready(*, request: ApplicationSetupRequest, phase: str,
                             api: ManagementStageAPI, state_dir: Path) -> bool:
     """Only recorded, unchanged admission and SQL Job observations count."""
     try:
-        if phase not in {'admission', 'database'}:
+        if phase not in {'admission', 'database', 'retirement'}:
             raise ManagementStageError('application setup phase has no readiness barrier')
         documents = _documents(request, phase)
         identity = {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(request.binding),

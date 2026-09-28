@@ -117,4 +117,4 @@ def test_retirement_fence_blocks_only_legacy_management_pod_creation(application
     assert policy['spec']['validations'] == [{'expression':
         "request.namespace != 'loom-nebius-management' || !has(object.spec.serviceAccountName) || "
         "object.spec.serviceAccountName != 'loom-management-provisioner'",
-        'message': 'legacy management process is retired'}]
+        'message': 'legacy management process is retired', 'reason': 'Forbidden'}]

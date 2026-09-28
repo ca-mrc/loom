@@ -754,6 +754,15 @@ retained SQL manager password for the setup Job, and the application's managemen
 cloud and shared SQL/CA/keyring bundles. It never generates new shared master keys,
 rotates existing credentials or overwrites bootstrap Secrets. Protected caller
 qualification of material provenance and actual cloud permissions remains required.
+The management cutover is a fixed UID/resource-version-conditioned update of the
+existing `loom-service` Deployment. It retains the original template, records each
+update intent before sending it, and reconciles uncertain replies without repeating
+the write. A narrowly scoped CREATE admission policy prevents delayed controller
+requests from starting `loom-management-provisioner` Pods in the management
+namespace. Retirement requires that actual denial, current zero controller
+replicas, and no remaining Pods, including terminating ones. The database and new
+application manager are not fenced. The new template is previewed and checked
+before activation; no automatic recovery restarts the legacy provisioner.
 These adapters are source/test coverage, not an installed upgrade: connecting the
 protected upgrade and qualifying the first personal HTTPS login remain outstanding.
 

@@ -63,7 +63,20 @@ def render_application_setup(deployment: ManagementDeployment, *, candidate: dic
     container['volumeMounts'] = [mount for mount in container['volumeMounts'] if mount['name'] == 'db-ca'] + [{
         'name': 'application-setup', 'mountPath': '/var/run/loom-application-setup', 'readOnly': True,
     }]
-    phases = {'admission': admission, 'permissions': permissions, 'network': network, 'database': [config, job]}
+    retirement_name = authority.name + '-legacy-pods'
+    retirement = [
+        {'apiVersion': 'admissionregistration.k8s.io/v1', 'kind': 'ValidatingAdmissionPolicy',
+            'metadata': {'name': retirement_name}, 'spec': {'failurePolicy': 'Fail',
+                'matchConstraints': {'resourceRules': [{'operations': ['CREATE'], 'apiGroups': [''],
+                    'apiVersions': ['v1'], 'resources': ['pods']}]},
+                'validations': [{'expression': f"request.namespace != '{deployment.namespace}' || "
+                    "!has(object.spec.serviceAccountName) || object.spec.serviceAccountName != 'loom-management-provisioner'",
+                    'message': 'legacy management process is retired', 'reason': 'Forbidden'}]}},
+        {'apiVersion': 'admissionregistration.k8s.io/v1', 'kind': 'ValidatingAdmissionPolicyBinding',
+            'metadata': {'name': retirement_name}, 'spec': {'policyName': retirement_name, 'validationActions': ['Deny']}},
+    ]
+    phases = {'admission': admission, 'permissions': permissions, 'network': network, 'database': [config, job],
+        'retirement': retirement}
     for phase in phases.values():
         for doc in phase:
             doc['metadata'].setdefault('labels', {})[APPLICATION_INSTALLATION_LABEL] = str(deployment.installation_id)

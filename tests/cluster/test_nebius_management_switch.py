@@ -34,6 +34,11 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
 @pytest.mark.timeout(240)
 def test_fixed_switch_retires_running_old_pods_and_preserves_deployment_uid(switch_inputs, tmp_path):
     from kubernetes import client
+    from scripts.ops.nebius_application_setup import (
+        HTTPSApplicationSetupAPI,
+        application_setup_ready,
+        stage_application_setup,
+    )
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_switch import (
         HTTPSManagementSwitchAPI,
@@ -95,6 +100,22 @@ def test_fixed_switch_retires_running_old_pods_and_preserves_deployment_uid(swit
         path = '/apis/apps/v1/namespaces/' + binding.namespace + '/deployments/loom-service'
         with httpx.Client(base_url=endpoint, verify=trust, trust_env=False, timeout=20) as observer:
             original = observer.get(path).raise_for_status().json()
+        # A CREATE fence also blocks delayed old-controller requests, without
+        # killing the already-running Pod or denying new-manager/database Pods.
+        with HTTPSApplicationSetupAPI(request=setup, phase='retirement', api_server=endpoint, ssl_context=trust) as api:
+            fence_args = dict(request=setup, phase='retirement', api=api, state_dir=tmp_path / 'fence')
+            stage_application_setup(**fence_args)
+            deadline = time.monotonic() + 20
+            while not application_setup_ready(**fence_args):
+                assert time.monotonic() < deadline, 'management retirement policy did not type-check'
+                time.sleep(0.1)
+        core.create_namespaced_service_account(binding.namespace, {'metadata': {'name': 'loom-application-provisioner'},
+            'automountServiceAccountToken': False})
+        for account in ('loom-application-provisioner', 'default'):
+            allowed = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'allowed-' + uuid4().hex},
+                'spec': copy.deepcopy(pod)}
+            allowed['spec']['serviceAccountName'] = account
+            assert core.create_namespaced_pod(binding.namespace, allowed, dry_run='All').metadata.uid
         request = ManagementSwitchRequest(setup=setup, original=original)
         with HTTPSManagementSwitchAPI(request=request, api_server=endpoint, ssl_context=trust) as api:
             args = dict(request=request, api=api, state_dir=tmp_path / 'switch')
