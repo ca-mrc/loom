@@ -15,6 +15,7 @@ from loom.nebius_kubernetes import (
     create_api_client,
 )
 from loom_execution_capacity_collector.contracts import (
+    CapacityTargetScopeV1,
     DaemonSetPlacement,
     KubernetesCapacitySnapshot,
     ManagedPodPlacement,
@@ -411,7 +412,7 @@ def _template_sample(
     )
 
 
-def _target_pod(pod: Any, *, namespace: str, target_id: str) -> bool:
+def _target_pod(pod: Any, *, namespace: str, target_id: str, target_scope: CapacityTargetScopeV1 | None = None) -> bool:
     metadata = pod.metadata
     labels = dict(getattr(metadata, "labels", None) or {})
     annotations = dict(getattr(metadata, "annotations", None) or {})
@@ -420,7 +421,7 @@ def _target_pod(pod: Any, *, namespace: str, target_id: str) -> bool:
         metadata.namespace == (namespace + "-build" if native else namespace)
         and (labels.get("app.kubernetes.io/managed-by") == _MANAGED_BY
              or labels.get("app.kubernetes.io/component") == "task-image-builder")
-        and annotations.get(_TARGET_ANNOTATION) == target_id
+        and annotations.get(_TARGET_ANNOTATION) in (target_scope.target_ids if target_scope else [target_id])
     )
 
 
@@ -543,7 +544,13 @@ class InClusterKubernetesCapacityReader:
         target_id: str,
         node_label_selector: str,
         pool: PoolPodClassifier | None = None,
+        target_scope: CapacityTargetScopeV1 | None = None,
     ) -> KubernetesCapacitySnapshot:
+        if target_scope is not None and (
+            pool is not None or target_scope.owner_target_id != target_id
+            or target_scope.namespace_name != namespace
+        ):
+            raise KubernetesObservationError("capacity target scope does not match collector identity")
         try:
             nodes, node_version = self._list_all(
                 self._core.list_node,
@@ -609,14 +616,15 @@ class InClusterKubernetesCapacityReader:
             if phase in {"Succeeded", "Failed"}:
                 continue
             node_name = getattr(pod.spec, "node_name", None) or None
-            target = (_target_pod(pod, namespace=namespace, target_id=target_id)
+            target = (_target_pod(pod, namespace=namespace, target_id=target_id, target_scope=target_scope)
                       if pool is None else pool.registered(pod))
             include_pending = target if pool is None else pool.includes_pending(pod)
             managed = (_managed_placement(pod) if target else None) if pool is None else pool.managed(pod)
             if managed is not None:
-                if pool is not None and managed.lease_id in observed_reservations:
+                reservation = managed.lease_id if pool is not None else f"{managed.lease_id}:{managed.generation}"
+                if (pool is not None or target_scope is not None) and reservation in observed_reservations:
                     raise KubernetesObservationError("multiple live Pods for one shared reservation")
-                observed_reservations.add(managed.lease_id)
+                observed_reservations.add(reservation)
                 managed_by_uid[managed.uid] = managed
             if target and node_name is not None and node_name not in node_names:
                 raise KubernetesObservationError(
@@ -720,12 +728,14 @@ class InClusterKubernetesCapacityReader:
         namespace: str,
         target_id: str,
         node_label_selector: str,
+        target_scope: CapacityTargetScopeV1 | None = None,
     ) -> KubernetesCapacitySnapshot:
         return await asyncio.to_thread(
             self._capture_sync,
             namespace=namespace,
             target_id=target_id,
             node_label_selector=node_label_selector,
+            target_scope=target_scope,
         )
 
     async def capture_pool(self, *, scope: PoolObservationScope) -> KubernetesCapacitySnapshot:
