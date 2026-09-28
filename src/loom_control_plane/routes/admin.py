@@ -33,6 +33,7 @@ from loom_control_plane.execution_capacity import (
     fetch_execution_capacity_status,
     upsert_execution_capacity_policy,
 )
+from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.execution_finance import (
     create_execution_price_snapshot,
     fetch_execution_finance_status,
@@ -1070,13 +1071,17 @@ async def get_execution_capacity_collector_policy(
     await _require_capacity_observer(request, authorization)
     async with request.app.state.session_factory() as session:
         target = await session.get(ServiceExecutionTarget, target_id)
+        if target is None or target.provider != "nebius" or target.logical_pool_id != pool_id:
+            raise HTTPException(status_code=404, detail="capacity policy target is unavailable")
+        group = await resolve_capacity_targets(session, target_id)
+        if group.owner.id != target_id:
+            raise HTTPException(status_code=409, detail="capacity collector requires the capacity owner target")
         policy = await session.get(ExecutionCapacityPolicy, target_id)
-    if target is None or target.provider != "nebius" or target.logical_pool_id != pool_id:
-        raise HTTPException(status_code=404, detail="capacity policy target is unavailable")
     if policy is None:
         raise HTTPException(status_code=409, detail="capacity policy is unavailable")
     return {
         "target_id": target.id,
+        **({"target_scope": group.scope.model_dump(mode="json")} if group.scope is not None else {}),
         "pool_id": target.logical_pool_id,
         "enabled": policy.enabled,
         "max_nodes": policy.max_nodes,

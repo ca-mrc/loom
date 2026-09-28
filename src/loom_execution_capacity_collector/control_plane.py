@@ -133,6 +133,7 @@ class CapacityControlPlaneClient:
         try:
             return CapacityPolicyBinding(
                 target_id=target_id,
+                target_scope=payload.get("target_scope"),
                 pool_id=pool_id,
                 enabled=payload["enabled"],
                 max_nodes=payload["max_nodes"],

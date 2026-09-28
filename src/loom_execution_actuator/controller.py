@@ -14,6 +14,7 @@ from loom_control_plane.execution_capacity import (
     ExecutionProvisioningBlockedError,
     reserve_execution_provisioning,
 )
+from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.service_execution import (
     ClaimedExecutionCommand,
     ServiceExecutionConflict,
@@ -133,7 +134,8 @@ class ExecutionActuator:
         observation: KubernetesJobObservation,
     ) -> None:
         expected = (
-            observation.namespace == self._target.namespace
+            lease.target_id == self._target.target_id
+            and observation.namespace == self._target.namespace
             and observation.job_name == lease.job_name
             and observation.lease_id == str(lease.id)
             and observation.resource_generation == lease.resource_generation
@@ -530,6 +532,8 @@ class ExecutionActuator:
             KUBERNETES_API_ERRORS_TOTAL.labels(operation="list", status_class=status_class).inc()
             raise
         async with self._sessions() as session:
+            family = await resolve_capacity_targets(session, self._target.target_id)
+            sibling_ids = family.target_ids - {self._target.target_id}
             leases = (
                 (
                     await session.execute(
@@ -545,6 +549,11 @@ class ExecutionActuator:
                 session.expunge(lease)
         by_lease: dict[str, list[KubernetesJobObservation]] = defaultdict(list)
         for observation in inventory.observations:
+            # A family shares one namespace, not reconciliation authority. Each
+            # sibling alone diagnoses and deletes its own Jobs. Unknown target
+            # annotations remain drift; namespace equality is still required.
+            if observation.target_id in sibling_ids and observation.namespace == self._target.namespace:
+                continue
             by_lease[observation.lease_id].append(observation)
         leases_by_id = {str(lease.id): lease for lease in leases}
         drift = inventory.rejected_count

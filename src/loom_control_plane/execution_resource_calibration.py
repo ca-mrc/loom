@@ -11,7 +11,6 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
-    ExecutionCapacityObservation,
     ExecutionCapacityPolicy,
     ExecutionResourceCalibration,
     ExecutionResourceProfileBinding,
@@ -24,6 +23,8 @@ from loom.db.schema import (
 from loom.execution_contract import ExecutionClassV1
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
+from loom_control_plane.execution_capacity import _latest_observation
+from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 
 MIN_TRIAL_ATTEMPTS = 1_000
 MIN_EVIDENCE_DURATION_SECONDS = 14 * 24 * 60 * 60
@@ -557,22 +558,9 @@ async def fetch_execution_resource_profile_status(
             .scalars()
             .all()
         )
-        policy = await session.get(ExecutionCapacityPolicy, target.id)
-        observation = (
-            (
-                await session.execute(
-                    select(ExecutionCapacityObservation)
-                    .where(ExecutionCapacityObservation.target_id == target.id)
-                    .order_by(
-                        ExecutionCapacityObservation.observed_at.desc(),
-                        ExecutionCapacityObservation.id.desc(),
-                    )
-                    .limit(1)
-                )
-            )
-            .scalars()
-            .one_or_none()
-        )
+        group = await resolve_capacity_targets(session, target.id)
+        policy = await session.get(ExecutionCapacityPolicy, group.owner.id)
+        observation = await _latest_observation(session, group.owner.id)
         blockers: list[str] = []
         if binding is None or not binding.enabled:
             blockers.append("resource_profile_binding_unavailable")
@@ -587,10 +575,15 @@ async def fetch_execution_resource_profile_status(
         observation_fresh = bool(
             observation is not None
             and policy is not None
+            and group.matches_observation_scope(observation.observation_json)
             and observation.observed_at <= current_time + timedelta(seconds=60)
             and current_time
             <= observation.observed_at + timedelta(seconds=policy.observation_max_age_seconds)
         )
+        if group.owner.desired_state != "active":
+            blockers.append("resource_forecast_capacity_owner_not_active")
+        if observation is not None and not group.matches_observation_scope(observation.observation_json):
+            blockers.append("resource_forecast_capacity_target_scope_unavailable")
         if observation is not None and not observation_fresh:
             blockers.append("resource_forecast_capacity_observation_stale")
         if observation is not None:

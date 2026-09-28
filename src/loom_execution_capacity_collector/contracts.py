@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ResourceTotals(BaseModel):
@@ -92,11 +92,32 @@ class NodeGroupPlacement(BaseModel):
     raw_node: ResourceTotals
 
 
+class CapacityTargetScopeV1(BaseModel):
+    """Authoritative catalog membership captured with one physical inventory."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal["loom.execution-capacity-target-scope.v1"] = "loom.execution-capacity-target-scope.v1"
+    owner_target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    namespace_name: str = Field(pattern=r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")
+    target_ids: list[str] = Field(min_length=2, max_length=64)
+
+    @model_validator(mode="after")
+    def _exact_membership(self) -> CapacityTargetScopeV1:
+        import re
+
+        if (self.target_ids != sorted(set(self.target_ids)) or self.owner_target_id not in self.target_ids
+                or any(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", item) is None for item in self.target_ids)):
+            raise ValueError("capacity scope requires sorted unique target membership including its owner")
+        return self
+
+
 class CapacityPlacement(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     # Absent in historical observations or when no native builder is configured.
     build_concurrency_limit: int | None = Field(default=None, ge=1)
+    target_scope: CapacityTargetScopeV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     quota_resources: dict[Literal["nodes", "vcpu", "memory", "storage"], QuotaResource]
     node_group: NodeGroupPlacement
     nodes: list[NodePlacement]
@@ -121,6 +142,7 @@ class CapacityPolicyBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     target_id: str = Field(min_length=1, max_length=120)
+    target_scope: CapacityTargetScopeV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     pool_id: str = Field(min_length=1, max_length=120)
     enabled: bool
     max_nodes: int = Field(gt=0)
@@ -128,6 +150,12 @@ class CapacityPolicyBinding(BaseModel):
     node_memory_mib: int = Field(gt=0)
     node_storage_mib: int = Field(gt=0)
     version: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _scope_owner(self) -> CapacityPolicyBinding:
+        if self.target_scope is not None and self.target_scope.owner_target_id != self.target_id:
+            raise ValueError("capacity collector policy must bind the owner target")
+        return self
 
 
 class ProviderCapacitySnapshot(BaseModel):
