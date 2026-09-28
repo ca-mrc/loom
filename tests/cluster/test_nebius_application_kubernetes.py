@@ -32,10 +32,9 @@ from tests.integration.test_execution_actuator_k3s import (
     _load_client,
     _start_k3s,
 )
+from tests.integration.test_nebius_application_credentials import database_access as database_access
 from tests.integration.test_nebius_application_credentials import setup as credential_setup
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
-from tests.integration.test_nebius_application_database import access_postgres as access_postgres
-from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_effects import started
 from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_operations import applications as applications

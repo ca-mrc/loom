@@ -534,6 +534,29 @@ generation's material. `AsyncApplicationDatabaseAccess` keeps synchronous SQL of
 the heartbeat loop using private, bounded autocommit connections. The protected
 caller must qualify the manager's database/TLS route; construction grants nothing.
 
+After the durable SQL grant, `ApplicationOwnerProjection` reads the current
+management User, Team and real membership under the operation lease. Owning a
+deployment or having submit scope does not confer team-owner authority. The
+bounded shared-side `enroll_principal` routine initializes missing identities with
+the source UUIDs and actual owner/member/viewer role; it never copies passwords,
+email or platform-admin authority. Existing enabled ordinary shared identities
+retain their profiles, credentials and actual shared membership role. Disabled or
+privileged shared identities are refused, never re-enabled or downgraded.
+
+Retained private identity and application-enrollment records prevent replay from
+recreating deleted users/teams, including through another application/team.
+Missing membership between existing identities fails closed; it may represent an
+administrator's removal. A new membership can be initialized only while creating
+a genuinely new user or team. These short SQL transactions share the schema fence
+and require the exact live application/access generation; they grant no direct
+manager table access. Personal stop never deletes shared identities or provenance.
+The installer validates retained table/routine structure rather than overwriting
+partial or drifted installations. Source eligibility and the lease are rechecked
+after external enrollment and group grants before returning deliverable material.
+Failure retains generation material/reservation and does not open Pod admission.
+Enrollment is not a login token: login and active readiness must still recheck
+current authorization and origin/generation-bound session requirements.
+
 Credential delivery uses three immutable, generation-named Kubernetes Secrets in
 the already-observed personal namespace. The existing effect journal stores only
 request hashes and object identities, not Secret values; a lost response reconciles
@@ -544,8 +567,8 @@ Database retirement commits revocation before draining existing sessions. It nee
 the same data/application identity but not a still-deliverable CA/keyring, so
 expired delivery material cannot itself prevent revocation. SQL cancellation may
 leave an in-flight request; monotonic shared-side tombstones fence late grants.
-This SQL step does not retire cloud access or Pods, prove S3 denial, enroll shared
-users, coordinate migrations, mark readiness or release platform reservations.
+This SQL step does not retire cloud access or Pods, prove S3 denial, coordinate
+migrations, mark readiness or release platform reservations.
 
 Cloud retirement separately reconciles prior-generation grants and deletes exact
 owned memberships, keys and accounts in dependency order. Prepared predecessor

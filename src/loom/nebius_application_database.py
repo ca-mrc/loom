@@ -384,6 +384,9 @@ def install_application_database_access(
                 if connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace=pg_catalog.to_regnamespace(%s) AND proname=%s", (_SCHEMA, name)).fetchall() != [(body, True, ["search_path=pg_catalog, pg_temp"])]:
                     raise ApplicationDatabaseAccessError("application_database_installation_drift")
             _install_schema_grant(connection, manager_role, fresh=namespace == (None,))
+            from loom.nebius_application_identity import _install_identity
+
+            _install_identity(connection, manager_role)
             connection.execute(sql.SQL("DO {} ").format(sql.Literal("BEGIN " + _PUBLIC_SAFE + " END")))
             connection.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}; GRANT USAGE ON SCHEMA public TO {}").format(
                 sql.Identifier(connection.info.dbname), sql.Identifier(runtime), sql.Identifier(runtime)))
