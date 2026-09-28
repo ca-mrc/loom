@@ -44,19 +44,20 @@ def test_node_share_preserves_minima_and_reserves_every_resident_role(node_cpu, 
     ))
     assert resolved.task_resources.memory_mib == expected
     assert resolved.container_request("task-sandbox").memory_mib == expected
-    assert resolved.container_request("verifier-sandbox").memory_mib == expected
-    assert runtime_pod_resources(resolved).memory_mib == 1024 + 2 * expected
+    assert "verifier-sandbox" not in {item.role_name for item in resolved.sidecars}
+    assert resolved.resource_requests.verifier_sandbox is None
+    assert runtime_pod_resources(resolved).memory_mib == 1024 + expected
     validate_runtime_plan_requirements(resolved, workload_requirements_from_task(task))
     assert plan.canonical_payload() == frozen
     assert ExecutionRuntimePlanV1.model_validate(resolved.canonical_payload()) == resolved
-    assert resource_allocation_summary(resolved)["pod_requests"]["memory_mib"] == 1024 + 2 * expected
+    assert resource_allocation_summary(resolved)["pod_requests"]["memory_mib"] == 1024 + expected
 
 
 def test_large_task_cannot_be_shrunk_to_fit_and_memory_cannot_be_underreserved():
     _, plan = _plan(12 * 1024)
     with pytest.raises(ValueError, match="exceeds_node_allocatable"):
         allocate_node_resources(plan, target_id="small", usable_node=ContainerResourcesV1(
-            cpu_millis=16_000, memory_mib=24 * 1024, ephemeral_storage_mib=512 * 1024,
+            cpu_millis=16_000, memory_mib=12 * 1024, ephemeral_storage_mib=512 * 1024,
         ))
     resolved = allocate_node_resources(plan, target_id="large", usable_node=ContainerResourcesV1(
         cpu_millis=16_000, memory_mib=240 * 1024, ephemeral_storage_mib=512 * 1024,
@@ -111,7 +112,7 @@ def test_renderer_uses_the_frozen_allocation_for_every_container():
     ))
     pod = manifest["spec"]["template"]["spec"]
     containers = {c["name"]: c for c in pod["containers"] + pod["initContainers"]}
-    for role in ("task-sandbox", "verifier-sandbox"):
+    for role in ("task-sandbox",):
         assert containers[role]["resources"]["requests"]["memory"] == "7168Mi"
         assert containers[role]["resources"]["limits"]["memory"] == "7168Mi"
     assert containers["execution"]["resources"]["requests"]["memory"] == "1024Mi"
