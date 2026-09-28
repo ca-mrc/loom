@@ -12,6 +12,7 @@ import json
 import math
 import os
 import shlex
+import shutil
 import signal
 import sys
 import tomllib
@@ -341,6 +342,19 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         loop.remove_signal_handler(signal.SIGTERM)
 
 
+def stage_committed_workspace_archive(workspace: Path) -> Path:
+    """Place the durable agent archive where the verifier sandbox import reads it."""
+    target = workspace / ".loom/workspace.tar"
+    if target.is_file():
+        return target
+    committed = workspace / "artifacts" / "workspace.tar"
+    if not committed.is_file():
+        raise ServiceExecutionTaskError("verifier handoff archive is missing")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(committed, target)
+    return target
+
+
 async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
@@ -380,7 +394,7 @@ async def _run_verifier(
             excluded_paths=(".loom/**",),
         )
         if not in_place:
-            archive = workspace / ".loom/workspace.tar"
+            archive = stage_committed_workspace_archive(workspace)
             # The archive was validated by the agent phase before durable capture;
             # it stays in the private controller workspace between phases.
             if task.environment.workspace_reference_files:
