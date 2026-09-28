@@ -402,6 +402,22 @@ installation. Upgrading a legacy unqualified installation requires the dedicated
 manager to be `NOLOGIN` with no sessions; the installer neither kills sessions nor
 re-enables the manager. Existing binding and routine drift is never overwritten.
 
+Online Alembic runs hold the matching exclusive **session** lock on their own
+direct PostgreSQL connection, including across migration commits, and physically
+close that connection on exit. A changed revision or purge is refused while any
+personal generation remains unretired or a tracked login has a backend. Exact-head
+no-op commands and read-only diagnostics remain possible. The guard checks the
+complete Alembic migration plan, not only the first requested target; version-table
+purge or recreation is checked before Alembic's plan callback. The database owner uses
+a bounded, read-only `migration_ready()` routine, not access to private credential
+records. A legacy installation without that routine must be upgraded before a
+schema change. Lock contention and stale transaction isolation fail closed.
+
+This admission boundary is not a process-retirement proof: the protected rollout
+still coordinates the full personal stop lifecycle, shared/background services,
+compatible candidates and reapplication of runtime grants before reopening access.
+Personal deployment and rollback never migrate the shared database themselves.
+
 Each application incarnation/access generation gets a separate ordinary login.
 PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
 and `ADMIN FALSE`; the login cannot assume the common runtime role. The common

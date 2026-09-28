@@ -252,6 +252,15 @@ BEGIN
 END
 """
 
+_MIGRATION_READY = """
+BEGIN
+    PERFORM pg_catalog.pg_stat_clear_snapshot();
+    RETURN NOT EXISTS (SELECT 1 FROM loom_application_access.generations WHERE NOT retired)
+       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity a
+           JOIN loom_application_access.generations g ON g.role_oid=a.usesysid);
+END
+"""
+
 
 def _install_schema_grant(connection: psycopg.Connection[Any], manager_role: str, *, fresh: bool) -> None:
     observed = connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace='loom_application_access'::regnamespace AND proname='grant_access_at_schema'").fetchall()
@@ -266,8 +275,17 @@ def _install_schema_grant(connection: psycopg.Connection[Any], manager_role: str
         connection.execute(sql.SQL("CREATE FUNCTION loom_application_access.grant_access_at_schema(p_data uuid,p_app uuid,p_incarnation uuid,p_generation bigint,p_password text,p_schema text) RETURNS text LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS {}").format(sql.Literal(_SCHEMA_GRANT)))
     elif observed != [(_SCHEMA_GRANT, True, ["search_path=pg_catalog, pg_temp"])]:
         raise ApplicationDatabaseAccessError("application_database_installation_drift")
+    readiness = connection.execute("SELECT prosrc,prosecdef,proconfig FROM pg_catalog.pg_proc WHERE pronamespace='loom_application_access'::regnamespace AND proname='migration_ready'").fetchall()
+    if not readiness:
+        connection.execute(sql.SQL("CREATE FUNCTION loom_application_access.migration_ready() RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS {}").format(sql.Literal(_MIGRATION_READY)))
+    elif readiness != [(_MIGRATION_READY, True, ["search_path=pg_catalog, pg_temp"])]:
+        raise ApplicationDatabaseAccessError("application_database_installation_drift")
     connection.execute("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM PUBLIC")
     connection.execute(sql.SQL("REVOKE ALL ON ALL FUNCTIONS IN SCHEMA loom_application_access FROM {}").format(sql.Identifier(manager_role)))
+    owner = connection.execute("SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_catalog.pg_database WHERE datname=current_database()").fetchone()
+    assert owner is not None
+    connection.execute(sql.SQL("GRANT USAGE ON SCHEMA loom_application_access TO {}; GRANT EXECUTE ON FUNCTION loom_application_access.migration_ready() TO {}").format(
+        sql.Identifier(owner[0]), sql.Identifier(owner[0])))
     for name, arguments in (("grant_access_at_schema", "uuid,uuid,uuid,bigint,text,text"),
                             ("revoke_access", "uuid,uuid,uuid,bigint"),
                             ("drain_access", "uuid,uuid,uuid,bigint")):
