@@ -385,6 +385,34 @@ def test_retirement_cannot_name_the_destination_or_fresh_install(rendered, monke
     assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
 
 
+@pytest.mark.parametrize("change", ["remove-guest", "rename-guest", "replace-owner"])
+def test_guest_target_replacement_requires_separate_retirement_protocol(rendered, change):
+    _, config, _, _ = rendered
+    previous = {**config, "guest_execution_target": {"target_id": "guest-original"}}
+    proposed = {**previous}
+    retire = None
+    if change == "remove-guest":
+        proposed.pop("guest_execution_target")
+    elif change == "rename-guest":
+        proposed["guest_execution_target"] = {"target_id": "guest-replacement"}
+    else:
+        proposed["target_id"] = "owner-replacement"
+        retire = previous["target_id"]
+    with pytest.raises(deploy.DeploymentError, match="guest"):
+        deploy.validate_target_replacement(
+            {"data": {"environment.json": json.dumps(previous)}}, proposed, retire,
+        )
+
+
+def test_guest_target_can_be_added_and_retained_without_replacing_owner(rendered):
+    _, config, _, _ = rendered
+    proposed = {**config, "guest_execution_target": {"target_id": "guest-original"}}
+    for previous in (config, proposed):
+        deploy.validate_target_replacement(
+            {"data": {"environment.json": json.dumps(previous)}}, proposed, None,
+        )
+
+
 @pytest.mark.parametrize("changed", ["target_id", "execution_namespace", "region"])
 def test_target_replacement_rechecks_its_source_after_lock(rendered, monkeypatch, changed):
     args, config, _, files = rendered

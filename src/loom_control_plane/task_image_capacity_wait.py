@@ -15,6 +15,7 @@ from loom.db.schema import (
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
 )
+from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
 from loom_control_plane.task_image_materializations import has_nebius_task_image_demand
 from loom_execution_capacity_collector.contracts import CapacityPlacement, ResourceTotals
 
@@ -32,10 +33,13 @@ async def _realizable(
     from loom_control_plane.execution_capacity import _latest_observation, native_allocatable_sample
 
     target = await session.get(ServiceExecutionTarget, target_id)
-    policy = await session.get(ExecutionCapacityPolicy, target_id)
     if (target is None or target.provider != "nebius" or target.desired_state != "active"
             or target.logical_pool_id != pool_id
-            or target.health_status != "healthy" or policy is None or not policy.enabled):
+            or target.health_status != "healthy"):
+        return False
+    group = await resolve_capacity_targets(session, target_id)
+    policy = await session.get(ExecutionCapacityPolicy, group.owner.id)
+    if group.owner.desired_state != "active" or policy is None or not policy.enabled:
         return False
     if any(value > limit for value, limit in (
         (resources.cpu_millis, policy.node_cpu_millis),
@@ -43,9 +47,10 @@ async def _realizable(
         (resources.storage_mib, policy.node_storage_mib),
     )):
         return False
-    observed = await _latest_observation(session, target_id)
+    observed = await _latest_observation(session, group.owner.id)
     if (observed is None or observed.observed_at > now + timedelta(seconds=60)
             or observed.observed_at + timedelta(seconds=policy.observation_max_age_seconds) < now
+            or not group.matches_observation_scope(observed.observation_json)
             or not observed.observation_json.get("placement")):
         return False
     placement = CapacityPlacement.model_validate(observed.observation_json["placement"])
@@ -62,7 +67,7 @@ async def _realizable(
            for key, value in (("nodes", 1), ("vcpu", raw.cpu_millis),
                               ("memory", raw.memory_mib), ("storage", raw.storage_mib))):
         return False
-    sample = await native_allocatable_sample(session, target_id, placement)
+    sample = await native_allocatable_sample(session, group.owner.id, placement)
     # Existing Ready nodes need no cold-template proof. Only observed managed
     # work is considered drainable; retain foreign/DaemonSet resource and slot
     # occupancy. This is waiting eligibility, never permission to release the

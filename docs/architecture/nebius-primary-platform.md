@@ -1257,6 +1257,14 @@ gateway are integrated and qualified together.
 
 ## Native task-image capacity fairness
 
+An explicitly registered guest capacity alias shares its ordinary target's
+physical admission family. The ordinary collector captures both target IDs from
+the control plane's catalog scope; it also retains the owner's build namespace.
+This same-environment family is separate from the protected managed-environment
+`capture_pool` registry above. See the
+[target binding contract](nebius-service-execution.md#provider-neutral-contracts)
+for independent health/intent and observation membership fencing.
+
 Native build and trial admission share the existing capacity transaction lock,
 placement model and provider quota identities. A lock alone does not prevent a
 new trial from overtaking a builder whose capacity reservation was rejected.
