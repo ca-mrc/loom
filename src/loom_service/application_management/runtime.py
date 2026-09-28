@@ -159,20 +159,43 @@ class ApplicationRuntimeProvider:
             raise ProviderWaitingError("application_workloads_retirement_pending")
         return actual, recorded
 
+    async def ensure_namespace(self, lease: ApplicationLease) -> None:
+        """Bootstrap the retained personal namespace, never adopt or recreate it."""
+        await self._fence(lease)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        # Namespace identity is needed for every namespaced call, including the
+        # fence. A lost bootstrap reply must be observed before using that gate.
+        # This never dispatches a predecessor's unsent bootstrap request.
+        for effect in await self.registry.effect_history(lease):
+            if effect.intent.kind != "Namespace":
+                continue
+            if effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key,
+                    document=await self._request_document(lease, effect))
+            elif effect.phase == "prepared" and effect.operation_id == lease.operation_id:
+                await self.kubernetes.create(lease, effect.key, await self._request_document(lease, effect))
+        actual = await self.kubernetes._read("/api/v1/namespaces/" + namespace)
+        history = [item for item in await self.registry.effect_history(lease) if item.intent.kind == "Namespace"]
+        if any(item.phase == "observed" for item in history):
+            await self.kubernetes._namespace(lease, "Pod", namespace)
+            return
+        if any(item.phase == "dispatched" or (item.phase == "prepared" and item.operation_id == lease.operation_id)
+               for item in history):
+            raise ProviderWaitingError("application_namespace_pending")
+        if actual is not None:
+            raise ProviderBlockedError("application_namespace_identity_conflict")
+        document = next(doc for docs in plan["files"].values() for doc in docs if doc["kind"] == "Namespace")
+        await self.kubernetes.create(lease, "namespace:create", document)
+        await self.kubernetes._namespace(lease, "Pod", namespace)
+
     async def stop_workloads(self, lease: ApplicationLease) -> None:
         """Fence admission, retire routes and prove personal processes have exited.
 
         Shared data, access revocation and reservation accounting are deliberately
         not changed here. Even foreign/terminating Pods retain the retirement gate.
         """
-        await self._fence(lease)  # Qualify installation before any resumed mutation.
-        # Namespace identity is needed for every namespaced call, including the
-        # fence. A lost bootstrap reply must be observed before using that gate.
-        # This never dispatches a predecessor's unsent bootstrap request.
-        for effect in await self.registry.effect_history(lease):
-            if effect.intent.kind == "Namespace" and effect.phase == "dispatched":
-                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key,
-                    document=await self._request_document(lease, effect))
+        await self.ensure_namespace(lease)
         await self._resume_retirement(lease)
         await self.close_admission(lease)
         for effect in await self.registry.effect_history(lease):

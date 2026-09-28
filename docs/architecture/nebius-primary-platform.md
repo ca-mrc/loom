@@ -193,6 +193,12 @@ must match, and the quota controller's status must acknowledge `pods: 0` before
 the call returns. Definitive patch conflicts wait for new preconditions; uncertain
 writes are never resent. Closing admission alone does not prove process shutdown.
 
+`ensure_namespace` reconciles lost bootstrap replies and resumes only current
+prepared creation intent. An early stop with no dispatched Namespace request can
+create the empty retained personal namespace under its current operation, so
+retirement uses the same quota path. An existing unrecorded namespace is never
+adopted, and a disappeared observed namespace is never recreated.
+
 `stop_workloads` then removes exact journal-owned personal Ingress/Service objects
 and scales retained Deployment names to zero. Requests use original frozen
 templates and UID/resourceVersion preconditions; a prepared request resumes its
