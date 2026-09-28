@@ -189,3 +189,33 @@ async def test_prepared_current_patch_survives_version_churn_before_dispatch(run
     assert api.mutations[-1][2][1] == {"op": "test", "path": "/metadata/resourceVersion", "value": "99"}
     assert [effect.phase for effect in (await registry.effect_history(current))[-2:]] == ["rejected", "observed"]
     assert len(api.mutations) == 4
+
+
+@pytest.mark.parametrize("lost_reply", [False, True])
+async def test_peer_fence_creation_during_read_is_not_a_permanent_identity_conflict(
+    runtime_context, monkeypatch, lost_reply,
+):
+    provider = runtime(runtime_context)
+    _, kubernetes, _, api, lease, _ = runtime_context
+    read = provider._read
+    first = True
+
+    async def peer_writes_before_read(current, namespace):
+        nonlocal first
+        if first:
+            first = False
+            api.lose_response = lost_reply
+            try:
+                await kubernetes.create(current, "pod-fence:create", await provider._fence(current))
+            except ProviderWaitingError:
+                assert lost_reply
+            api.lose_response = False
+            api.objects[FENCE_PATH]["status"] = {"hard": {"pods": "0"}}
+        return await read(current, namespace)
+
+    monkeypatch.setattr(provider, "_read", peer_writes_before_read)
+    if lost_reply:
+        with pytest.raises(ProviderWaitingError):
+            await provider.close_admission(lease)
+    await provider.close_admission(lease)
+    assert len(api.mutations) == 2
