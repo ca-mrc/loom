@@ -763,8 +763,8 @@ namespace. Retirement requires that actual denial, current zero controller
 replicas, and no remaining Pods, including terminating ones. The database and new
 application manager are not fenced. The new template is previewed and checked
 before activation; no automatic recovery restarts the legacy provisioner.
-These adapters are source/test coverage, not an installed upgrade: connecting the
-protected upgrade and qualifying the first personal HTTPS login remain outstanding.
+The protected entry connects these adapters, but source/test coverage is not an
+installed upgrade: the first personal HTTPS login still needs installed proof.
 
 `POST /applications/{id}/login` exchanges the owning management **user session**
 for a 90-second one-use proof, never a shared password or database credential.
@@ -1174,9 +1174,10 @@ management migration waits for the old process to stop. Only then may the new
 template activate. A resumed operation never retires the new process or
 automatically restarts the legacy worker. Public verification explicitly requires
 `application_provisioner` readiness and authenticated management routes; legacy or
-absent worker health is insufficient. The protected entry still needs to connect
-this upgrade to live shared-material/IAM and actual-subject qualification before
-it can establish installed personal-application readiness.
+absent worker health is insufficient. The protected entry connects the upgrade to
+live shared-material/IAM and actual-subject qualification. Running that protected
+upgrade and proving personal-application readiness remain installed acceptance,
+not results inferred from the connection's tests.
 
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
