@@ -252,6 +252,63 @@ def test_https_switch_rejects_foreign_snapshot_before_network(switch_inputs):
     assert not calls
 
 
+@pytest.mark.parametrize('action', ['retire', 'activate'])
+@pytest.mark.parametrize('rejection', ['kubernetes-422', 'malformed-422', 'server-503'])
+def test_https_precondition_rejection_allows_fresh_observation_only(switch_inputs, tmp_path, monkeypatch, action, rejection):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+    from scripts.ops.nebius_management_switch import MARKER, HTTPSManagementSwitchAPI
+
+    request, fake = switch_inputs
+    state = tmp_path / 'switch'
+    if action == 'activate':
+        retire(switch_inputs, state)
+    fake.processes = False
+    writes = []
+
+    def response(http):
+        if http.method == 'PATCH':
+            patch = json.loads(http.content)
+            desired = fake.desired(fake.document, action, patch[3]['value'][MARKER])
+            if http.url.params.get('dryRun') == 'All':
+                return httpx.Response(200, json=desired)
+            writes.append(patch)
+            if len(writes) == 1:
+                # A controller status update advances RV without changing spec.
+                fake.document['metadata']['resourceVersion'] = '20'
+                if rejection == 'malformed-422':
+                    return httpx.Response(422, text='unqualified proxy reply')
+                code, reason = (422, 'Invalid') if rejection == 'kubernetes-422' else (503, 'ServiceUnavailable')
+                return httpx.Response(code, json={'apiVersion': 'v1', 'kind': 'Status', 'metadata': {},
+                    'status': 'Failure', 'message': 'the server rejected our request due to an error in our request',
+                    'reason': reason, 'details': {}, 'code': code})
+            assert patch[1]['value'] == '20'
+            fake.document = desired
+            return httpx.Response(200, json=desired)
+        name = http.url.path.rsplit('/', 1)[1]
+        return httpx.Response(200, json=fake.document if name == 'loom-service' else namespace_response(request, name))
+
+    with HTTPSManagementSwitchAPI(request=request,
+            api_server=request.setup.deployment.installation.applications.runtime.kubernetes.endpoint,
+            ssl_context=ssl.create_default_context()) as api:
+        api.client.close()
+        api.client = httpx.Client(transport=httpx.MockTransport(response), base_url=api.api_server)
+        monkeypatch.setattr(api, 'retired', lambda: not fake.processes)
+        run = retire if action == 'retire' else activate
+        if rejection == 'kubernetes-422':
+            assert run((request, api), state) is False
+            assert len(writes) == 1
+            assert json.loads((state / 'switch.json').read_text())['phase'] == ('prepared' if action == 'retire' else 'stopped')
+            assert run((request, api), state) is True
+            assert len(writes) == 2
+            assert fake.document['spec']['replicas'] == (0 if action == 'retire' else 1)
+        else:
+            for _ in range(2):
+                with pytest.raises(ManagementStageError, match='unresolved'):
+                    run((request, api), state)
+            assert len(writes) == 1
+            assert json.loads((state / 'switch.json').read_text())['phase'] == action + '_intent'
+
+
 def test_switch_transport_does_not_expose_inherited_setup_writes(switch_inputs):
     from scripts.ops.nebius_management_stage import ManagementStageError
     from scripts.ops.nebius_management_switch import HTTPSManagementSwitchAPI
