@@ -35,10 +35,11 @@ class AsyncApplicationDatabaseAccess:
             with psycopg.connect(self._connection_url, autocommit=True, connect_timeout=10,
                                   options="-c statement_timeout=30000 -c lock_timeout=10000") as connection:
                 access = ApplicationDatabaseAccess(connection, self.data_environment_id)
-                if action == "grant":
+                if action in {"grant", "qualify"}:
                     assert password is not None and schema_revision is not None
-                    return access.grant(lease.application_id, lease.incarnation, generation, password,
-                                        schema_revision=schema_revision)
+                    method = access.grant if action == "grant" else access.qualify
+                    return method(lease.application_id, lease.incarnation, generation, password,
+                                  schema_revision=schema_revision)
                 if action == "enroll":
                     assert principal is not None and schema_revision is not None
                     return ApplicationDatabaseIdentity(access).enroll(lease.application_id, lease.incarnation,
@@ -64,6 +65,12 @@ class AsyncApplicationDatabaseAccess:
 
     async def revoke(self, lease: ApplicationLease, through_generation: int) -> None:
         await asyncio.to_thread(self._call, "revoke", lease, through_generation)
+
+    async def qualify(self, lease: ApplicationLease, password: str, *, schema_revision: str) -> str:
+        value = await asyncio.to_thread(self._call, "qualify", lease, lease.access_generation, password, schema_revision)
+        if not isinstance(value, str):
+            raise ProviderBlockedError("application_database_result_invalid")
+        return value
 
     async def enroll(self, lease: ApplicationLease, principal: ApplicationPrincipalV1, *, schema_revision: str) -> str:
         value = await asyncio.to_thread(self._call, "enroll", lease, lease.access_generation,

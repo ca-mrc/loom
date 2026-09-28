@@ -583,6 +583,15 @@ with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
 
+Before startup, credential `qualify` requires retained material and the four
+already-observed current IAM grants. It reconciles their live identities without
+new cloud mutations, validates the protected CA/keyring and original object key,
+and requalifies schema, SQL login and actual shared membership under the current
+source/lease checks. Positive catalog checks require every individual runtime
+table/sequence privilege; missing grants are never repaired here. Qualification
+reuses bounded grant/enrollment replay, not a new administrative SQL interface.
+Its returned evidence contains identities and an access-key hash, not credentials.
+
 ### Closed-admission application preparation
 
 The runtime recovers the current operation's interrupted ServiceAccount,

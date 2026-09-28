@@ -11,6 +11,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
+from loom.nebius_application_identity import MembershipRole
 from loom_service.application_management.leases import ApplicationLease
 
 Identifier = Annotated[StrictStr, Field(pattern=r"^[A-Za-z0-9._:-]{1,256}$")]
@@ -52,6 +53,16 @@ class ApplicationSharedPolicyObservation(_Proof):
     name: Identifier
     uid: Identifier
     resource_version: Identifier
+
+
+class ApplicationAccessReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    schema_revision: Annotated[StrictStr, Field(pattern=r"^[a-zA-Z0-9_]{1,64}$")]
+    database_role: Identifier
+    user_id: UUID
+    team_id: UUID
+    membership_role: MembershipRole
+    access_key_sha256: Digest
 
 
 class ApplicationDeploymentRetirement(ApplicationResourceObservation):
