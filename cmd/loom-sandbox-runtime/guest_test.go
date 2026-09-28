@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"net/http"
+ "os"
+ "path/filepath"
 	"testing"
 	"time"
 
@@ -49,4 +51,17 @@ func TestGuestListenerRejectsAmbiguousTransport(t *testing.T) {
 	if _, err := sandboxListener("", nil); err == nil {
 		t.Fatal("accepted missing transport")
 	}
+}
+
+func TestGuestChannelDiscoveryUsesNamedPortRatherThanOrdinal(t *testing.T) {
+ root:=t.TempDir()
+ for _,port:=range []string{"vport0p0","vport1p4"} {
+  if err:=os.MkdirAll(filepath.Join(root,port),0755);err!=nil{t.Fatal(err)}
+  name:="unrelated";if port=="vport1p4" {name="loom.rpc"}
+  if err:=os.WriteFile(filepath.Join(root,port,"name"),[]byte(name+"\n"),0644);err!=nil {t.Fatal(err)}
+ }
+ path,err:=guestChannelDevice(root,"/dev")
+ if err!=nil || path!="/dev/vport1p4" {t.Fatalf("%q %v",path,err)}
+ if err:=os.WriteFile(filepath.Join(root,"vport0p0/name"),[]byte("loom.rpc\n"),0644);err!=nil{t.Fatal(err)}
+ if _,err:=guestChannelDevice(root,"/dev");err==nil {t.Fatal("accepted ambiguous RPC port")}
 }
