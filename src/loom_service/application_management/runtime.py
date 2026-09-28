@@ -68,6 +68,12 @@ class ApplicationRuntimeProvider:
             and annotations.get("loom.nebius/operation-id") == str(effect.operation_id)
             and annotations.get("loom.nebius/effect-key") == effect.key), None)
         if recorded is None:
+            if any(effect.phase == "dispatched" and effect.intent.action in {"create", "patch"}
+                   and annotations.get("loom.nebius/operation-id") == str(effect.operation_id)
+                   and annotations.get("loom.nebius/effect-key") == effect.key for effect in history):
+                # A peer has sent this request but not yet recorded readback.
+                # Next reconciliation verifies its digest/UID before adoption.
+                raise ProviderWaitingError("application_pod_fence_pending")
             raise ProviderBlockedError("application_pod_fence_conflict")
         expected = await self._fence(lease, operation_id=recorded.operation_id)
         spec = actual.get("spec", {})
@@ -102,8 +108,10 @@ class ApplicationRuntimeProvider:
                 original = (None if effect.intent.action == "delete"
                             else await self._fence(lease, operation_id=effect.operation_id))
                 await self.kubernetes.reconcile(lease, effect.operation_id, effect.key, document=original)
-        history = await self._history(lease)
         actual = await self._read(lease, namespace)
+        # A peer can create/observe the quota while this caller awaits the API.
+        # Judge the returned object against a post-read journal snapshot.
+        history = await self._history(lease)
         if actual is None:
             retired = {effect.observed_uid for effect in history
                        if effect.phase == "observed" and effect.intent.action == "delete"}
