@@ -181,6 +181,13 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
                     raise ManagementError("application_effect_conflict")
                 return _view(existing)
             opening = await _activation_effect(session, lease.operation_id)
+            if key.startswith("start:"):
+                if (parsed.kind not in {"Deployment", "Service", "Ingress"}
+                        or parsed.action not in {"create", "patch"}
+                        or operation.plan_json["registration"]["desired_state"] != "active"):
+                    raise ManagementError("invalid_application_effect", 422)
+                if opening is None or opening.phase != "observed":
+                    raise ManagementError("application_activation_pending")
             if opening is not None and (
                 key.startswith("retire:") or (parsed.kind == "ResourceQuota" and not activation)
                 or (parsed.kind in {"ServiceAccount", "NetworkPolicy", "Secret"} and parsed.action in {"create", "patch"})

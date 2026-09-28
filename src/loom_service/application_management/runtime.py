@@ -29,11 +29,13 @@ from loom_service.application_management.kubernetes import (
 )
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.application_management.proofs import (
+    ApplicationDeploymentReadiness,
     ApplicationDeploymentRetirement,
     ApplicationPreparationReadiness,
     ApplicationResourceObservation,
     ApplicationRetirementIdentity,
     ApplicationSharedPolicyObservation,
+    ApplicationWorkloadReadiness,
     ApplicationWorkloadRetirement,
 )
 from loom_service.application_management.registry import ApplicationRegistry
@@ -678,3 +680,116 @@ class ApplicationRuntimeProvider:
             raise ProviderBlockedError("application_pod_fence_conflict")
         await self.registry.frozen_plan(lease)
         return effect
+
+    async def _activated(self, lease: ApplicationLease) -> ApplicationEffect:
+        effect = await self.activation_effect(lease)
+        if effect is None or effect.phase != "observed":
+            raise ProviderWaitingError("application_activation_pending")
+        plan = await self.registry.frozen_plan(lease)
+        if await self._read(lease, plan["registration"]["application_namespace"]) is not None:
+            raise ProviderBlockedError("application_pod_fence_conflict")
+        return effect
+
+    async def _start_resources(self, lease: ApplicationLease, kinds: set[str]) -> None:
+        await self._activated(lease)
+        for effect in await self.registry.effect_history(lease):
+            if effect.operation_id != lease.operation_id or effect.phase not in {"prepared", "dispatched"}:
+                continue
+            if not effect.key.startswith("start:") or effect.intent.kind not in kinds:
+                continue
+            document = await self._request_document(lease, effect)
+            if effect.phase == "dispatched":
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key, document=document)
+                continue
+            try:
+                if effect.intent.action == "create":
+                    await self.kubernetes.create(lease, effect.key, document)
+                else:
+                    assert effect.intent.uid is not None and effect.intent.resource_version is not None
+                    await self.kubernetes.patch_spec(lease, effect.key, document,
+                        uid=effect.intent.uid, resource_version=effect.intent.resource_version)
+            except KubernetesEffectRejectedError:
+                raise ProviderWaitingError("application_workloads_start_pending") from None
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        for docs in plan["files"].values():
+            for doc in docs:
+                kind, name = doc["kind"], doc["metadata"]["name"]
+                if kind not in kinds:
+                    continue
+                actual, recorded = await self._workload(lease, kind, namespace, name)
+                try:
+                    if actual is None:
+                        await self.kubernetes.create(lease, f"start:create:{kind}:{name}", doc)
+                    elif recorded is not None and recorded.operation_id == lease.operation_id and recorded.key.startswith("start:"):
+                        continue  # _workload checked the current frozen document.
+                    elif kind == "Deployment" and actual["spec"]["replicas"] == 0:
+                        metadata = actual["metadata"]
+                        identity = ":".join((kind, name, metadata["uid"], metadata["resourceVersion"]))
+                        await self.kubernetes.patch_spec(lease, "start:patch:" + hashlib.sha256(identity.encode()).hexdigest(),
+                            doc, uid=metadata["uid"], resource_version=metadata["resourceVersion"])
+                    else:
+                        raise ProviderBlockedError("application_workload_identity_conflict")
+                except KubernetesEffectRejectedError:
+                    raise ProviderWaitingError("application_workloads_start_pending") from None
+
+    async def _ready_deployments(self, lease: ApplicationLease) -> tuple[ApplicationDeploymentReadiness, ...]:
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        results = []
+        for docs in plan["files"].values():
+            for doc in docs:
+                if doc["kind"] != "Deployment":
+                    continue
+                actual, recorded = await self._workload(lease, "Deployment", namespace, doc["metadata"]["name"])
+                if actual is None or recorded is None or recorded.operation_id != lease.operation_id or not recorded.key.startswith("start:"):
+                    raise ProviderWaitingError("application_workloads_readiness_pending")
+                generation, replicas = actual["metadata"].get("generation"), doc["spec"]["replicas"]
+                status = actual.get("status", {})
+                observed = status.get("observedGeneration")
+                if (type(generation) is not int or generation < 1 or type(observed) is not int or observed < generation
+                        or type(replicas) is not int or replicas < 1
+                        or any(type(status.get(key)) is not int or status[key] != replicas for key in (
+                            "replicas", "updatedReplicas", "readyReplicas", "availableReplicas"))
+                        or any(type(status.get(key, 0)) is not int or status.get(key, 0) != 0
+                               for key in ("unavailableReplicas", "terminatingReplicas"))):
+                    raise ProviderWaitingError("application_workloads_readiness_pending")
+                results.append(ApplicationDeploymentReadiness(**_observation(actual, recorded).model_dump(),
+                    generation=generation, observed_generation=observed, replicas=replicas))
+        return tuple(results)
+
+    async def start_workloads(self, lease: ApplicationLease) -> ApplicationWorkloadReadiness:
+        """Install frozen backends, wait for health, then publish their route."""
+        await self._start_resources(lease, {"Deployment", "Service"})
+        await self._ready_deployments(lease)
+        await self._start_resources(lease, {"Ingress"})
+        return await self.read_ready(lease)
+
+    async def read_ready(self, lease: ApplicationLease) -> ApplicationWorkloadReadiness:
+        """Live desired identity/template/controller proof, never a repair path."""
+        activation = await self._activated(lease)
+        deployments = await self._ready_deployments(lease)
+        plan = await self.registry.frozen_plan(lease)
+        namespace = plan["registration"]["application_namespace"]
+        services, ingress = [], None
+        for docs in plan["files"].values():
+            for doc in docs:
+                if doc["kind"] not in {"Service", "Ingress"}:
+                    continue
+                actual, recorded = await self._workload(lease, doc["kind"], namespace, doc["metadata"]["name"])
+                if actual is None or recorded is None or recorded.operation_id != lease.operation_id or not recorded.key.startswith("start:"):
+                    raise ProviderWaitingError("application_workloads_readiness_pending")
+                if doc["kind"] == "Service":
+                    services.append(_observation(actual, recorded))
+                else:
+                    ingress = _observation(actual, recorded)
+        actual_namespace = await self.kubernetes._namespace(lease, "Deployment", namespace)
+        assert actual_namespace is not None and ingress is not None and activation.observed_uid is not None
+        namespace_source = next(item for item in await self.registry.effect_history(lease)
+            if item.intent.kind == "Namespace" and item.intent.action == "create"
+            and item.phase == "observed" and item.observed_uid == actual_namespace["metadata"]["uid"])
+        await self._activated(lease)
+        return ApplicationWorkloadReadiness(
+            identity=ApplicationRetirementIdentity.for_lease(lease, UUID(plan["registration"]["data_environment_id"])),
+            namespace=_observation(actual_namespace, namespace_source), activation_key=activation.key,
+            retired_quota_uid=activation.observed_uid, deployments=deployments, services=tuple(services), ingress=ingress)

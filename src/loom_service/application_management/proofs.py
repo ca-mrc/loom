@@ -84,6 +84,20 @@ class ApplicationWorkloadRetirement(_Proof):
     deployments: tuple[ApplicationDeploymentRetirement, ...]
 
 
+class ApplicationDeploymentReadiness(ApplicationDeploymentRetirement):
+    replicas: Positive
+
+
+class ApplicationWorkloadReadiness(_Proof):
+    identity: ApplicationRetirementIdentity
+    namespace: ApplicationResourceObservation
+    activation_key: Identifier
+    retired_quota_uid: Identifier
+    deployments: tuple[ApplicationDeploymentReadiness, ...]
+    services: tuple[ApplicationResourceObservation, ...]
+    ingress: ApplicationResourceObservation
+
+
 class ApplicationDatabaseRetirement(_Proof):
     identity: ApplicationRetirementIdentity
     retired_through: Annotated[StrictInt, Field(ge=0)]
