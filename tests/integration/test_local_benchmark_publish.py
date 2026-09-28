@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -714,5 +715,98 @@ async def test_publish_without_profile_keeps_harbor_root_verifier(
                 "gateway-only"
             ]
             assert task.config["environment"].get("user") == "root"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("physical_profile", [False, True])
+async def test_adapter_publication_preserves_catalog_and_execution_contract(
+    postgres_url, tmp_path, monkeypatch, capsys, physical_profile,
+):
+    from loom_benchmarks.base import BenchmarkInstance, ConvertedTask, UpstreamSource
+
+    from loom.trial.workspace import TB21_AGENT_WORKSPACE_POLICY
+    from loom_cli import benchmark_prepare
+    from loom_cli.benchmark_publish import publish_benchmark
+    from loom_cli.datasets_cmd import dispatch
+
+    benchmark_id = "terminal-bench-2@tb2.1-r6" if physical_profile else "unified-adapter"
+    task_id = f"{benchmark_id}/HumanEval/0"
+
+    class Adapter:
+        name = benchmark_id
+        display_name = "Unified adapter fixture"
+        series = "test"
+        license_spdx = "MIT"
+        license_url = "https://example.test/license"
+        splits = ("test",)
+        upstream_source = UpstreamSource(kind="git", locator="https://example.test/upstream", revision="abc")
+        instruction = "original"
+
+        def list_instances(self, **kwargs):
+            yield BenchmarkInstance("HumanEval/0", "test", {}, {"language": "python"})
+
+        def convert_instance(self, instance, *, out_dir):
+            (out_dir / "task.toml").write_text(_TASK_TOML.format(tid=task_id))
+            (out_dir / "instruction.md").write_text(self.instruction)
+            script = out_dir / "verifier" / "run.sh"
+            script.parent.mkdir()
+            script.write_text("#!/bin/sh\nexit 0\n")
+            script.chmod(0o755)
+            return ConvertedTask(task_id, task_checksum(out_dir), "MIT", ())
+
+        def profile_provenance(self):
+            return {"workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY}
+
+        def task_source_provenance(self, **kwargs):
+            script = kwargs["bundle_dir"] / "verifier" / "run.sh"
+            return {
+                "workspace_staging_policy": TB21_AGENT_WORKSPACE_POLICY,
+                "verifier_asset": {
+                    "script_path": "/app/verifier/run.sh", "mode": "0755",
+                    "sha256": "sha256:" + hashlib.sha256(script.read_bytes()).hexdigest(),
+                },
+            }
+
+    adapter = Adapter()
+    monkeypatch.setitem(benchmark_prepare.REGISTRY, benchmark_id, adapter)
+    monkeypatch.setattr(benchmark_prepare, "_prepare_adapter_source", lambda **kw: tmp_path)
+    store = FakeObjectStore()
+    args = dict(benchmark=benchmark_id, cache_dir=tmp_path / "cache", db_url=postgres_url,
+                object_store=store, bucket="benchmark-test")
+    monkeypatch.setattr("loom.trajectory.storage.MinioObjectStore", lambda **kwargs: store)
+    monkeypatch.setenv("LOOM_DB_URL", postgres_url)
+    monkeypatch.setenv("LOOM_MINIO_ACCESS_KEY", "fixture-access")
+    monkeypatch.setenv("LOOM_MINIO_SECRET_KEY", "fixture-secret")
+    command = [
+        "publish", "--benchmark", benchmark_id, "--cache-dir", str(tmp_path / "cache"),
+        "--minio-endpoint", "https://example.test", "--bucket", "benchmark-test",
+    ]
+    assert await asyncio.to_thread(dispatch, command) == 0
+    assert "inserted=1" in capsys.readouterr().out
+    again = await publish_benchmark(**args)
+    assert again.unchanged == 1
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session:
+            task = await session.get(TaskRow, task_id)
+            benchmark = await session.get(Benchmark, benchmark_id)
+            assert task.config["task"]["id"] == task_id
+            assert task.tags["split"] == "test"
+            assert task.tags["language"] == "python"
+            assert task.source_provenance["workspace_staging_policy"] == TB21_AGENT_WORKSPACE_POLICY
+            assert task.source_provenance["service_execution_input"]
+            assert "/HumanEval/0/.loom-revisions-v2/" in task.source
+            assert benchmark.upstream_locator == adapter.upstream_source.locator
+            assert benchmark.upstream_revision == "abc"
+            assert benchmark.splits == ["test"]
+            if physical_profile:
+                assert benchmark.execution_state == "pending"
+        if physical_profile:
+            adapter.instruction = "changed"
+            assert await asyncio.to_thread(dispatch, command) == 1
+            assert "immutable TB2.1 physical profile drift" in capsys.readouterr().err
     finally:
         await engine.dispose()

@@ -11,9 +11,11 @@ import hashlib
 import json
 import re
 from typing import Any
+from uuid import UUID
 
 import httpx
 
+from loom.nebius_application_contract import ApplicationRegistrationV1
 from loom_service.application_management.effects import ApplicationEffect, ApplicationEffectJournal
 from loom_service.application_management.leases import ApplicationLease
 from loom_service.environment_management.kubernetes_provider import _contains
@@ -42,11 +44,11 @@ class ApplicationKubernetesProvider:
             raise ValueError("application Kubernetes endpoint must be an HTTPS origin")
         self.registry, self.http = registry, http
 
-    async def _namespace(self, lease: ApplicationLease, kind: str, namespace: str | None) -> None:
+    async def _namespace(self, lease: ApplicationLease, kind: str, namespace: str | None) -> dict[str, Any] | None:
         plan = await self.registry.frozen_plan(lease)
         name = plan["registration"]["application_namespace"]
         if kind == "Namespace" and namespace is None:
-            return
+            return None
         if namespace != name:
             raise ProviderBlockedError("application_namespace_identity_conflict")
         history = await self.registry.effect_history(lease)
@@ -69,8 +71,13 @@ class ApplicationKubernetesProvider:
                 or not _contains(actual, expected) or not _contains(actual, planned)):
             raise ProviderBlockedError("application_namespace_identity_conflict")
 
+        return actual
+
     @staticmethod
-    def _document(lease: ApplicationLease, key: str, document: dict[str, Any]) -> dict[str, Any]:
+    def _document(lease: ApplicationLease, key: str, document: dict[str, Any], *,
+                  operation_id: UUID | None = None, deployment_generation: int | None = None) -> dict[str, Any]:
+        # Historical identity is request data only; the current lease remains
+        # the sole authority for journal reads and observations.
         value = copy.deepcopy(document)
         metadata = value["metadata"]
         metadata.setdefault("labels", {}).update({
@@ -78,11 +85,65 @@ class ApplicationKubernetesProvider:
             "loom.nebius/incarnation": str(lease.incarnation),
         })
         metadata.setdefault("annotations", {}).update({
-            "loom.nebius/operation-id": str(lease.operation_id),
-            "loom.nebius/deployment-generation": str(lease.deployment_generation),
+            "loom.nebius/operation-id": str(operation_id or lease.operation_id),
+            "loom.nebius/deployment-generation": str(deployment_generation or lease.deployment_generation),
             "loom.nebius/effect-key": key,
         })
         return value
+
+    @staticmethod
+    def _digest(body: Any) -> str:
+        return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"),
+                                         allow_nan=False).encode()).hexdigest()
+
+    @staticmethod
+    def _patches(expected: dict[str, Any], uid: str, resource_version: str) -> list[dict[str, Any]]:
+        return [
+            {"op": "test", "path": "/metadata/uid", "value": uid},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
+            {"op": "replace", "path": "/spec", "value": expected["spec"]},
+            {"op": "add", "path": "/metadata/labels", "value": expected["metadata"]["labels"]},
+            {"op": "add", "path": "/metadata/annotations", "value": expected["metadata"]["annotations"]},
+        ]
+
+    async def _effect(self, lease: ApplicationLease, operation_id: UUID, key: str) -> ApplicationEffect:
+        history = await self.registry.effect_history(lease)
+        effect = next((item for item in history if item.operation_id == operation_id and item.key == key), None)
+        if effect is None:
+            raise ProviderBlockedError("application_kubernetes_effect_missing")
+        return effect
+
+    async def reconcile(self, lease: ApplicationLease, operation_id: UUID, key: str, *,
+                         document: dict[str, Any] | None = None) -> ApplicationEffect:
+        """Resolve an existing dispatch, including predecessors, without writes.
+
+        Terminal effects are immutable history, not a live readiness check.
+        Prepared effects were never sent and cannot be dispatched through here.
+        """
+        effect = await self._effect(lease, operation_id, key)
+        if effect.phase == "prepared":
+            raise ProviderWaitingError("application_kubernetes_not_dispatched")
+        if effect.phase in {"observed", "rejected"}:
+            return effect
+        parsed, expected = effect.intent, None
+        if parsed.action != "delete":
+            plan = await self.registry.frozen_plan(lease, operation_id=operation_id)
+            row = ApplicationRegistrationV1.model_validate(plan["registration"])
+            if document is None:
+                raise ProviderBlockedError("application_kubernetes_request_conflict")
+            try:
+                expected = self._document(lease, key, document, operation_id=operation_id,
+                                          deployment_generation=row.deployment_generation)
+                body: Any = expected
+                if parsed.action == "patch":
+                    assert parsed.uid is not None and parsed.resource_version is not None
+                    body = self._patches(expected, parsed.uid, parsed.resource_version)
+                if self._digest(body) != parsed.request_sha256:
+                    raise ValueError
+            except (ValueError, TypeError, KeyError, AttributeError):
+                raise ProviderBlockedError("application_kubernetes_request_conflict") from None
+        await self._namespace(lease, parsed.kind, parsed.namespace)
+        return await self._observe(lease, effect, expected)
 
     async def _request(self, method: str, path: str, body: Any = None) -> httpx.Response:
         try:
@@ -121,8 +182,7 @@ class ApplicationKubernetesProvider:
         # Namespace readback precedes preparation, so missing bootstrap identity
         # cannot consume the operation's one outstanding journal slot.
         await self._namespace(lease, intent["kind"], intent["namespace"])
-        intent = intent | {"request_sha256": hashlib.sha256(json.dumps(
-            body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()}
+        intent = intent | {"request_sha256": self._digest(body)}
         effect = await self.registry.prepare_effect(lease, key, intent)
         if effect.phase == "observed":
             return effect
@@ -142,7 +202,16 @@ class ApplicationKubernetesProvider:
             except KubernetesEffectRejectedError as exc:
                 await self.registry.reject_effect(lease, key, status_code=exc.status_code)
                 raise
+        return await self._observe(lease, effect, expected)
+
+    async def _observe(self, lease: ApplicationLease, effect: ApplicationEffect,
+                        expected: dict[str, Any] | None) -> ApplicationEffect:
         # A dispatched effect is NEVER resent, including an earlier timeout/404.
+        parsed = effect.intent
+        prefix = "/api/v1" if parsed.api_version == "v1" else "/apis/" + parsed.api_version
+        if parsed.namespace is not None:
+            prefix += "/namespaces/" + parsed.namespace
+        path = prefix + "/" + _RESOURCES[parsed.kind] + "/" + parsed.name
         actual = await self._read(path)
         if parsed.action == "delete":
             if actual is not None and actual.get("metadata", {}).get("uid") == parsed.uid:
@@ -160,18 +229,19 @@ class ApplicationKubernetesProvider:
         await self._namespace(lease, parsed.kind, parsed.namespace)
         assert uid is not None
         try:
-            await self.registry.observe_effect(lease, key, uid=uid, resource_version=resource_version)
+            await self.registry.observe_effect(lease, effect.key, uid=uid, resource_version=resource_version,
+                                                operation_id=effect.operation_id)
         except ManagementError as exc:
             if exc.code != "application_effect_observation_conflict":
                 raise
             # Another reconciler may have recorded the same successful object
             # before a controller changed only its RV. Preserve that immutable
             # historical observation; never replace it with our newer readback.
-            recorded = await self.registry.prepare_effect(lease, key, intent)
+            recorded = await self._effect(lease, effect.operation_id, effect.key)
             if recorded.phase != "observed" or recorded.observed_uid != uid:
                 raise
             return recorded
-        return await self.registry.prepare_effect(lease, key, intent)
+        return await self._effect(lease, effect.operation_id, effect.key)
 
     async def create(self, lease: ApplicationLease, key: str, document: dict[str, Any]) -> ApplicationEffect:
         expected = self._document(lease, key, document)
@@ -185,13 +255,7 @@ class ApplicationKubernetesProvider:
                          uid: str, resource_version: str) -> ApplicationEffect:
         expected = self._document(lease, key, document)
         metadata = expected["metadata"]
-        patches = [
-            {"op": "test", "path": "/metadata/uid", "value": uid},
-            {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
-            {"op": "replace", "path": "/spec", "value": expected["spec"]},
-            {"op": "add", "path": "/metadata/labels", "value": metadata["labels"]},
-            {"op": "add", "path": "/metadata/annotations", "value": metadata["annotations"]},
-        ]
+        patches = self._patches(expected, uid, resource_version)
         return await self._apply(lease, key, {
             "api_version": expected["apiVersion"], "kind": expected["kind"], "action": "patch",
             "namespace": metadata.get("namespace"), "name": metadata["name"],

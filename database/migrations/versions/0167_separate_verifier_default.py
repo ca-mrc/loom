@@ -1,7 +1,7 @@
 """Keep historical shared verifier rows on the snapshot path.
 
-Revision ID: 0163
-Revises: 0162
+Revision ID: 0167
+Revises: 0166
 
 Ingest used to store env_mode=shared while grading in a second sandbox.
 shared now means in-place grading, so those rows become separate.
@@ -9,8 +9,8 @@ shared now means in-place grading, so those rows become separate.
 
 from alembic import op
 
-revision = "0163"
-down_revision = "0162"
+revision = "0167"
+down_revision = "0166"
 branch_labels = None
 depends_on = None
 

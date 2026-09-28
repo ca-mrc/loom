@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 
 from loom.db.schema import (
     Batch,
+    ProviderConnection,
     Task,
     TaskSet,
     Team,
@@ -35,6 +36,7 @@ from loom.db.schema import (
 from loom_service import agent_catalog
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
+from tests.integration.test_service_batches_crud import _seed_connection
 
 
 @pytest.fixture
@@ -176,6 +178,7 @@ async def fwd_setup(
             s.execute(delete(TaskSet))
             s.execute(delete(TeamQuota))
             s.execute(delete(User))
+            s.execute(delete(ProviderConnection))
             s.execute(delete(Team))
             s.commit()
         sync_engine.dispose()
@@ -332,7 +335,7 @@ async def test_post_trial_rejects_completion_agent_for_workspace_task(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id, captured = fwd_setup
+    app, raw, team_id, captured = fwd_setup
     task_id = "local/workspace-trial"
     sync_engine = create_engine(postgres_url)
     sl = sessionmaker(sync_engine)
@@ -367,6 +370,7 @@ async def test_post_trial_rejects_completion_agent_for_workspace_task(
                     "agent_name": "direct-completion",
                     "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
                 },
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
             },
         )
 
@@ -379,7 +383,7 @@ async def test_post_trial_hides_foreign_private_task_set_task(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     postgres_url: str,
 ) -> None:
-    app, raw, _team_id, captured = fwd_setup
+    app, raw, team_id, captured = fwd_setup
     foreign_team_id = uuid4()
     task_set_id = f"ts/{foreign_team_id}/private-source"
     task_id = f"{task_set_id}/tasks/row-1"
@@ -433,6 +437,7 @@ async def test_post_trial_hides_foreign_private_task_set_task(
                     "agent_name": "direct-completion",
                     "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
                 },
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
             },
         )
 

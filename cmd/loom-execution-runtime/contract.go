@@ -353,7 +353,7 @@ func (p plan) validate() error {
 	}
 	if fixtureCount > 0 && (fixtureCount != 1 || p.TaskImageMaterializationID == nil ||
 		p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" ||
-		!p.privateSandboxesMatch() || len(p.Sidecars) != 1 + len(p.residentPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
+		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.residentPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
 		return fmt.Errorf("one prepared fixture requires an isolated attempt controller and both sandboxes")
 	}
 	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||

@@ -24,6 +24,7 @@ from loom.service_execution_materialization import (
 )
 from tests.integration.test_service_batches_crud import (
     _automatic_service_execution_task_config,
+    _seed_connection,
     _service_execution_runtime_profile,
     camp_setup,  # noqa: F401
 )
@@ -81,6 +82,7 @@ async def native_resource_batch(camp_setup, postgres_url: str) -> AsyncIterator[
     payload = {
         "task_filter": {"task_ids": task_ids}, "backend": "nebius", "n_per_task": 1,
         "purpose": "evaluation",
+        "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-5"),
         "trial_config": {"agent_name": "terminus-2", "agent_model": {
             "provider": "openai", "name": "gpt-5", "source": "api",
         }, "retry": {"max_attempts": 1, "retry_on": []}},

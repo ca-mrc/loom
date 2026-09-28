@@ -213,9 +213,14 @@ def _effective_provider_fields(
     batch: Batch,
     combination: Mapping[str, Any] | None,
 ) -> tuple[UUID | None, str | None]:
+    # Batches submitted since #2054 store each combination's resolved pair;
+    # the field-by-field inheritance below only serves older batches.
     conn_id = batch.provider_connection_id
     model_id = batch.provider_model_id
     if combination is not None:
+        if combination.get("agent_model") is None:
+            # No-model agents (oracle) never run on a provider route.
+            return None, None
         conn_id = _coerce_uuid(
             combination.get("provider_connection_id"),
         ) or conn_id

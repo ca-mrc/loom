@@ -2628,3 +2628,61 @@ async def test_raw_harbor_tb2_v1_packs_verifier_audit_artifacts(
         assert log_entry["size_bytes"] == len(log_body)
         assert log_entry["content_hash"].startswith("sha256:")
         assert log_entry["step_name"] == "main"
+
+
+async def test_scored_timeout_v2_download_uses_committed_native_file(
+    delivery_setup: dict[str, object], postgres_url: str,
+) -> None:
+    from urllib.parse import urlsplit
+
+    from tests.unit.test_scored_timeout_native_export import fixture
+
+    trial_id, _ = _seed_scored_timeout(delivery_setup, postgres_url)
+    trial, events, objects, native = fixture(identity=trial_id, team=delivery_setup["team_id"])
+    fake_s3 = delivery_setup["fake_s3"]
+    settings = delivery_setup["settings"]
+    prefix = f"{delivery_setup['team_id']}/{trial_id}"
+    terminal = json.loads(fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")])
+    terminal["seq"] = max(e.seq for e in events) + 1
+    frozen = b"".join((e.model_dump_json()+"\n").encode() for e in events) + (json.dumps(terminal)+"\n").encode()
+    fake_s3.objects[(settings.trajectories_bucket, f"{prefix}/events.jsonl")] = frozen
+    fake_s3.objects.update(objects._objects)
+    engine = create_engine(postgres_url)
+    try:
+        with engine.begin() as conn:
+            index = conn.execute(select(Trial.trajectory_index).where(Trial.id == trial_id)).scalar_one()
+            conn.execute(update(Trial).where(Trial.id == trial_id).values(
+                config=trial.config, result=trial.result, attempt_count=1,
+                trajectory_index={**index, **trial.trajectory_index},
+            ))
+            artifact = conn.execute(select(Artifact.id, Artifact.storage).where(
+                Artifact.trial_id == trial_id, Artifact.artifact_type == "loom.trial-artifact-bundle.v1",
+            )).one()
+            conn.execute(update(Artifact).where(Artifact.id == artifact.id).values(storage={
+                **artifact.storage, "attempt": 1,
+                "files": [{**row, "media_type": "application/json"} for row in trial.trajectory_index["artifacts"]],
+            }))
+        transport = httpx.ASGITransport(app=delivery_setup["app"])
+        headers = {"Authorization": f"Bearer {delivery_setup['raw']}"}
+        async with httpx.AsyncClient(transport=transport, base_url="http://svc") as client:
+            response = await client.post(f"/api/v1/batches/{delivery_setup['main_batch_id']}/delivery-export",
+                headers=headers, json={"mode": "raw-harbor-tb2-v2",
+                    "supplemental_batch_ids": [str(delivery_setup["supplemental_batch_id"]), str(delivery_setup["targeted_batch_id"])],
+                    "selection": {"trial_ids": [str(trial_id)]}})
+            assert response.status_code == 201, response.text
+            downloaded = await client.get(urlsplit(response.json()["download_url"]).path, headers=headers)
+            assert downloaded.status_code == 200, downloaded.text
+        with tarfile.open(fileobj=io.BytesIO(downloaded.content), mode="r:gz") as tar:
+            root = next(n.removesuffix("loom_trajectory.jsonl") for n in tar.getnames() if n.startswith("agent_runs/") and n.endswith("/loom_trajectory.jsonl"))
+            assert tar.extractfile(root+"loom_trajectory.jsonl").read() == frozen
+            assert tar.extractfile(root+"native/harbor_trajectory.json").read() == native
+            result = json.load(tar.extractfile(root+"execution_result.json"))
+            assert result["state"] == "failed" and result["failure_reason"] == "timed_out"
+            assert result["result"] == trial.result
+            assert json.load(tar.extractfile(root+"verifier/output.json"))["rewards"] == {"passed": 0}
+            assert json.load(tar.extractfile(root+"export_provenance.json"))["native_artifact_authority"] == "committed_runtime_output"
+        with engine.connect() as conn:
+            row = conn.execute(select(Trial.state, Trial.result, Trial.attempt_count).where(Trial.id == trial_id)).one()
+            assert row.state == "failed" and row.result == trial.result and row.attempt_count == 1
+    finally:
+        engine.dispose()

@@ -30,7 +30,7 @@ from loom.nebius_application_contract import (
     SharedDevelopmentBindingV1,
 )
 from loom.nebius_application_render import RenderedApplication
-from loom_service.application_management.effects import ApplicationEffectJournal
+from loom_service.application_management.completion import ApplicationCompletionJournal
 from loom_service.application_management.plans import freeze_plan
 from loom_service.environment_management.platform_accounting import ENVELOPE_FIELDS, platform_usage
 from loom_service.environment_management.registry import ManagementError, owner_identity
@@ -57,7 +57,7 @@ def _fingerprint(**intent: Any) -> str:
     return hashlib.sha256(json.dumps(intent, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-class ApplicationRegistry(ApplicationEffectJournal):
+class ApplicationRegistry(ApplicationCompletionJournal):
     @staticmethod
     async def _replay(session: AsyncSession, owner: UUID, key: str, fingerprint: str) -> ApplicationOperationV1 | None:
         row = await session.scalar(select(NebiusApplicationOperation).where(
@@ -76,15 +76,6 @@ class ApplicationRegistry(ApplicationEffectJournal):
         fingerprint = _fingerprint(action="create", team=team, slug=slug, release_id=release_id)
         async with self.session_factory() as session:
             return await self._replay(session, owner, idempotency_key, fingerprint)
-
-    @staticmethod
-    async def _lock_budget(session: AsyncSession, cluster_id: str) -> NebiusPlatformBudget:
-        budget = await session.scalar(select(NebiusPlatformBudget).where(
-            NebiusPlatformBudget.cluster_id == cluster_id,
-        ).with_for_update())
-        if budget is None:
-            raise ManagementError("platform_budget_not_configured", 503)
-        return budget
 
     @staticmethod
     async def _capacity(session: AsyncSession, budget: NebiusPlatformBudget, needed: dict[str, int]) -> None:

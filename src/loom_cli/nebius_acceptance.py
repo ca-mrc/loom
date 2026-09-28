@@ -34,6 +34,8 @@ _SHA256 = re.compile(r"(?:sha256:)?([0-9a-f]{64})\Z")
 _CANDIDATE_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _CHECKSUMS_PATH = "checksums/SHA256SUMS"
 _DEFAULT_POOL_ID = "nebius-cpu"
+# Approved connection for real model-calling acceptance (#2054).
+DEFAULT_ACCEPTANCE_PROVIDER = "az-gateway-loom-testing"
 _ACCEPTANCE_REQUIRED_OUTPUTS = frozenset(
     {
         "files/artifacts/answer.txt",
@@ -417,7 +419,7 @@ def _batch_shape(
     trials_per_task: int,
     agent_name: str,
     agent_model: dict[str, str],
-    provider_connection_id: str | None,
+    provider_connection_id: str,
     provider_model_id: str,
 ) -> tuple[dict[str, Any], int, list[dict[str, Any]]]:
     """Return a legal API shape when one task needs over 100 samples."""
@@ -439,14 +441,8 @@ def _batch_shape(
                 "agent_model": agent_model,
                 "n_per_task": count,
                 "label": f"nebius-acceptance-{index}",
-                **(
-                    {
-                        "provider_connection_id": provider_connection_id,
-                        "provider_model_id": provider_model_id,
-                    }
-                    if provider_connection_id
-                    else {}
-                ),
+                "provider_connection_id": provider_connection_id,
+                "provider_model_id": provider_model_id,
             }
         )
         remaining -= count
@@ -496,7 +492,7 @@ def run_acceptance(
     capacity_policy: dict[str, Any],
     task_set_id: str,
     task_count: int,
-    provider_connection: dict[str, Any] | None,
+    provider_connection: dict[str, Any],
     provider_model_id: str,
     agent_name: str,
     agent_provider: str,
@@ -578,7 +574,7 @@ def run_acceptance(
             trials_per_task=n_per_task,
             agent_name=agent_name,
             agent_model=agent_model,
-            provider_connection_id=str(provider_connection["id"]) if provider_connection else None,
+            provider_connection_id=str(provider_connection["id"]),
             provider_model_id=provider_model_id,
         )
         create_payload = {
@@ -589,14 +585,8 @@ def run_acceptance(
             "n_per_task": api_n_per_task,
             "combinations": combinations,
             "backend": "nebius",
-            **(
-                {
-                    "provider_connection_id": provider_connection["id"],
-                    "provider_model_id": provider_model_id,
-                }
-                if provider_connection
-                else {}
-            ),
+            "provider_connection_id": provider_connection["id"],
+            "provider_model_id": provider_model_id,
         }
         progress["current_stage"] = {"stage": stage, "state": "submitting"}
         _checkpoint(output_dir, progress)
@@ -998,7 +988,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 sleeper=time.sleep,
             )
             task_count = _positive_int(taskset.get("task_count"), field="TaskSet task_count")
-            connection = _resolve_by_name(client, args.provider) if args.provider else None
+            # Model-backed submissions require an explicit Provider Connection
+            # (#2054); resolve this environment's connection id by name.
+            connection = _resolve_by_name(client, args.provider)
             evidence = run_acceptance(
                 client=client,
                 output_dir=Path(args.output).resolve(),
@@ -1054,11 +1046,15 @@ def configure_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     )
     parser.add_argument(
         "--provider",
-        help="Optional persisted provider connection name; omit for an existing gateway-configured model.",
+        default=DEFAULT_ACCEPTANCE_PROVIDER,
+        help=(
+            "Provider connection name, resolved to this environment's connection id "
+            f"(default: {DEFAULT_ACCEPTANCE_PROVIDER})."
+        ),
     )
     parser.add_argument(
         "--model",
-        help="Model id; required for new acceptance, including gateway-configured models.",
+        help="Model id served by the provider connection; required for new acceptance.",
     )
     parser.add_argument("--agent", default="litellm", help="Agent name (default: litellm).")
     parser.add_argument("--agent-provider", default="openai", help="Agent model provider dialect.")
