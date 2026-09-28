@@ -23,6 +23,10 @@ from tests.support.historical_task_images import (
 @pytest.fixture
 def build_guard_database(isolated_migration_postgres_url):
     url = make_url(isolated_migration_postgres_url)
+    # This published guard chain requires the pre-retirement application tables.
+    application = Config("database/migrations/alembic.ini")
+    application.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
+    command.downgrade(application, "0166")
     suffix = uuid4().hex
     owner, migrator, agent = (f"build_{kind}_{suffix}" for kind in ("owner", "migrator", "agent"))
     engine = create_engine(url)
@@ -228,3 +232,16 @@ async def test_only_one_exact_assignment_can_hold_a_platform_request(build_guard
             connection.execute(text("DELETE FROM loom_capacity_build_guard.request_holds"))
     finally:
         agent_engine.dispose()
+
+
+def test_current_retirement_refuses_an_installed_legacy_build_guard(build_guard_database):
+    config, engine, _owner, _agent, _url = build_guard_database
+    command.upgrade(config, "head")
+    application = Config("database/migrations/alembic.ini")
+    application.set_main_option("sqlalchemy.url", engine.url.render_as_string(hide_password=False).replace("%", "%%"))
+    with pytest.raises(RuntimeError, match="dependent SQL routine disposition"):
+        command.upgrade(application, "head")
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT version_num FROM public.alembic_version")) == "0166"
+        assert connection.scalar(text("SELECT to_regclass('public.personal_dev_build_platform_requests') IS NOT NULL"))
+        assert connection.scalar(text("SELECT version_num FROM loom_capacity_build_guard.alembic_version")) == "build_guard_0032"
