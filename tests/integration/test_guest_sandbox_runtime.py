@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import os
 import shutil
 import signal
 import subprocess
+import tarfile
 import tempfile
 import time
 from collections.abc import Iterator
@@ -299,7 +301,8 @@ def test_existing_docker_plugin_layout_does_not_block_guest(layout: str) -> None
 
 
 @contextlib.contextmanager
-def container_guest(*, memory_mib: int = 1024) -> Iterator[tuple[httpx.Client, str]]:
+def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
+                    disk_state: bool = False, cpus: int = 1) -> Iterator[tuple[httpx.Client, str]]:
     """Launch with the rendered read-only root and limited outer capabilities."""
     import uuid
 
@@ -323,17 +326,24 @@ def container_guest(*, memory_mib: int = 1024) -> Iterator[tuple[httpx.Client, s
         rpc = directory / "rpc"
         rpc.mkdir(mode=0o770)
         rpc.chmod(0o2770)  # inherit the caller's group for the root-owned socket
+        state_mount = ["--tmpfs", "/state:size=1g"]
+        if disk_state:
+            # Production emptyDir uses disk, not an additional RAM allocation.
+            state = directory / "state"
+            state.mkdir(mode=0o700)
+            state_mount = ["--volume", f"{state}:/state"]
         command = [
             "docker", "run", "--name", name, "--read-only", "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE",
-            "--security-opt=no-new-privileges", "--cpus=1", f"--memory={memory_mib}m",
+            "--security-opt=no-new-privileges", f"--cpus={cpus}", f"--memory={memory_mib}m",
             f"--memory-swap={memory_mib}m", "--pids-limit=128",
-            "--tmpfs", "/left", "--tmpfs", "/right", "--tmpfs", "/state:size=1g",
+            "--tmpfs", "/left", "--tmpfs", "/right", *state_mount,
             "--volume", f"{payload}:/payload:ro", "--volume", f"{rpc}:/rpc",
             name, "/bin/busybox", "sh", "-ec",
             "echo left > /left/value; echo right > /right/value; "
             "exec /payload/bin/loom-guest-runtime --payload /payload --root / "
             f"--state /state/incarnation --socket /rpc/sandbox.sock --memory-mib {memory_mib} "
-            "--storage-mib 160 --cpu-millis 1000 --exec-timeout-seconds 60",
+            f"--storage-mib {storage_mib} --cpu-millis {cpus * 1000} --exec-timeout-seconds 900 "
+            f"--max-transfer-bytes {6 * 1024**3}",
         ]
         with (directory / "console.log").open("wb") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
@@ -356,6 +366,12 @@ def container_guest(*, memory_mib: int = 1024) -> Iterator[tuple[httpx.Client, s
                 subprocess.run(["docker", "stop", "--time=5", name], capture_output=True, check=False)
                 process.wait(timeout=10)
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+                if disk_state:
+                    subprocess.run([
+                        "docker", "run", "--rm", "--network=none", "--read-only", "--cap-drop=ALL",
+                        "--cap-add=DAC_OVERRIDE", "--volume", f"{state}:/state", name,
+                        "/bin/busybox", "rm", "-rf", "/state/incarnation",
+                    ], capture_output=True, check=True)
                 subprocess.run(["docker", "image", "rm", name], capture_output=True, check=False)
 
 
@@ -398,4 +414,44 @@ def test_container_guest_stays_within_memory_limit_under_ram_and_disk_pressure(
             "/sys/fs/cgroup/memory.swap.max", "/sys/fs/cgroup/memory.swap.current",
         ], check=True, capture_output=True, text=True).stdout
         assert swap.splitlines() == ["0", "0"], swap
+        assert execute(client, "echo alive") == "alive\n"
+
+
+@pytest.mark.timeout(600)
+def test_large_archive_restore_survives_full_guest_page_cache(tmp_path: Path) -> None:
+    """A 4 GiB handoff must not OOM the outer 8 GiB sandbox as RAM fills."""
+    source = tmp_path / "image"
+    size = 4000 * 1024**2
+    with source.open("wb") as stream:
+        stream.truncate(size)
+    archive = tmp_path / "workspace.tar"
+    with tarfile.open(archive, "w") as stream:
+        stream.add(source, arcname="image")
+    with source.open("rb") as stream:
+        expected = hashlib.file_digest(stream, "sha256").hexdigest()
+    with container_guest(memory_mib=8192, storage_mib=12288, disk_state=True, cpus=2) as (client, name):
+        with archive.open("rb") as stream:
+            response = client.put(
+                "http://sandbox/file", params={"path": "/tmp/input.tar"},
+                content=iter(lambda: stream.read(1024 * 1024), b""),
+                headers={"Content-Length": str(archive.stat().st_size)}, timeout=180,
+            )
+        response.raise_for_status()
+        response = client.post("http://sandbox/exec", json={
+            "argv": ["/bin/sh", "-ec", "/bin/busybox mkdir /tmp/restored; "
+                     "/bin/busybox tar -C /tmp/restored -xpf /tmp/input.tar; "
+                     # Touch more pages than guest RAM, including cache reclaim.
+                     "/bin/busybox dd if=/dev/zero of=/tmp/pressure bs=1M count=1024; "
+                     "/bin/busybox sha256sum /tmp/restored/image"],
+            "timeout_sec": 180,
+        }, timeout=190)
+        response.raise_for_status()
+        result = response.json()
+        assert result["return_code"] == 0, result
+        assert base64.b64decode(result["stdout"] or "").decode().split()[0] == expected
+        events = subprocess.run([
+            "docker", "exec", name, "/bin/busybox", "cat", "/sys/fs/cgroup/memory.events",
+        ], check=True, capture_output=True, text=True).stdout
+        counts = dict(line.split() for line in events.splitlines())
+        assert counts["oom"] == counts["oom_kill"] == "0", events
         assert execute(client, "echo alive") == "alive\n"
