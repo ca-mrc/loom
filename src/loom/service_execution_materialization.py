@@ -21,14 +21,24 @@ from pydantic import (
 )
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
-from loom.execution_contract import nebius_cpu_execution_class
+from loom.execution_contract import (
+    evaluate_execution_admission,
+    nebius_cpu_execution_class,
+    nebius_guest_execution_class,
+    workload_requirements_from_task,
+)
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
-from loom.execution_requirements import execution_requirement_diagnostics
+from loom.execution_requirements import (
+    GUEST_EXECUTION_CAPABILITIES,
+    GuestExecutionCapability,
+    execution_requirement_diagnostics,
+)
 from loom.execution_runtime_contract import (
     TASK_EGRESS_OUTPUT,
     ContainerResourcesV1,
     ExecutionResourceRequestsV1,
     ExecutionRuntimePlanV1,
+    GuestExecutionV1,
     ProbeV1,
     ProcessPhaseV1,
     RuntimeOutputDeclarationV1,
@@ -132,6 +142,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
+    guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    guest_runtime_volume_mib: int | None = Field(default=None, ge=1024, le=4096, exclude_if=lambda value: value is None)
+    guest_max_artifact_bytes: int | None = Field(default=None, gt=0, le=10 * 1024**3, exclude_if=lambda value: value is None)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -143,6 +156,10 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0)
     service_lifecycle_ready: bool = False
+
+    @property
+    def supported_guest_capabilities(self) -> frozenset[GuestExecutionCapability]:
+        return GUEST_EXECUTION_CAPABILITIES if self.guest_runtime is not None else frozenset()
 
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
@@ -163,6 +180,10 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
 
     @model_validator(mode="after")
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
+        if self.guest_runtime is None and (
+            self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
+        ):
+            raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
             supports_task_web_egress=self.supports_task_web_egress,
         )
@@ -202,6 +223,10 @@ def build_nebius_runtime_profile(
     supports_task_web_egress: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
+    guest_runtime: Literal["qemu-tcg-v1"] | None = None,
+    guest_runtime_volume_mib: int | None = None,
+    guest_max_artifact_bytes: int | None = None,
+    runtime_volume_mib: int = 32,
     resource_allocation_policy: Literal["node-share-v1"] | None = None,
 ) -> ServiceExecutionRuntimeProfileV1:
     """Construct publisher profiles with the class matching explicit capabilities.
@@ -224,6 +249,10 @@ def build_nebius_runtime_profile(
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_identity=supports_task_identity,
+        guest_runtime=guest_runtime,
+        guest_runtime_volume_mib=guest_runtime_volume_mib,
+        guest_max_artifact_bytes=guest_max_artifact_bytes,
+        runtime_volume_mib=runtime_volume_mib,
     )
 
 
@@ -318,6 +347,7 @@ def automatic_service_execution_rejections(
     *,
     source_provenance: dict[str, Any],
     allow_task_image_preparation: bool = False,
+    supported_capabilities: frozenset[GuestExecutionCapability] = frozenset(),
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
@@ -327,7 +357,23 @@ def automatic_service_execution_rejections(
     reasons: list[str] = []
     if task.agent.continue_until_timeout and not terminus:
         reasons.append("agent_continuation_unsupported")
-    reasons.extend(item.code for item in execution_requirement_diagnostics(env.execution_requirements))
+    reasons.extend(item.code for item in execution_requirement_diagnostics(
+        env.execution_requirements, supported_capabilities=supported_capabilities,
+    ))
+    if _guest_capabilities(task):
+        if not terminus:
+            reasons.append("guest_private_sandboxes_required")
+        if env.sidecars:
+            reasons.append("guest_sidecars_unsupported")
+        for user in (env.user, task.verifier.user):
+            try:
+                identity = resolve_sandbox_identity(user, env.environment.get("HOME")) if user is not None else None
+            except ValueError:
+                identity = None
+            if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
+                reasons.append("guest_root_identity_required")
+        admission = evaluate_execution_admission(workload_requirements_from_task(task), nebius_guest_execution_class())
+        reasons.extend(reason.code for reason in admission.reasons if reason.code.startswith("guest_"))
     if service_execution_input_binding(source_provenance) is None:
         reasons.append("immutable_task_input_unavailable")
     if env.os != "linux" or env.cpu_arch not in {"x86_64", "any"}:
@@ -485,6 +531,7 @@ def compile_service_execution_plan(
         task,
         trial,
         source_provenance=source_provenance,
+        supported_capabilities=profile.supported_guest_capabilities,
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
@@ -495,10 +542,9 @@ def compile_service_execution_plan(
     selected_agent_image = controller_image_for_trial(profile, trial)
     if task_image_grant is not None and selected_agent_image is not None:
         admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
-        profile_reasons = (() if selected_agent_image in admitted
-                           else ("task_image_not_in_runtime_profile",))
-        if _requires_task_identity(task) and not profile.supports_task_identity:
-            profile_reasons += ("task_identity_runtime_unavailable",)
+        if selected_agent_image in admitted:
+            profile_reasons = tuple(reason for reason in profile_reasons
+                                    if reason != "task_image_not_in_runtime_profile")
     if "terminus_controller_unavailable" in profile_reasons:
         raise ValueError("active runtime profile has no Terminus controller image")
     if profile_reasons:
@@ -705,11 +751,23 @@ def _requires_task_identity(task: TaskConfig) -> bool:
             or task.verifier.user is not None)
 
 
+def _guest_capabilities(task: TaskConfig) -> frozenset[GuestExecutionCapability]:
+    declared = task.environment.execution_requirements
+    return GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
+
+
 def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
     *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Submission and scheduling share the profile's image/agent compatibility."""
+    if _guest_capabilities(task):
+        if profile.guest_runtime is None:
+            return ("guest_runtime_unavailable",)
+        if (profile.guest_runtime_volume_mib or profile.runtime_volume_mib) < 1024:
+            return ("guest_runtime_volume_too_small",)
+        if not profile.supports_task_identity:
+            return ("task_identity_runtime_unavailable",)
     if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
         return ("task_egress_runtime_unavailable",)
     if trial.agent_version is not None and (
@@ -767,10 +825,18 @@ def _compile_terminus_plan(
 
     sidecars = list(fixture_sidecars(task))
     shared = resolve_verifier_env_mode(task, trial) == "shared"
+    guest_capabilities = _guest_capabilities(task)
+    guest_execution = GuestExecutionV1(capabilities=tuple(sorted(guest_capabilities))) if guest_capabilities else None
+    runtime_volume_mib = (profile.guest_runtime_volume_mib or profile.runtime_volume_mib
+                          if guest_execution is not None else profile.runtime_volume_mib)
+    max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
+                          if guest_execution is not None else profile.max_artifact_bytes)
     sandbox_roles = ("task-sandbox",)
     for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
+        startup_probe = (probe.model_copy(update={"failure_threshold": 60})
+                         if guest_execution is not None else probe)
         user = (task.verifier.user if role == "verifier-sandbox" and task.verifier.user is not None
                 else env.user)
         identity = resolve_sandbox_identity(
@@ -780,8 +846,9 @@ def _compile_terminus_plan(
         sidecars.append(SidecarContainerV1(
             role_name=role, image_ref=env.docker_image,
             argv=(binary, "--socket", socket, "--exec-timeout-seconds", exec_limit), resources=resources,
-            startup_probe=probe, readiness_probe=probe, private_sandbox=True,
+            startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
             identity=identity,
+            guest_execution=guest_execution,
         ))
     phase_env = {
         "LOOM_TASK_TRIAL_JSON": trial.model_dump_json(exclude_defaults=True),
@@ -835,11 +902,33 @@ def _compile_terminus_plan(
         published_refs.add(env.docker_image)
     if isinstance(task.environment.baseline_network_policy, WebAllowlist):
         outputs.insert(0, TASK_EGRESS_OUTPUT)
+    controller_resources = (ContainerResourcesV1(
+        cpu_millis=profile.controller_resources.cpu_millis,
+        memory_mib=profile.controller_resources.memory_mib,
+        ephemeral_storage_mib=env.storage_mb,
+    ) if profile.controller_resources is not None else None)
+    if guest_execution is not None:
+        # The shared runtime payload occupies Pod ephemeral storage in addition
+        # to both guest disks. Reserve it exactly once, in the controller envelope,
+        # so rendering, finance and node-share placement use the same total.
+        controller_resources = ContainerResourcesV1.model_validate({
+            **(controller_resources or resources).model_dump(),
+            "ephemeral_storage_mib": env.storage_mb + runtime_volume_mib,
+        })
+        if resource_requests is not None and resource_requests.controller is not None:
+            resource_requests = resource_requests.model_copy(update={
+                "controller": resource_requests.controller.model_copy(update={
+                    "ephemeral_storage_mib": (resource_requests.controller.ephemeral_storage_mib
+                                              + runtime_volume_mib),
+                }),
+            })
     return ExecutionRuntimePlanV1(
         task_egress=(task.environment.baseline_network_policy
                      if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
-        command_identity_sha256=command_identity, execution_class_id=profile.execution_class_id,
+        command_identity_sha256=command_identity, execution_class_id=(nebius_guest_execution_class(
+            supports_task_web_egress=profile.supports_task_web_egress,
+        ).class_id if guest_execution is not None else profile.execution_class_id),
         composition="init_payload", task_image_ref=env.docker_image,
         task_image_materialization_id=task_image_materialization_id,
         agent_image_ref=agent_image, runtime_image_ref=profile.runtime_image_ref,
@@ -848,13 +937,9 @@ def _compile_terminus_plan(
         run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
         task_resources=resources,
         resource_requests=resource_requests,
-        controller_resources=(ContainerResourcesV1(
-            cpu_millis=profile.controller_resources.cpu_millis,
-            memory_mib=profile.controller_resources.memory_mib,
-            ephemeral_storage_mib=env.storage_mb,
-        ) if profile.controller_resources is not None else None),
+        controller_resources=controller_resources,
         workspace_mib=env.storage_mb,
-        runtime_volume_mib=profile.runtime_volume_mib,
+        runtime_volume_mib=runtime_volume_mib,
         termination_grace_seconds=profile.termination_grace_seconds,
         task_input=RuntimeTaskInputV1(
             manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
@@ -866,7 +951,7 @@ def _compile_terminus_plan(
         in_place_verifier=shared,
         verifier=phase("verifier", "verify-sandbox", verifier_timeout) if shared else None,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
-        max_artifact_bytes=profile.max_artifact_bytes,
+        max_artifact_bytes=max_artifact_bytes,
     )
 
 

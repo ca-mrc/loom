@@ -26,6 +26,7 @@ import httpx
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
+from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.models.capabilities import Capabilities
 from loom.models.networking import WebAllowlist
@@ -97,6 +98,16 @@ def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
 
 def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
     command_environment = {}
+    guest = (task.environment.execution_requirements is not None
+             and bool(GUEST_EXECUTION_CAPABILITIES.intersection(task.environment.execution_requirements.capabilities)))
+    max_transfer = 256 * 1024 * 1024
+    if guest:
+        try:
+            max_transfer = int(os.environ.get("LOOM_SANDBOX_MAX_TRANSFER_BYTES", ""))
+        except ValueError:
+            raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
+        if not 0 < max_transfer <= 10 * 1024**3:
+            raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
     if isinstance(task.environment.baseline_network_policy, WebAllowlist):
         from urllib.parse import urlsplit
 
@@ -104,6 +115,8 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
         url = urlsplit(proxy)
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
             raise ServiceExecutionTaskError("task_egress_runtime_unavailable")
+        if guest:
+            proxy = url._replace(netloc=f"10.0.2.2:{url.port}").geturl()
         command_environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
         command_environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
     return ServiceSandboxDriver(
@@ -115,6 +128,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
         ),
         network_policy=task.environment.baseline_network_policy,
         command_environment=command_environment,
+        max_transfer_bytes=max_transfer,
     )
 
 

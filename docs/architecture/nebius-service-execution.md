@@ -79,7 +79,9 @@ execution unit:
 `ExecutionClassV1` describes portable capabilities. It deliberately has no
 provider, region, target, worker, pool, or reusable-slot field. A valid service
 class cannot permit privileged mode, hostPath, host networking, nested
-containers, host devices, or a shared-kernel isolation boundary.
+containers on the trusted host, host devices, or a shared-kernel isolation boundary.
+The optional [guest execution contract](guest-execution.md) uses new immutable
+class identities for capabilities confined to separate task-owned kernels.
 
 `ExecutionTargetV1` is the later environment binding point for provider,
 physical `cluster_scope_id`, region, failure domain, residency, namespace, and
@@ -1048,13 +1050,14 @@ identifiers, not credentials or proof of availability. Prerequisite kinds are
 secret values, duplicate capabilities and duplicate prerequisite names are
 rejected. Invalid declaration values are redacted from compatibility reports.
 
-Both execution-class admission and the ordinary TaskSet compiler reject every
-currently declared special capability. The local compatibility report records
-the same reasons before bootstrap adaptation, so later conversion errors do
-not hide them. A prerequisite without a reference yields
+The ordinary shared-kernel class and TaskSet compiler reject special capabilities.
+An explicitly opted-in [guest runtime](guest-execution.md) can admit the three
+guest-local capabilities against its separate immutable class. External
+capabilities remain rejected. The local compatibility report records rejection
+reasons before bootstrap adaptation, so later conversion errors do not hide them. A prerequisite without a reference yields
 `execution_prerequisite_missing`; a supplied reference yields
-`execution_prerequisite_unverified`. No reference resolver or new runtime class
-is implemented by this declaration contract.
+`execution_prerequisite_unverified`. The declaration itself does not resolve prerequisite references or establish
+deployed runtime readiness.
 
 | Capability | Qualification required before support |
 | --- | --- |
@@ -1065,7 +1068,7 @@ is implemented by this declaration contract.
 | `pkcs11_authentication` | Actual emulated or physical authentication fixture, socket forwarding and device isolation where needed. |
 | `dpdk_networking` | Owned NICs, hugepages, driver binding, isolated traffic and cleanup in a dedicated runtime. |
 
-These remain unsupported classes, not a privilege switch. The existing
+These declarations never grant trusted-host privileges. The existing
 `ExecutionClassV1` prohibition on privileged containers, host paths/network,
 nested containers and host devices remains enforced. Local cluster fixtures
 must be evaluated on their own evidence; they do not necessarily require a
@@ -1092,7 +1095,7 @@ identities, and duplicate workload identities. The generated report records
 the current counts. No workload is statically supported on Nebius: catalog
 candidates require per-task conversion and admission; OSWorld, the two
 GPU/host-specialized Behavior profiles, and the six special execution
-capabilities above are unsupported there.
+capabilities above require separate deployment readiness and qualification.
 OLDLAB, GB10, and Slurm are retired and cannot receive hosted work.
 The unconverted catalog classes are availability gaps, not fallback routes.
 Desktop/GUI and Behavior GPU execution remain local-only. Pipeline submission

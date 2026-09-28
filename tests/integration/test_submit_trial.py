@@ -161,15 +161,17 @@ def test_submit_creates_trial(app, seed_team):  # type: ignore[no-untyped-def]
 
 
 @pytest.mark.parametrize(
-    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status", "web_egress", "web_ready"),
+    ("agent_name", "separate_task_image", "admit_task_image", "has_controller", "expected_status", "web_egress", "web_ready", "guest_requested", "guest_ready"),
     [
-        ("direct-completion", False, True, False, 201, False, False),
-        ("terminus-2", True, True, True, 201, False, False),
-        ("terminus-2", True, False, True, 400, False, False),
-        ("terminus-2", True, True, False, 400, False, False),
-        ("direct-completion", True, True, True, 400, False, False),
-        ("terminus-2", True, True, True, 201, True, True),
-        ("terminus-2", True, True, True, 400, True, False),
+        ("direct-completion", False, True, False, 201, False, False, False, False),
+        ("terminus-2", True, True, True, 201, False, False, False, False),
+        ("terminus-2", True, False, True, 400, False, False, False, False),
+        ("terminus-2", True, True, False, 400, False, False, False, False),
+        ("direct-completion", True, True, True, 400, False, False, False, False),
+        ("terminus-2", True, True, True, 201, True, True, False, False),
+        ("terminus-2", True, True, True, 400, True, False, False, False),
+        ("terminus-2", False, True, True, 201, False, False, True, True),
+        ("terminus-2", False, True, True, 400, False, False, True, False),
     ],
 )
 @pytest.mark.parametrize("dockerfile", [False, True], ids=["prebuilt", "dockerfile"])
@@ -185,11 +187,13 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
     dockerfile: bool,
     web_egress: bool,
     web_ready: bool,
+    guest_requested: bool,
+    guest_ready: bool,
 ) -> None:
     team_id, raw = seed_team
     if dockerfile:
         expected_status = 201 if agent_name == "terminus-2" and has_controller else 400
-    if web_egress and not web_ready:
+    if (web_egress and not web_ready) or (guest_requested and not guest_ready):
         expected_status = 400
     task_id = "automatic-nebius-submit"
     batch_id = uuid4()
@@ -208,6 +212,9 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
         candidate_sha="1" * 40,
         execution_class_id="linux-amd64-cpu-web-pod-v1" if web_ready else "linux-amd64-cpu-pod-v1",
         supports_task_web_egress=web_ready,
+        guest_runtime="qemu-tcg-v1" if guest_ready else None,
+        runtime_volume_mib=1024 if guest_ready else 32,
+        supports_task_identity=guest_ready,
         task_image_ref=default_task_image,
         agent_image_ref=controller_image if has_controller else None,
         runtime_image_ref=runtime_image,
@@ -247,6 +254,9 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                             **({"dockerfile": "environment/Dockerfile"} if dockerfile else {
                                 "docker_image": task_image,
                             }),
+                            **({"user": "root", "execution_requirements": {
+                                "capabilities": ["nested_docker"],
+                            }} if guest_requested else {}),
                             "cpus": 1,
                             "memory_mb": 1024,
                             "storage_mb": 2048,
@@ -259,6 +269,7 @@ def test_submit_ordinary_task_into_nebius_batch_uses_automatic_pool_binding(
                         "verifier": {
                             "name": "script",
                             "args": {"script_path": "verifier/check.sh"},
+                            **({"user": "root"} if guest_requested else {}),
                         },
                         "steps": [
                             {

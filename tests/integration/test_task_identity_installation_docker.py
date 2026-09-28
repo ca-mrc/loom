@@ -101,10 +101,18 @@ print('authored caches preserved; verifier downloads uncached')
 def native_binary(tmp_path_factory):
     directory = tmp_path_factory.mktemp("identity-runtime")
     repository = Path(__file__).resolve().parents[2]
-    subprocess.run([
-        "docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+    build = [
+        "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
         "-v", f"{repository}:/src:ro", "-v", f"{directory}:/output", "-w", "/src",
-        "-e", "GOCACHE=/tmp/go-cache", "-e", "CGO_ENABLED=0", "golang:1.26-alpine3.23",
+        "-e", "GOCACHE=/tmp/go-cache", "-e", "GOMODCACHE=/output/modules", "-e", "CGO_ENABLED=0",
+    ]
+    # Fetch checksum-locked dependencies before the deliberately offline build.
+    # Task/verifier containers below retain their no-network boundary.
+    subprocess.run([
+        *build, "golang:1.26-alpine3.23", "go", "mod", "download",
+    ], check=True, timeout=120, capture_output=True)
+    subprocess.run([
+        *build, "--network", "none", "-e", "GOPROXY=off", "golang:1.26-alpine3.23",
         "go", "build", "-o", "/output/loom-sandbox-runtime", "./cmd/loom-sandbox-runtime",
     ], check=True, timeout=120, capture_output=True)
     return directory / "loom-sandbox-runtime"

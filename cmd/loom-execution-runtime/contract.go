@@ -54,7 +54,14 @@ type probe struct {
 	Argv                []string `json:"argv"`
 }
 
+type guestExecution struct {
+	SchemaVersion string   `json:"schema_version"`
+	Runtime       string   `json:"runtime"`
+	Capabilities  []string `json:"capabilities"`
+}
+
 type sidecar struct {
+	GuestExecution     *guestExecution   `json:"guest_execution,omitempty"`
 	TaskFixture        bool              `json:"task_fixture,omitempty"`
 	TaskImageComponent *string           `json:"task_image_component,omitempty"`
 	Hostname           *string           `json:"hostname,omitempty"`
@@ -226,6 +233,9 @@ func (p plan) privateSandboxesMatch() bool {
 }
 
 func (p plan) validate() error {
+	if err := p.validateGuestExecution(); err != nil {
+		return err
+	}
 	if p.TaskEgress != nil {
 		declared := false
 		for _, output := range p.OutputDeclarations {
@@ -378,7 +388,14 @@ func (p plan) validate() error {
 		if !p.privateSandboxesMatch() {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
-		if p.NodeResourceAllocation == nil && p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != p.TaskResources.EphemeralStorageMiB {
+		expectedControllerStorage := p.TaskResources.EphemeralStorageMiB
+		for _, sidecar := range p.Sidecars {
+			if sidecar.GuestExecution != nil {
+				expectedControllerStorage += p.RuntimeVolumeMiB
+				break
+			}
+		}
+		if p.NodeResourceAllocation == nil && p.ControllerResources != nil && p.ControllerResources.EphemeralStorageMiB != expectedControllerStorage {
 			return fmt.Errorf("controller sizing must preserve task-derived storage")
 		}
 		if p.ResourceRequests != nil {

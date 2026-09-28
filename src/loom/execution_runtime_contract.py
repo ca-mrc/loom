@@ -19,8 +19,15 @@ from pydantic import (
     model_validator,
 )
 
-from loom.execution_contract import VerifierTopology, WorkloadRequirementsV1
+from loom.execution_contract import (
+    IsolationLevel,
+    VerifierTopology,
+    WorkloadRequirementsV1,
+    evaluate_execution_admission,
+    nebius_guest_execution_class,
+)
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
+from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.models.networking import WebAllowlist
 from loom.sandbox_identity import SandboxIdentityV1
 
@@ -184,6 +191,21 @@ class ProbeV1(_Strict):
         return self
 
 
+class GuestExecutionV1(_Strict):
+    """Exact task-declared capabilities implemented inside one private guest."""
+
+    schema_version: Literal["loom.guest-execution.v1"] = "loom.guest-execution.v1"
+    runtime: Literal["qemu-tcg-v1"] = "qemu-tcg-v1"
+    capabilities: tuple[GuestExecutionCapability, ...] = Field(min_length=1, max_length=3)
+
+    @field_validator("capabilities")
+    @classmethod
+    def _canonical_capabilities(cls, value: tuple[GuestExecutionCapability, ...]) -> tuple[GuestExecutionCapability, ...]:
+        if tuple(sorted(set(value))) != value:
+            raise ValueError("guest capabilities must be sorted and unique")
+        return value
+
+
 class SidecarContainerV1(_Strict):
     role_name: str = Field(pattern=_ROLE_NAME.pattern)
     image_ref: str
@@ -195,6 +217,7 @@ class SidecarContainerV1(_Strict):
     depends_on: tuple[str, ...] = Field(default=(), max_length=32)
     private_sandbox: bool = False
     identity: SandboxIdentityV1 | None = None
+    guest_execution: GuestExecutionV1 | None = Field(default=None, exclude_if=lambda value: value is None)
     task_fixture: bool = Field(default=False, strict=True, exclude_if=lambda value: not value)
     task_image_component: str | None = Field(default=None, exclude_if=lambda value: value is None)
     hostname: str | None = Field(default=None, exclude_if=lambda value: value is None)
@@ -214,6 +237,23 @@ class SidecarContainerV1(_Strict):
             raise ValueError("task identity requires a private sandbox")
         if self.identity is not None and "HOME" in self.environment:
             raise ValueError("sandbox HOME must be declared by its identity")
+        if self.guest_execution is not None:
+            if (not self.private_sandbox or self.identity is None
+                    or self.identity.run_as_user != 0 or self.identity.run_as_group != 0):
+                raise ValueError("guest execution requires an explicit root private sandbox")
+            binary = "/loom/bin/loom-sandbox-runtime"
+            socket = f"/loom/sandboxes/{self.role_name}/sandbox.sock"
+            if (len(self.argv) != 5 or self.argv[:4] != (
+                    binary, "--socket", socket, "--exec-timeout-seconds")
+                    or not self.argv[4].isascii() or not self.argv[4].isdigit()
+                    or not 1 <= int(self.argv[4]) <= 86400 or str(int(self.argv[4])) != self.argv[4]):
+                raise ValueError("guest execution requires the canonical bounded sandbox command")
+            if any(probe.kind != "exec" or probe.argv != (binary, "--check-socket", socket)
+                   for probe in (self.startup_probe, self.readiness_probe)):
+                raise ValueError("guest execution requires its private socket probes")
+            if (self.resources.cpu_millis < 1000 or self.resources.memory_mib < 512
+                    or self.resources.ephemeral_storage_mib < 160):
+                raise ValueError("guest execution resources are below the admitted minimum")
         return self
 
     @field_validator("image_ref")
@@ -365,6 +405,25 @@ class ExecutionRuntimePlanV1(_Strict):
 
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
+        guests = [sidecar for sidecar in self.sidecars if sidecar.guest_execution is not None]
+        guest_class = self.execution_class_id in {
+            nebius_guest_execution_class().class_id,
+            nebius_guest_execution_class(supports_task_web_egress=True).class_id,
+        }
+        if guest_class != bool(guests):
+            raise ValueError("guest execution class and guest plan must be selected together")
+        if guests and (
+            {sidecar.role_name for sidecar in guests} != {"task-sandbox", "verifier-sandbox"}
+            or len(self.sidecars) != 2
+            or self.execution_role != "attempt" or self.composition != RuntimeComposition.INIT_PAYLOAD
+            or self.verifier_execution != VerifierExecution.IN_ATTEMPT
+            or self.runtime_volume_mib < 1024
+            or self.controller_resources is None
+            or any(sidecar.guest_execution != guests[0].guest_execution
+                   or sidecar.resources != self.task_resources
+                   or sidecar.image_ref != self.task_image_ref for sidecar in guests)
+        ):
+            raise ValueError("guest execution requires matching private task/verifier plans and payload storage")
         fixtures = [sidecar for sidecar in self.sidecars if sidecar.task_fixture]
         private = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
         expected = self.resident_private_roles()
@@ -449,8 +508,15 @@ class ExecutionRuntimePlanV1(_Strict):
                 raise ValueError("controller sizing must preserve task and verifier resources")
             if (self.node_resource_allocation is None
                     and self.controller_resources.ephemeral_storage_mib
-                    != self.task_resources.ephemeral_storage_mib):
+                    != self.task_resources.ephemeral_storage_mib + (self.runtime_volume_mib if guests else 0)):
                 raise ValueError("controller sizing must preserve task-derived storage")
+        if guests:
+            declared = (self.node_resource_allocation.declared_task
+                        if self.node_resource_allocation else self.task_resources)
+            if (self.execution_resources.ephemeral_storage_mib
+                    < declared.ephemeral_storage_mib + self.runtime_volume_mib
+                    or self.container_request("execution").ephemeral_storage_mib <= self.runtime_volume_mib):
+                raise ValueError("guest payload storage must be reserved in the controller allocation and request")
         if self.resource_requests is not None:
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
@@ -672,6 +738,22 @@ def validate_runtime_plan_requirements(
 ) -> None:
     """Reject semantic drift between admission requirements and the runtime plan."""
 
+    declared_capabilities = (requirements.execution_requirements.capabilities
+                             if requirements.execution_requirements else ())
+    expected_guest = GUEST_EXECUTION_CAPABILITIES.intersection(declared_capabilities)
+    guests = [sidecar.guest_execution for sidecar in plan.sidecars if sidecar.guest_execution is not None]
+    if bool(guests) != bool(expected_guest) or bool(guests) != (
+        requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
+    ):
+        raise ValueError("runtime guest plan does not match workload isolation and capabilities")
+    if guests:
+        execution_class = nebius_guest_execution_class(
+            supports_task_web_egress=plan.execution_class_id == nebius_guest_execution_class(
+                supports_task_web_egress=True).class_id,
+        )
+        admission = evaluate_execution_admission(requirements, execution_class)
+        if not admission.compatible or any(frozenset(guest.capabilities) != expected_guest for guest in guests):
+            raise ValueError("runtime guest plan does not match admitted workload requirements")
     if requirements.task_egress != plan.task_egress:
         raise ValueError("runtime plan network policy does not match workload requirements")
     if requirements.image_ref != plan.task_image_ref:
@@ -705,6 +787,7 @@ __all__ = [
     "ExecutionResourceRequestsV1",
     "ExecutionRuntimePlanV1",
     "ExecutionRuntimeResultV1",
+    "GuestExecutionV1",
     "ProbeV1",
     "ProcessPhaseV1",
     "RuntimeComposition",

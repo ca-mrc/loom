@@ -810,16 +810,16 @@ jobs:
           cache: false
       - name: gofmt
         run: |
-          out=$(gofmt -l ./cmd/)
+          out=$(gofmt -l ./cmd/ ./internal/)
           if [ -n "$out" ]; then
             echo "$out"
-            echo "gofmt found issues; run \`gofmt -w ./cmd/\` to fix"
+            echo "gofmt found issues; run \`gofmt -w ./cmd/ ./internal/\` to fix"
             exit 1
           fi
       - name: go vet
-        run: go vet ./cmd/...
+        run: go vet ./cmd/... ./internal/...
       - name: go test
-        run: go test -race ./cmd/...
+        run: go test -race ./cmd/... ./internal/...
 
   # Required frontend gate. It builds and serves the production bundle under
   # a route prefix, then exercises logged-out, user, and admin paths at
@@ -1053,6 +1053,17 @@ jobs:
 
       - name: Prepare pinned MinIO fixture images
         run: uv run --no-sync python -m tests.support.minio_images
+
+      - name: Build and extract the admitted software-guest payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -f deploy/Dockerfile.execution-runtime -t loom-guest-ci:local .
+          guest_container=$(docker create loom-guest-ci:local)
+          trap 'docker rm -f "$guest_container" >/dev/null' EXIT
+          mkdir -p "$RUNNER_TEMP/loom-guest-payload"
+          docker cp "$guest_container:/guest/." "$RUNNER_TEMP/loom-guest-payload/"
+          echo "LOOM_GUEST_PAYLOAD=$RUNNER_TEMP/loom-guest-payload" >> "$GITHUB_ENV"
 
       - name: Pytest — integration (docker tier)
         shell: bash

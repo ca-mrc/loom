@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 )
@@ -71,6 +72,12 @@ func main() {
 	}
 	defer func() { _ = stopProxy() }()
 	trustedEnvironment := trustedGatewayEnvironment(proxyURL)
+	for _, sidecar := range p.Sidecars {
+		if sidecar.GuestExecution != nil {
+			trustedEnvironment["LOOM_SANDBOX_MAX_TRANSFER_BYTES"] = strconv.FormatInt(p.MaxArtifactBytes, 10)
+			break
+		}
+	}
 	stopTaskEgress := func() {}
 	if p.TaskEgress != nil {
 		diagnosticDirectory := filepath.Join(filepath.Clean(*workspace), filepath.Dir(taskEgressOutput.SourcePath))
@@ -84,7 +91,14 @@ func main() {
 			os.Exit(2)
 		}
 		defer evidence.Close()
-		proxy, stop, err := broker.startTaskEgress(executionContext, p.TaskEgress, p.RuntimeContractSHA256, evidence, p.MaxArtifactBytes, p.MaxLogBytesPerStream)
+		startEgress := broker.startTaskEgress
+		for _, sidecar := range p.Sidecars {
+			if sidecar.GuestExecution != nil {
+				startEgress = broker.startGuestTaskEgress
+				break
+			}
+		}
+		proxy, stop, err := startEgress(executionContext, p.TaskEgress, p.RuntimeContractSHA256, evidence, p.MaxArtifactBytes, p.MaxLogBytesPerStream)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "start task egress:", err)
 			os.Exit(2)

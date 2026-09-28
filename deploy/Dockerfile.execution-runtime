@@ -4,12 +4,40 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/loom-execution-runtime ./cmd/loom-execution-runtime
 COPY cmd/loom-sandbox-runtime ./cmd/loom-sandbox-runtime
+COPY cmd/loom-guest-runtime ./cmd/loom-guest-runtime
+COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/loom-execution-runtime ./cmd/loom-execution-runtime
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/loom-sandbox-runtime ./cmd/loom-sandbox-runtime
 
-FROM scratch
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/loom-guest-runtime ./cmd/loom-guest-runtime
+
+# Build with the repository root as context. No package maintainer scripts run.
+FROM docker:29-cli@sha256:a1cc00ef07709f989c0b03c447ce9dae58bbabc2537ac5800ce930e25cd84cb0 AS docker-cli
+FROM python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254 AS guest-build
+COPY deploy/guest-runtime/sources.lock.json deploy/guest-runtime/build-payload.py /build/
+COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins/docker-buildx /build/docker-buildx
+RUN --mount=type=cache,target=/downloads \
+    python /build/build-payload.py --lock /build/sources.lock.json \
+    --buildx /build/docker-buildx --downloads /downloads --work /work --output /payload
+
+# Exercise the payload without a system loader, libc, shell or external tools.
+FROM scratch AS guest-verify
+COPY --from=guest-build /payload /payload
+COPY deploy/guest-runtime/verify-payload.sh /verify-payload.sh
+RUN ["/payload/bin/busybox", "mkdir", "-m", "1777", "/tmp"]
+USER 65532:65532
+RUN ["/payload/bin/busybox", "sh", "/verify-payload.sh"]
+
+FROM scratch AS guest-payload
+COPY --from=guest-verify /payload /payload
+
+FROM scratch AS runtime
+COPY --from=guest-payload /payload /guest
+COPY --from=build /out/loom-guest-runtime /guest/bin/loom-guest-runtime
+COPY --from=build /out/loom-sandbox-runtime /guest/bin/loom-sandbox-runtime
 COPY --from=build /out/loom-execution-runtime /loom-execution-runtime
 COPY --from=build /out/loom-sandbox-runtime /loom-sandbox-runtime
 USER 65532:65532

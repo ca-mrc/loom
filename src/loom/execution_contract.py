@@ -28,6 +28,8 @@ from pydantic import (
 )
 
 from loom.execution_requirements import (
+    GUEST_EXECUTION_CAPABILITIES,
+    GuestExecutionCapability,
     TaskExecutionRequirementsV1,
     execution_requirement_diagnostics,
 )
@@ -49,6 +51,7 @@ class IsolationLevel(StrEnum):
     SHARED_KERNEL = "shared_kernel"
     SANDBOXED_RUNTIME = "sandboxed_runtime"
     DEDICATED_EPHEMERAL_NODE = "dedicated_ephemeral_node"
+    DEDICATED_GUEST_KERNEL = "dedicated_guest_kernel"
 
 
 class NetworkAccess(StrEnum):
@@ -139,6 +142,18 @@ class PoolCapacityV1(_StrictContract):
         return self
 
 
+class GuestExecutionClassV1(_StrictContract):
+    """Guest-local capabilities, without authority over the trusted host."""
+
+    schema_version: Literal["loom.guest-execution-class.v1"] = "loom.guest-execution-class.v1"
+    runtime: Literal["qemu-tcg-v1"] = "qemu-tcg-v1"
+    supported_capabilities: frozenset[GuestExecutionCapability] = GUEST_EXECUTION_CAPABILITIES
+
+    @field_serializer("supported_capabilities", when_used="json")
+    def _serialize_capabilities(self, value: frozenset[GuestExecutionCapability]) -> list[str]:
+        return sorted(value)
+
+
 class ExecutionClassV1(_StrictContract):
     """Versioned, provider-neutral capabilities for one execution class."""
 
@@ -165,6 +180,9 @@ class ExecutionClassV1(_StrictContract):
     permits_host_network: bool
     permits_nested_containers: bool
     permits_host_devices: bool
+    guest_execution: GuestExecutionClassV1 | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
 
     @model_serializer(mode="wrap")
     def _omit_unused_web_egress(self, handler: Any) -> dict[str, Any]:
@@ -192,6 +210,15 @@ class ExecutionClassV1(_StrictContract):
                 "service execution classes cannot enable host-escape capabilities: "
                 + ", ".join(enabled),
             )
+        return self
+
+    @model_validator(mode="after")
+    def _guest_capabilities_require_an_independent_kernel(self) -> ExecutionClassV1:
+        dedicated_guest = self.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
+        if dedicated_guest != (self.guest_execution is not None):
+            raise ValueError("guest_execution requires exactly dedicated_guest_kernel isolation")
+        if dedicated_guest and (self.cpu_architecture != "x86_64" or self.gpu_vendor != "none"):
+            raise ValueError("guest execution supports only Linux x86_64 CPU classes")
         return self
 
 
@@ -494,6 +521,7 @@ def workload_requirements_from_task(
 
     env = task.environment
     capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
+    needs_guest_kernel = bool(GUEST_EXECUTION_CAPABILITIES.intersection(capabilities))
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
         image_ref: str | None = None
@@ -537,7 +565,10 @@ def workload_requirements_from_task(
         cpu_millis=round(env.cpus * 1000) if env.cpus is not None else None,
         memory_mib=env.memory_mb,
         ephemeral_storage_mib=env.storage_mb,
-        isolation_level=IsolationLevel.SHARED_KERNEL,
+        isolation_level=(
+            IsolationLevel.DEDICATED_GUEST_KERNEL if needs_guest_kernel
+            else IsolationLevel.SHARED_KERNEL
+        ),
         network_access=network_access,
         task_egress=(env.baseline_network_policy
                      if isinstance(env.baseline_network_policy, WebAllowlist) else None),
@@ -551,9 +582,9 @@ def workload_requirements_from_task(
         privileged=False,
         host_path=False,
         host_network=False,
-        nested_containers=bool({"nested_docker", "singularity_mounts"}.intersection(capabilities)),
+        nested_containers=False,
         host_devices="dpdk_networking" in capabilities,
-        host_specialized="isolated_kernel_settings" in capabilities,
+        host_specialized=False,
         execution_requirements=env.execution_requirements,
     )
 
@@ -569,7 +600,13 @@ def evaluate_execution_admission(
     def reject(code: str, message: str) -> None:
         reasons.append(CompatibilityReasonV1(code=code, message=message))
 
-    for diagnostic in execution_requirement_diagnostics(requirements.execution_requirements):
+    supported_capabilities = (
+        execution_class.guest_execution.supported_capabilities
+        if execution_class.guest_execution is not None else frozenset()
+    )
+    for diagnostic in execution_requirement_diagnostics(
+        requirements.execution_requirements, supported_capabilities=supported_capabilities,
+    ):
         reject(diagnostic.code, diagnostic.reason)
 
     if requirements.operating_system != execution_class.operating_system:
@@ -623,6 +660,22 @@ def evaluate_execution_admission(
             reject(f"{name}_limit_required", f"{name} must have an explicit positive limit")
         elif maximum is not None and requested > maximum:
             reject(f"{name}_limit_exceeded", f"{name} exceeds the execution class maximum")
+
+    if execution_class.guest_execution is not None:
+        for name, requested, minimum, field, unit in (
+            ("cpu", requirements.cpu_millis, 1000, "cpus", "CPU millis"),
+            ("memory", requirements.memory_mib, 512, "memory_mb", "MiB"),
+            (
+                "ephemeral_storage", requirements.ephemeral_storage_mib, 160,
+                "storage_mb", "MiB",
+            ),
+        ):
+            if requested is not None and requested < minimum:
+                reject(
+                    f"guest_{name}_limit_too_small",
+                    f"guest execution requires at least {minimum} {unit}; "
+                    f"increase environment.{field} before submitting this workload",
+                )
 
     feature_pairs = (
         (requirements.custom_dns, execution_class.supports_custom_dns, "custom_dns"),
@@ -685,10 +738,30 @@ NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 = NEBIUS_CPU_EXECUTION_CLASS_V1.model_copy(upd
     "supports_task_web_egress": True,
 })
 
+NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1 = ExecutionClassV1.model_validate({
+    **NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(),
+    "class_id": "linux-amd64-cpu-guest-v1",
+    "isolation_level": IsolationLevel.DEDICATED_GUEST_KERNEL,
+    "guest_execution": GuestExecutionClassV1(),
+})
+NEBIUS_CPU_GUEST_WEB_EXECUTION_CLASS_V1 = ExecutionClassV1.model_validate({
+    **NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1.model_dump(),
+    "class_id": "linux-amd64-cpu-guest-web-v1",
+    "supports_task_web_egress": True,
+})
+
 
 def nebius_cpu_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
     """Select an immutable CPU catalog identity from explicit runtime readiness."""
     return (
         NEBIUS_CPU_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
         else NEBIUS_CPU_EXECUTION_CLASS_V1
+    )
+
+
+def nebius_guest_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
+    """Select guest-local contract support; deployment readiness is checked separately."""
+    return (
+        NEBIUS_CPU_GUEST_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
+        else NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1
     )

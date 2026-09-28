@@ -56,7 +56,8 @@
       "enum": [
         "shared_kernel",
         "sandboxed_runtime",
-        "dedicated_ephemeral_node"
+        "dedicated_ephemeral_node",
+        "dedicated_guest_kernel"
       ],
       "title": "IsolationLevel",
       "type": "string"
