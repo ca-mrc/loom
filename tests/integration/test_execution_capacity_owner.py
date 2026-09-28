@@ -90,3 +90,23 @@ async def test_catalog_rejects_capacity_owner_chains(postgres_url):
                 await persist_execution_catalog(session, execution_class=nebius_guest_execution_class(), targets=(nested,))
     finally:
         await engine.dispose()
+
+
+async def test_catalog_rejects_uncollectable_family_size_before_registration(postgres_url):
+    from loom_control_plane.execution_capacity_targets import resolve_capacity_targets
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with sessions() as session, session.begin():
+            _, owner = await _seed_ready_trial(session, now=datetime.now(UTC))
+            members = tuple(_alias(owner, target_id=f"{owner.target_id}-guest-{index}",
+                health_check_id=f"{owner.health_check_id}-guest-{index}") for index in range(63))
+            await persist_execution_catalog(session, execution_class=nebius_guest_execution_class(), targets=members)
+            assert len((await resolve_capacity_targets(session, owner.target_id)).scope.target_ids) == 64
+            excess = _alias(owner, target_id=owner.target_id + "-excess")
+            with pytest.raises(ServiceExecutionConflict, match="64"):
+                await persist_execution_catalog(session, execution_class=nebius_guest_execution_class(), targets=(excess,))
+            assert await session.get(ServiceExecutionTarget, excess.target_id) is None
+    finally:
+        await engine.dispose()
