@@ -1,6 +1,7 @@
 """Concrete preparation composes real databases and journal-backed provider I/O."""
 from __future__ import annotations
 
+import asyncio
 import copy
 from uuid import uuid4
 
@@ -132,3 +133,70 @@ async def test_stopped_generation_cannot_enter_concrete_preparation(preparation)
     with pytest.raises(ProviderBlockedError, match='application_preparation_not_requested'):
         await coordinator.prepare(current)
     assert api.mutations == cloud.mutations == []
+
+
+async def test_concrete_activation_recovery_never_reenters_preparation(preparation, monkeypatch):
+    coordinator, registry, _, _, lease, api, cloud, _ = preparation
+    await close_quota(preparation)
+    dispatch = registry.dispatch_effect
+
+    async def interrupt_open(current, key):
+        if key.startswith('activate:'):
+            raise asyncio.CancelledError
+        return await dispatch(current, key)
+
+    monkeypatch.setattr(registry, 'dispatch_effect', interrupt_open)
+    with pytest.raises(asyncio.CancelledError):
+        await coordinator.activate(lease)
+    assert (await registry.effect_history(lease))[-1].phase == 'prepared'
+    monkeypatch.setattr(registry, 'dispatch_effect', dispatch)
+
+    async def never_retire(*args, **kwargs):
+        pytest.fail('activation recovery must not call preparation or stop workloads')
+
+    monkeypatch.setattr(coordinator, 'prepare', never_retire)
+    monkeypatch.setattr(coordinator.runtime, 'stop_workloads', never_retire)
+    before = copy.deepcopy(api.mutations), copy.deepcopy(cloud.mutations)
+    effect = await coordinator.activate(lease)
+    assert effect.phase == 'observed' and FENCE_PATH not in api.objects
+    assert len(api.mutations) == len(before[0]) + 1 and cloud.mutations == before[1]
+    assert await coordinator.activate(lease) == effect
+    assert len(api.mutations) == len(before[0]) + 1
+
+
+@pytest.mark.parametrize('damage', ['network', 'secret', 'privilege'])
+async def test_concrete_activation_requalifies_live_prerequisites_before_quota_delete(
+    preparation, database_access, damage,
+):
+    coordinator, _, _, _, lease, api, _, row = preparation
+    await close_quota(preparation)
+    await coordinator.prepare(lease)
+    if damage == 'network':
+        prefix = f'/namespaces/{coordinator.runtime.authority.shared_namespace}/networkpolicies/'
+        path = next(path for path in api.objects if prefix in path)
+        del api.objects[path]
+    elif damage == 'secret':
+        secret = next(value for value in api.objects.values() if value['kind'] == 'Secret')
+        secret['data'][next(iter(secret['data']))] = 'Y2hhbmdlZA=='
+    else:
+        role = 'loom_app_runtime_' + row.data_environment_id.hex
+        database_access[0].execute(f'REVOKE SELECT ON public.shared_records FROM "{role}"')
+    before = len(api.mutations)
+    with pytest.raises(ProviderBlockedError):
+        await coordinator.activate(lease)
+    assert FENCE_PATH in api.objects
+    assert not any(method == 'DELETE' and path == FENCE_PATH for method, path, _ in api.mutations[before:])
+
+
+async def test_concrete_activation_reconciles_lost_delete_reply_without_reclosing(preparation):
+    coordinator, _, _, _, lease, api, _, _ = preparation
+    await close_quota(preparation)
+    await coordinator.prepare(lease)
+    api.lose_response = True
+    with pytest.raises(ProviderWaitingError):
+        await coordinator.activate(lease)
+    assert FENCE_PATH not in api.objects
+    before = copy.deepcopy(api.mutations)
+    api.lose_response = False
+    assert (await coordinator.activate(lease)).phase == 'observed'
+    assert api.mutations == before

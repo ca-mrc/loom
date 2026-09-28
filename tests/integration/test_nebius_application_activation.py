@@ -1,6 +1,7 @@
 """Active lifecycle recovery observes retirement without re-entering mutations."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 
@@ -100,3 +101,101 @@ async def test_read_retired_rejects_expired_lease_and_recovers_under_takeover(ac
     assert fresh.namespace == proof.namespace and fresh.fence == proof.fence
     assert fresh.identity.runner_epoch == current.runner_epoch > proof.identity.runner_epoch
     assert api.mutations == writes
+
+
+async def test_open_admission_deletes_exact_owned_quota_once_and_replay_reads_live_absence(active_retired):
+    context, provider, _ = active_retired
+    api, lease = context[3:5]
+    metadata = copy.deepcopy(api.objects[FENCE_PATH]['metadata'])
+    before = len(api.mutations)
+    effect = await provider.open_admission(lease)
+    assert effect.phase == 'observed' and effect.intent.action == 'delete'
+    assert effect.intent.uid == metadata['uid'] and effect.intent.resource_version == metadata['resourceVersion']
+    assert FENCE_PATH not in api.objects
+    assert await provider.open_admission(lease) == effect
+    assert len(api.mutations) == before + 1
+    assert api.mutations[-1][0:2] == ('DELETE', FENCE_PATH)
+
+
+async def test_prepared_open_retains_original_preconditions_after_takeover_and_rejection(active_retired, monkeypatch):
+    context, provider, _ = active_retired
+    registry, _, _, api, lease, _ = context
+    dispatch = registry.dispatch_effect
+
+    async def interrupted(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(registry, 'dispatch_effect', interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await provider.open_admission(lease)
+    prepared = (await registry.effect_history(lease))[-1]
+    assert prepared.phase == 'prepared'
+    monkeypatch.setattr(registry, 'dispatch_effect', dispatch)
+    await expire(registry.session_factory, lease)
+    current = await registry.claim(lease.operation_id)
+    api.objects[FENCE_PATH]['metadata']['resourceVersion'] = '99'
+    api.reject_next = 422
+    with pytest.raises(ProviderWaitingError):
+        await provider.open_admission(current)
+    assert api.mutations[-1][2]['preconditions']['resourceVersion'] == '1'
+    rejected = (await registry.effect_history(current))[-1]
+    assert rejected.key == prepared.key and rejected.phase == 'rejected'
+    observed = await provider.open_admission(current)
+    assert observed.key != rejected.key and observed.phase == 'observed'
+    assert api.mutations[-1][2]['preconditions']['resourceVersion'] == '99'
+
+
+async def test_uncertain_open_waits_for_original_delete_without_resending(active_retired):
+    context, provider, _ = active_retired
+    registry, _, _, api, lease, _ = context
+    api.lose_response = api.pending_delete = True
+    with pytest.raises(ProviderWaitingError):
+        await provider.open_admission(lease)
+    before = copy.deepcopy(api.mutations)
+    await expire(registry.session_factory, lease)
+    current = await registry.claim(lease.operation_id)
+    api.lose_response = False
+    with pytest.raises(ProviderWaitingError):
+        await provider.open_admission(current)
+    assert api.mutations == before
+    del api.objects[FENCE_PATH]
+    assert (await provider.open_admission(current)).phase == 'observed'
+    assert api.mutations == before
+
+
+@pytest.mark.parametrize('uncertain', [False, True])
+async def test_open_never_deletes_replacement_quota_even_if_old_delete_is_observed(active_retired, uncertain):
+    context, provider, _ = active_retired
+    api, lease = context[3:5]
+    replacement = copy.deepcopy(api.objects[FENCE_PATH])
+    replacement['metadata']['uid'] = 'replacement'
+    if uncertain:
+        api.lose_response = True
+        with pytest.raises(ProviderWaitingError):
+            await provider.open_admission(lease)
+        api.lose_response = False
+    else:
+        await provider.open_admission(lease)
+    api.objects[FENCE_PATH] = replacement
+    before = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError, match='application_pod_fence_conflict'):
+        await provider.open_admission(lease)
+    assert api.mutations == before
+
+
+async def test_open_refuses_running_pods_and_stopped_successor(active_retired):
+    context, provider, _ = active_retired
+    registry, _, _, api, lease, alice = context
+    api.objects[PODS]['items'] = [{'metadata': {'name': 'still-running'}}]
+    before = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderWaitingError, match='application_workloads_retirement_pending'):
+        await provider.open_admission(lease)
+    api.objects[PODS]['items'] = []
+    stopped = await registry.transition(lease.application_id, principal=alice, idempotency_key='stop',
+        action='suspend', expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    with pytest.raises(ProviderBlockedError, match='application_activation_not_requested'):
+        await provider.open_admission(current)
+    with pytest.raises(ManagementError, match='stale_operation_lease'):
+        await provider.open_admission(lease)
+    assert api.mutations == before
