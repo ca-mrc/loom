@@ -67,8 +67,8 @@ class ManagementUpgradeAPI(Protocol):
         """Actual application subject; False means admission propagation pending."""
         ...
 
-    def verify_public(self, request: ManagementUpgradeRequest, state_dir: Path) -> None:
-        """Exact active Deployment readiness, application worker, HTTPS and auth."""
+    def verify_public(self, request: ManagementUpgradeRequest, state_dir: Path) -> bool:
+        """False while the exact workload starts; True only after public proof."""
         ...
 
 
@@ -228,7 +228,11 @@ def upgrade_management(*, request: ManagementUpgradeRequest, api: ManagementUpgr
                         if not activate_management(request=switch, api=connected_switch, state_dir=state / 'switch'):
                             return pending('activate')
                     stage = 'public_authentication'
-                    api.verify_public(request, state)
+                    ready = api.verify_public(request, state)
+                    if ready is False:
+                        return pending('service')
+                    if ready is not True:
+                        raise ValueError
                     return {**result, 'status': 'management_upgraded'}
     except ManagementUpgradeError:
         raise
