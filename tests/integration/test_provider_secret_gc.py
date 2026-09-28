@@ -21,6 +21,7 @@ from loom_service.provider_secret_gc import (
     retire_provider_secret,
     run_loop,
 )
+from tests.integration.test_nebius_application_effect_migration import operation
 
 KEY = bytes(range(32))
 OLD = datetime.now(UTC) - timedelta(days=2)
@@ -205,14 +206,52 @@ def test_migration_downgrade_upgrade_and_reference_inventory(isolated_migration_
                 SELECT tgrelid::regclass::text FROM pg_trigger
                 WHERE tgname LIKE '%_provider_secret_attachment'
             """)).scalars())
-        expected = {table.name for table in Base.metadata.tables.values()
-                    if any(c.name.endswith("secret_ref") or c.name == "secret_refs"
-                           or c.name == "encrypted_api_key_ref" for c in table.columns)}
-        assert actual == expected
+        # This is migration0156's historical inventory, not today's ORM schema.
+        assert actual == {"provider_connections", "dev_instances", "task_image_build_projections",
+                          "task_image_build_session_generations", "pipeline_stage_runs"}
         indexes = {index["name"] for index in inspect(engine).get_indexes("secrets")}
         assert "secrets_provider_retired_idx" in indexes
     finally:
         engine.dispose()
+
+
+def test_current_secret_consumers_have_attachment_integrity(isolated_migration_postgres_url):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.connect() as connection:
+            guarded = {(table, field.decode()) for table, args in connection.execute(text("""
+                SELECT tgrelid::regclass::text, tgargs FROM pg_trigger
+                WHERE tgname LIKE '%_provider_secret_attachment'
+            """)) for field in bytes(args).split(b"\0") if field}
+        inspector = inspect(engine)
+        for table in Base.metadata.tables.values():
+            for constraint in inspector.get_foreign_keys(table.name):
+                if constraint["referred_table"] == "secrets" and constraint["referred_columns"] == ["ref"]:
+                    guarded.update((table.name, column) for column in constraint["constrained_columns"])
+        expected = {(table.name, column.name) for table in Base.metadata.tables.values() for column in table.columns
+                    if column.name.endswith("secret_ref") or column.name in {"secret_refs", "encrypted_api_key_ref"}}
+        assert guarded == expected
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_retired_secret_with_application_material_reference_is_retained(factory):
+    from loom.db.schema import NebiusApplicationMaterial
+
+    async with factory.begin() as session:
+        ref, _ = await seed(session, retired=OLD, deleted=True)
+        owner = await (await session.connection()).run_sync(operation)
+        session.add(NebiusApplicationMaterial(operation_id=owner, secret_ref=ref))
+    # Native FK protection alone prevents deletion but would abort every GC pass.
+    # The collector must recognize this consumer and still reclaim another key.
+    async with factory.begin() as session:
+        unreferenced, _ = await seed(session, retired=OLD, deleted=True)
+    async with factory.begin() as session:
+        assert await collect_provider_secrets(session) == 1
+    async with factory() as session:
+        assert await session.get(Secret, ref) is not None
+        assert await session.get(Secret, unreferenced) is None
 
 
 @pytest.mark.asyncio

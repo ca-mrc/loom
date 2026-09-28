@@ -22,7 +22,7 @@ PROVIDER_SECRET_GRACE = timedelta(hours=24)
 _BATCH_SIZE = 100
 _POLL_SECONDS = 60
 
-# Keep aligned with migration 0156's narrow reference-attachment guards. Retain
+# Keep aligned with reference-attachment guards and native Secret foreign keys. Retain
 # generic references regardless of historical consumer state, including terminal
 # stage runs. Soft-deleted provider records retain attribution, not credentials.
 _REFERENCED_SQL = """
@@ -36,6 +36,7 @@ _REFERENCED_SQL = """
         WHERE session_secret_ref = :ref
         UNION ALL SELECT 1 FROM pipeline_stage_runs
         WHERE :ref = ANY(secret_refs)
+        UNION ALL SELECT 1 FROM nebius_application_material WHERE secret_ref = :ref
     )
 """
 

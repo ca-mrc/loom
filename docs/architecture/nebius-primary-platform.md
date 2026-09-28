@@ -340,6 +340,70 @@ CREATE has no namespace-UID precondition: readback detects namespace replacement
 but does not claim to fence a privileged external administrator replacing it.
 The application manager itself has no namespace replacement/delete authority.
 
+### Shared application database access
+
+`loom.nebius_application_database` supplies a protected shared-side credential
+interface, not an installed lifecycle worker. Its administrator-installed private
+SQL schema binds one development data UUID, database identity and dedicated manager
+login. That ordinary manager can invoke the credential routines but cannot perform
+general role/schema administration or write the private records directly.
+
+Each application incarnation/access generation gets a separate ordinary login.
+PostgreSQL16 membership options grant inherited shared-data DML with `SET FALSE`
+and `ADMIN FALSE`; the login cannot assume the common runtime role. The common
+role has no schema ownership/DDL or migration-head writes. It is separate from
+the historical service role. Protected shared migrations must reapply its grants
+for new tables. Developer-controlled APIs remain trusted development code with
+shared-data DML, not mutually adversarial database tenants.
+
+Grant/revoke serialize on a private application row. A committed monotonic
+revocation record prevents an earlier delayed grant from reopening retired access,
+including a generation that had never finished provisioning. Revocation removes
+LOGIN, password and membership without deleting users, tasks or data. A separate
+committed call terminates existing connections and checks their absence; successor
+access waits for predecessor connections to disappear. The SQL routine itself
+rejects a retirement made in its current transaction before terminating anything;
+rolling back a later drain cannot undo the prior revocation. `NOLOGIN` alone is never
+retirement evidence. An authentication already in flight may outlive a backend
+snapshot, but after revocation it has no shared runtime membership or data grants.
+
+The interface preserves exact role OIDs, rejects role replacement/privilege drift,
+and never rotates an unknown credential on replay. PUBLIC data privileges that
+would defeat revocation are rejected. Private records retain only credential
+fingerprints, not raw passwords. The protected caller must generate high-entropy
+credentials and retain them in protected material for retry. This code has no
+live installation/dispatch entry point and does not retire object-store keys,
+close Pods, qualify application schema compatibility, or release capacity.
+
+### Recoverable application credential material
+
+The internal application registry persists a generation's credential bundles in
+the existing management `LocalEncryptedSecretStore` before a trusted lifecycle
+caller prepares or dispatches external grants or Kubernetes Secret delivery.
+Migration0164 atomically links each operation to its unique encrypted record;
+foreign keys retain both the operation and ciphertext, and downgrade refuses to
+erase material history. Provider-secret collection recognizes these references,
+preserving any referenced retired key without aborting unrelated collection.
+Plans and public operation progress contain neither raw
+material nor secret references. Management's encryption key remains separate from
+the shared-development keyring delivered to APIs.
+
+`ensure_material` validates the current operation lease and serializes competing
+callers. Its synchronous, side-effect-free factory runs only when no committed
+material exists; retries and lease takeover decrypt the original material without
+rotating credentials. Factory/transaction failure leaves no partial reference.
+New credentials require an active create/update/resume with exactly its frozen
+generation-specific DB, storage and auth Secret targets. Historical fixed-name
+plans and stop operations cannot generate new material. `load_material` requires
+a current lease even to read earlier operations of the same application, allowing
+retirement without granting sibling/future access. Missing or corrupted material
+fails closed rather than generating a replacement.
+
+This is encrypted persistence, not semantic validation of a password, CA, cloud
+key or shared keyring. The trusted lifecycle provider still must qualify those
+values, protect delivery and coordinate revocation; no credential provisioning,
+runtime activation, readiness or capacity release is enabled by this journal.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

@@ -30,7 +30,7 @@ from loom.nebius_application_contract import (
     SharedDevelopmentBindingV1,
 )
 from loom.nebius_application_render import RenderedApplication
-from loom_service.application_management.effects import ApplicationEffectJournal
+from loom_service.application_management.material import ApplicationMaterialJournal
 from loom_service.application_management.plans import freeze_plan
 from loom_service.environment_management.platform_accounting import ENVELOPE_FIELDS, platform_usage
 from loom_service.environment_management.registry import ManagementError, owner_identity
@@ -57,7 +57,7 @@ def _fingerprint(**intent: Any) -> str:
     return hashlib.sha256(json.dumps(intent, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-class ApplicationRegistry(ApplicationEffectJournal):
+class ApplicationRegistry(ApplicationMaterialJournal):
     @staticmethod
     async def _replay(session: AsyncSession, owner: UUID, key: str, fingerprint: str) -> ApplicationOperationV1 | None:
         row = await session.scalar(select(NebiusApplicationOperation).where(
