@@ -256,6 +256,7 @@ async def _reserve_service_candidate(
                          else dict(row["task_source_provenance"] or {}))
     allocate_resources = False
     binding = task.service_execution
+    trial_config = None
     if binding is not None:
         if (row["batch_runtime_profile"] or {}).get("task_resource_requests", {}).get(row["task_id"]):
             raise ValueError("task resource requests require automatic native execution")
@@ -273,10 +274,11 @@ async def _reserve_service_candidate(
         allocate_resources = runtime_profile.resource_allocation_policy == "node-share-v1"
         if runtime_profile.logical_pool_id != pool_id:
             raise ValueError("queued service-execution runtime profile pool drift")
+        trial_config = TrialConfig.model_validate(row["trial_config"])
         runtime_plan = compile_service_execution_plan(
             task_id=row["task_id"],
             task=task,
-            trial=TrialConfig.model_validate(row["trial_config"]),
+            trial=trial_config,
             task_revision_sha256=task_revision,
             source_provenance=source_provenance,
             task_image_grant=grant,
@@ -292,7 +294,10 @@ async def _reserve_service_candidate(
         execution_class_id=runtime_plan.execution_class_id,
         now=current_time,
     )
-    requirements = workload_requirements_from_task(resolve_prepared_task(task, grant) if grant else task)
+    requirements = workload_requirements_from_task(
+        resolve_prepared_task(task, grant) if grant else task,
+        trial_config if binding is None else None,
+    )
     blocked: ExecutionProvisioningBlockedError | None = None
     for target in targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:

@@ -33,6 +33,8 @@ from loom.execution_requirements import (
 )
 from loom.models.networking import WebAllowlist
 from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 _IMMUTABLE_OCI_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 
@@ -479,7 +481,9 @@ class ExecutionRoutingDecisionV1(_StrictContract):
         return self
 
 
-def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
+def workload_requirements_from_task(
+    task: TaskConfig, trial: TrialConfig | None = None,
+) -> WorkloadRequirementsV1:
     """Project a version-1 task into the explicit service workload contract.
 
     Existing task fields called ``public`` mean unrestricted network access;
@@ -511,11 +515,19 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         "web-allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
-    # separate means a later verifier pod. shared grades in this attempt.
+    # A later verifier pod exists only for Terminus separate grading. Callers
+    # that have the trial pass it, because that is what the compiler uses.
+    # Task-only callers keep the declared env_mode so stored comparisons that
+    # do not know the trial stay stable.
+    if trial is None:
+        separate = task.verifier.env_mode == "separate"
+    else:
+        separate = (
+            trial.agent_name == "terminus-2"
+            and resolve_verifier_env_mode(task, trial) == "separate"
+        )
     verifier_topology = (
-        VerifierTopology.SEPARATE_EXECUTION
-        if task.verifier.env_mode == "separate"
-        else VerifierTopology.IN_ATTEMPT
+        VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT
     )
     return WorkloadRequirementsV1(
         operating_system=env.os,
