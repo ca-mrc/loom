@@ -39,34 +39,39 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 
 @pytest.fixture
-async def stopped_context(applications, platform_inputs, database_access, shared_ca):
+async def stopped_context(applications, platform_inputs, database_access, shared_ca, request):
     _, _, shared, _ = inputs(platform_inputs)
     authority = ApplicationNamespaceAuthorityV1(installation_id=uuid4(), namespace="loom-nebius-management",
         cluster_id=shared.cluster_id, data_environment_id=database_access[3], shared_namespace=shared.platform_namespace)
     credentials, registry, factory, alice, row, original, cloud, _ = await setup(
         applications, platform_inputs, database_access, shared_ca, authority=authority)
-    await credentials.prepare(original)
+    early = getattr(request, 'param', None) == 'early'
+    if not early:
+        await credentials.prepare(original)
     api = KubernetesAPI()
     async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
         kubernetes = ApplicationKubernetesProvider(registry, http)
         runtime = ApplicationRuntimeProvider(registry, kubernetes, authority=authority)
-        await runtime.ensure_namespace(original)
         plan = await registry.frozen_plan(original)
-        for docs in plan['files'].values():
-            for doc in docs:
-                if doc['kind'] in {'Deployment', 'Service', 'Ingress'}:
-                    await kubernetes.create(original, doc['kind'] + ':' + doc['metadata']['name'], doc)
-        for path in (API, WEB):
-            api.objects[path]['metadata']['generation'] = 1
-            api.objects[path]['status'] = {'observedGeneration': 1}
+        if not early:
+            await runtime.ensure_namespace(original)
+            for docs in plan['files'].values():
+                for doc in docs:
+                    if doc['kind'] in {'Deployment', 'Service', 'Ingress'}:
+                        await kubernetes.create(original, doc['kind'] + ':' + doc['metadata']['name'], doc)
+            for path in (API, WEB):
+                api.objects[path]['metadata']['generation'] = 1
+                api.objects[path]['status'] = {'observedGeneration': 1}
         api.objects[PODS] = {'kind': 'PodList', 'metadata': {'resourceVersion': '10'}, 'items': []}
         stopped = await registry.transition(row.application_id, principal=alice, action='suspend',
             idempotency_key='stop', expected_generation=1)
         lease = await registry.claim(stopped.operation_id, lease_seconds=300)
         with pytest.raises(ProviderWaitingError):
-            await runtime.close_admission(lease)
+            await runtime.stop_workloads(lease)
         api.objects[FENCE_PATH]['status'] = {'hard': {'pods': '0'}}
-        env = api.objects[API]['spec']['template']['spec']['containers'][0]['env']
+        deployment = next(doc for docs in plan['files'].values() for doc in docs
+                          if doc['kind'] == 'Deployment' and doc['metadata']['name'] == 'loom-service')
+        env = deployment['spec']['template']['spec']['containers'][0]['env']
         endpoint = next(item['value'] for item in env if item['name'] == 'LOOM_SVC_MINIO_ENDPOINT')
         async with httpx.AsyncClient(base_url=endpoint, transport=httpx.MockTransport(
             lambda request: httpx.Response(403, text='<Error><Code>InvalidAccessKeyId</Code></Error>'),
@@ -265,3 +270,61 @@ async def test_coordinator_failure_never_completes_or_releases(stopped_context, 
     async with factory() as session:
         operation = await session.get(NebiusApplicationOperation, lease.operation_id)
         assert operation.phase == 'running' and operation.completion_json is operation.completed_at is None
+
+
+@pytest.mark.parametrize('stopped_context', ['early'], indirect=True)
+async def test_stop_before_any_dispatch_completes_without_grants_or_workloads(stopped_context, database_access):
+    from loom_service.application_management.coordinator import ApplicationLifecycleCoordinator
+
+    registry, factory, _, lease, runtime, credentials, verifier, api, cloud, _ = stopped_context
+    await ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier).stop(lease)
+    assert cloud.mutations == []
+    assert [body['kind'] for method, _, body in api.mutations if method == 'POST'] == ['Namespace', 'ResourceQuota']
+    assert database_access[0].execute('SELECT count(*) FROM loom_application_access.generations').fetchone() == (0,)
+    assert await charged(stopped_context) == (0, 0, 0, 0)
+    async with factory() as session:
+        receipt = (await session.get(NebiusApplicationOperation, lease.operation_id)).completion_json
+        assert receipt['objects']['keys'] == receipt['workloads']['deployments'] == []
+
+
+async def test_coordinator_cannot_stop_active_generation(stopped_context, applications):
+    from loom_service.application_management.coordinator import ApplicationLifecycleCoordinator
+    from loom_service.environment_management.provider import ProviderBlockedError
+
+    registry, _, alice, _, runtime, credentials, verifier, api, cloud, _ = stopped_context
+    active = await registry.create(principal=alice, idempotency_key='active', **applications[3]('active'))
+    lease = await registry.claim(active.operation_id)
+    mutations = len(api.mutations), len(cloud.mutations)
+    with pytest.raises(ProviderBlockedError, match='application_stop_not_requested'):
+        await ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier).stop(lease)
+    assert (len(api.mutations), len(cloud.mutations)) == mutations
+
+
+@pytest.mark.parametrize('phase', ['prepared', 'dispatched'])
+async def test_historical_dispatch_is_not_confused_with_unsent_intent(stopped_context, phase):
+    registry, _, alice, lease, runtime, credentials, verifier, *_ = stopped_context
+    proof = await evidence(stopped_context)
+    created = next(item for item in await registry.effect_history(lease)
+        if item.intent.kind == 'Service' and item.intent.name == 'loom-service' and item.intent.action == 'create')
+    await registry.prepare_effect(lease, 'late-delete', dict(api_version='v1', kind='Service',
+        namespace='loom-dev-alice', name='loom-service', action='delete', uid=created.observed_uid,
+        resource_version=created.observed_resource_version, request_sha256='c' * 64))
+    if phase == 'dispatched':
+        await registry.dispatch_effect(lease, 'late-delete')
+    operation = await registry.transition(lease.application_id, principal=alice, action='destroy_retained',
+        idempotency_key='destroy', expected_generation=2)
+    current = await registry.claim(operation.operation_id)
+    database = await credentials.retire_database(current)
+    objects = await credentials.retire_cloud(current, verifier)
+    # Independently pin the registry gate: a stale process snapshot cannot hide
+    # an unresolved predecessor even when all its identity fields look current.
+    workloads = proof.workloads.model_dump() | {
+        'identity': database.identity, 'fence': await runtime.close_admission(current)}
+    candidate = ApplicationStopEvidence.model_validate(dict(workloads=workloads, database=database, objects=objects))
+    if phase == 'dispatched':
+        with pytest.raises(ManagementError, match='application_completion_effects_pending'):
+            await registry.complete_stopped(current, candidate)
+        assert (await charged(stopped_context))[0] > 0
+    else:
+        await registry.complete_stopped(current, candidate)
+        assert await charged(stopped_context) == (0, 0, 0, 0)

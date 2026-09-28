@@ -20,7 +20,7 @@ def test_empty_cloud_migration_preserves_operation_and_model(application_databas
         operation(connection)
         before = connection.execute(select(NebiusApplicationOperation)).mappings().all()
     migrate(application_database, "downgrade", "0164")
-    migrate(application_database, "upgrade", "0165")
+    migrate(application_database, "upgrade", "head")
     with application_database.connect() as connection:
         assert connection.execute(select(NebiusApplicationOperation)).mappings().all() == before
     assert {column["name"] for column in inspect(application_database).get_columns("nebius_application_cloud_effects")} == set(

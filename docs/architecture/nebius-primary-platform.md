@@ -525,6 +525,35 @@ with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
 
+### Stopped application completion
+
+`ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
+close Pod admission and stop personal workloads, revoke/drain SQL access, retire
+exact IAM identities and probe retained keys, then refresh the live workload and
+admission observations. Only this internal path supplies completion attestations;
+owner requests cannot submit evidence or a success flag. Active startup and a
+polling worker are not enabled by this coordinator.
+
+The adapters return immutable, secret-free evidence bound to the application,
+incarnation, shared data environment, operation/generations and lease epoch/token
+digest. It identifies the observed namespace/quota and Deployment UIDs, live
+resource versions, controller generations, empty unfiltered PodList version,
+revoked SQL generation and original probed access-key hashes. These are trusted
+adapter attestations, not cryptographic provider receipts or installed acceptance.
+
+`ApplicationRegistry.complete_stopped` acquires budget, application and operation
+locks in that order. It requires the current unexpired lease, matching attestations,
+the exact recorded resource/deletion identities and encrypted original key material.
+Current prepared effects and any dispatched effects prevent completion. Historical
+unsent creates grant no external authority. Any error keeps the reservation charged.
+One transaction records `completion_json`/`completed_at`, completes the operation,
+clears its lease and zeros only its personal CPU/memory/ephemeral reservation.
+Registration, namespace/name claims, encrypted history and the zero-storage reservation
+row remain. Shared users, accepted work, data, services and sibling reservations
+are not removed. Exact receipt replay is read-only; a different proof/token or a
+later transition cannot replay the old completion. Supersession retains the receipt,
+and schema downgrade refuses to discard retained completion evidence.
+
 ## Managed environment identity and rendering
 
 This section describes the retained full-environment v1 format. New personal

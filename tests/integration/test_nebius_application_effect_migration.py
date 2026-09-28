@@ -31,7 +31,7 @@ def test_empty_effect_downgrade_and_upgrade_preserve_frozen_operation_and_orm_sh
         operation(connection)
         before = connection.execute(select(NebiusApplicationOperation)).mappings().all()
     migrate(application_database, "downgrade", "0161")
-    migrate(application_database, "upgrade", "0162")
+    migrate(application_database, "upgrade", "head")
     with application_database.connect() as connection:
         assert connection.execute(select(NebiusApplicationOperation)).mappings().all() == before
     assert {col["name"] for col in inspect(application_database).get_columns("nebius_application_effects")} == set(
