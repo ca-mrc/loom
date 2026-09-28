@@ -19,13 +19,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
 @contextlib.contextmanager
-def guest() -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
+def guest(*, docker: bool = False) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
     configured = os.environ.get("LOOM_GUEST_PAYLOAD")
     if configured is None:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("CI must build LOOM_GUEST_PAYLOAD before running guest qualification")
         pytest.skip("requires built LOOM_GUEST_PAYLOAD")
     payload = Path(configured).resolve()
     assert (payload / "bin/loom-guest-runtime").is_file()
@@ -44,9 +46,11 @@ def guest() -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
         command = [
             str(payload / "bin/loom-guest-runtime"), "--payload", str(payload),
             "--root", str(root), "--state", str(state), "--socket", str(socket),
-            "--memory-mib", "1024", "--storage-mib", "512", "--cpu-millis", "1000",
+            "--memory-mib", "2048" if docker else "1024", "--storage-mib", "1024" if docker else "512", "--cpu-millis", "1000",
             "--exec-timeout-seconds", "60",
         ]
+        if docker:
+            command.append("--nested-docker")
         with (directory / "console.log").open("wb") as log:
             process = subprocess.Popen(command, stdout=log, stderr=log)
             client = httpx.Client(transport=httpx.HTTPTransport(uds=str(socket)), timeout=40)
@@ -82,7 +86,7 @@ def execute(client: httpx.Client, command: str) -> str:
     response.raise_for_status()
     result = response.json()
     assert result["return_code"] == 0, result
-    return base64.b64decode(result["stdout"]).decode()
+    return base64.b64decode(result["stdout"] or "").decode()
 
 
 def test_real_guest_core_and_filesystem_are_private() -> None:
@@ -103,7 +107,8 @@ def test_real_guest_core_and_filesystem_are_private() -> None:
         for action in ("pause-processes", "resume-processes", "stop-processes"):
             response = client.post(f"http://sandbox/{action}")
             assert response.status_code == 204, response.text
-        child_pids = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        child_pids = {pid for children in Path(f"/proc/{process.pid}/task").glob("*/children")
+                      for pid in children.read_text().split()}
         assert child_pids, "guest compute missing"
         process.send_signal(signal.SIGTERM)
         process.wait(timeout=5)
@@ -122,3 +127,94 @@ def test_parallel_guests_have_independent_kernel_and_artifacts() -> None:
         execute(right, "echo right > /proc/sys/kernel/core_pattern; echo right > /tmp/owner")
         assert execute(left, "cat /proc/sys/kernel/core_pattern /tmp/owner") == "left\nleft\n"
         assert execute(right, "cat /proc/sys/kernel/core_pattern /tmp/owner") == "right\nright\n"
+
+
+def test_failed_command_deadline_and_guest_exit_remain_distinct() -> None:
+    with guest() as (client, process, directory):
+        for command, timeout, code in (("exit 7", 10, 7), ("sleep 30", 0.1, 124)):
+            response = client.post("http://sandbox/exec", json={
+                "argv": ["/bin/sh", "-c", command], "timeout_sec": timeout,
+            })
+            response.raise_for_status()
+            assert response.json()["return_code"] == code
+        assert execute(client, "echo still-alive") == "still-alive\n"
+        # Reboot must terminate the incarnation, never silently create a fresh
+        # guest disk behind the same Unix socket and lease.
+        with contextlib.suppress(httpx.TransportError):
+            client.post("http://sandbox/exec", json={"argv": ["reboot", "-f"]})
+        assert process.wait(timeout=5) != 0
+        assert not (directory / "state/state.ext4").exists()
+        assert (directory / "state/retired").exists()
+
+
+def test_guest_docker_build_cache_invalidation_and_artifact() -> None:
+    with guest(docker=True) as (client, _, _):
+        execute(client, "set -eu; /bin/busybox mkdir -p /tmp/context; "
+                "/bin/busybox cp /bin/busybox /tmp/context/shell; "
+                "printf 'first\\n' > /tmp/context/input")
+        dockerfile = rb'''FROM scratch
+COPY shell /bin/sh
+RUN ["/bin/sh", "-c", "echo dependency > /dependency"]
+COPY input /input
+RUN ["/bin/sh", "-c", "read value < /input; printf '%s' \"$value\" > /output"]
+CMD ["/bin/sh", "-c", "read value < /output; printf '%s' \"$value\""]
+'''
+        response = client.put("http://sandbox/file", params={"path": "/tmp/context/Dockerfile"}, content=dockerfile)
+        response.raise_for_status()
+        build = "docker build --progress=plain -t loom-cache-probe /tmp/context 2>&1"
+        execute(client, build)
+        first = execute(client, "docker image inspect --format '{{json .RootFS.Layers}}' loom-cache-probe")
+        cached = execute(client, build)
+        assert cached.count("CACHED") >= 3, cached
+        assert execute(client, "docker image inspect --format '{{json .RootFS.Layers}}' loom-cache-probe") == first
+        execute(client, "printf 'second\\n' > /tmp/context/input")
+        changed = execute(client, build)
+        assert "CACHED" in changed, changed
+        second = execute(client, "docker image inspect --format '{{json .RootFS.Layers}}' loom-cache-probe")
+        import json
+        before, after = json.loads(first), json.loads(second)
+        assert before[:2] == after[:2]
+        assert before[2:] != after[2:]
+        assert execute(client, "docker run --rm --network none loom-cache-probe") == "second"
+        execute(client, "set -eu; docker create --name export-probe loom-cache-probe; "
+                "docker cp export-probe:/output /tmp/result; docker rm -v export-probe")
+        result = client.get("http://sandbox/file", params={"path": "/tmp/result"})
+        result.raise_for_status()
+        assert result.content == b"second"
+        with guest(docker=True) as (other, _, _):
+            assert execute(other, "docker image ls -q") == ""
+            assert execute(other, "docker ps -aq") == ""
+
+
+def test_guest_docker_registry_traffic_uses_outer_allowlist_proxy() -> None:
+    import http.server
+    import threading
+
+    destinations: list[str] = []
+
+    class Proxy(http.server.BaseHTTPRequestHandler):
+        def do_CONNECT(self) -> None:
+            destinations.append(self.path)
+            self.send_error(403, "fixture allowlist denied")
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    proxy = http.server.ThreadingHTTPServer(("127.0.0.1", 18791), Proxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with guest(docker=True) as (client, _, _):
+            assert execute(client, "docker info --format '{{.HTTPProxy}}'").strip() == "http://10.0.2.2:18791"
+            response = client.post("http://sandbox/exec", json={
+                "argv": ["docker", "pull", "registry.example.org/blocked/image:fixture"], "timeout_sec": 20,
+            })
+            response.raise_for_status()
+            result = response.json()
+            assert result["return_code"] != 0
+            assert "403" in base64.b64decode(result["stderr"] or "").decode()
+            assert destinations == ["registry.example.org:443"]
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        thread.join(timeout=5)
