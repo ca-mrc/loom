@@ -703,6 +703,11 @@ DB-time leases. One successful claim drives one concrete start/stop coroutine;
 different owners have independent bounded concurrency. Lease heartbeats, readiness
 deadlines and retry limits prevent unbounded execution. Lease loss, shutdown and
 database outages cancel/drain work while preserving durable effects and charges.
+Worker database calls, including polling, renewal and failure reporting, have a
+five-second maximum further limited to one-sixth of the lease duration. Together
+with the one-third-lease heartbeat interval this reserves time for response latency
+and cancellation before expiry. A database deadline is an infrastructure failure,
+not a provider retry: uncertain operation state remains retained for reconciliation.
 Failure reporting happens after cancellation; only concrete coordinator evidence
 can complete an operation. Poll health becomes false on DB failure or shutdown.
 

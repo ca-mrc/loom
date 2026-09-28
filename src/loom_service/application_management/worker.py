@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -21,6 +23,10 @@ from loom_service.environment_management.registry import ManagementError
 _LOG = logging.getLogger(__name__)
 
 
+class _DatabaseUnavailableError(OSError):
+    """Infrastructure timeout, not a failed/retryable provider attempt."""
+
+
 class ApplicationWorker:
     def __init__(self, registry: ApplicationRegistry, coordinator: ApplicationLifecycleCoordinator, *,
                  lease_seconds: int = 60, attempt_timeout: float = 45, max_attempts: int = 20,
@@ -36,13 +42,27 @@ class ApplicationWorker:
         self.readiness_poll_seconds, self.readiness_timeout = readiness_poll_seconds, readiness_timeout
         self.healthy = False
 
+    @asynccontextmanager
+    async def _database_operation(self) -> AsyncIterator[None]:
+        # Include claim/renew response latency in the conservative lease budget:
+        # previous call <= 1/6 + heartbeat sleep 1/3 + next call <= 1/6.
+        # Thus renewal failure stops work before the prior lease can expire.
+        try:
+            async with asyncio.timeout(min(5, self.lease_seconds / 6)):
+                yield
+        except TimeoutError:
+            self.healthy = False
+            raise _DatabaseUnavailableError("application_database_timeout") from None
+
     async def _heartbeat(self, lease: ApplicationLease) -> None:
         while True:
             await asyncio.sleep(self.lease_seconds / 3)
-            await self.registry.renew(lease, lease_seconds=self.lease_seconds)
+            async with self._database_operation():
+                await self.registry.renew(lease, lease_seconds=self.lease_seconds)
 
     async def _advance(self, lease: ApplicationLease) -> None:
-        plan = await self.registry.frozen_plan(lease)
+        async with self._database_operation():
+            plan = await self.registry.frozen_plan(lease)
         advance = self.coordinator.start if plan["registration"]["desired_state"] == "active" else self.coordinator.stop
         deadline = asyncio.get_running_loop().time() + self.readiness_timeout
         while True:
@@ -56,7 +76,8 @@ class ApplicationWorker:
                 await asyncio.sleep(self.readiness_poll_seconds)
 
     async def reconcile_once(self, operation_id: UUID) -> None:
-        lease = await self.registry.claim(operation_id, lease_seconds=self.lease_seconds)
+        async with self._database_operation():
+            lease = await self.registry.claim(operation_id, lease_seconds=self.lease_seconds)
         if lease is None:
             return
         heartbeat = asyncio.create_task(self._heartbeat(lease))
@@ -90,7 +111,8 @@ class ApplicationWorker:
 
     async def _failure(self, lease: ApplicationLease, code: str, *, retry: bool) -> None:
         try:
-            await self.registry.finish_attempt(lease, error_code=code, retry=retry)
+            async with self._database_operation():
+                await self.registry.finish_attempt(lease, error_code=code, retry=retry)
         except ManagementError:
             pass
 
@@ -114,7 +136,8 @@ class ApplicationWorker:
                             task.result()
                     # Poll at full concurrency too: DB loss must revoke health
                     # and cancel active work, not silently keep a green endpoint.
-                    operations = await self.registry.runnable_operations(limit=concurrency)
+                    async with self._database_operation():
+                        operations = await self.registry.runnable_operations(limit=concurrency)
                     for identity in operations:
                         if identity not in active and len(active) < concurrency:
                             active[identity] = asyncio.create_task(self.reconcile_once(identity))
