@@ -2130,6 +2130,28 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
             await session.commit()
 
         async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict, match="verifier parent cleanup is not complete"):
+                await _reserve(
+                    session,
+                    trial_id=trial_id,
+                    target=target,
+                    now=now + timedelta(seconds=2),
+                    requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+                    runtime_contract=_runtime_contract(
+                        execution_role="verifier",
+                        verifier_execution="skipped",
+                    ),
+                    parent_lease_id=parent.id,
+                )
+
+        async with sessions() as session:
+            parent_row = await session.get(ServiceExecutionLease, parent.id)
+            parent_row.cleanup_state = "complete"
+            parent_row.cleanup_requested_at = now
+            parent_row.cleanup_deadline_at = now + timedelta(seconds=30)
+            await session.commit()
+
+        async with sessions() as session:
             verifier = await _reserve(
                 session,
                 trial_id=trial_id,

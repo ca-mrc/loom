@@ -636,6 +636,8 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("verifier parent lease is not eligible")
         if parent_lease.observed_state not in {"finalizing", "finalized"}:
             raise ServiceExecutionConflict("verifier parent result is not ready")
+        if parent_lease.cleanup_state != "complete":
+            raise ServiceExecutionConflict("verifier parent cleanup is not complete")
         attempt = parent_lease.attempt
     if deadline_at <= current_time:
         raise ServiceExecutionConflict("execution deadline must be in the future")
