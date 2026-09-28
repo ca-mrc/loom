@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
+from uuid import uuid4
 
 import pytest
 
@@ -12,8 +14,9 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_effects import expire, intent, started
 from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_material import material
+from tests.integration.test_nebius_application_operations import _observed_complete
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_application_runtime import runtime
+from tests.integration.test_nebius_application_runtime import FENCE_PATH, close_ready, runtime
 from tests.integration.test_nebius_application_runtime import runtime_context as runtime_context
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
@@ -44,6 +47,7 @@ async def test_activation_boundary_survives_every_request_phase_and_lease_takeov
         ("retire:scale:old", intent(plan, action="patch", uid="old-api", resource_version="7")),
         ("pod-fence:create", intent(plan, kind="ResourceQuota", api_version="v1", name="loom-application-retired")),
         ("pod-fence:advance:old", intent(plan, kind="ResourceQuota", api_version="v1", name="loom-application-retired", action="patch", uid="fence-uid", resource_version="8")),
+        ("prepare:network", intent(plan, kind="NetworkPolicy", api_version="networking.k8s.io/v1", name="default-deny")),
     ):
         with pytest.raises(ManagementError, match="application_activation_started"):
             await registry.prepare_effect(lease, retirement_key, retirement)
@@ -246,4 +250,157 @@ async def test_preparation_cannot_run_after_the_activation_boundary(runtime_cont
         uid="fence-uid", resource_version="9", request_sha256="a" * 64))
     with pytest.raises(ProviderBlockedError, match="application_activation_started"):
         await runtime(runtime_context).resume_preparation(lease)
+    assert len(api.mutations) == 1
+
+
+SA_PATH = "/api/v1/namespaces/loom-dev-alice/serviceaccounts/loom-platform"
+NETWORK_PATH = "/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/networkpolicies/"
+
+
+async def test_static_preparation_waits_for_observed_quota_before_installing(runtime_context):
+    _, _, _, api, lease, _ = runtime_context
+    with pytest.raises(ProviderWaitingError, match="application_pod_fence_pending"):
+        await runtime(runtime_context).prepare_static(lease)
+    assert {body["kind"] for method, _, body in api.mutations if method == "POST"} == {
+        "Namespace", "RoleBinding", "ResourceQuota"}
+    assert api.objects[FENCE_PATH]["spec"]["hard"] == {"pods": "0"}
+
+
+async def test_static_preparation_installs_only_frozen_resources_and_replays_without_writes(runtime_context):
+    _, _, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    await provider.prepare_static(lease)
+    assert api.objects[SA_PATH]["automountServiceAccountToken"] is False
+    policies = {obj["metadata"]["name"] for obj in api.objects.values() if obj["kind"] == "NetworkPolicy"}
+    assert policies == {"default-deny", "public-api", "public-web", "application-egress"}
+    assert {obj["kind"] for obj in api.objects.values()} == {
+        "Namespace", "RoleBinding", "ResourceQuota", "ServiceAccount", "NetworkPolicy"}
+    writes = copy.deepcopy(api.mutations)
+    await provider.prepare_static(lease)
+    assert api.mutations == writes
+
+
+@pytest.mark.parametrize("damage", ["deleted", "replaced", "broad-policy", "token-mount", "terminating"])
+async def test_static_preparation_blocks_live_drift_instead_of_repairing_it(runtime_context, damage):
+    _, _, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    await provider.prepare_static(lease)
+    actual = api.objects[SA_PATH if damage == "token-mount" else NETWORK_PATH + "default-deny"]
+    if damage == "deleted":
+        del api.objects[NETWORK_PATH + "default-deny"]
+    elif damage == "replaced":
+        actual["metadata"]["uid"] = "foreign"
+    elif damage == "broad-policy":
+        actual["spec"]["ingress"] = [{}]
+    elif damage == "token-mount":
+        actual["automountServiceAccountToken"] = True
+    else:
+        actual["metadata"]["deletionTimestamp"] = "2026-09-28T00:00:00Z"
+    writes = copy.deepcopy(api.mutations)
+    with pytest.raises(ProviderBlockedError, match="application_static_resource_conflict"):
+        await provider.prepare_static(lease)
+    assert api.mutations == writes
+
+
+async def test_static_preparation_lost_network_reply_recovers_without_another_post(runtime_context, monkeypatch):
+    registry, client, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    request = client._request
+
+    async def lose_network_reply(method, path, body=None):
+        if method == "POST" and path.endswith("/networkpolicies"):
+            api.lose_response = True
+        try:
+            return await request(method, path, body)
+        finally:
+            api.lose_response = False
+
+    with monkeypatch.context() as patch:
+        patch.setattr(client, "_request", lose_network_reply)
+        with pytest.raises(ProviderWaitingError):
+            await provider.prepare_static(lease)
+    await expire(registry.session_factory, lease)
+    replacement = await registry.claim(lease.operation_id)
+    await provider.prepare_static(replacement)
+    assert sum(method == "POST" and body.get("kind") == "NetworkPolicy"
+               and body["metadata"]["name"] == "default-deny" for method, _, body in api.mutations) == 1
+
+
+async def next_static_generation(context, platform_inputs):
+    from loom.nebius_application_contract import (
+        ApplicationRegistrationV1,
+        ApplicationReleaseV1,
+        SharedDevelopmentBindingV1,
+    )
+    from loom.nebius_application_render import render_application
+    from tests.unit.test_nebius_application_render import inputs
+
+    registry, _, authority, _, lease, alice = context
+    plan = await registry.frozen_plan(lease)
+    release = ApplicationReleaseV1.model_validate(plan["release"]).model_copy(update={"release_id": uuid4()})
+    row = ApplicationRegistrationV1.model_validate(plan["registration"]).model_copy(update={
+        "deployment_generation": 2, "access_generation": 2, "release_id": release.release_id})
+    shared = SharedDevelopmentBindingV1.model_validate(plan["shared"])
+    rendered = render_application(row, release, shared, inputs(platform_inputs)[3], authority=authority)
+    # A different frozen policy is supplied through the trusted planner, not an
+    # owner raw-manifest endpoint. This checks an actual spec replacement.
+    for docs in rendered.files.values():
+        for doc in docs:
+            if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"] == "public-api":
+                doc["spec"]["ingress"][0]["ports"].append({"protocol": "TCP", "port": 8091})
+    await _observed_complete(registry.session_factory, lease.operation_id)
+    operation = await registry.transition(lease.application_id, principal=alice, idempotency_key="update",
+        action="update", expected_generation=1, release_id=release.release_id,
+        prepared=rendered, release=release, shared=shared)
+    return await registry.claim(operation.operation_id)
+
+
+async def test_static_update_retains_account_and_patches_owned_network_with_exact_preconditions(runtime_context, platform_inputs):
+    _, _, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    await provider.prepare_static(lease)
+    before = copy.deepcopy(api.objects)
+    current = await next_static_generation(runtime_context, platform_inputs)
+    await provider.prepare_static(current)
+    assert api.objects[SA_PATH] == before[SA_PATH]
+    for method, path, body in api.mutations:
+        if method == "PATCH" and path.startswith(NETWORK_PATH):
+            assert body[:2] == [
+                {"op": "test", "path": "/metadata/uid", "value": before[path]["metadata"]["uid"]},
+                {"op": "test", "path": "/metadata/resourceVersion", "value": before[path]["metadata"]["resourceVersion"]},
+            ]
+    assert sum(method == "PATCH" and path.startswith(NETWORK_PATH) for method, path, _ in api.mutations) == 4
+    updated = api.objects[NETWORK_PATH + "public-api"]
+    assert updated["spec"]["ingress"][0]["ports"] == [{"protocol": "TCP", "port": 8090}, {"protocol": "TCP", "port": 8091}]
+    assert updated["metadata"]["annotations"]["loom.nebius/operation-id"] == str(current.operation_id)
+    writes = copy.deepcopy(api.mutations)
+    await provider.prepare_static(current)
+    assert api.mutations == writes
+
+
+async def test_static_update_never_sends_a_historical_prepared_request(runtime_context, platform_inputs, monkeypatch):
+    registry, client, _, api, lease, _ = runtime_context
+    provider = await close_ready(runtime_context)
+    await interrupted_create(registry, client, lease, "old-account", await document(registry, lease, "ServiceAccount"), monkeypatch)
+    current = await next_static_generation(runtime_context, platform_inputs)
+    await provider.prepare_static(current)
+    previous = next(item for item in await registry.effect_history(current) if item.key == "old-account")
+    assert previous.phase == "prepared"
+    assert api.objects[SA_PATH]["metadata"]["annotations"]["loom.nebius/operation-id"] == str(current.operation_id)
+    assert sum(method == "POST" and body.get("kind") == "ServiceAccount" for method, _, body in api.mutations) == 1
+
+
+@pytest.mark.parametrize("phase", ["stopped", "activated"])
+async def test_static_preparation_cannot_cross_stopped_or_activation_boundary(runtime_context, phase):
+    registry, _, _, api, lease, alice = runtime_context
+    if phase == "stopped":
+        operation = await registry.transition(lease.application_id, principal=alice, idempotency_key="stop",
+            action="suspend", expected_generation=1)
+        lease = await registry.claim(operation.operation_id)
+    else:
+        await registry.prepare_effect(lease, "activate:unfence:" + hashlib.sha256(b"fence-uid:9").hexdigest(),
+            dict(api_version="v1", kind="ResourceQuota", namespace="loom-dev-alice", name="loom-application-retired",
+                 action="delete", uid="fence-uid", resource_version="9", request_sha256="a" * 64))
+    with pytest.raises(ProviderBlockedError, match=r"application_preparation_not_requested|application_activation_started"):
+        await runtime(runtime_context).prepare_static(lease)
     assert len(api.mutations) == 1
