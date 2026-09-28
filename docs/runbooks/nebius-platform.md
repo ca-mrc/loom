@@ -225,6 +225,10 @@ After a policy correction clears type warnings, Kubernetes may omit the empty
 `typeChecking` status field. The deployer still requires a positive, current
 `observedGeneration`, no expression warnings, and both admission probes before
 restoring the namespace mode. A stale generation never establishes readiness.
+Admission evaluation can lag behind the type-check status. During the bounded
+probe interval, a rejection from this policy retries the positive dry run until
+the corrected policy accepts it. Persistent rejection, another policy's denial,
+or a transport error still blocks deployment; restricted PSS remains in place.
 
 Prepare this policy with identity readiness disabled. Qualify the installed
 Kubernetes version, the intended root and non-root container shapes, actual

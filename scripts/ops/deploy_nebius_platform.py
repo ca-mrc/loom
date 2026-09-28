@@ -287,7 +287,19 @@ def install_task_identity_policy(
     }}
     probe = snapshot_root / "identity-policy-probe.yaml"
     probe.write_text(yaml.safe_dump(pod))
-    kube.run("apply", "-f", str(probe), "--dry-run=server")
+    while True:
+        try:
+            kube.run("apply", "-f", str(probe), "--dry-run=server")
+            break
+        except TaskIdentityPolicyDeniedError as exc:
+            if exc.policy_name != name:
+                raise DeploymentError("another policy rejected the identity probe") from exc
+            # Admission evaluation has its own informer/cache. A corrected
+            # policy's type-check status can arrive before it stops rejecting
+            # this safe Pod. PSS stays restricted throughout both probes.
+            if time.monotonic() >= deadline:
+                raise DeploymentError("task identity admission policy did not accept the positive probe") from exc
+        time.sleep(0.2)
     pod["spec"]["containers"][0]["securityContext"]["capabilities"]["add"] = ["NET_BIND_SERVICE"]
     probe.write_text(yaml.safe_dump(pod))
     while True:
