@@ -257,8 +257,11 @@ def install_task_identity_policy(
         policy = kube.get("validatingadmissionpolicy", name, namespace)
         status = policy.get("status", {})
         if (status.get("observedGeneration") == policy.get("metadata", {}).get("generation")
-                and status.get("observedGeneration", 0) > 0 and "typeChecking" in status):
-            if status["typeChecking"].get("expressionWarnings"):
+                and status.get("observedGeneration", 0) > 0):
+            # The status controller publishes the generation only after type
+            # checking. Clearing warnings through server-side apply can omit
+            # the empty typeChecking parent from an otherwise current status.
+            if status.get("typeChecking", {}).get("expressionWarnings"):
                 raise DeploymentError("task identity admission policy has type-checking warnings")
             break
         if time.monotonic() >= deadline:

@@ -221,6 +221,10 @@ by this specific policy. Only then may the deployment apply the namespace mode.
 Probe Pods declare bounded CPU and memory requests so the execution namespace
 quota can admit them. They are dry runs: they create no workloads or image pulls.
 Failure leaves restricted PSS and the deployment guard in place.
+After a policy correction clears type warnings, Kubernetes may omit the empty
+`typeChecking` status field. The deployer still requires a positive, current
+`observedGeneration`, no expression warnings, and both admission probes before
+restoring the namespace mode. A stale generation never establishes readiness.
 
 Prepare this policy with identity readiness disabled. Qualify the installed
 Kubernetes version, the intended root and non-root container shapes, actual
