@@ -593,6 +593,21 @@ async def test_monitor_summary_reports_protected_pending_as_waiting_demand(
         sync_engine.dispose()
 
 
+async def test_monitor_summary_batch_filter_does_not_count_other_batches(
+    overview_setup: tuple[FastAPI, UUID, UUID],
+) -> None:
+    app, team_id, batch_id = overview_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as ac:
+        await _login(ac)
+        response = await ac.get("/api/v1/monitor/summary", params={
+            "view": "trials", "team_id": str(team_id), "batch_id": str(batch_id),
+        })
+    assert response.status_code == 200, response.text
+    assert response.json()["state_counts"]["batches"] == {
+        "submitted": 0, "running": 1, "finished": 0, "cancelled": 0,
+    }
+
+
 async def test_monitor_summary_search_scopes_batch_identity_counts(
     overview_setup: tuple[FastAPI, UUID, UUID],
 ) -> None:

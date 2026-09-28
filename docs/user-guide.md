@@ -1427,6 +1427,19 @@ Use the SPA top-level **Run Library** page:
   user activated.
 
 Open a Library row to inspect task selection, agent/model config, trial rollup,
+and download complete results. Members with submit access can choose an export
+format (including **Raw Harbor TB2 v2**) and either **Whole batch family** or
+**Selected Trials**. Whole-family export retains the linked-rerun resolution
+rules. Explicit selection sends exactly the checked Trial IDs; loading another
+page preserves that selection. Failed Trials are not silently removed: the
+service checks their delivery eligibility and reports any missing evidence.
+After changing the format or selection, prepare a new bundle before downloading
+it. The prepared bundle's count and format describe the existing download,
+independently of the current form options. Viewers may download prepared bundles
+but cannot create exports. Bundle file labels preserve `canonical/` versus
+`files/` so projected and original files with different sizes remain distinct.
+
+The detail page also shows
 debug evidence, provenance, and artifact group previews. For multi-agent/model
 batches, the **Combination results** table compares each requested combination's
 reward, actual/expected trial count, scored-trial count, success/failure counts,
