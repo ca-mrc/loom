@@ -583,6 +583,29 @@ with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
 
+### Closed-admission application preparation
+
+The runtime recovers the current operation's interrupted ServiceAccount,
+NetworkPolicy and immutable Secret requests from frozen plans/encrypted material.
+Prepared requests retain their original key and UID/resourceVersion; dispatched
+requests only reconcile. Historical prepared requests never dispatch. This path
+does not create workloads or routes, and stopped operations cannot invoke it.
+
+`prepare_static` establishes protected namespace/resource authority and observes
+the zero-Pod quota before installing the frozen ServiceAccount/network policies.
+It retains the account's original observed identity and updates a prior owned
+NetworkPolicy only through an exact preconditioned patch. Live disappearance,
+replacement, spec drift or termination blocks preparation rather than recreating
+or repairing unqualified resources. Historical write success is not readiness.
+
+An exact current-operation quota DELETE intent is the durable activation boundary,
+including when that request is rejected or awaiting observation. Under the journal
+lock, this phase prevents new retirement, quota-closing and static/Secret writes
+in the same operation. The single unresolved-effect slot prevents an earlier
+prepared request crossing that boundary. A stopped successor can still close its
+own generation's admission. These are preparation primitives; active orchestration,
+live shared-access qualification and installed owner acceptance remain required.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:

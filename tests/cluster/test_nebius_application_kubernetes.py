@@ -134,16 +134,20 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
 
 
 @pytest.mark.timeout(180)
-async def test_early_stop_bootstraps_using_only_protected_manager_authority(applications, platform_inputs):
+@pytest.mark.parametrize("active", [False, True])
+async def test_application_preparation_and_stop_use_only_protected_manager_authority(applications, platform_inputs, active):
     from kubernetes import client, utils
 
     from loom.nebius_application_authority import render_application_authority
     from loom_service.application_management.runtime import ApplicationRuntimeProvider
 
     registry, authority, lease, alice, _ = await runtime_inputs(applications, platform_inputs)
-    stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
-        idempotency_key='early-stop', expected_generation=1)
-    lease = await registry.claim(stopped.operation_id, lease_seconds=300)
+    if not active:
+        stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
+            idempotency_key='early-stop', expected_generation=1)
+        lease = await registry.claim(stopped.operation_id, lease_seconds=300)
+    else:
+        await registry.renew(lease, lease_seconds=300)
     container = await asyncio.to_thread(_start_k3s)
     try:
         _, core, _ = await asyncio.to_thread(_load_client, container)
@@ -188,17 +192,27 @@ async def test_early_stop_bootstraps_using_only_protected_manager_authority(appl
             deadline = time.monotonic() + 30
             while True:
                 try:
-                    proof = await provider.stop_workloads(lease)
+                    if active:
+                        await provider.prepare_static(lease)
+                    else:
+                        proof = await provider.stop_workloads(lease)
+                        assert proof.deployments == ()
                     break
                 except ProviderWaitingError:
-                    assert time.monotonic() < deadline, 'protected early stop did not converge'
+                    assert time.monotonic() < deadline, 'protected preparation/early stop did not converge'
                     await asyncio.sleep(0.1)
-            assert proof.deployments == ()
             assert await allowed('resourcequotas')
             effects = await registry.effect_history(lease)
-            assert [(item.intent.kind, item.intent.action) for item in effects] == [
+            expected = [
                 ('Namespace', 'create'), ('RoleBinding', 'create'), ('ResourceQuota', 'create')]
+            if active:
+                expected += [('ServiceAccount', 'create'), *[('NetworkPolicy', 'create')] * 4]
+                await provider.prepare_static(lease)
+            assert [(item.intent.kind, item.intent.action) for item in effects] == expected
             assert all(item.phase == 'observed' for item in effects)
+            assert (await asyncio.to_thread(core.list_namespaced_pod, 'loom-dev-alice')).items == []
+            assert (await http.get('/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service')).status_code == 404
+            assert (await http.get('/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/ingresses/loom-web')).status_code == 404
             assert (await http.get('/api/v1/namespaces/loom-dev/services')).status_code == 403
             assert (await http.delete('/api/v1/namespaces/loom-dev-alice')).status_code == 403
     finally:

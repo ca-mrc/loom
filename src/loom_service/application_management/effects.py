@@ -183,6 +183,7 @@ class ApplicationEffectJournal(ApplicationOperationJournal):
             opening = await _activation_effect(session, lease.operation_id)
             if opening is not None and (
                 key.startswith("retire:") or (parsed.kind == "ResourceQuota" and not activation)
+                or (parsed.kind in {"ServiceAccount", "NetworkPolicy", "Secret"} and parsed.action in {"create", "patch"})
                 or (activation and opening.phase != "rejected")
             ):
                 # Atomic with preparation under the application/operation locks:

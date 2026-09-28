@@ -138,6 +138,81 @@ class ApplicationRuntimeProvider:
             except KubernetesEffectRejectedError:
                 raise ProviderWaitingError("application_preparation_pending") from None
 
+    async def _static(self, lease: ApplicationLease, document: dict[str, Any]
+                      ) -> tuple[dict[str, Any] | None, ApplicationEffect | None]:
+        kind, name, namespace = document["kind"], document["metadata"]["name"], document["metadata"]["namespace"]
+        resource = {"ServiceAccount": "serviceaccounts", "NetworkPolicy": "networkpolicies"}[kind]
+        prefix = "/api/v1" if kind == "ServiceAccount" else "/apis/networking.k8s.io/v1"
+        path = f"{prefix}/namespaces/{namespace}/{resource}/{name}"
+        await self.kubernetes._namespace(lease, kind, namespace)
+        actual = await self.kubernetes._read(path)
+        history = [item for item in await self.registry.effect_history(lease)
+                   if item.intent.kind == kind and item.intent.name == name and item.intent.namespace == namespace]
+        if any(item.phase == "dispatched" or (item.phase == "prepared" and item.operation_id == lease.operation_id)
+               for item in history):
+            raise ProviderWaitingError("application_preparation_pending")
+        if actual is None and any(item.phase == "observed" for item in history):
+            # A same-lease peer can observe its CREATE between our GET and
+            # history read. Re-read once; never recreate an observed identity.
+            actual = await self.kubernetes._read(path)
+            if actual is None:
+                raise ProviderBlockedError("application_static_resource_conflict")
+        if actual is None:
+            return None, None
+        metadata = actual["metadata"]
+        annotations = metadata.get("annotations", {})
+        recorded = next((item for item in reversed(history) if item.phase == "observed"
+            and item.intent.action in {"create", "patch"} and item.observed_uid == metadata["uid"]
+            and annotations.get("loom.nebius/operation-id") == str(item.operation_id)
+            and annotations.get("loom.nebius/effect-key") == item.key), None)
+        if recorded is None or metadata.get("deletionTimestamp"):
+            raise ProviderBlockedError("application_static_resource_conflict")
+        plan = await self.registry.frozen_plan(lease, operation_id=recorded.operation_id)
+        original = await self._request_document(lease, recorded)
+        expected = self.kubernetes._document(lease, recorded.key, original, operation_id=recorded.operation_id,
+            deployment_generation=plan["registration"]["deployment_generation"])
+        if not _contains(actual, expected):
+            raise ProviderBlockedError("application_static_resource_conflict")
+        await self.kubernetes._namespace(lease, kind, namespace)
+        return actual, recorded
+
+    async def prepare_static(self, lease: ApplicationLease) -> None:
+        """Install frozen account/network resources while Pod admission is closed."""
+        await self.resume_preparation(lease)
+        await self.ensure_resource_authority(lease)
+        await self.close_admission(lease)
+        for effect in await self.registry.effect_history(lease):
+            if effect.phase == "dispatched" and effect.intent.kind in {"ServiceAccount", "NetworkPolicy"}:
+                await self.kubernetes.reconcile(lease, effect.operation_id, effect.key,
+                    document=await self._request_document(lease, effect))
+        plan = await self.registry.frozen_plan(lease)
+        for docs in plan["files"].values():
+            for document in docs:
+                kind, name = document["kind"], document["metadata"]["name"]
+                if kind not in {"ServiceAccount", "NetworkPolicy"}:
+                    continue
+                actual, recorded = await self._static(lease, document)
+                try:
+                    if actual is None:
+                        await self.kubernetes.create(lease, f"prepare:{kind}:{name}", document)
+                    elif kind == "NetworkPolicy" and recorded is not None and recorded.operation_id != lease.operation_id:
+                        metadata = actual["metadata"]
+                        identity = ":".join((kind, name, metadata["uid"], metadata["resourceVersion"]))
+                        await self.kubernetes.patch_spec(lease, "prepare:patch:" + hashlib.sha256(identity.encode()).hexdigest(),
+                            document, uid=metadata["uid"], resource_version=metadata["resourceVersion"])
+                except KubernetesEffectRejectedError:
+                    raise ProviderWaitingError("application_preparation_pending") from None
+                actual, recorded = await self._static(lease, document)
+                if actual is None or recorded is None:
+                    raise ProviderBlockedError("application_static_resource_conflict")
+                original = await self.registry.frozen_plan(lease, operation_id=recorded.operation_id)
+                expected = self.kubernetes._document(lease, recorded.key, document, operation_id=recorded.operation_id,
+                    deployment_generation=original["registration"]["deployment_generation"])
+                if not _contains(actual, expected):
+                    raise ProviderBlockedError("application_static_resource_conflict")
+        if await self.registry.activation_started(lease):
+            raise ProviderBlockedError("application_activation_started")
+
     async def _resume_retirement(self, lease: ApplicationLease) -> None:
         # A prepared request owns the current operation's journal slot. Resume
         # its original preconditions even if live resourceVersion has advanced.
