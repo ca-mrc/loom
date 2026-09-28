@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from loom_cli import local_benchmark_publish
-from loom_cli.benchmark_prepare import prepare_adapter_benchmark
 from loom_cli.local_benchmark_publish import LocalBenchmarkPublishStats
 
 
@@ -52,16 +51,30 @@ async def publish_benchmark(
         raise ValueError(
             "benchmark metadata comes from the adapter; metadata flags require local PATH"
         )
-    with tempfile.TemporaryDirectory(prefix="loom-adapter-prepare-") as temporary:
-        root = Path(temporary)
-        prepared = prepare_adapter_benchmark(
-            benchmark,
-            cache_dir=(cache_dir or default_benchmark_cache()).expanduser(),
-            staging_dir=root,
-            refresh=refresh,
-            limit=limit,
-            instance_ids=instance_ids,
-        )
-        return await local_benchmark_publish.publish_local_benchmark(
-            root, prepared_adapter=prepared, **publication
-        )
+    try:
+        from loom_cli.benchmark_prepare import prepare_adapter_benchmark
+
+        with tempfile.TemporaryDirectory(prefix="loom-adapter-prepare-") as temporary:
+            root = Path(temporary)
+            prepared = prepare_adapter_benchmark(
+                benchmark,
+                cache_dir=(cache_dir or default_benchmark_cache()).expanduser(),
+                staging_dir=root,
+                refresh=refresh,
+                limit=limit,
+                instance_ids=instance_ids,
+            )
+            return await local_benchmark_publish.publish_local_benchmark(
+                root, prepared_adapter=prepared, **publication
+            )
+    except ModuleNotFoundError as exc:
+        if (exc.name or "").split(".")[0] not in {
+            "loom_benchmarks", "loom_benchmark_terminal_bench_2", "datasets",
+        }:
+            raise
+        raise ValueError(
+            "--benchmark requires optional upstream adapter dependencies "
+            f"(missing {exc.name}). From the Loom repository, run "
+            "`uv sync --locked --extra rollout`, then retry with `uv run loom datasets publish`. "
+            "Local PATH publication does not require these dependencies."
+        ) from exc

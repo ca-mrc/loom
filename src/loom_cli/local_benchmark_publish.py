@@ -47,7 +47,7 @@ from loom.terminal_bench_normalize import (
 from loom.trajectory.storage import ObjectStore, bundle_file_metadata_sha256
 from loom_benchmark_tool.db_url import normalize_db_url
 from loom_benchmark_tool.upload import upload_task_dir
-from loom_cli.benchmark_prepare import AdapterBenchmarkEntry, PreparedAdapterBenchmark
+from loom_cli.benchmark_types import AdapterBenchmarkEntry, PreparedAdapterBenchmark
 from loom_cli.local_benchmark_validate import (
     LocalBenchmarkValidationError,
     validate_local_benchmark,
