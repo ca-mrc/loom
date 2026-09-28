@@ -384,7 +384,7 @@ def test_trial_submit_with_valid_provider_succeeds(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "task_id": ids["task_id"],
-            "config": {"agent_name": "oracle"},
+            "config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-4o",
         },
@@ -416,7 +416,7 @@ def test_trial_submit_with_cross_team_provider_returns_404(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "task_id": ids["task_id"],
-            "config": {"agent_name": "oracle"},
+            "config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_b"]),
         },
     )
@@ -432,7 +432,7 @@ def test_trial_submit_with_nonexistent_provider_returns_400(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "task_id": ids["task_id"],
-            "config": {"agent_name": "oracle"},
+            "config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(uuid4()),
         },
     )
@@ -449,7 +449,7 @@ def test_trial_submit_with_deleted_provider_returns_400(app_setup) -> None:
         headers=_auth(tokens["a"]),
         json={
             "task_id": ids["task_id"],
-            "config": {"agent_name": "oracle"},
+            "config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_a_deleted"]),
         },
     )
@@ -472,7 +472,7 @@ def test_batch_create_with_valid_provider_succeeds(app_setup) -> None:
             "name": "batch-with-provider",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-4o",
         },
@@ -521,7 +521,7 @@ def test_batch_create_with_known_failed_preflight_model_returns_400(
             "name": "known-failed-provider-model",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-private"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-private",
         },
@@ -568,7 +568,7 @@ def test_batch_create_is_not_blocked_by_inconclusive_preflight(
             "name": f"inconclusive-preflight-{error_code}",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-slow"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-slow",
         },
@@ -597,7 +597,7 @@ def test_batch_create_with_uncached_provider_model_returns_400(
             "name": "uncached-provider-model",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-never-cached"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-never-cached",
         },
@@ -629,7 +629,7 @@ def test_platform_admin_batch_create_with_explicit_team_uses_target_team_provide
             "name": "admin-on-behalf",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o-mini"}},
             "provider_connection_id": str(ids["conn_b"]),
             "provider_model_id": "gpt-4o-mini",
         },
@@ -664,7 +664,7 @@ def test_platform_admin_api_token_batch_create_with_explicit_team(
             "name": "admin-api-token-on-behalf",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o-mini"}},
             "provider_connection_id": str(ids["conn_b"]),
             "provider_model_id": "gpt-4o-mini",
         },
@@ -752,7 +752,7 @@ def test_shared_provider_can_be_used_by_target_team_for_batch_create(
             "name": "batch-with-shared-provider",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-4o",
         },
@@ -797,7 +797,7 @@ def test_shared_provider_batch_create_with_uncached_model_returns_400(
             "name": "shared-provider-uncached-model",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-never-cached"}},
             "provider_connection_id": str(ids["conn_a"]),
             "provider_model_id": "gpt-never-cached",
         },
@@ -836,7 +836,7 @@ def test_batch_create_with_cross_team_provider_returns_404(app_setup) -> None:
             "name": "cross-team",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_b"]),
         },
     )
@@ -854,7 +854,7 @@ def test_batch_create_with_nonexistent_provider_returns_400(app_setup) -> None:
             "name": "nope",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(uuid4()),
         },
     )
@@ -872,9 +872,81 @@ def test_batch_create_with_deleted_provider_returns_400(app_setup) -> None:
             "name": "deleted",
             "purpose": "evaluation",
             "task_filter": {"task_ids": [ids["task_id"]]},
-            "trial_config": {"agent_name": "oracle", "agent_model": None},
+            "trial_config": {"agent_name": "direct-completion", "agent_model": {"provider": "openai", "name": "gpt-4o"}},
             "provider_connection_id": str(ids["conn_a_deleted"]),
         },
     )
     assert r.status_code == 400
     assert "has been deleted" in r.json()["detail"]
+
+
+def test_trial_submit_with_conflicting_model_returns_400(app_setup) -> None:
+    """#2054: the model that runs (agent_model.name) and the model that is
+    preflighted and priced (provider_model_id) must agree."""
+    app, tokens, ids = app_setup
+    c = _client(app)
+    r = c.post(
+        "/api/v1/trials",
+        headers=_auth(tokens["a"]),
+        json={
+            "task_id": ids["task_id"],
+            "config": {
+                "agent_name": "direct-completion",
+                "agent_model": {"provider": "openai", "name": "gpt-4o"},
+            },
+            "provider_connection_id": str(ids["conn_a"]),
+            "provider_model_id": "gpt-4o-mini",
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "conflicts with provider_model_id" in r.json()["detail"]
+
+
+def test_trial_submit_oracle_with_provider_returns_400(app_setup) -> None:
+    app, tokens, ids = app_setup
+    c = _client(app)
+    r = c.post(
+        "/api/v1/trials",
+        headers=_auth(tokens["a"]),
+        json={
+            "task_id": ids["task_id"],
+            "config": {"agent_name": "oracle"},
+            "provider_connection_id": str(ids["conn_a"]),
+        },
+    )
+    assert r.status_code == 400, r.text
+    assert "does not take a model" in r.json()["detail"]
+
+
+def test_models_catalog_includes_connections_shared_with_the_team(app_setup) -> None:
+    """#2054: /models matches /provider-connections visibility, so a shared
+    connection's models are selectable by the target team."""
+    app, tokens, ids = app_setup
+    c = _client(app)
+
+    def team_b_connection_ids() -> set[str]:
+        r = c.get("/api/v1/models", headers=_auth(tokens["b"]))
+        assert r.status_code == 200, r.text
+        return {
+            item["provider_connection_id"]
+            for item in r.json()["items"]
+            if item.get("provider_connection_id")
+        }
+
+    assert str(ids["conn_a"]) not in team_b_connection_ids()
+    assert str(ids["conn_b"]) in team_b_connection_ids()
+
+    sync_engine = create_engine(str(app.state.settings.db_url))
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(
+            insert(ProviderConnectionShare).values(
+                provider_connection_id=ids["conn_a"],
+                target_team_id=ids["team_b"],
+                created_by_actor="test",
+            )
+        )
+        s.commit()
+    sync_engine.dispose()
+
+    assert str(ids["conn_a"]) in team_b_connection_ids()

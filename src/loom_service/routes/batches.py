@@ -14,7 +14,7 @@ Routes:
 from __future__ import annotations
 
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -89,6 +89,7 @@ from loom_service.combination_summary import combination_summary_for_batch
 from loom_service.debug_evidence import build_batch_debug_evidence
 from loom_service.dependencies import AdminSessionAndCtx, SessionAndCtx
 from loom_service.diagnosis import build_batch_diagnosis, trial_failure_records
+from loom_service.effective_combination import ProviderRouteError, resolve_provider_route
 from loom_service.execution_admission import (
     admit_execution_backend,
     freeze_task_resource_requests,
@@ -610,12 +611,84 @@ def _effective_provider_fields(
     payload: _CreateBatch,
     combo: Combination | None,
 ) -> tuple[UUID | None, str | None]:
+    """Provider route of a payload already passed through
+    `_resolve_payload_provider_routes`: each combination carries its own
+    resolved pair, so nothing is inherited field by field."""
     if combo is None:
         return payload.provider_connection_id, payload.provider_model_id
-    return (
-        combo.provider_connection_id or payload.provider_connection_id,
-        combo.provider_model_id or payload.provider_model_id,
+    return combo.provider_connection_id, combo.provider_model_id
+
+
+def _resolve_payload_provider_routes(
+    payload: _CreateBatch,
+    trial_config: dict[str, Any],
+) -> _CreateBatch:
+    """Return `payload` with every selection's connection/model resolved.
+
+    Combinations get their own resolved pair (inheriting the batch-level
+    defaults as a pair); a single-combination batch gets resolved
+    batch-level fields. Rejects conflicting model identities and stale
+    provider fields on no-model agents.
+    """
+    try:
+        if payload.combinations:
+            resolved: list[Combination] = []
+            for i, combo in enumerate(payload.combinations):
+                route = resolve_provider_route(
+                    context=f"combinations[{i}]",
+                    agent_model=combo.agent_model,
+                    connection_id=combo.provider_connection_id,
+                    model_id=combo.provider_model_id,
+                    default_connection_id=payload.provider_connection_id,
+                    default_model_id=payload.provider_model_id,
+                )
+                resolved.append(
+                    combo.model_copy(
+                        update={
+                            "provider_connection_id": route.connection_id,
+                            "provider_model_id": route.model_id,
+                        },
+                    ),
+                )
+            return payload.model_copy(update={"combinations": resolved})
+        agent_name = trial_config.get("agent_name")
+        if not isinstance(agent_name, str) or not agent_name:
+            return payload
+        model_raw = trial_config.get("agent_model")
+        route = resolve_provider_route(
+            context="trial_config",
+            agent_model=None if model_raw is None else ModelSpec.model_validate(model_raw),
+            connection_id=payload.provider_connection_id,
+            model_id=payload.provider_model_id,
+        )
+    except ProviderRouteError as exc:
+        reject_submission(reason="invalid_input", status_code=400, detail=str(exc))
+    return payload.model_copy(
+        update={
+            "provider_connection_id": route.connection_id,
+            "provider_model_id": route.model_id,
+        },
     )
+
+
+def _disambiguate_derived_labels(
+    combos: list[Combination],
+    connection_names: dict[UUID, str],
+) -> list[Combination]:
+    """Name the connection in derived labels that would otherwise collide,
+    so the same model can be compared across connections (#2054).
+    Explicit labels are left alone; duplicates among them stay an error."""
+    derived = [_derive_combination_label(c) for c in combos]
+    counts = Counter(label for c, label in zip(combos, derived, strict=True) if not c.label)
+    out: list[Combination] = []
+    for combo, label in zip(combos, derived, strict=True):
+        if not combo.label and counts[label] > 1 and combo.provider_connection_id is not None:
+            name = connection_names.get(combo.provider_connection_id) or str(
+                combo.provider_connection_id,
+            )[:8]
+            combo = combo.model_copy(update={"label": f"{label}@{name}"[:200]})
+        out.append(combo)
+    return out
 
 
 def _rerun_selection_error(selection: dict[str, Any]) -> str | None:
@@ -914,18 +987,6 @@ async def _create_batch_record(
                     status_code=400,
                     detail=f"combinations[{i}]: {err}",
                 )
-        # Labels unique within the batch (after computing the
-        # derived label for those without one).
-        seen_labels: set[str] = set()
-        for i, combo in enumerate(payload.combinations):
-            label = combo.label or _derive_combination_label(combo)
-            if label in seen_labels:
-                reject_submission(
-                    reason="invalid_input",
-                    status_code=400,
-                    detail=(f"combinations[{i}] label {label!r} is duplicated within the batch"),
-                )
-            seen_labels.add(label)
     else:
         # Single-combination batch. Catalog check on the agent
         # embedded in trial_config + agent⇄model compatibility.
@@ -970,10 +1031,12 @@ async def _create_batch_record(
                     detail=f"trial_config: {err}",
                 )
 
+    # #2054: resolve every selection's connection/model once. From here on,
+    # preflight, budget, persistence and fan-out all read these values.
+    payload = _resolve_payload_provider_routes(payload, trial_config)
+
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
-    # Combination-level provider fields override the batch-level value; the
-    # batch-level value remains the backward-compatible default.
     provider_connection: ProviderConnection | None = None
     provider_connection_ids: set[UUID] = set()
     provider_model_checks: list[tuple[UUID | None, str | None, str | None]] = []
@@ -1035,6 +1098,28 @@ async def _create_batch_record(
             .all()
         )
         provider_connections_by_id = {row.id: row for row in provider_rows}
+
+    if payload.combinations:
+        payload = payload.model_copy(
+            update={
+                "combinations": _disambiguate_derived_labels(
+                    payload.combinations,
+                    {cid: row.display_name for cid, row in provider_connections_by_id.items()},
+                ),
+            },
+        )
+        # Labels unique within the batch (after computing the
+        # derived label for those without one).
+        seen_labels: set[str] = set()
+        for i, combo in enumerate(payload.combinations):
+            label = combo.label or _derive_combination_label(combo)
+            if label in seen_labels:
+                reject_submission(
+                    reason="invalid_input",
+                    status_code=400,
+                    detail=(f"combinations[{i}] label {label!r} is duplicated within the batch"),
+                )
+            seen_labels.add(label)
 
     # #1380: mid-trajectory model switch validation (after provider rows load).
     multi_model_spec = None

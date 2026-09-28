@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import boto3
 import httpx
@@ -800,3 +800,252 @@ async def test_backend_stored_on_batch(setup: tuple[FastAPI, str]) -> None:
     )
     assert r.status_code == 201
     assert r.json()["backend"] == "docker"
+
+
+# ----------------------------------------------------------------
+# #2054: one effective connection/model per combination
+# ----------------------------------------------------------------
+
+
+def _insert_connection(
+    postgres_url: str,
+    raw: str,
+    display_name: str,
+    model_ids: tuple[str, ...],
+) -> UUID:
+    conn_id = uuid4()
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        team_id = s.execute(
+            select(Token.team_id).where(
+                Token.token_hash == hashlib.sha256(raw.encode()).digest(),
+                Token.type == "team",
+            )
+        ).scalar_one()
+        s.execute(
+            insert(ProviderConnection).values(
+                id=conn_id,
+                team_id=team_id,
+                provider_type="openai-compatible",
+                display_name=display_name,
+                base_url="https://api.example.test/v1",
+                upstream_host="api.example.test",
+                resolved_egress_ips=["203.0.113.10"],
+                encrypted_api_key_ref=f"test://{conn_id}",
+                status="valid",
+                pricing_source="tokens-only",
+                created_by="test:combo",
+            )
+        )
+        for model_id in model_ids:
+            s.execute(
+                insert(ProviderModelCache).values(
+                    provider_connection_id=conn_id,
+                    model_id=model_id,
+                    last_preflight_status="valid",
+                )
+            )
+        s.commit()
+    sync_engine.dispose()
+    return conn_id
+
+
+def _stored_combinations(postgres_url: str, batch_id: str) -> list[dict]:
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        batch = s.execute(select(Batch).where(Batch.id == batch_id)).scalar_one()
+        combinations = list(batch.combinations)
+    sync_engine.dispose()
+    return combinations
+
+
+def _litellm(model: str, **extra: object) -> dict:
+    return {
+        "agent_name": "litellm",
+        "agent_model": {"provider": "openai", "name": model},
+        "n_per_task": 1,
+        **extra,
+    }
+
+
+async def test_combinations_reject_conflicting_model_identity(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Conflict provider", ("gpt-4o", "gpt-4o-mini"))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-model-conflict",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "combinations": [
+                _litellm(
+                    "gpt-4o",
+                    provider_connection_id=str(conn_id),
+                    provider_model_id="gpt-4o-mini",
+                ),
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "combinations[0]" in detail
+    assert "'gpt-4o'" in detail and "'gpt-4o-mini'" in detail
+
+
+async def test_combinations_reject_model_that_conflicts_with_inherited_batch_model(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Inherit provider", ("gpt-4o", "gpt-4o-mini"))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-inherited-conflict",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "provider_connection_id": str(conn_id),
+            "provider_model_id": "gpt-4o",
+            "combinations": [_litellm("gpt-4o"), _litellm("gpt-4o-mini")],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "combinations[1]" in detail
+    assert "batch-level provider_model_id" in detail
+
+
+async def test_combinations_store_resolved_route_inherited_from_batch(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Default provider", ("gpt-4o",))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-inherits-route",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "provider_connection_id": str(conn_id),
+            "combinations": [_litellm("gpt-4o")],
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    stored = _stored_combinations(postgres_url, r.json()["batch_id"])
+    assert stored[0]["provider_connection_id"] == str(conn_id)
+    assert stored[0]["provider_model_id"] == "gpt-4o"
+
+
+async def test_combinations_compare_same_model_across_connections(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    conn_a = _insert_connection(postgres_url, raw, "Relay A", ("gpt-4o",))
+    conn_b = _insert_connection(postgres_url, raw, "Relay B", ("gpt-4o",))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-same-model",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 2},
+            "trial_config": {},
+            "combinations": [
+                _litellm("gpt-4o", provider_connection_id=str(conn_a)),
+                _litellm("gpt-4o", provider_connection_id=str(conn_b)),
+            ],
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["expected_trial_count"] == 4
+    stored = _stored_combinations(postgres_url, r.json()["batch_id"])
+    assert [c["label"] for c in stored] == [
+        "litellm/openai/gpt-4o@Relay A",
+        "litellm/openai/gpt-4o@Relay B",
+    ]
+    assert [c["provider_connection_id"] for c in stored] == [str(conn_a), str(conn_b)]
+
+
+async def test_combinations_reject_oracle_with_provider_fields(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Stale provider", ("gpt-4o",))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-oracle-stale",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "combinations": [
+                {
+                    "agent_name": "oracle",
+                    "agent_model": None,
+                    "provider_connection_id": str(conn_id),
+                    "n_per_task": 1,
+                },
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    assert "does not take a model" in r.json()["detail"]
+
+
+async def test_combinations_mixed_oracle_ignores_batch_level_route(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """The batch-level connection is a default for model-backed combinations
+    only; the oracle combination is stored without a provider route."""
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Mixed provider", ("gpt-4o",))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "combo-mixed-oracle",
+            "purpose": "evaluation",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "provider_connection_id": str(conn_id),
+            "combinations": [
+                {"agent_name": "oracle", "agent_model": None, "n_per_task": 1},
+                _litellm("gpt-4o", n_per_task=2),
+            ],
+        },
+    )
+
+    assert r.status_code == 201, r.text
+    assert r.json()["expected_trial_count"] == 3
+    stored = _stored_combinations(postgres_url, r.json()["batch_id"])
+    assert stored[0]["provider_connection_id"] is None
+    assert stored[0]["provider_model_id"] is None
+    assert stored[1]["provider_connection_id"] == str(conn_id)
+    assert stored[1]["provider_model_id"] == "gpt-4o"
