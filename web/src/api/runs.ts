@@ -34,6 +34,8 @@ export type RerunPlan =
 export type DeliveryExport =
   paths["/api/v1/batches/{batch_id}/delivery-export"]["get"]["responses"][200]["content"]["application/json"];
 
+export type DeliveryExportRequest = Partial<components["schemas"]["_DeliveryExportRequest"]>;
+
 export type Usage = paths["/api/v1/usage"]["get"]["responses"][200]["content"]["application/json"];
 
 export type Team = paths["/api/v1/teams/{team_id}"]["get"]["responses"][200]["content"]["application/json"];
@@ -112,7 +114,7 @@ export const runsApi = {
   getBatchDebug: (id: string) => apiFetch<DebugEvidence>(`/api/v1/batches/${id}/debug`),
   getBatchDiagnosis: (id: string) => apiFetch<DiagnosisReport>(`/api/v1/batches/${id}/diagnosis`),
   getBatchDeliveryExport: (id: string) => apiFetch<DeliveryExport>(`/api/v1/batches/${id}/delivery-export`),
-  createBatchDeliveryExport: (id: string, body: { supplemental_batch_ids?: string[] | null } = {}) =>
+  createBatchDeliveryExport: (id: string, body: DeliveryExportRequest = {}) =>
     apiFetch<DeliveryExport>(`/api/v1/batches/${id}/delivery-export`, {
       method: "POST",
       body: JSON.stringify(body),
