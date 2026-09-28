@@ -76,6 +76,8 @@ class KubernetesAPI:
                 else:
                     raise AssertionError("unexpected patch field")
             value["metadata"]["resourceVersion"] = "2"
+            if self.lose_response:
+                raise httpx.ReadTimeout("must-not-escape-protected-detail")
             return httpx.Response(200, json=value)
         assert request.method == "DELETE"
         assert body == {"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background",
@@ -83,6 +85,8 @@ class KubernetesAPI:
                                           "resourceVersion": value["metadata"]["resourceVersion"]}}
         if not self.pending_delete:
             del self.objects[path]
+        if self.lose_response:
+            raise httpx.ReadTimeout("must-not-escape-protected-detail")
         return httpx.Response(202, json={"kind": "Status", "status": "Success"})
 
 
@@ -161,6 +165,65 @@ async def test_same_owner_sibling_cannot_load_or_observe_predecessor_effects(pro
                                       operation_id=lease.operation_id)
     with pytest.raises(ProviderBlockedError, match="application_kubernetes_effect_missing"):
         await client.reconcile(other, lease.operation_id, "namespace")
+
+
+@pytest.mark.parametrize("action", ["patch", "delete"])
+async def test_stop_reconciles_predecessor_exact_patch_or_delete(provider, applications, action):
+    client, api, registry, plan, lease = await namespace_ready(provider)
+    document = copy.deepcopy(named(plan["prepared"], "Deployment", "loom-service"))
+    created = await client.create(lease, "api", document)
+    document["spec"]["replicas"] = 0
+    api.lose_response = True
+    api.pending_delete = True
+    with pytest.raises(ProviderWaitingError):
+        if action == "patch":
+            await client.patch_spec(lease, "stop-api", document,
+                uid=created.observed_uid, resource_version=created.observed_resource_version)
+        else:
+            await client.delete(lease, "stop-api", api_version="apps/v1", kind="Deployment",
+                namespace="loom-dev-alice", name="loom-service",
+                uid=created.observed_uid, resource_version=created.observed_resource_version)
+    stopped = await registry.transition(lease.application_id, principal=applications[2][0], idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    if action == "delete":
+        with pytest.raises(ProviderWaitingError, match="retirement_pending"):
+            await client.reconcile(current, lease.operation_id, "stop-api")
+        # Replacement proves only retirement of the original UID, not ownership
+        # of the new object or permission to delete it.
+        api.objects["/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service"]["metadata"]["uid"] = "replacement"
+    else:
+        changed = copy.deepcopy(document)
+        changed["spec"]["replicas"] = 9
+        with pytest.raises(ProviderBlockedError, match="application_kubernetes_request_conflict"):
+            await client.reconcile(current, lease.operation_id, "stop-api", document=changed)
+    result = await client.reconcile(current, lease.operation_id, "stop-api", document=document)
+    assert result.phase == "observed" and result.observed_uid == created.observed_uid
+    assert result.observed_resource_version == ("2" if action == "patch" else None)
+    assert len(api.mutations) == 3
+
+
+async def test_reconcile_never_dispatches_prepared_history_or_rechecks_terminal_evidence(provider, applications):
+    from tests.integration.test_nebius_application_effects import intent
+
+    client, api, registry, plan, lease = await namespace_ready(provider)
+    await registry.prepare_effect(lease, "api", intent(plan))
+    stopped = await registry.transition(lease.application_id, principal=applications[2][0], idempotency_key="stop",
+        action="suspend", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    with pytest.raises(ProviderWaitingError, match="not_dispatched"):
+        await client.reconcile(current, lease.operation_id, "api")
+    with pytest.raises(ManagementError, match="stale_operation_lease"):
+        await registry.dispatch_effect(lease, "api")
+    with pytest.raises(ManagementError, match="application_effect_missing"):
+        await registry.dispatch_effect(current, "api")
+    with pytest.raises(ManagementError, match="application_effect_not_dispatched"):
+        await registry.observe_effect(current, "api", uid="never-sent", resource_version="1",
+                                      operation_id=lease.operation_id)
+    api.objects.clear()
+    result = await client.reconcile(current, lease.operation_id, "namespace")
+    assert result.phase == "observed" and result.observed_uid == "uid-1"
+    assert len(api.mutations) == 1  # An observation is history, never readiness.
 
 
 @pytest.mark.parametrize("replacement", [False, True])

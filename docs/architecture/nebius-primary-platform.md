@@ -329,6 +329,17 @@ proof, and malformed readback is rejected. An uncertain dispatch only reads on
 subsequent calls, including after lease takeover. A confirmed409/422 is retained
 as rejection so trusted orchestration can use a new key after fresh observation.
 
+After supersession, the current lease can also reconcile an old same-application
+dispatch using its original operation, generation, effect key and request digest.
+CREATE/PATCH reconciliation requires the exact original document; a different body
+cannot satisfy the recorded request. This path makes no Kubernetes writes and
+cannot dispatch a predecessor's prepared request. DELETE reconciliation confirms
+absence of the original UID, without deleting any replacement. Terminal effects
+remain immutable history, not a fresh readiness or retirement check. Stale leases
+and sibling applications cannot inspect frozen predecessor plans or record their
+effects. The disposable Kubernetes lane exercises a real successful CREATE whose
+reply is lost, followed by suspension and reconciliation without another POST.
+
 This internal adapter receives qualified manifests/material from trusted lifecycle
 code, not from an owner raw-manifest endpoint. That caller must qualify PATCH/DELETE
 target ownership and history before supplying UID/resourceVersion, including Pod

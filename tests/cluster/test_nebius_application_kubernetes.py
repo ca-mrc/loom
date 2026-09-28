@@ -104,6 +104,46 @@ async def test_journal_drives_real_create_preconditioned_patch_and_delete(applic
 
 
 @pytest.mark.timeout(180)
+async def test_stop_records_predecessor_create_after_lost_real_response(applications):
+    registry, _, alice, plan, _, lease = await started(applications)
+    await registry.renew(lease, lease_seconds=180)
+    container = await asyncio.to_thread(_start_k3s)
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        config = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
+        trust.load_cert_chain(config.cert_file, config.key_file)
+        writes = []
+
+        async def lose_deployment_reply(response):
+            if response.request.method != "GET":
+                writes.append((response.request.method, response.status_code))
+            if response.request.method == "POST" and response.request.url.path.endswith("/deployments"):
+                assert response.status_code == 201
+                raise httpx.ReadTimeout("simulated response loss after real Kubernetes CREATE")
+
+        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
+                                     event_hooks={"response": [lose_deployment_reply]}) as http:
+            provider = ApplicationKubernetesProvider(registry, http)
+            await registry.renew(lease, lease_seconds=180)
+            await provider.create(lease, "namespace", named(plan["prepared"], "Namespace", "loom-dev-alice"))
+            document = copy.deepcopy(named(plan["prepared"], "Deployment", "loom-service"))
+            document["spec"]["replicas"] = 0
+            with pytest.raises(ProviderWaitingError):
+                await provider.create(lease, "api", document)
+            stopped = await registry.transition(lease.application_id, principal=alice, action="suspend",
+                idempotency_key="stop", expected_generation=1)
+            current = await registry.claim(stopped.operation_id, lease_seconds=180)
+            result = await provider.reconcile(current, lease.operation_id, "api", document=document)
+            assert result.phase == "observed" and result.operation_id == lease.operation_id
+            assert result.observed_uid and result.observed_resource_version
+            assert writes == [("POST", 201), ("POST", 201)]
+            assert (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items == []
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
+@pytest.mark.timeout(180)
 async def test_composed_credentials_create_only_immutable_generation_secrets(
     applications, platform_inputs, database_access, shared_ca,
 ):
