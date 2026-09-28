@@ -5,6 +5,7 @@ import base64
 from dataclasses import replace
 from uuid import uuid4
 
+import httpx
 import psycopg
 import pytest
 from sqlalchemy.engine import make_url
@@ -19,9 +20,12 @@ from tests.integration.test_nebius_application_database import access_postgres a
 from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_database import login
 from tests.integration.test_nebius_application_effects import expire
+from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
 from tests.integration.test_nebius_application_material import management_key as management_key
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_render import inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -199,3 +203,43 @@ async def test_lease_loss_during_key_read_prevents_credential_commit_and_grants(
         await registry.load_material(current)
     assert len(cloud.mutations) == 2
     assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone()[0] == 0
+
+
+async def test_generation_secret_delivery_matches_renderer_and_never_reposts_after_timeout(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
+    from loom_service.environment_management.provider import ProviderWaitingError
+
+    provider, registry, _, _, _, lease, _, _ = await setup(
+        applications, platform_inputs, database_access, shared_ca)
+    plan = await registry.frozen_plan(lease)
+    documents = [doc for group in plan["files"].values() for doc in group]
+    namespace = next(doc for doc in documents if doc["kind"] == "Namespace")
+    api = KubernetesAPI()
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(api.handle)) as http:
+        kubernetes = ApplicationKubernetesProvider(registry, http)
+        await kubernetes.create(lease, "namespace", namespace)
+        api.lose_response = True
+        with pytest.raises(ProviderWaitingError):
+            await provider.deliver(lease, kubernetes)
+        assert len(api.mutations) == 2
+        api.lose_response = False
+        await provider.deliver(lease, kubernetes)
+        await provider.deliver(lease, kubernetes)
+    assert len(api.mutations) == 4  # Namespace and three immutable generation Secrets.
+    material = await registry.load_material(lease)
+    secrets_by_name = {doc["metadata"]["name"]: doc for doc in api.objects.values() if doc["kind"] == "Secret"}
+    assert set(secrets_by_name) == set(material)
+    for name, values in material.items():
+        secret = secrets_by_name[name]
+        assert secret["immutable"] is True and secret["type"] == "Opaque"
+        assert secret["metadata"]["namespace"] == namespace["metadata"]["name"]
+        assert {key: base64.b64decode(value).decode() for key, value in secret["data"].items()} == values
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")
+    for variable in deployment["spec"]["template"]["spec"]["containers"][0]["env"]:
+        if "valueFrom" in variable:
+            reference = variable["valueFrom"]["secretKeyRef"]
+            assert reference["key"] in material[reference["name"]]
+    password = make_url(db_bundle(material)["url"]).password
+    assert password not in repr(await registry.effect_history(lease))
