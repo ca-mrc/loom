@@ -88,6 +88,36 @@ def test_ordinary_plan_and_profile_omit_guest_extensions_even_when_deployment_re
     assert all("guest_execution" not in sidecar for sidecar in old.canonical_payload()["sidecars"])
 
 
+def test_guest_specific_budgets_leave_ordinary_plans_unchanged():
+    ordinary, trial, original = _inputs()
+    task, _, _ = _guest_inputs()
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **original.model_dump(mode="json"), "supports_task_identity": True,
+        "guest_runtime": "qemu-tcg-v1", "guest_runtime_volume_mib": 1024,
+        "guest_max_artifact_bytes": 6 * 1024**3,
+    })
+    plan = _compile(task, trial, profile)
+    assert plan.runtime_volume_mib == 1024
+    assert plan.max_artifact_bytes == 6 * 1024**3
+    assert plan.controller_resources.ephemeral_storage_mib == task.environment.storage_mb + 1024
+    assert _compile(ordinary, trial, profile).canonical_payload() == _compile(
+        ordinary, trial, original.model_copy(update={"supports_task_identity": True}),
+    ).canonical_payload()
+    assert original.max_artifact_bytes == 1024**3
+    assert original.runtime_volume_mib == 32
+
+
+@pytest.mark.parametrize("settings", [
+    {"guest_runtime_volume_mib": 1024}, {"guest_max_artifact_bytes": 6 * 1024**3},
+    {"guest_runtime": "qemu-tcg-v1", "guest_max_artifact_bytes": 10 * 1024**3 + 1},
+    {"guest_runtime": "qemu-tcg-v1", "guest_runtime_volume_mib": 1023},
+])
+def test_guest_specific_budgets_require_runtime_and_bounded_values(settings):
+    _, _, original = _inputs()
+    with pytest.raises(ValueError):
+        ServiceExecutionRuntimeProfileV1.model_validate({**original.model_dump(mode="json"), **settings})
+
+
 @pytest.mark.parametrize("change,reason", [
     ({"guest_runtime": None}, "guest_runtime_unavailable"),
     ({"supports_task_identity": False}, "task_identity_runtime_unavailable"),
