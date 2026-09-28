@@ -313,6 +313,9 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         supports_task_web_egress=getattr(args, "supports_task_web_egress", False),
         service_lifecycle_ready=getattr(args, "service_lifecycle_ready", False),
         supports_task_identity=getattr(args, "supports_task_identity", False),
+        guest_runtime=getattr(args, "guest_runtime", None),
+        guest_runtime_volume_mib=getattr(args, "guest_runtime_volume_mib", None),
+        guest_max_artifact_bytes=getattr(args, "guest_max_artifact_bytes", None),
         resource_allocation_policy="node-share-v1" if getattr(args, "node_share_resources", False) else None,
         image_admission=bundle,
     )
@@ -362,6 +365,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--supports-task-web-egress", action="store_true")
     parser.add_argument("--service-lifecycle-ready", action="store_true")
     parser.add_argument("--supports-task-identity", action="store_true")
+    parser.add_argument("--guest-runtime", choices=("qemu-tcg-v1",))
+    parser.add_argument("--guest-runtime-volume-mib", type=int)
+    parser.add_argument("--guest-max-artifact-bytes", type=int)
     parser.add_argument("--node-share-resources", action="store_true")
     parser.add_argument("--signing-key", required=True, type=Path)
     parser.add_argument("--signing-key-id", required=True)

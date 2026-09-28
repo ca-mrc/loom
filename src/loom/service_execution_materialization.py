@@ -142,6 +142,8 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    guest_runtime_volume_mib: int | None = Field(default=None, ge=1024, le=4096, exclude_if=lambda value: value is None)
+    guest_max_artifact_bytes: int | None = Field(default=None, gt=0, le=10 * 1024**3, exclude_if=lambda value: value is None)
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
@@ -177,6 +179,10 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
 
     @model_validator(mode="after")
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
+        if self.guest_runtime is None and (
+            self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
+        ):
+            raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
             supports_task_web_egress=self.supports_task_web_egress,
         )
@@ -217,6 +223,8 @@ def build_nebius_runtime_profile(
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
+    guest_runtime_volume_mib: int | None = None,
+    guest_max_artifact_bytes: int | None = None,
     runtime_volume_mib: int = 32,
     resource_allocation_policy: Literal["node-share-v1"] | None = None,
 ) -> ServiceExecutionRuntimeProfileV1:
@@ -241,6 +249,8 @@ def build_nebius_runtime_profile(
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
+        guest_runtime_volume_mib=guest_runtime_volume_mib,
+        guest_max_artifact_bytes=guest_max_artifact_bytes,
         runtime_volume_mib=runtime_volume_mib,
     )
 
@@ -753,7 +763,7 @@ def runtime_profile_rejections(
     if _guest_capabilities(task):
         if profile.guest_runtime is None:
             return ("guest_runtime_unavailable",)
-        if profile.runtime_volume_mib < 1024:
+        if (profile.guest_runtime_volume_mib or profile.runtime_volume_mib) < 1024:
             return ("guest_runtime_volume_too_small",)
         if not profile.supports_task_identity:
             return ("task_identity_runtime_unavailable",)
@@ -815,6 +825,10 @@ def _compile_terminus_plan(
     sidecars = list(fixture_sidecars(task))
     guest_capabilities = _guest_capabilities(task)
     guest_execution = GuestExecutionV1(capabilities=tuple(sorted(guest_capabilities))) if guest_capabilities else None
+    runtime_volume_mib = (profile.guest_runtime_volume_mib or profile.runtime_volume_mib
+                          if guest_execution is not None else profile.runtime_volume_mib)
+    max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
+                          if guest_execution is not None else profile.max_artifact_bytes)
     for role in ("task-sandbox", "verifier-sandbox"):
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
@@ -896,13 +910,13 @@ def _compile_terminus_plan(
         # so rendering, finance and node-share placement use the same total.
         controller_resources = ContainerResourcesV1.model_validate({
             **(controller_resources or resources).model_dump(),
-            "ephemeral_storage_mib": env.storage_mb + profile.runtime_volume_mib,
+            "ephemeral_storage_mib": env.storage_mb + runtime_volume_mib,
         })
         if resource_requests is not None and resource_requests.controller is not None:
             resource_requests = resource_requests.model_copy(update={
                 "controller": resource_requests.controller.model_copy(update={
                     "ephemeral_storage_mib": (resource_requests.controller.ephemeral_storage_mib
-                                              + profile.runtime_volume_mib),
+                                              + runtime_volume_mib),
                 }),
             })
     return ExecutionRuntimePlanV1(
@@ -922,7 +936,7 @@ def _compile_terminus_plan(
         resource_requests=resource_requests,
         controller_resources=controller_resources,
         workspace_mib=env.storage_mb,
-        runtime_volume_mib=profile.runtime_volume_mib,
+        runtime_volume_mib=runtime_volume_mib,
         termination_grace_seconds=profile.termination_grace_seconds,
         task_input=RuntimeTaskInputV1(
             manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
@@ -933,7 +947,7 @@ def _compile_terminus_plan(
         verifier_after_agent_timeout=True,
         verifier=phase("verifier", "verify-sandbox", verifier_timeout),
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
-        max_artifact_bytes=profile.max_artifact_bytes,
+        max_artifact_bytes=max_artifact_bytes,
     )
 
 
