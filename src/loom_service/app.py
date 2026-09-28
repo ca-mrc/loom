@@ -55,6 +55,7 @@ from loom_service.provider_secret_gc import run_loop as provider_secret_gc_run_l
 from loom_service.routes import (
     admin_audit,
     agents,
+    applications,
     atif,
     auth,
     backends,
@@ -157,6 +158,7 @@ def register_api_routes(
     app.include_router(teams.router, prefix="/api/v1")
     if management:
         app.include_router(environments.router, prefix="/api/v1")
+        app.include_router(applications.router, prefix="/api/v1")
     if not management:
         app.include_router(managed_child.router, prefix="/api/v1")
         for workload_router in (

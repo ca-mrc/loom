@@ -27,6 +27,7 @@ from loom.nebius_application_contract import (
     ApplicationOperationV1,
     ApplicationRegistrationV1,
     ApplicationReleaseV1,
+    ApplicationStatusV1,
     SharedDevelopmentBindingV1,
 )
 from loom.nebius_application_render import RenderedApplication
@@ -55,6 +56,16 @@ def _key(value: str) -> None:
 
 def _fingerprint(**intent: Any) -> str:
     return hashlib.sha256(json.dumps(intent, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def _transition_fingerprint(*, team: UUID, application_id: UUID, action: str,
+                            expected_generation: int, release_id: UUID | None) -> str:
+    if (action not in {"update", "suspend", "resume", "destroy_retained"}
+            or type(expected_generation) is not int or expected_generation < 1
+            or (action == "update") != (release_id is not None)):
+        raise ManagementError("invalid_application_transition", 422)
+    return _fingerprint(action=action, team=team, application_id=application_id,
+                        expected_generation=expected_generation, release_id=release_id)
 
 
 class ApplicationRegistry(ApplicationCompletionJournal):
@@ -146,6 +157,40 @@ class ApplicationRegistry(ApplicationCompletionJournal):
             ).order_by(NebiusApplication.created_at, NebiusApplication.application_id).limit(1000))
             return [registration_view(row) for row in rows]
 
+    async def status(self, application_id: UUID, *, principal: AuthContext,
+                     for_mutation: bool = False) -> ApplicationStatusV1:
+        owner, team = owner_identity(principal, mutation=for_mutation)
+        async with self.session_factory() as session:
+            result = (await session.execute(select(NebiusApplication, NebiusApplicationOperation).outerjoin(
+                NebiusApplicationOperation,
+                (NebiusApplicationOperation.application_id == NebiusApplication.application_id)
+                & (NebiusApplicationOperation.deployment_generation == NebiusApplication.deployment_generation)
+                & (NebiusApplicationOperation.access_generation == NebiusApplication.access_generation),
+            ).where(NebiusApplication.application_id == application_id,
+                    NebiusApplication.owner_user_id == owner, NebiusApplication.owner_team_id == team,
+                    NebiusApplication.purged_at.is_(None)))).one_or_none()
+            if result is None:
+                raise ManagementError("application_forbidden", 403)
+            row, operation = result
+            return ApplicationStatusV1(registration=registration_view(row),
+                operation=operation_view(operation) if operation is not None else None)
+
+    async def replay_transition(self, application_id: UUID, *, principal: AuthContext, idempotency_key: str,
+                                action: str, expected_generation: int, release_id: UUID | None = None
+                                ) -> ApplicationOperationV1 | None:
+        owner, team = owner_identity(principal, mutation=True)
+        _key(idempotency_key)
+        fingerprint = _transition_fingerprint(team=team, application_id=application_id, action=action,
+                                             expected_generation=expected_generation, release_id=release_id)
+        async with self.session_factory() as session:
+            owned = await session.scalar(select(NebiusApplication.application_id).where(
+                NebiusApplication.application_id == application_id,
+                NebiusApplication.owner_user_id == owner, NebiusApplication.owner_team_id == team,
+            ))
+            if owned is None:
+                raise ManagementError("application_forbidden", 403)
+            return await self._replay(session, owner, idempotency_key, fingerprint)
+
     async def transition(
         self, application_id: UUID, *, principal: AuthContext, idempotency_key: str,
         action: str, expected_generation: int, release_id: UUID | None = None,
@@ -154,12 +199,8 @@ class ApplicationRegistry(ApplicationCompletionJournal):
     ) -> ApplicationOperationV1:
         owner, team = owner_identity(principal, mutation=True)
         _key(idempotency_key)
-        if (action not in {"update", "suspend", "resume", "destroy_retained"}
-                or type(expected_generation) is not int or expected_generation < 1
-                or (action == "update") != (release_id is not None)):
-            raise ManagementError("invalid_application_transition", 422)
-        fingerprint = _fingerprint(action=action, team=team, application_id=application_id,
-                                   expected_generation=expected_generation, release_id=release_id)
+        fingerprint = _transition_fingerprint(team=team, application_id=application_id, action=action,
+                                             expected_generation=expected_generation, release_id=release_id)
         try:
             async with self.session_factory.begin() as session:
                 cluster_id = await session.scalar(select(NebiusApplication.cluster_id).where(

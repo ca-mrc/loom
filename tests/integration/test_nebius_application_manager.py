@@ -25,9 +25,8 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 
 def manager(registry, platform_inputs, *, plan=None, releases=None, authority=None):
-    from loom_service.application_management.manager import ApplicationManager
-
     from loom.nebius_application_contract import ApplicationReleaseV1, SharedDevelopmentBindingV1
+    from loom_service.application_management.manager import ApplicationManager
 
     _, release, shared, foundation = inputs(platform_inputs)
     if plan is not None:
@@ -84,7 +83,8 @@ async def test_update_from_actual_ready_completion_preserves_identity_and_freeze
     assert new_plan['registration']['deployment_generation'] == new_plan['registration']['access_generation'] == 2
     assert new_plan['shared'] == plan['shared'] and new_plan['release']['service_image_ref'] == release.service_image_ref
     unavailable, _ = manager(registry, platform_inputs, plan=plan, releases=())
-    assert await unavailable.transition(alice, lease.application_id, request, idempotency_key='update') == operation
+    replay = await unavailable.transition(alice, lease.application_id, request, idempotency_key='update')
+    assert replay.operation_id == operation.operation_id and replay.phase == 'running'
     with pytest.raises(ManagementError, match='application_generation_conflict'):
         await service.transition(alice, lease.application_id, request, idempotency_key='stale')
 
@@ -152,10 +152,11 @@ async def test_management_api_authenticates_owner_and_never_exposes_private_plan
 
 
 async def test_application_routes_are_management_only():
-    from loom_service.app import create_app
-    from loom_service.config import LoomServiceSettings
+    from fastapi import FastAPI
 
-    app = create_app(LoomServiceSettings(_env_file=None, service_mode='api_only',
-        db_url='postgresql+psycopg://fixture:fixture@localhost/fixture'))
+    from loom_service.app import register_api_routes
+
+    app = FastAPI()
+    register_api_routes(app, management=False, include_local_execution=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://personal.example.com') as client:
         assert (await client.get('/api/v1/applications')).status_code == 404

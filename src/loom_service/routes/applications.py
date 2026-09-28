@@ -1,0 +1,60 @@
+"""Authenticated application-only controls, without caller-supplied authority."""
+from __future__ import annotations
+
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Header, Request
+
+from loom.nebius_application_contract import (
+    ApplicationCreateRequestV1,
+    ApplicationOperationRequestV1,
+    ApplicationOperationV1,
+    ApplicationRegistrationV1,
+    ApplicationStatusV1,
+)
+from loom_service.application_management.manager import ApplicationManager
+from loom_service.environment_management.registry import ManagementError
+from loom_service.routes.environments import ManagementPrincipal
+
+router = APIRouter()
+IdempotencyKey = Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")]
+
+
+def manager(request: Request) -> ApplicationManager:
+    value = getattr(request.app.state, "application_manager", None)
+    if not isinstance(value, ApplicationManager):
+        raise ManagementError("application_management_not_configured", 503)
+    return value
+
+
+@router.post("/applications", status_code=202)
+async def create_application(request: Request, payload: ApplicationCreateRequestV1,
+                             principal: ManagementPrincipal, idempotency_key: IdempotencyKey) -> ApplicationOperationV1:
+    return await manager(request).create(principal, payload, idempotency_key=idempotency_key)
+
+
+@router.get("/applications")
+async def list_applications(request: Request, principal: ManagementPrincipal) -> dict[str, list[ApplicationRegistrationV1]]:
+    return {"items": await manager(request).registry.list_applications(principal=principal)}
+
+
+@router.get("/applications/{application_id}")
+async def application_status(request: Request, application_id: UUID, principal: ManagementPrincipal) -> ApplicationStatusV1:
+    return await manager(request).registry.status(application_id, principal=principal)
+
+
+@router.post("/applications/{application_id}/operations", status_code=202)
+async def request_operation(request: Request, application_id: UUID, payload: ApplicationOperationRequestV1,
+                            principal: ManagementPrincipal, idempotency_key: IdempotencyKey) -> ApplicationOperationV1:
+    return await manager(request).transition(principal, application_id, payload, idempotency_key=idempotency_key)
+
+
+@router.get("/application-operations/{operation_id}")
+async def operation_status(request: Request, operation_id: UUID, principal: ManagementPrincipal) -> ApplicationOperationV1:
+    return await manager(request).registry.get_operation(operation_id, principal=principal)
+
+
+@router.post("/application-operations/{operation_id}/retry", status_code=202)
+async def retry_operation(request: Request, operation_id: UUID, principal: ManagementPrincipal) -> ApplicationOperationV1:
+    return await manager(request).registry.retry(operation_id, principal=principal)
