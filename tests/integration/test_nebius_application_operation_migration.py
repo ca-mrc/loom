@@ -4,7 +4,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import insert, inspect, select, text
+from sqlalchemy import insert, inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from tests.integration.test_nebius_application_registry import (
@@ -25,7 +25,7 @@ def test_empty_operation_downgrade_preserves_existing_application_records(applic
     with application_database.connect() as connection:
         assert connection.execute(text("SELECT * FROM nebius_applications")).mappings().all() == before
         assert connection.execute(text("SELECT * FROM nebius_deployment_name_claims ORDER BY kind")).mappings().all() == claims
-    migrate(application_database, "upgrade", "0161")
+    migrate(application_database, "upgrade", "head")
     from loom.db.nebius_application_operation_schema import (
         NebiusApplicationOperation,
         NebiusApplicationReservation,
@@ -55,12 +55,13 @@ def test_operation_downgrade_refuses_to_erase_history(application_database, hist
             costs = dict(cpu_millis=100, memory_mib=128, storage_mib=0, ephemeral_storage_mib=512)
             connection.execute(insert(NebiusPlatformBudget).values(cluster_id=row["cluster_id"], **costs))
             connection.execute(insert(model).values(application_id=row["application_id"], cluster_id=row["cluster_id"], **costs))
-        before = connection.execute(select(model)).mappings().all()
+        snapshot = text("SELECT * FROM " + model.__tablename__)
+        before = connection.execute(snapshot).mappings().all()
     with pytest.raises(DBAPIError, match="cannot remove application operation or reservation history"):
         migrate(application_database, "downgrade", "0160")
     with application_database.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0161"
-        assert connection.execute(select(model)).mappings().all() == before
+        assert connection.execute(snapshot).mappings().all() == before
 
 
 @pytest.mark.parametrize("change", [

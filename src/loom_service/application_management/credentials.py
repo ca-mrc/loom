@@ -7,6 +7,7 @@ release capacity or mark an application ready.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import secrets
 from dataclasses import dataclass
@@ -29,7 +30,15 @@ from loom_service.application_management.material import (
     ApplicationMaterial,
     ApplicationMaterialJournal,
 )
+from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+from loom_service.application_management.proofs import (
+    ApplicationCloudRetirement,
+    ApplicationDatabaseRetirement,
+    ApplicationKeyRetirement,
+    ApplicationRetirementIdentity,
+)
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from loom_service.environment_management.registry import ManagementError
 
 
 @dataclass(frozen=True, repr=False)
@@ -114,7 +123,7 @@ class ApplicationCredentialProvider:
         except (ValueError, KeyError, ArgumentError):
             raise ProviderBlockedError("application_credential_material_conflict") from None
         await self.registry.frozen_plan(lease)
-        role = await self.database.grant(lease, password)
+        role = await self.database.grant(lease, password, schema_revision=plan["release"]["schema_revision"])
         if role != f"lap_{row.incarnation.hex}_g{row.access_generation}":
             raise ProviderBlockedError("application_database_result_invalid")
         await self.cloud.create(lease, "data", binding)
@@ -137,16 +146,88 @@ class ApplicationCredentialProvider:
                 "data": {key: base64.b64encode(value.encode()).decode() for key, value in material[name].items()},
             })
 
-    async def retire_database(self, lease: ApplicationLease) -> None:
+    async def retire_database(self, lease: ApplicationLease) -> ApplicationDatabaseRetirement:
         plan = await self.registry.frozen_plan(lease)
         # Retirement needs exact DB identity, not material suitable for a NEW
         # delivery. An expired CA/keyring must not keep old SQL access alive.
         row = self._registration(plan)
         through = lease.access_generation - (1 if row.desired_state == "active" else 0)
-        if through == 0:
-            return
-        await self.database.revoke(lease, through)
+        if through:
+            await self.database.revoke(lease, through)
+            await self.registry.frozen_plan(lease)
+            if not await self.database.drain(lease, through):
+                raise ProviderWaitingError("application_database_retirement_pending")
         await self.registry.frozen_plan(lease)
-        if not await self.database.drain(lease, through):
-            raise ProviderWaitingError("application_database_retirement_pending")
+        return ApplicationDatabaseRetirement(
+            identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id), retired_through=through)
+
+    async def retire_cloud(self, lease: ApplicationLease, verifier: ApplicationObjectAccessVerifier) -> ApplicationCloudRetirement:
+        """Retire prior-generation IAM and prove rejection of delivered keys.
+
+        The lifecycle caller must stop old processes separately. Shared groups,
+        buckets, policies and other applications' credentials are never targets.
+        """
+        current_plan = await self.registry.frozen_plan(lease)
+        row = self._registration(current_plan)
+        through = lease.access_generation - (1 if row.desired_state == "active" else 0)
+        plans: dict[UUID, dict[str, Any]] = {lease.operation_id: current_plan}
+        for effect in await self.cloud.registry.cloud_history(lease):
+            if effect.operation_id not in plans:
+                plans[effect.operation_id] = await self.registry.frozen_plan(lease, operation_id=effect.operation_id)
+            source = self._registration(plans[effect.operation_id])
+            if source.access_generation <= through and effect.action == "create" and effect.phase == "dispatched":
+                try:
+                    await self.cloud.reconcile(lease, effect.operation_id, effect.key)
+                except ProviderBlockedError as exc:
+                    if exc.code != "application_cloud_recorded_resource_missing":
+                        raise
+                    # A peer can observe and retire this CREATE after our first
+                    # snapshot. Only its exact dispatched deletion explains the
+                    # disappearance; unrelated/missing evidence remains blocked.
+                    latest = await self.cloud.registry.cloud_history(lease)
+                    recorded = next((item for item in latest if item.operation_id == effect.operation_id
+                        and item.key == effect.key and item.phase == "observed"), None)
+                    retired = next((item for item in latest if recorded is not None
+                        and item.key == f"retire:{effect.operation_id.hex}:{effect.key}"
+                        and item.action == "delete" and item.phase in {"dispatched", "observed"}
+                        and item.resource_id == recorded.observed_resource_id
+                        and item.expected == recorded.expected), None)
+                    if retired is None:
+                        raise
+                    await self.cloud.reconcile(lease, retired.operation_id, retired.key)
+        history = await self.cloud.registry.cloud_history(lease)
+        targets = [effect for effect in history if effect.action == "create" and effect.phase == "observed"
+                   and self._registration(plans[effect.operation_id]).access_generation <= through]
+        proofs: list[tuple[ApplicationKeyRetirement, dict[str, Any], dict[str, str]]] = []
+        for effect in targets:
+            if effect.kind != "access_key":
+                continue
+            plan = plans[effect.operation_id]
+            try:
+                material = await self.registry.load_material(lease, operation_id=effect.operation_id)
+            except ManagementError as exc:
+                # Group grants require committed material. A key interrupted
+                # before that commit was permissionless and never deliverable.
+                # Corruption, or material missing after any membership intent,
+                # remains an error and cannot silently imply revoked access.
+                if exc.code != "application_material_missing" or any(
+                    item.operation_id == effect.operation_id and item.kind == "membership" for item in history
+                ):
+                    raise
+            else:
+                name = application_credential_names(self._registration(plan))["storage"]
+                storage = material[name]
+                proof = ApplicationKeyRetirement(operation_id=effect.operation_id, key=effect.key,
+                    access_key_sha256=hashlib.sha256(storage["access-key"].encode()).hexdigest())
+                proofs.append((proof, plan, storage))
+        # Journal history follows generation/sequence, so reversing it removes
+        # memberships before keys before their service account. Existing exact
+        # deletion intent is reused even across suspend->destroy transitions.
+        for effect in reversed(targets):
+            await self.cloud.delete(lease, effect.operation_id, effect.key)
+        for _, plan, storage in proofs:
+            await self.registry.frozen_plan(lease)
+            await verifier.verify_retired(plan, storage)
         await self.registry.frozen_plan(lease)
+        return ApplicationCloudRetirement(identity=ApplicationRetirementIdentity.for_lease(lease, row.data_environment_id),
+            keys=tuple(proof for proof, _, _ in proofs))

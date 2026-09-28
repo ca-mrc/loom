@@ -9,10 +9,12 @@ from typing import Any
 from uuid import uuid4
 
 from alembic import context
+from alembic.runtime.migration import MigrationContext
 from sqlalchemy import Connection, engine_from_config, pool, text
 
 from loom.db import schema  # noqa: F401  (registers models with Base.metadata)
 from loom.db.base import Base
+from loom.nebius_application_schema import guard_shared_application_schema
 
 
 def _assume_application_owner(connection: Connection, owner_role: str) -> None:
@@ -160,7 +162,23 @@ if hasattr(context, "config"):
                 if owner_role is not None:
                     _assume_application_owner(connection, owner_role)
                 context.configure(connection=connection, target_metadata=target_metadata)
+                options = context.get_context().opts
+                plan_migrations = options["fn"]
+
+                def guarded_steps(revisions: tuple[str, ...], migration_context: MigrationContext) -> list[Any]:
+                    # Inspect every actual step, not the destination argument:
+                    # Alembic's revision-argument helper truncates stamp tuples,
+                    # and relative/no-op targets cannot be compared as strings.
+                    steps = list(plan_migrations(revisions, migration_context))
+                    if steps:
+                        guard_shared_application_schema(connection, changing_schema=True)
+                    return steps
+
+                context.configure(connection=connection, target_metadata=target_metadata, fn=guarded_steps)
                 with context.begin_transaction():
+                    # Alembic purges the version table before invoking fn, so
+                    # that path requires quiescence before run_migrations too.
+                    guard_shared_application_schema(connection, changing_schema=bool(options.get("purge")))
                     _assert_compatible_migration_lineage(connection)
                     context.run_migrations()
         finally:

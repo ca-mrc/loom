@@ -23,14 +23,30 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 FENCE_PATH = "/api/v1/namespaces/loom-dev-alice/resourcequotas/loom-application-retired"
 
 
-async def runtime_inputs(applications, platform_inputs):
+async def runtime_inputs(applications, platform_inputs, *, fixture_image=None):
     registry, _, (alice, _), _, _, _ = applications
     row, release, shared, foundation = inputs(platform_inputs)
+    if fixture_image is not None:
+        release = release.model_copy(update={"service_image_ref": fixture_image, "web_image_ref": fixture_image})
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id})
     authority = ApplicationNamespaceAuthorityV1(installation_id=uuid4(), namespace="loom-nebius-management",
         cluster_id=shared.cluster_id, data_environment_id=shared.data_environment_id,
         shared_namespace=shared.platform_namespace)
     rendered = render_application(row, release, shared, foundation, authority=authority)
+    if fixture_image is not None:
+        # Freeze harmless runnable templates for disposable controller tests;
+        # never alter an already-journaled manifest or any production renderer.
+        for docs in rendered.files.values():
+            for doc in docs:
+                if doc["kind"] == "Deployment":
+                    pod = doc["spec"]["template"]["spec"]
+                    pod.pop("nodeSelector")
+                    pod.pop("volumes", None)
+                    pod["terminationGracePeriodSeconds"] = 1
+                    container = pod["containers"][0]
+                    container.pop("volumeMounts", None)
+                    container.pop("readinessProbe")
+                    container.update(env=[], command=["/fixture", "idle"])
     operation = await registry.create(principal=alice, idempotency_key="create",
         prepared=rendered, release=release, shared=shared)
     lease = await registry.claim(operation.operation_id)
