@@ -24,7 +24,7 @@ def _plan(memory=4096):
     profile = profile.model_copy(update={
         "controller_resources": ControllerComputeResourcesV1(cpu_millis=1000, memory_mib=1024),
     })
-    return task, compile_service_execution_plan(
+    return task, trial, compile_service_execution_plan(
         task=task, trial=trial, profile=profile, task_revision_sha256=_REVISION,
         source_provenance=_provenance(),
     )
@@ -37,26 +37,27 @@ def _plan(memory=4096):
     (16_000, 240 * 1024, 12 * 1024, 12 * 1024),
 ])
 def test_node_share_preserves_minima_and_reserves_every_resident_role(node_cpu, node_memory, declared, expected):
-    task, plan = _plan(declared)
+    task, trial, plan = _plan(declared)
     frozen = deepcopy(plan.canonical_payload())
     resolved = allocate_node_resources(plan, target_id="pool-a", usable_node=ContainerResourcesV1(
         cpu_millis=node_cpu, memory_mib=node_memory, ephemeral_storage_mib=512 * 1024,
     ))
     assert resolved.task_resources.memory_mib == expected
     assert resolved.container_request("task-sandbox").memory_mib == expected
-    assert resolved.container_request("verifier-sandbox").memory_mib == expected
-    assert runtime_pod_resources(resolved).memory_mib == 1024 + 2 * expected
-    validate_runtime_plan_requirements(resolved, workload_requirements_from_task(task))
+    assert "verifier-sandbox" not in {item.role_name for item in resolved.sidecars}
+    assert resolved.resource_requests.verifier_sandbox is None
+    assert runtime_pod_resources(resolved).memory_mib == 1024 + expected
+    validate_runtime_plan_requirements(resolved, workload_requirements_from_task(task, trial))
     assert plan.canonical_payload() == frozen
     assert ExecutionRuntimePlanV1.model_validate(resolved.canonical_payload()) == resolved
-    assert resource_allocation_summary(resolved)["pod_requests"]["memory_mib"] == 1024 + 2 * expected
+    assert resource_allocation_summary(resolved)["pod_requests"]["memory_mib"] == 1024 + expected
 
 
 def test_large_task_cannot_be_shrunk_to_fit_and_memory_cannot_be_underreserved():
-    _, plan = _plan(12 * 1024)
+    _, _, plan = _plan(12 * 1024)
     with pytest.raises(ValueError, match="exceeds_node_allocatable"):
         allocate_node_resources(plan, target_id="small", usable_node=ContainerResourcesV1(
-            cpu_millis=16_000, memory_mib=24 * 1024, ephemeral_storage_mib=512 * 1024,
+            cpu_millis=16_000, memory_mib=12 * 1024, ephemeral_storage_mib=512 * 1024,
         ))
     resolved = allocate_node_resources(plan, target_id="large", usable_node=ContainerResourcesV1(
         cpu_millis=16_000, memory_mib=240 * 1024, ephemeral_storage_mib=512 * 1024,
@@ -82,7 +83,7 @@ def test_mixed_workloads_consume_actual_allocations_in_existing_placement():
     )
     demands = []
     for i in range(30):
-        _, plan = _plan((4 if i % 2 else 12) * 1024)
+        _, _, plan = _plan((4 if i % 2 else 12) * 1024)
         allocated = allocate_node_resources(plan, target_id="pool-a", usable_node=usable)
         total = runtime_pod_resources(allocated)
         demands.append((str(i), ResourceTotals(cpu_millis=total.cpu_millis,
@@ -98,20 +99,20 @@ def test_renderer_uses_the_frozen_allocation_for_every_container():
     from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
     from tests.unit.test_execution_actuator import _lease
 
-    task, plan = _plan()
+    task, trial, plan = _plan()
     lease = _lease()
     resolved = allocate_node_resources(plan, target_id=lease.target_id, usable_node=ContainerResourcesV1(
         cpu_millis=16_000, memory_mib=240 * 1024, ephemeral_storage_mib=512 * 1024,
     ))
     lease.runtime_contract_json = resolved.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
+    lease.workload_requirements_json = workload_requirements_from_task(task, trial).model_dump(mode="json")
     manifest = render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,
     ))
     pod = manifest["spec"]["template"]["spec"]
     containers = {c["name"]: c for c in pod["containers"] + pod["initContainers"]}
-    for role in ("task-sandbox", "verifier-sandbox"):
+    for role in ("task-sandbox",):
         assert containers[role]["resources"]["requests"]["memory"] == "7168Mi"
         assert containers[role]["resources"]["limits"]["memory"] == "7168Mi"
     assert containers["execution"]["resources"]["requests"]["memory"] == "1024Mi"

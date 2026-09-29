@@ -72,6 +72,20 @@
       "title": "NetworkAccess",
       "type": "string"
     },
+    "PublicWeb": {
+      "additionalProperties": false,
+      "description": "Public HTTP and HTTPS through the gateway dialer.\n\nThis is not Docker ``Public``. The execution pod still has no route to\nthe public internet; the gateway dials port 80 or 443 after the public\naddress checks.",
+      "properties": {
+        "kind": {
+          "const": "public-web",
+          "default": "public-web",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "PublicWeb",
+      "type": "object"
+    },
     "TaskExecutionRequirementsV1": {
       "additionalProperties": false,
       "description": "Bounded capability and prerequisite declarations retained at admission.",
@@ -325,13 +339,28 @@
     "task_egress": {
       "anyOf": [
         {
-          "$ref": "#/$defs/WebAllowlist"
+          "discriminator": {
+            "mapping": {
+              "public-web": "#/$defs/PublicWeb",
+              "web-allowlist": "#/$defs/WebAllowlist"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/WebAllowlist"
+            },
+            {
+              "$ref": "#/$defs/PublicWeb"
+            }
+          ]
         },
         {
           "type": "null"
         }
       ],
-      "default": null
+      "default": null,
+      "title": "Task Egress"
     },
     "tmpfs": {
       "title": "Tmpfs",

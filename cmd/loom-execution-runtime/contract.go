@@ -137,7 +137,7 @@ type nodeResourceAllocation struct {
 
 type plan struct {
 	NodeResourceAllocation     *nodeResourceAllocation    `json:"node_resource_allocation,omitempty"`
-	TaskEgress                 *webAllowlist              `json:"task_egress,omitempty"`
+	TaskEgress                 *storedTaskEgress          `json:"task_egress,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
 	TaskRevisionSHA256         string                     `json:"task_revision_sha256"`
@@ -165,6 +165,7 @@ type plan struct {
 	VerifierExecution          string                     `json:"verifier_execution"`
 	Verifier                   *phase                     `json:"verifier"`
 	VerifierAfterAgentTimeout  bool                       `json:"verifier_after_agent_timeout,omitempty"`
+	InPlaceVerifier            bool                       `json:"in_place_verifier,omitempty"`
 	Sidecars                   []sidecar                  `json:"sidecars"`
 	MaxLogBytesPerStream       int64                      `json:"max_log_bytes_per_stream"`
 	MaxArtifactBytes           int64                      `json:"max_artifact_bytes"`
@@ -200,6 +201,35 @@ func decodePlan(payload []byte) (plan, error) {
 	digest := sha256.Sum256(payload)
 	result.RuntimeContractSHA256 = "sha256:" + hex.EncodeToString(digest[:])
 	return result, nil
+}
+
+func (p plan) residentPrivateRoles() map[string]bool {
+	if p.ExecutionRole == "verifier" {
+		return map[string]bool{"verifier-sandbox": true}
+	}
+	if p.InPlaceVerifier || p.VerifierExecution == "separate_execution" {
+		return map[string]bool{"task-sandbox": true}
+	}
+	return map[string]bool{"task-sandbox": true, "verifier-sandbox": true}
+}
+
+func (p plan) privateSandboxesMatch() bool {
+	expected := p.residentPrivateRoles()
+	found := map[string]bool{}
+	for _, item := range p.Sidecars {
+		if item.PrivateSandbox {
+			found[item.RoleName] = true
+		}
+	}
+	if len(found) != len(expected) {
+		return false
+	}
+	for name := range expected {
+		if !found[name] {
+			return false
+		}
+	}
+	return true
 }
 
 func (p plan) validate() error {
@@ -333,12 +363,12 @@ func (p plan) validate() error {
 	}
 	if fixtureCount > 0 && (fixtureCount != 1 || p.TaskImageMaterializationID == nil ||
 		p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" ||
-		!known["task-sandbox"] || !known["verifier-sandbox"] || len(p.Sidecars) != 3 || !p.Sidecars[0].TaskFixture) {
+		!p.privateSandboxesMatch() || len(p.Sidecars) != 1+len(p.residentPrivateRoles()) || !p.Sidecars[0].TaskFixture) {
 		return fmt.Errorf("one prepared fixture requires an isolated attempt controller and both sandboxes")
 	}
 	if p.VerifierAfterAgentTimeout && (p.ExecutionRole != "attempt" ||
 		p.Composition != "init_payload" || p.AgentImageRef == nil ||
-		p.VerifierExecution != "in_attempt" || !known["task-sandbox"] || !known["verifier-sandbox"]) {
+		p.VerifierExecution != "in_attempt" || !p.privateSandboxesMatch()) {
 		return fmt.Errorf("timeout verification requires an isolated attempt controller and in-attempt verifier")
 	}
 	if p.ControllerResources != nil || p.ResourceRequests != nil {
@@ -347,19 +377,15 @@ func (p plan) validate() error {
 				return fmt.Errorf("invalid controller resources: %w", err)
 			}
 		}
-		if p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload" {
+		if p.AgentImageRef == nil || (p.ExecutionRole != "attempt" && p.ExecutionRole != "verifier") || p.Composition != "init_payload" {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
-		sandboxes := map[string]bool{}
 		for _, item := range p.Sidecars {
-			if item.PrivateSandbox {
-				sandboxes[item.RoleName] = true
-				if item.Resources != p.TaskResources {
-					return fmt.Errorf("controller sizing must preserve task and verifier resources")
-				}
+			if item.PrivateSandbox && item.Resources != p.TaskResources {
+				return fmt.Errorf("controller sizing must preserve task and verifier resources")
 			}
 		}
-		if !sandboxes["task-sandbox"] || !sandboxes["verifier-sandbox"] {
+		if !p.privateSandboxesMatch() {
 			return fmt.Errorf("controller resources require an isolated attempt controller")
 		}
 		expectedControllerStorage := p.TaskResources.EphemeralStorageMiB

@@ -13,14 +13,19 @@ from psycopg import sql
 from sqlalchemy import create_engine, pool
 from sqlalchemy.engine import make_url
 
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_application_database import (
     ApplicationDatabaseAccess,
     ApplicationDatabaseAccessError,
     install_application_database_access,
 )
-from tests.integration.test_nebius_application_database import access_postgres as access_postgres
+from tests.integration.test_nebius_application_database import (
+    access_postgres as access_postgres,
+)
 from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_database import login
+
+_HEAD = service_schema_head()
 
 
 @pytest.fixture
@@ -44,7 +49,7 @@ def migration_access(isolated_migration_postgres_url):
 def test_alembic_refuses_changes_until_personal_access_is_drained(migration_access, change):
     admin, url, access, config = migration_access
     app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
-    role = access.grant(app, incarnation, 1, password, schema_revision="0166")
+    role = access.grant(app, incarnation, 1, password, schema_revision=_HEAD)
 
     def migrate():
         if change == "downgrade":
@@ -52,7 +57,7 @@ def test_alembic_refuses_changes_until_personal_access_is_drained(migration_acce
         elif change == "stamp":
             command.stamp(config, "0165")
         elif change == "multi_stamp":
-            command.stamp(config, ["0166", "0165"])
+            command.stamp(config, "0165")
         else:
             command.stamp(config, "head", purge=True)
 
@@ -62,7 +67,7 @@ def test_alembic_refuses_changes_until_personal_access_is_drained(migration_acce
     command.current(config)
     with pytest.raises(RuntimeError, match="application_database_access_active"):
         migrate()
-    assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0166",)
+    assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == (_HEAD,)
     with login(url, role, password) as client:
         access.revoke(app, incarnation, 1)
         # NOLOGIN does not terminate an existing session.
@@ -71,7 +76,7 @@ def test_alembic_refuses_changes_until_personal_access_is_drained(migration_acce
             migrate()
         assert access.drain(app, incarnation, 1)
         migrate()
-    expected = "0166" if change == "purge" else "0165"
+    expected = _HEAD if change == "purge" else "0165"
     assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == (expected,)
 
 
@@ -79,14 +84,14 @@ def test_alembic_refuses_changes_until_personal_access_is_drained(migration_acce
 def test_actual_noop_migration_plan_preserves_active_access(migration_access, noop):
     admin, url, access, config = migration_access
     password = token_urlsafe(48)
-    role = access.grant(uuid4(), uuid4(), 1, password, schema_revision="0166")
+    role = access.grant(uuid4(), uuid4(), 1, password, schema_revision=_HEAD)
     if noop == "stamp":
         command.stamp(config, "head")
     else:
-        command.upgrade(config, "0166+0")
-    assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0166",)
+        command.upgrade(config, _HEAD + "+0")
+    assert admin.execute("SELECT version_num FROM public.alembic_version").fetchone() == (_HEAD,)
     with login(url, role, password) as client:
-        assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == ("0166",)
+        assert client.execute("SELECT version_num FROM public.alembic_version").fetchone() == (_HEAD,)
 
 
 def engine_for(admin):

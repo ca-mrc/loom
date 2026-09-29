@@ -1448,6 +1448,83 @@ def test_batch_create_evaluation_rejects_task_set(
     assert ("POST", "/api/v1/batches") not in paths
 
 
+def test_batch_create_verifier_env_mode_shared_is_sent(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "docker",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--purpose",
+            "evaluation",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--verifier-env-mode",
+            "shared",
+            "--name",
+            "shared-grade",
+        ]
+    )
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["verifier_env_mode"] == "shared"
+    capsys.readouterr()
+
+
+def test_batch_create_rejects_verifier_env_mode_with_skip_verifier(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    rc = main(
+        [
+            "eval",
+            "batch",
+            "create",
+            "--purpose",
+            "trajectory_generation",
+            "--provider",
+            "openai-prod",
+            "--model",
+            "gpt-4o",
+            "--agent",
+            "litellm",
+            "--benchmark",
+            "humaneval",
+            "--skip-verifier",
+            "--verifier-env-mode",
+            "shared",
+            "--name",
+            "n",
+        ]
+    )
+    assert rc == 2
+    assert "verifier-env-mode" in capsys.readouterr().err
+    paths = [(r.method, r.url.path) for r in mock_server.requests]
+    assert ("POST", "/api/v1/batches") not in paths
+
+
 def test_batch_create_evaluation_rejects_skip_verifier(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

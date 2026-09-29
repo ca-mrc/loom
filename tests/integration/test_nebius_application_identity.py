@@ -10,6 +10,7 @@ import pytest
 from psycopg import sql
 from sqlalchemy.engine import make_url
 
+from loom.db.schema_startup import service_schema_head
 from loom.nebius_application_database import (
     ApplicationDatabaseAccess,
     ApplicationDatabaseAccessError,
@@ -27,16 +28,16 @@ def principal(**changes):
     return ApplicationPrincipalV1(**(values | changes))
 
 
-def enroll(access, app, incarnation, owner, *, generation=1, schema="0166"):
+def enroll(access, app, incarnation, owner, *, generation=1, schema=None):
     from loom.nebius_application_identity import ApplicationDatabaseIdentity
 
     return ApplicationDatabaseIdentity(access).enroll(
-        app, incarnation, generation, schema_revision=schema, principal=owner)
+        app, incarnation, generation, schema_revision=schema or service_schema_head(), principal=owner)
 
 
 def granted(access):
     app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
-    role = access.grant(app, incarnation, 1, password, schema_revision="0166")
+    role = access.grant(app, incarnation, 1, password, schema_revision=service_schema_head())
     return app, incarnation, role, password
 
 
@@ -140,7 +141,7 @@ def test_enrollment_requires_exact_live_grant_and_schema(migration_access, inval
     admin, _, access, _ = migration_access
     owner = principal()
     app, incarnation, _, _ = granted(access)
-    generation, schema = 1, "0166"
+    generation, schema = 1, service_schema_head()
     if invalid == "no_grant":
         app, incarnation = uuid4(), uuid4()
     elif invalid == "generation":
@@ -165,7 +166,7 @@ def test_application_owner_mapping_is_immutable_across_generation(migration_acce
     enroll(access, app, incarnation, owner)
     access.revoke(app, incarnation, 1)
     assert access.drain(app, incarnation, 1)
-    access.grant(app, incarnation, 2, token_urlsafe(48), schema_revision="0166")
+    access.grant(app, incarnation, 2, token_urlsafe(48), schema_revision=service_schema_head())
     other = principal(username="Bob", username_normalized="bob", team_name="Other team")
     with pytest.raises(ApplicationDatabaseAccessError, match="principal"):
         enroll(access, app, incarnation, other, generation=2)
@@ -248,10 +249,10 @@ def test_raw_grant_and_enrollment_share_transaction_and_rollback(migration_acces
     app, incarnation, password = uuid4(), uuid4(), token_urlsafe(48)
     with pytest.raises(RuntimeError, match="rollback"):
         with access.connection.transaction():
-            access.connection.execute("SELECT loom_application_access.grant_access_at_schema(%s,%s,%s,1,%s,'0166')",
-                                      (access.data_environment_id, app, incarnation, password))
-            assert access.connection.execute("SELECT loom_application_access.enroll_principal(%s,%s,%s,1,'0166',%s,%s,%s,%s,%s,%s,%s)",
-                                             (access.data_environment_id, app, incarnation, owner.user_id, owner.team_id,
+            access.connection.execute("SELECT loom_application_access.grant_access_at_schema(%s,%s,%s,1,%s,%s)",
+                                      (access.data_environment_id, app, incarnation, password, service_schema_head()))
+            assert access.connection.execute("SELECT loom_application_access.enroll_principal(%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                             (access.data_environment_id, app, incarnation, service_schema_head(), owner.user_id, owner.team_id,
                                               owner.username, owner.username_normalized, owner.display_name, owner.team_name, owner.role)).fetchone() == ("member",)
             raise RuntimeError("rollback")
     assert admin.execute("SELECT count(*) FROM public.users WHERE id=%s", (owner.user_id,)).fetchone() == (0,)

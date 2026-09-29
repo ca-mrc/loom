@@ -185,16 +185,45 @@ func TestWebEgressContractRejectsAmbiguousHostAndLegacyOmission(t *testing.T) {
 		t.Fatal("legacy bytes changed")
 	}
 	p.OutputDeclarations = []outputDeclaration{taskEgressOutput}
-	p.TaskEgress = &webAllowlist{Kind: "web-allowlist", Destinations: []webDestination{{Host: "example.org", Protocol: "https"}}}
+	allow := &webAllowlist{Kind: "web-allowlist", Destinations: []webDestination{{Host: "example.org", Protocol: "https"}}}
+	p.TaskEgress = &storedTaskEgress{taskEgressPolicy: allow}
 	raw, _ = json.Marshal(p)
 	if _, err := decodePlan(raw); err != nil {
 		t.Fatal(err)
 	}
 	for _, host := range []string{"localhost", "127.0.0.1", "EXAMPLE.org", "example.org.", "*.example.org", "a.svc.cluster.local"} {
-		p.TaskEgress.Destinations[0].Host = host
-		if p.TaskEgress.validate() == nil {
+		allow.Destinations[0].Host = host
+		if allow.validate() == nil {
 			t.Errorf("accepted %s", host)
 		}
+	}
+}
+
+func TestPublicWebAllowsValidatedHostsAndAllowlistDoesNotWiden(t *testing.T) {
+	open := &publicWeb{Kind: "public-web"}
+	if err := open.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !open.permits(webDestination{Host: "pypi.org", Protocol: "https"}) {
+		t.Fatal("public web rejected a public https host")
+	}
+	allow := &webAllowlist{Kind: "web-allowlist", Destinations: []webDestination{{Host: "registry.npmjs.org", Protocol: "https"}}}
+	if allow.permits(webDestination{Host: "pypi.org", Protocol: "https"}) {
+		t.Fatal("allowlist accepted an undeclared host")
+	}
+	p := testPlan("/workspace", phase{Role: "agent", Argv: []string{"true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 2})
+	p.OutputDeclarations = []outputDeclaration{taskEgressOutput}
+	p.TaskEgress = &storedTaskEgress{taskEgressPolicy: open}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decodePlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.TaskEgress.permits(webDestination{Host: "files.pythonhosted.org", Protocol: "https"}) {
+		t.Fatal("decoded public web lost its open host policy")
 	}
 }
 

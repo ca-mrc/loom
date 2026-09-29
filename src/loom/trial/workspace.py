@@ -17,6 +17,7 @@ the production trial path, using the Driver protocol's single-file
 from __future__ import annotations
 
 import asyncio
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
@@ -214,6 +215,25 @@ def resolve_trial_workspace_staging_policy(
     if isinstance(raw_provenance_policy, dict):
         return WorkspaceStagingPolicy.from_provenance(raw_provenance_policy)
     return None
+
+
+_PLANTED_PRIVATE = ("tests", "verifier", "solution", "upstream-task.toml")
+
+
+async def refuse_planted_private_paths(driver: Driver, workdir: PurePosixPath) -> None:
+    """Fail closed when the agent already created a private-path name.
+
+    Shared grading uploads tests into the live agent sandbox. Deleting an
+    agent-created ``tests`` directory or symlink and writing the real tests
+    on top would hide that the path was planted.
+    """
+    for name in _PLANTED_PRIVATE:
+        path = shlex.quote(str(workdir / name))
+        result = await driver.exec(f"if [ -e {path} ] || [ -L {path} ]; then exit 42; fi")
+        if result.return_code == 42:
+            raise RuntimeError(f"planted private path: {name}")
+        if result.return_code not in {0, 42}:
+            raise RuntimeError("planted private path check failed")
 
 
 async def materialize_workspace(

@@ -763,6 +763,14 @@ def _batch_create(args: argparse.Namespace) -> int:
                     )
                     return 2
                 trial_config["skip_verifier"] = True
+            if getattr(args, "verifier_env_mode", None):
+                if trial_config.get("skip_verifier"):
+                    sys.stderr.write(
+                        "error: --verifier-env-mode cannot be combined with "
+                        "--skip-verifier.\n",
+                    )
+                    return 2
+                trial_config["verifier_env_mode"] = args.verifier_env_mode
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -1629,6 +1637,17 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Skip the verifier phase (trajectory_generation only). "
             "Rejected with --purpose evaluation."
+        ),
+    )
+    p_bc.add_argument(
+        "--verifier-env-mode",
+        dest="verifier_env_mode",
+        choices=("shared", "separate"),
+        default=None,
+        help=(
+            "Grade in the agent sandbox (shared) or the second verifier "
+            "sandbox (separate). Omit to use the task file, which defaults "
+            "to separate. Cannot be combined with --skip-verifier."
         ),
     )
     p_bc.add_argument(

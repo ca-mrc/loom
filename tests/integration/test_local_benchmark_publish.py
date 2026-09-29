@@ -669,10 +669,10 @@ async def test_publish_nebius_terminus_profile_adapts_harbor_pack(
             assert env["cpus"] == 1
             assert env["memory_mb"] == 2048
             assert env["storage_mb"] == 4096
-            assert env["network_policies_supported"] == ["gateway-only"]
-            assert env["baseline_network_policy"] == {"kind": "gateway-only"}
+            assert env["network_policies_supported"] == ["public-web"]
+            assert env["baseline_network_policy"] == {"kind": "public-web"}
             assert task.config["verifier"]["user"] == "root"
-            assert task.config["verifier"]["env_mode"] == "shared"
+            assert task.config["verifier"]["env_mode"] == "separate"
             assert task.config["verifier"]["args"]["script_path"] == "verifier/run.sh"
             assert "service_execution_input" in task.source_provenance
     finally:

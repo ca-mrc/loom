@@ -14,10 +14,10 @@ def allocate_node_resources(
 ) -> ExecutionRuntimePlanV1:
     """Task declarations are minima; memory reservations equal enforced limits.
 
-    Both native sandboxes remain resident throughout execution, even while one
-    is idle. Divide the remaining share between them after reserving controller
-    and other sidecars. Large declarations win over the share; normal placement
-    then reduces concurrency or rejects a task that cannot fit.
+    A deferred verifier is not resident in the agent pod. Divide the remaining
+    share by two anyway, so the task keeps today's per-sandbox share. The
+    verifier pod is a later admission and does not enlarge this one. Large
+    declarations still win over the share.
     """
     if plan.node_resource_allocation is not None:
         if plan.node_resource_allocation.target_id != target_id:
@@ -29,7 +29,11 @@ def allocate_node_resources(
     overhead = [sidecar.resources for sidecar in plan.sidecars if not sidecar.private_sandbox]
     if private:
         overhead.append(plan.execution_resources)
-    roles = len(private) or 1
+    # A deferred verifier is not in this pod, and its share is not added to the task.
+    deferred = (
+        plan.execution_role == "attempt" and plan.verifier_execution == "separate_execution"
+    ) or plan.execution_role == "verifier"
+    roles = 2 if deferred else (len(private) or 1)
     values = {}
     for field in fields:
         remaining = getattr(usable_node, field) // slots - sum(getattr(r, field) for r in overhead)
@@ -56,7 +60,17 @@ def allocate_node_resources(
         payload["controller_resources"] = plan.execution_resources.model_dump()
         payload["resource_requests"] = {
             "controller": controller,
-            "task_sandbox": task.model_dump(), "verifier_sandbox": task.model_dump(),
+            **(
+                {"verifier_sandbox": task.model_dump()}
+                if plan.execution_role == "verifier"
+                else {"task_sandbox": task.model_dump()}
+            ),
+            **(
+                {"verifier_sandbox": task.model_dump()}
+                if any(sidecar.role_name == "verifier-sandbox" for sidecar in private)
+                and plan.execution_role != "verifier"
+                else {}
+            ),
         }
     resolved = ExecutionRuntimePlanV1.model_validate(payload)
     total = runtime_pod_resources(resolved)

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
-from loom.models.networking import WebDestination
+from loom.models.networking import WebAllowlist, WebDestination
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.service_execution_output import ServiceExecutionPeerV1
 from loom_llm_gateway.drain import ensure_drain_state
@@ -62,7 +62,8 @@ async def task_egress(websocket: WebSocket) -> None:
         if len(text) > 1024:
             raise EgressDeniedError("task_egress_request_invalid")
         destination = WebDestination.model_validate(json.loads(text))
-        if destination not in plan.task_egress.destinations:
+        if (isinstance(plan.task_egress, WebAllowlist)
+                and destination not in plan.task_egress.destinations):
             raise EgressDeniedError("task_egress_destination_denied")
         phase_deadline = datetime.fromisoformat(websocket.headers.get("x-loom-phase-deadline", ""))
         if phase_deadline.tzinfo is None:

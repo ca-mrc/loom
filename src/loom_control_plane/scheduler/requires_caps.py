@@ -13,6 +13,7 @@ from loom.models.networking import (
     NetworkPolicy,
     NoNetwork,
     Public,
+    PublicWeb,
     WebAllowlist,
 )
 from loom.models.task import TaskConfig
@@ -53,4 +54,6 @@ def _kind(policy: NetworkPolicy) -> NetworkPolicyKind:
         return "allowlist"
     if isinstance(policy, WebAllowlist):
         return "web-allowlist"
+    if isinstance(policy, PublicWeb):
+        return "public-web"
     raise ValueError(f"unknown NetworkPolicy: {policy!r}")

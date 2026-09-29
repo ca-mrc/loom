@@ -12,6 +12,7 @@ import json
 import math
 import os
 import shlex
+import shutil
 import signal
 import sys
 import tomllib
@@ -28,7 +29,7 @@ from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.models.capabilities import Capabilities
-from loom.models.networking import WebAllowlist
+from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
@@ -40,7 +41,11 @@ from loom.service_execution_task import (
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
 from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_paths
-from loom.trial.workspace import WorkspaceStagingPolicy, materialize_workspace
+from loom.trial.workspace import (
+    WorkspaceStagingPolicy,
+    materialize_workspace,
+    refuse_planted_private_paths,
+)
 from loom.trial.workspace_references import (
     export_workspace_references,
     import_workspace_with_references,
@@ -51,6 +56,7 @@ from loom.trial.workspace_snapshot import (
     _strip_private_entries,
     _validate_workspace_archive,
 )
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 _PRIVATE_PATHS = ("tests/**", "verifier/**", "solution/**", "upstream-task.toml", ".loom/**")
 _POLICY = WorkspaceStagingPolicy(_PRIVATE_PATHS, _PRIVATE_PATHS, ())
@@ -102,7 +108,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         from urllib.parse import urlsplit
 
         proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
@@ -117,7 +123,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
             os="linux", cpu_arch="x86_64", gpu_vendor="none",
-            network_policies=frozenset({"gateway-only", "web-allowlist"}), dynamic_network_policy=False,
+            network_policies=frozenset({"gateway-only", "web-allowlist", "public-web"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
         network_policy=task.environment.baseline_network_policy,
@@ -249,7 +255,17 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 )
                                 _write_json_atomic(output / "usage.json", terminus_usage(events, trial))
                         finally:
-                            if lifecycle is not None and handoff_allowed:
+                            in_place = resolve_verifier_env_mode(task, trial) == "shared"
+                            if in_place and driver_started:
+                                # Harbor shared mode does not reap before grading.
+                                if (
+                                    lifecycle is not None
+                                    and handoff_allowed
+                                    and lifecycle.readiness_scope == "startup_and_handoff"
+                                ):
+                                    async with asyncio.timeout(lifecycle.readiness_timeout_sec):
+                                        await driver.run_healthcheck(lifecycle.readiness)
+                            elif lifecycle is not None and handoff_allowed:
                                 if lifecycle.readiness_scope == "startup_and_handoff":
                                     async with asyncio.timeout(lifecycle.readiness_timeout_sec):
                                         await driver.run_healthcheck(lifecycle.readiness)
@@ -287,7 +303,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 await driver.download(task.environment.workdir / path, destination)
                             except (DriverError, FileNotFoundError):
                                 print(f"task artifact unavailable: {path}", file=sys.stderr)
-                        if lifecycle is not None and handoff_allowed:
+                        if lifecycle is not None and handoff_allowed and not in_place:
                             await driver.resume_processes()
                             services_retained = True
                 finally:
@@ -340,13 +356,27 @@ async def run_verifier(workspace: Path, task: TaskConfig, trial: TrialConfig) ->
         loop.remove_signal_handler(signal.SIGTERM)
 
 
+def stage_committed_workspace_archive(workspace: Path) -> Path:
+    """Place the durable agent archive where the verifier sandbox import reads it."""
+    target = workspace / ".loom/workspace.tar"
+    if target.is_file():
+        return target
+    committed = workspace / "artifacts" / "workspace.tar"
+    if not committed.is_file():
+        raise ServiceExecutionTaskError("verifier handoff archive is missing")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(committed, target)
+    return target
+
+
 async def _run_verifier(
     workspace: Path, task: TaskConfig, trial: TrialConfig, *, deadline: AttemptDeadline | None, grace: float,
     begin_cleanup: Callable[[], None],
 ) -> None:
-    separate_private_inputs = _uses_harbor_private_inputs(workspace, task)
+    in_place = resolve_verifier_env_mode(task, trial) == "shared"
+    separate_private_inputs = (not in_place) and _uses_harbor_private_inputs(workspace, task)
     input_root = _PRIVATE_VERIFIER_INPUT_ROOT if separate_private_inputs else task.environment.workdir
-    driver = sandbox_driver("verifier-sandbox", task)
+    driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task)
     driver_started = False
     failure: BaseException | None = None
 
@@ -367,34 +397,40 @@ async def _run_verifier(
     try:
         await driver.start()
         driver_started = True
+        if in_place:
+            try:
+                await refuse_planted_private_paths(driver, task.environment.workdir)
+            except RuntimeError as exc:
+                raise ServiceExecutionTaskError(str(exc)) from exc
         await materialize_workspace(
             driver=driver, task_dir=workspace, dst=input_root,
             policy=_POLICY, phase="verifier",
             excluded_paths=(".loom/**",),
         )
-        archive = workspace / ".loom/workspace.tar"
-        # The archive was validated by the agent phase before durable capture;
-        # it stays in the private controller workspace between phases.
-        if task.environment.workspace_reference_files:
-            await import_workspace_with_references(
-                driver, archive, task.environment.workdir, policy=_POLICY,
-                preserve_acls=task.environment.preserve_acls,
-                reference_files=task.environment.workspace_reference_files,
-                reference_symlinks=task.environment.reference_file_symlinks,
-            )
-        else:
-            await _import_workspace_archive(
-                driver, archive, task.environment.workdir, policy=_POLICY,
-                preserve_acls=task.environment.preserve_acls,
-            )
-        if task.environment.mutable_paths:
-            await import_mutable_paths(
-                driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
-                workdir=task.environment.workdir,
-                preserve_acls=task.environment.preserve_acls,
-                reference_files=task.environment.mutable_path_reference_files,
-                reference_symlinks=task.environment.reference_file_symlinks,
-            )
+        if not in_place:
+            archive = stage_committed_workspace_archive(workspace)
+            # The archive was validated by the agent phase before durable capture;
+            # it stays in the private controller workspace between phases.
+            if task.environment.workspace_reference_files:
+                await import_workspace_with_references(
+                    driver, archive, task.environment.workdir, policy=_POLICY,
+                    preserve_acls=task.environment.preserve_acls,
+                    reference_files=task.environment.workspace_reference_files,
+                    reference_symlinks=task.environment.reference_file_symlinks,
+                )
+            else:
+                await _import_workspace_archive(
+                    driver, archive, task.environment.workdir, policy=_POLICY,
+                    preserve_acls=task.environment.preserve_acls,
+                )
+            if task.environment.mutable_paths:
+                await import_mutable_paths(
+                    driver, task.environment.mutable_paths, workspace / ".loom/mutable-paths",
+                    workdir=task.environment.workdir,
+                    preserve_acls=task.environment.preserve_acls,
+                    reference_files=task.environment.mutable_path_reference_files,
+                    reference_symlinks=task.environment.reference_file_symlinks,
+                )
         remote_output = (
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
             else task.environment.workdir / ".loom/verifier/output.json"
@@ -447,18 +483,21 @@ async def _run_verifier(
                     retain_failure("stop", exc)
 
         async def cleanup_service() -> None:
-            if task.environment.service_lifecycle is not None:
-                service_driver = sandbox_driver("task-sandbox", task)
+            # In-place grading already owns task-sandbox. Scraping it again
+            # from a second driver races the verifier cleanup above.
+            if in_place or task.environment.service_lifecycle is None:
+                return
+            service_driver = sandbox_driver("task-sandbox", task)
+            try:
+                await service_driver.start()
+                await service_driver.stop_processes()
+            except Exception as exc:
+                retain_failure("service_cleanup", exc)
+            finally:
                 try:
-                    await service_driver.start()
-                    await service_driver.stop_processes()
+                    await service_driver.stop()
                 except Exception as exc:
-                    retain_failure("service_cleanup", exc)
-                finally:
-                    try:
-                        await service_driver.stop()
-                    except Exception as exc:
-                        retain_failure("service_disconnect", exc)
+                    retain_failure("service_disconnect", exc)
 
         remaining = min(grace, max(0, deadline.monotonic_deadline + grace - asyncio.get_running_loop().time())) if deadline else grace
         try:

@@ -20,7 +20,7 @@ def _event(ordinal, *, reason="Error", restarts=1, previous=True, started="2026-
 
 
 def _diagnose(events):
-    return execution_failure_diagnosis(events, plan=_plan()[1], job_uid="job", pod_uid="pod")
+    return execution_failure_diagnosis(events, plan=_plan()[2], job_uid="job", pod_uid="pod")
 
 
 def test_late_oom_enriches_original_incarnation_without_trusting_exit_137():
@@ -110,7 +110,7 @@ def test_delayed_original_oom_corrects_replacement_timestamp_in_first_observatio
     events = [unknown, oom, first]
     for event in events:
         event["payload"]["container_diagnostics"][0]["name"] = role
-    plan = _plan()[1]
+    plan = _plan()[2]
     if role == "fixture-server":
         from tests.unit.test_task_fixtures import _plan as fixture_plan
 

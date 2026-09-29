@@ -46,13 +46,14 @@ from loom.execution_runtime_contract import (
     SidecarContainerV1,
     TaskExecutionResourceRequestsV1,
 )
-from loom.models.networking import WebAllowlist
+from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -410,7 +411,7 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist"}:
+    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
         (set(env.environment) - ({"HOME"} if terminus else set()))
@@ -444,8 +445,8 @@ def automatic_service_execution_rejections(
         reasons.append("api_model_required")
     if trial.extra_mcp_servers or trial.extra_skills or trial.multi_model is not None:
         reasons.append("extended_agent_runtime_unsupported")
-    if task.verifier.name != "script" or task.verifier.env_mode != "shared":
-        reasons.append("shared_script_verifier_required")
+    if task.verifier.name != "script" or task.verifier.env_mode not in {"shared", "separate"}:
+        reasons.append("script_verifier_required")
     verifier_path = task.verifier.args.get("script_path")
     if (
         not isinstance(verifier_path, str)
@@ -455,8 +456,8 @@ def automatic_service_execution_rejections(
         or _GLOB_MAGIC.search(verifier_path)
     ):
         reasons.append("exact_verifier_path_required")
-    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared"}:
-        reasons.append("shared_verifier_required")
+    if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared", "separate"}:
+        reasons.append("verifier_mode_required")
     if terminus:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
@@ -535,7 +536,7 @@ def compile_service_execution_plan(
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     terminus = trial.agent_name == "terminus-2"
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
@@ -641,11 +642,10 @@ def compile_service_execution_plan(
             required=True,
         ),
     )
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         output_declarations = (TASK_EGRESS_OUTPUT, *output_declarations)
     return ExecutionRuntimePlanV1(
-        task_egress=(task.environment.baseline_network_policy
-                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
         candidate_sha=profile.candidate_sha,
         task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity,
@@ -767,7 +767,7 @@ def runtime_profile_rejections(
             return ("guest_runtime_volume_too_small",)
         if not profile.supports_task_identity:
             return ("task_identity_runtime_unavailable",)
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist) and not profile.supports_task_web_egress:
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         return ("task_egress_runtime_unavailable",)
     if trial.agent_version is not None and (
         trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
@@ -823,13 +823,18 @@ def _compile_terminus_plan(
     from loom.task_fixtures import fixture_sidecars
 
     sidecars = list(fixture_sidecars(task))
+    shared = resolve_verifier_env_mode(task, trial) == "shared"
     guest_capabilities = _guest_capabilities(task)
     guest_execution = GuestExecutionV1(capabilities=tuple(sorted(guest_capabilities))) if guest_capabilities else None
     runtime_volume_mib = (profile.guest_runtime_volume_mib or profile.runtime_volume_mib
                           if guest_execution is not None else profile.runtime_volume_mib)
     max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
                           if guest_execution is not None else profile.max_artifact_bytes)
-    for role in ("task-sandbox", "verifier-sandbox"):
+    # Guest launch keeps both sandboxes in this pod. Separate grading otherwise
+    # defers the verifier until the agent pod is gone.
+    colocated_verifier = shared or guest_execution is not None
+    sandbox_roles = ("task-sandbox", "verifier-sandbox") if guest_execution is not None else ("task-sandbox",)
+    for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
         # Guest disk preparation (30s) and boot (90s) need room to complete
@@ -874,7 +879,7 @@ def _compile_terminus_plan(
         ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", True),
+        ("verifier/output.json", "verifier/output.json", "verifier", shared),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -899,7 +904,7 @@ def _compile_terminus_plan(
             ))
     if task_image_materialization_id is None:
         published_refs.add(env.docker_image)
-    if isinstance(task.environment.baseline_network_policy, WebAllowlist):
+    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
         outputs.insert(0, TASK_EGRESS_OUTPUT)
     controller_resources = (ContainerResourcesV1(
         cpu_millis=profile.controller_resources.cpu_millis,
@@ -922,8 +927,7 @@ def _compile_terminus_plan(
                 }),
             })
     return ExecutionRuntimePlanV1(
-        task_egress=(task.environment.baseline_network_policy
-                     if isinstance(task.environment.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=(nebius_guest_execution_class(
             supports_task_web_egress=profile.supports_task_web_egress,
@@ -945,12 +949,62 @@ def _compile_terminus_plan(
             total_bytes=binding.total_bytes,
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
         main=phase("agent", "terminus-2", agent_timeout),
-        verifier_execution="in_attempt",
-        verifier_after_agent_timeout=True,
-        verifier=phase("verifier", "verify-sandbox", verifier_timeout),
+        verifier_execution="in_attempt" if colocated_verifier else "separate_execution",
+        verifier_after_agent_timeout=shared and guest_execution is None,
+        in_place_verifier=shared and guest_execution is None,
+        verifier=phase("verifier", "verify-sandbox", verifier_timeout) if colocated_verifier else None,
         max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
         max_artifact_bytes=max_artifact_bytes,
     )
+
+
+def compile_deferred_verifier_plan(
+    agent_plan: ExecutionRuntimePlanV1, task: TaskConfig, *, verifier_timeout_seconds: int,
+) -> ExecutionRuntimePlanV1:
+    """Verifier pod that grades a committed workspace after the agent pod is gone."""
+    task_sandbox = next(
+        sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == "task-sandbox"
+    )
+    user = task.verifier.user if task.verifier.user is not None else task.environment.user
+    identity = resolve_sandbox_identity(
+        user, task.environment.environment.get("HOME"),
+        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
+    )
+    verifier_sandbox = task_sandbox.model_copy(update={
+        "role_name": "verifier-sandbox", "identity": identity,
+    })
+    argv = tuple(
+        "verify-sandbox" if item == "terminus-2" else item for item in agent_plan.main.argv
+    )
+    outputs = []
+    for item in agent_plan.output_declarations:
+        required = item.required
+        if item.relative_path == "verifier/output.json":
+            required = True
+        elif item.relative_path == "artifacts/workspace.tar":
+            required = False
+        outputs.append(item.model_copy(update={"required": required}))
+    return agent_plan.model_copy(update={
+        "execution_role": "verifier",
+        "verifier_execution": "skipped",
+        "verifier": None,
+        "verifier_after_agent_timeout": False,
+        "in_place_verifier": False,
+        "sidecars": (
+            *(
+                sidecar for sidecar in agent_plan.sidecars
+                if not sidecar.private_sandbox and not sidecar.task_fixture
+            ),
+            verifier_sandbox,
+        ),
+        "main": agent_plan.main.model_copy(update={
+            "role": "verifier", "argv": argv, "timeout_seconds": verifier_timeout_seconds,
+        }),
+        "output_declarations": tuple(outputs),
+        "resource_requests": None,
+        "task_image_materialization_id": None,
+        "node_resource_allocation": None,
+    })
 
 
 __all__ = [
@@ -966,6 +1020,7 @@ __all__ = [
     "TaskExecutionResourceRequestsV1",
     "automatic_service_execution_rejections",
     "build_service_execution_input_manifest",
+    "compile_deferred_verifier_plan",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
     "prepare_service_execution_input_manifest",

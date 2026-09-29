@@ -98,8 +98,12 @@ def normalize_terminal_bench_task_toml(
     if "dockerfile" not in environment and "docker_image" not in environment:
         environment["dockerfile"] = DEFAULT_HARBOR_DOCKERFILE
         environment.setdefault("docker_build_context", DEFAULT_HARBOR_DOCKER_BUILD_CONTEXT)
-    if "allow_internet" in environment:
-        _normalize_internet_declaration(environment, environment.pop("allow_internet"))
+    if "allow_internet" in environment or "network_mode" in environment:
+        _normalize_internet_declaration(
+            environment,
+            environment.pop("allow_internet", None),
+            environment.pop("network_mode", None),
+        )
 
     agent = payload.get("agent")
     if not isinstance(agent, dict):
@@ -149,12 +153,31 @@ def _normalize_resource_sizes(environment: dict[str, Any]) -> None:
         del environment[field]
 
 
-def _normalize_internet_declaration(environment: dict[str, Any], value: Any) -> None:
-    if value is False:
+def _normalize_internet_declaration(
+    environment: dict[str, Any], allow_internet: Any, network_mode: Any = None,
+) -> None:
+    """Map Harbor internet declarations onto hosted dialer policy.
+
+    An existing web-allowlist is kept. ``true`` and ``network_mode = public``
+    become public HTTP(S) through the gateway dialer. ``false`` and
+    ``no-network`` stay offline. Omission leaves the policy untouched.
+    """
+    existing = environment.get("baseline_network_policy")
+    if isinstance(existing, dict) and existing.get("kind") == "web-allowlist":
+        if allow_internet not in {None, True, False}:
+            raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+        return
+    if allow_internet not in {None, True, False}:
+        raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+    if network_mode not in {None, "public", "no-network", "allowlist"}:
+        raise ValueError("environment.network_mode is unsupported")
+    if allow_internet is False or network_mode == "no-network":
         environment["network_policies_supported"] = ["no-network"]
         environment["baseline_network_policy"] = {"kind": "no-network"}
-    elif value is not True and value is not None:
-        raise ValueError("Terminal-Bench environment.allow_internet must be boolean")
+        return
+    if allow_internet is True or network_mode == "public":
+        environment["network_policies_supported"] = ["public-web"]
+        environment["baseline_network_policy"] = {"kind": "public-web"}
 
 
 def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any]:
@@ -244,7 +267,9 @@ def _normalize_harbor_native_task_toml(payload: dict[str, Any]) -> dict[str, Any
     if isinstance(source_env, dict):
         environment["environment"] = {str(key): str(value) for key, value in source_env.items()}
     allow_internet = source_environment.get("allow_internet")
-    _normalize_internet_declaration(environment, allow_internet)
+    _normalize_internet_declaration(
+        environment, allow_internet, source_environment.get("network_mode"),
+    )
     gpus = source_environment.get("gpus")
     if isinstance(gpus, int) and gpus > 0 and "gpu_vendor" not in environment:
         environment["gpu_vendor"] = "nvidia"

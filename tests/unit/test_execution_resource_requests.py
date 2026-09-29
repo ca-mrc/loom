@@ -50,11 +50,11 @@ def _compile(task, trial, profile, **kwargs):
     )
 
 
-def _render(plan, task):
+def _render(plan, task, trial=None):
     lease = _lease()
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
+    lease.workload_requirements_json = workload_requirements_from_task(task, trial).model_dump(mode="json")
     lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
     return render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,
@@ -62,9 +62,9 @@ def _render(plan, task):
 
 
 @pytest.mark.parametrize("acquired_at, expected_daily_costs, expected_total", [
-    (datetime(2026, 9, 16, 12, tzinfo=UTC), ((date(2026, 9, 16), 3088),), 3088),
+    (datetime(2026, 9, 16, 12, tzinfo=UTC), ((date(2026, 9, 16), 2398),), 2398),
     (datetime(2026, 9, 16, 23, 35, tzinfo=UTC),
-     ((date(2026, 9, 16), 1287), (date(2026, 9, 17), 1802)), 3089),
+     ((date(2026, 9, 16), 1000), (date(2026, 9, 17), 1399)), 2399),
 ], ids=["same-day", "cross-midnight"])
 def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
     acquired_at, expected_daily_costs, expected_total,
@@ -83,13 +83,12 @@ def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
     assert "task_resource_requests" not in profile.model_dump(mode="json")
     assert "resource_requests" not in baseline.canonical_payload()
     assert _compile(task, trial, configured, task_id="other-task") == baseline
-    pod, baseline_pod = _render(plan, task), _render(baseline, task)
+    pod, baseline_pod = _render(plan, task, trial), _render(baseline, task, trial)
     assert pod["volumes"] == baseline_pod["volumes"]
     assert pod["initContainers"][0]["resources"] == baseline_pod["initContainers"][0]["resources"]
     actual = {row["name"]: row for row in [*pod["containers"], *pod["initContainers"][1:]]}
     original = {row["name"]: row for row in [*baseline_pod["containers"], *baseline_pod["initContainers"][1:]]}
-    for name, key in (("execution", "controller"), ("task-sandbox", "task_sandbox"),
-                      ("verifier-sandbox", "verifier_sandbox")):
+    for name, key in (("execution", "controller"), ("task-sandbox", "task_sandbox")):
         assert actual[name]["resources"]["limits"] == original[name]["resources"]["limits"]
         expected = _requests()[key]
         assert actual[name]["resources"]["requests"] == {
@@ -98,7 +97,7 @@ def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
         }
     totals = runtime_pod_resources(plan)
     assert totals.model_dump() == {
-        "cpu_millis": 400, "memory_mib": 896, "ephemeral_storage_mib": 1792,
+        "cpu_millis": 350, "memory_mib": 768, "ephemeral_storage_mib": 1280,
     }
     # Each UTC day's reservation rounds up independently. Keep the resource
     # pricing assertion deterministic and exercise both sides of midnight.
@@ -107,7 +106,7 @@ def test_scoped_requests_render_and_price_same_pod_without_changing_task_limits(
         memory_gib_microusd_per_hour=1024, ephemeral_storage_gib_microusd_per_hour=1024,
     ), acquired_at=acquired_at, deadline_at=acquired_at + timedelta(hours=1))
     assert (cost.requested_cpu_millis, cost.requested_memory_mib,
-            cost.requested_ephemeral_storage_mib) == (400, 896, 1792)
+            cost.requested_ephemeral_storage_mib) == (350, 768, 1280)
     assert cost.duration_seconds == 3600
     assert cost.daily_costs == expected_daily_costs
     assert cost.estimated_cost_microusd == expected_total
@@ -118,8 +117,7 @@ def test_one_role_override_defaults_other_roles_to_limits():
     plan = _compile(task, trial, _profile(profile, {"controller": _requests()["controller"]}),
                     task_id="selected-task")
     assert plan.container_request("task-sandbox") == plan.task_resources
-    assert plan.container_request("verifier-sandbox") == plan.task_resources
-    assert runtime_pod_resources(plan).cpu_millis == 2100
+    assert runtime_pod_resources(plan).cpu_millis == 1100
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
     expected = {"controller": _requests()["controller"]}
     assert plan.canonical_payload()["resource_requests"] == expected
@@ -183,7 +181,7 @@ def test_prepared_task_preserves_source_revision_and_requests():
     plan = _compile(task, trial, _profile(profile), task_id="selected-task", task_image_grant=grant)
     assert plan.task_revision_sha256 == "sha256:" + grant.task_checksum
     assert plan.resource_requests is not None
-    pod = _render(plan, resolve_prepared_task(task, grant))
+    pod = _render(plan, resolve_prepared_task(task, grant), trial)
     assert pod["initContainers"][1]["resources"]["requests"]["cpu"] == "250m"
     with pytest.raises(ValueError, match="frozen task"):
         _compile(task, trial, _profile(profile), task_id="selected-task",

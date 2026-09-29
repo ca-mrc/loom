@@ -68,6 +68,58 @@ func (p *webAllowlist) permits(d webDestination) bool {
 	}
 	return false
 }
+
+type publicWeb struct {
+	Kind string `json:"kind"`
+}
+
+func (p *publicWeb) validate() error {
+	if p == nil || p.Kind != "public-web" {
+		return fmt.Errorf("invalid task egress policy")
+	}
+	return nil
+}
+
+func (p *publicWeb) permits(webDestination) bool { return true }
+
+type taskEgressPolicy interface {
+	validate() error
+	permits(webDestination) bool
+}
+
+type storedTaskEgress struct {
+	taskEgressPolicy
+}
+
+func (s *storedTaskEgress) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	switch probe.Kind {
+	case "web-allowlist":
+		var policy webAllowlist
+		if err := json.Unmarshal(data, &policy); err != nil {
+			return err
+		}
+		s.taskEgressPolicy = &policy
+	case "public-web":
+		policy := publicWeb{Kind: "public-web"}
+		s.taskEgressPolicy = &policy
+	default:
+		return fmt.Errorf("invalid task egress policy")
+	}
+	return nil
+}
+
+func (s storedTaskEgress) MarshalJSON() ([]byte, error) {
+	if s.taskEgressPolicy == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(s.taskEgressPolicy)
+}
 func requestDestination(r *http.Request) (webDestination, error) {
 	if r.Method == http.MethodConnect {
 		host, port, err := net.SplitHostPort(r.Host)
@@ -161,18 +213,18 @@ func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, diges
 	return websocket.NetConn(ctx, ws, websocket.MessageBinary), nil
 }
 
-func (b *workloadBroker) startTaskEgress(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
+func (b *workloadBroker) startTaskEgress(parent context.Context, policy taskEgressPolicy, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
 	return b.startTaskEgressAt(parent, policy, digest, evidence, "127.0.0.1:0", evidenceLimits...)
 }
 
 // The guest Docker daemon starts before the controller phase. A stable,
 // Pod-local endpoint lets it use the same phase-fenced allowlist without a
 // restart, credentials, or an additional listener outside the Pod.
-func (b *workloadBroker) startGuestTaskEgress(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
+func (b *workloadBroker) startGuestTaskEgress(parent context.Context, policy taskEgressPolicy, digest string, evidence io.Writer, evidenceLimits ...int64) (string, func() error, error) {
 	return b.startTaskEgressAt(parent, policy, digest, evidence, "127.0.0.1:18791", evidenceLimits...)
 }
 
-func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy *webAllowlist, digest string, evidence io.Writer, address string, evidenceLimits ...int64) (string, func() error, error) {
+func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy taskEgressPolicy, digest string, evidence io.Writer, address string, evidenceLimits ...int64) (string, func() error, error) {
 	if err := policy.validate(); err != nil {
 		return "", nil, err
 	}

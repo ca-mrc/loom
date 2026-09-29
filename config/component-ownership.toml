@@ -312,6 +312,7 @@ source_paths = [
   "src/loom/terminal_result_semantics.py",
   "src/loom/trajectory/__init__.py",
   "src/loom/trajectory/storage.py",
+  "src/loom/verifier_runtime.py",
   "src/loom_control_plane/__init__.py",
   "src/loom_control_plane/execution_admission.py",
   "src/loom_control_plane/execution_capacity.py",

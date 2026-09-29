@@ -33,8 +33,10 @@ from loom.execution_requirements import (
     TaskExecutionRequirementsV1,
     execution_requirement_diagnostics,
 )
-from loom.models.networking import WebAllowlist
+from loom.models.networking import TaskHttpEgress, hosted_http_egress
 from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 _IMMUTABLE_OCI_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 
@@ -331,7 +333,7 @@ class WorkloadRequirementsV1(_StrictContract):
     ephemeral_storage_mib: int | None = Field(gt=0)
     isolation_level: IsolationLevel
     network_access: NetworkAccess
-    task_egress: WebAllowlist | None = None
+    task_egress: TaskHttpEgress | None = None
     image_materialization: ImageMaterialization
     image_ref: str | None
     sidecar_count: int = Field(ge=0)
@@ -516,7 +518,16 @@ class ExecutionRoutingDecisionV1(_StrictContract):
         return self
 
 
-def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
+def _task_declares_guest_execution(task: TaskConfig) -> bool:
+    from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
+
+    declared = task.environment.execution_requirements
+    return bool(GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
+
+
+def workload_requirements_from_task(
+    task: TaskConfig, trial: TrialConfig | None = None,
+) -> WorkloadRequirementsV1:
     """Project a version-1 task into the explicit service workload contract.
 
     Existing task fields called ``public`` mean unrestricted network access;
@@ -547,12 +558,27 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
         "gateway-only": NetworkAccess.GATEWAY_ONLY,
         "allowlist": NetworkAccess.APPROVED_ALLOWLIST,
         "web-allowlist": NetworkAccess.APPROVED_ALLOWLIST,
+        "public-web": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
+    # A later verifier pod exists only for Terminus separate grading. Callers
+    # that have the trial pass it, because that is what the compiler uses.
+    # Task-only callers keep the declared env_mode so stored comparisons that
+    # do not know the trial stay stable.
+    if trial is None:
+        separate = (
+            task.agent.name == "terminus-2"
+            and task.verifier.env_mode == "separate"
+            and not _task_declares_guest_execution(task)
+        )
+    else:
+        separate = (
+            trial.agent_name == "terminus-2"
+            and resolve_verifier_env_mode(task, trial) == "separate"
+            and not _task_declares_guest_execution(task)
+        )
     verifier_topology = (
-        VerifierTopology.SEPARATE_EXECUTION
-        if task.verifier.env_mode == "separate"
-        else VerifierTopology.IN_ATTEMPT
+        VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT
     )
     return WorkloadRequirementsV1(
         operating_system=env.os,
@@ -567,8 +593,7 @@ def workload_requirements_from_task(task: TaskConfig) -> WorkloadRequirementsV1:
             else IsolationLevel.SHARED_KERNEL
         ),
         network_access=network_access,
-        task_egress=(env.baseline_network_policy
-                     if isinstance(env.baseline_network_policy, WebAllowlist) else None),
+        task_egress=hosted_http_egress(env.baseline_network_policy),
         image_materialization=materialization,
         image_ref=image_ref,
         sidecar_count=len(env.sidecars),

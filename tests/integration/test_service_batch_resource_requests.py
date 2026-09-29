@@ -174,20 +174,21 @@ async def test_ordinary_submission_freezes_deployment_requests_through_pod_rende
     with f["sessions"]() as session:
         batch = session.get(Batch, UUID(batch_id))
         frozen = ServiceExecutionRuntimeProfileV1.model_validate(batch.service_execution_runtime_profile)
+        trial = TrialConfig.model_validate(payload["trial_config"])
         for task_id in f["task_ids"]:
             row = session.get(Task, task_id)
             task = TaskConfig.model_validate(row.config)
             plan = compile_service_execution_plan(
-                task=task, trial=TrialConfig.model_validate(payload["trial_config"]),
+                task=task, trial=trial,
                 task_id=task_id, task_revision_sha256="sha256:" + row.checksum,
                 source_provenance=row.source_provenance, profile=frozen,
             )
             totals = runtime_pod_resources(plan)
             assert totals.model_dump() == {
-                "cpu_millis": 1250 if explicit_override and task_id == f["task_ids"][0] else 1000,
-                "memory_mib": 2048, "ephemeral_storage_mib": 500,
+                "cpu_millis": 1000 if explicit_override and task_id == f["task_ids"][0] else 750,
+                "memory_mib": 1536, "ephemeral_storage_mib": 400,
             }
-            pod = _render(plan, task)
+            pod = _render(plan, task, trial)
             assert pod["containers"][0]["resources"]["requests"]["ephemeral-storage"] == "100Mi"
             assert row.config == _automatic_service_execution_task_config(task_id)
 
@@ -249,19 +250,19 @@ async def test_new_catalog_tasks_and_revisions_receive_default_requests_through_
             row = session.get(Task, task_id)
             assert (row.checksum, row.config) == (revision, raw_config)
             task = TaskConfig.model_validate(row.config)
+            trial = TrialConfig.model_validate(trial_config)
             plan = compile_service_execution_plan(
-                task=task, trial=TrialConfig.model_validate(trial_config), profile=frozen,
+                task=task, trial=trial, profile=frozen,
                 task_id=task_id, task_revision_sha256="sha256:" + row.checksum,
                 source_provenance=row.source_provenance,
             )
             assert runtime_pod_resources(plan).model_dump() == {
-                "cpu_millis": 1000, "memory_mib": 2048, "ephemeral_storage_mib": 2048,
+                "cpu_millis": 800, "memory_mib": 1536, "ephemeral_storage_mib": 1536,
             }
-            pod = _render(plan, task)
+            pod = _render(plan, task, trial)
             containers = {row["name"]: row for row in
                           [*pod["containers"], *pod["initContainers"][1:]]}
-            for name, role in (("execution", "controller"), ("task-sandbox", "task_sandbox"),
-                               ("verifier-sandbox", "verifier_sandbox")):
+            for name, role in (("execution", "controller"), ("task-sandbox", "task_sandbox")):
                 requested = _NEBIUS_DEFAULT_REQUESTS[role]
                 assert containers[name]["resources"]["requests"] == {
                     "cpu": f"{requested['cpu_millis']}m",

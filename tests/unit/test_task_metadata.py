@@ -43,7 +43,7 @@ def test_agent_defaults():
 
 def test_verifier_defaults():
     d = VerifierDefaults(name="pytest")
-    assert d.env_mode == "shared"
+    assert d.env_mode == "separate"
     assert d.timeout_sec == 300
 
 

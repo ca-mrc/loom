@@ -61,7 +61,7 @@ def test_ready_task_compiles_and_renders_without_platform_image_publication():
     lease = _lease()
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(resolved).model_dump(mode="json")
+    lease.workload_requirements_json = workload_requirements_from_task(resolved, trial).model_dump(mode="json")
     lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
     rendered = render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,
@@ -70,7 +70,7 @@ def test_ready_task_compiles_and_renders_without_platform_image_publication():
     containers = pod["containers"]
     assert next(item for item in containers if item["name"] == "execution")["image"] == _CONTROLLER
     sandboxes = [item for item in pod["initContainers"] if "sandbox" in item["name"]]
-    assert len(sandboxes) == 2
+    assert len(sandboxes) == 1
     assert all(item["image"] == _PREPARED_IMAGE for item in sandboxes)
 
 

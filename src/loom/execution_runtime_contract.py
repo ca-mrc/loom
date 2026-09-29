@@ -28,7 +28,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
-from loom.models.networking import WebAllowlist
+from loom.models.networking import TaskHttpEgress
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -356,7 +356,7 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
-    task_egress: WebAllowlist | None = None
+    task_egress: TaskHttpEgress | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     node_resource_allocation: NodeResourceAllocationV1 | None = None
@@ -368,6 +368,7 @@ class ExecutionRuntimePlanV1(_Strict):
     verifier_execution: VerifierExecution
     verifier: ProcessPhaseV1 | None = None
     verifier_after_agent_timeout: bool = False
+    in_place_verifier: bool = False
     sidecars: tuple[SidecarContainerV1, ...] = Field(default=(), max_length=32)
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
@@ -391,6 +392,17 @@ class ExecutionRuntimePlanV1(_Strict):
             cls._images_are_immutable(value)
         return value
 
+    def resident_private_roles(self) -> set[str]:
+        """Sandboxes that exist in this pod, not ones admitted later."""
+        if self.execution_role == "verifier":
+            return {"verifier-sandbox"}
+        if (
+            self.in_place_verifier
+            or self.verifier_execution == VerifierExecution.SEPARATE_EXECUTION
+        ):
+            return {"task-sandbox"}
+        return {"task-sandbox", "verifier-sandbox"}
+
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
         guests = [sidecar for sidecar in self.sidecars if sidecar.guest_execution is not None]
@@ -413,13 +425,14 @@ class ExecutionRuntimePlanV1(_Strict):
         ):
             raise ValueError("guest execution requires matching private task/verifier plans and payload storage")
         fixtures = [sidecar for sidecar in self.sidecars if sidecar.task_fixture]
+        private = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+        expected = self.resident_private_roles()
         if fixtures and (
             len(fixtures) != 1 or self.task_image_materialization_id is None
             or self.agent_image_ref is None or self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
-            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
-            != {"task-sandbox", "verifier-sandbox"}
-            or len(self.sidecars) != 3 or not self.sidecars[0].task_fixture
+            or private != expected
+            or len(self.sidecars) != 1 + len(expected) or not self.sidecars[0].task_fixture
         ):
             raise ValueError("one prepared fixture requires an isolated attempt controller and both sandboxes")
         if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
@@ -472,23 +485,23 @@ class ExecutionRuntimePlanV1(_Strict):
             if any(item not in known for item in sidecar.depends_on):
                 raise ValueError("sidecar dependencies must reference earlier sidecars")
             known.add(sidecar.role_name)
+        private_roles = {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
+        expected_roles = self.resident_private_roles()
         if self.verifier_after_agent_timeout and (
             self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
             or self.agent_image_ref is None
             or self.verifier_execution != "in_attempt"
-            or {sidecar.role_name for sidecar in self.sidecars if sidecar.private_sandbox}
-            != {"task-sandbox", "verifier-sandbox"}
+            or private_roles != expected_roles
         ):
             raise ValueError("timeout verification requires an isolated attempt controller and in-attempt verifier")
         if self.controller_resources is not None:
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
                 self.agent_image_ref is None
-                or self.execution_role != "attempt"
+                or self.execution_role not in {"attempt", "verifier"}
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes}
-                != {"task-sandbox", "verifier-sandbox"}
+                or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
             ):
                 raise ValueError("controller resources require an isolated attempt controller")
             if any(sidecar.resources != self.task_resources for sidecar in sandboxes):
@@ -508,10 +521,9 @@ class ExecutionRuntimePlanV1(_Strict):
             sandboxes = [sidecar for sidecar in self.sidecars if sidecar.private_sandbox]
             if (
                 self.agent_image_ref is None
-                or self.execution_role != "attempt"
+                or self.execution_role not in {"attempt", "verifier"}
                 or self.composition != RuntimeComposition.INIT_PAYLOAD
-                or {sidecar.role_name for sidecar in sandboxes}
-                != {"task-sandbox", "verifier-sandbox"}
+                or {sidecar.role_name for sidecar in sandboxes} != self.resident_private_roles()
                 or any(sidecar.resources != self.task_resources for sidecar in sandboxes)
             ):
                 raise ValueError("resource requests require an isolated attempt controller")
@@ -545,6 +557,8 @@ class ExecutionRuntimePlanV1(_Strict):
         # Keep existing published plans byte-compatible when new fields are unused.
         if not self.verifier_after_agent_timeout:
             payload.pop("verifier_after_agent_timeout")
+        if not self.in_place_verifier:
+            payload.pop("in_place_verifier")
         if self.controller_resources is None:
             payload.pop("controller_resources")
         if self.resource_requests is None:

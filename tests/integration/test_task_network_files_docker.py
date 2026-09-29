@@ -45,7 +45,7 @@ def test_root_network_file_writes_cannot_change_controller_or_verifier(tmp_path)
     lease.execution_class_id = plan.execution_class_id
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
+    lease.workload_requirements_json = workload_requirements_from_task(task, trial).model_dump(mode="json")
     lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
     spec = render_execution_job(lease, target=ExecutionTargetRuntime(
         target_id=lease.target_id, namespace=lease.namespace_name,
@@ -94,7 +94,7 @@ def test_root_network_file_writes_cannot_change_controller_or_verifier(tmp_path)
                 cap_add=security["capabilities"].get("add", []), **common,
             )
             containers.append(container)
-        agent, verifier = containers[1:]
+        agent = containers[1]
 
         def read(container, path):
             response = container.exec_run(["cat", path])
@@ -103,7 +103,7 @@ def test_root_network_file_writes_cannot_change_controller_or_verifier(tmp_path)
 
         for path in ("/etc/hosts", "/etc/resolv.conf"):
             baseline = [read(container, path) for container in containers]
-            for writer, marker in ((agent, b"task-only"), (verifier, b"verifier-only")):
+            for writer, marker in ((agent, b"task-only"),):
                 result = writer.exec_run(["python", "-c",
                     "import pathlib,sys; pathlib.Path(sys.argv[1]).write_bytes(sys.argv[2].encode())",
                     path, marker.decode()])

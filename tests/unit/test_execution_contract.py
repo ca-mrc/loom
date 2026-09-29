@@ -304,7 +304,7 @@ def test_task_projection_preserves_mutable_build_and_network_incompatibilities()
     requirements = workload_requirements_from_task(task)
     assert requirements.image_materialization == ImageMaterialization.TASK_DOCKERFILE
     assert requirements.network_access == NetworkAccess.UNRESTRICTED_PUBLIC
-    assert requirements.verifier_topology == VerifierTopology.SEPARATE_EXECUTION
+    assert requirements.verifier_topology == VerifierTopology.IN_ATTEMPT
     assert requirements.sidecar_count == 1
     decision = evaluate_execution_admission(
         requirements,

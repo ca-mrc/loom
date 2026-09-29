@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from loom.db.schema_startup import service_schema_head
 from tests.integration.test_nebius_application_effect_migration import operation
 from tests.integration.test_nebius_application_registry import (
     application_database as application_database,
@@ -47,5 +48,5 @@ def test_completion_receipt_blocks_lossy_downgrade(application_database):
     with pytest.raises(DBAPIError, match='cannot remove application completion evidence'):
         migrate(application_database, 'downgrade', '0165')
     with application_database.connect() as connection:
-        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == '0166'
+        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == service_schema_head()
         assert connection.execute(text('SELECT * FROM nebius_application_operations')).mappings().all() == before

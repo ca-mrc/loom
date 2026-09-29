@@ -57,6 +57,9 @@ def test_operation_downgrade_refuses_to_erase_history(application_database, hist
             connection.execute(insert(model).values(application_id=row["application_id"], cluster_id=row["cluster_id"], **costs))
         snapshot = text("SELECT * FROM " + model.__tablename__)
         before = connection.execute(snapshot).mappings().all()
+    # Later revisions sit above the operations journal. Step to 0161 first so a
+    # refused downgrade stays on the journal revision instead of rolling back to head.
+    migrate(application_database, "downgrade", "0161")
     with pytest.raises(DBAPIError, match="cannot remove application operation or reservation history"):
         migrate(application_database, "downgrade", "0160")
     with application_database.connect() as connection:

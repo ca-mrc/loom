@@ -42,8 +42,9 @@ from loom.trial.artifacts import ArtifactCollector
 from loom.trial.attempt_supervisor import supervise_agent_attempt
 from loom.trial.phase_network import phase_network
 from loom.trial.stale_running import effective_agent_timeout_sec
-from loom.trial.workspace import materialize_workspace
+from loom.trial.workspace import materialize_workspace, refuse_planted_private_paths
 from loom.trial.workspace_snapshot import handoff_workspace_snapshot
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 if TYPE_CHECKING:
     from loom.trial.trial import TrialContext
@@ -200,7 +201,17 @@ async def _run_step_impl(
         )
         verifier_started = time.monotonic()
         try:
-            if ctx.workspace_staging_policy is not None:
+            in_place = resolve_verifier_env_mode(ctx.task_config, ctx.trial_config) == "shared"
+            if ctx.workspace_staging_policy is not None and in_place:
+                await refuse_planted_private_paths(ctx.driver, workdir)
+                await materialize_workspace(
+                    driver=ctx.driver,
+                    task_dir=ctx.task_dir,
+                    dst=workdir,
+                    policy=ctx.workspace_staging_policy,
+                    phase="verifier",
+                )
+            elif ctx.workspace_staging_policy is not None:
                 factory = ctx.verifier_driver_factory
                 if factory is None:
                     raise RuntimeError(

@@ -188,9 +188,11 @@ def adapt_bundle_for_nebius_terminus(
         environment.get("network_policies_supported") != ["gateway-only"]
         or environment.get("baseline_network_policy") != {"kind": "gateway-only"}
     )
-    if (environment.get("baseline_network_policy") or {}).get("kind") == "web-allowlist":
-        # Admission validates the exact destinations; preparation must retain
-        # the declared network requirement for the runtime profile to enforce.
+    if (environment.get("baseline_network_policy") or {}).get("kind") in {
+        "web-allowlist", "public-web",
+    }:
+        # Admission validates the declared dialer policy. Do not replace an
+        # exact host list or explicit public HTTP(S) with gateway-only.
         network_forced = False
     else:
         environment["network_policies_supported"] = ["gateway-only"]
@@ -208,7 +210,10 @@ def adapt_bundle_for_nebius_terminus(
 
     verifier_identity_stripped = False
     verifier["name"] = verifier.get("name") or "script"
-    verifier["env_mode"] = "shared"
+    # Preserve an explicit Harbor environment_mode. Omission stays separate,
+    # which is the snapshot verifier. Do not rewrite that to shared.
+    if verifier.get("env_mode") not in {"shared", "separate"}:
+        verifier["env_mode"] = "separate"
     verifier_path_forced = verifier_args.get("script_path") != VERIFIER_SCRIPT_PATH
     verifier_args["script_path"] = VERIFIER_SCRIPT_PATH
     verifier["args"] = verifier_args
