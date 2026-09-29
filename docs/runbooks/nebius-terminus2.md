@@ -738,6 +738,16 @@ running; do not insert an agent solution or pre-complete required task work.
 The native PID 1 remains in control, so image ENTRYPOINT/CMD is not automatically
 executed. This explicit declaration records the reviewed initialization.
 
+Readiness defaults to 30 seconds and may explicitly allow up to 1800 seconds
+for slow prerequisites. The initializer still defaults to 60 seconds and is
+capped at 300 seconds. A readiness allowance does not extend the agent phase:
+startup readiness ends at the existing phase deadline or cancellation, and
+handoff readiness remains within the existing finalization deadline and grace.
+Size `readiness.retries` and `interval_sec` for the intended observation window;
+exhausting those retries can end readiness before its timeout.
+Deploy compatible task-config consumers before uploading declarations above
+the previous 300-second readiness maximum.
+
 The controller captures bounded initializer stdout/stderr and exit status in
 `diagnostics/service-startup.json`. Initialization failure occurs before model
 calls. Readiness is checked before the agent for initialized services and again
