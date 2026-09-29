@@ -926,6 +926,19 @@ failed retirement Pods and bounded log tails; raw logs, exception messages and
 credential values are never exported. `retirement_blocked` alone does not identify
 the cause, and inspection never retries or replaces the failed Job.
 
+For `retirement_blocked`, inspection also attempts a fixed registry probe through
+the matching, ready management service Pod. It qualifies the failed Job's immutable
+target configuration and the manager's installation, service account and Pod UID.
+The immutable ConfigMap must strictly predate the original Job; replacement,
+missing, or equal-second creation timestamps make the probe unavailable rather
+than attributing ambiguous settings to that failure.
+PostgreSQL enforces a bounded read-only, repeatable-read transaction; the probe
+performs only fixed SELECTs, never claims an operation or changes reservations.
+`registry_probe` exports named boolean checks against the retirement qualification
+contract, not database rows or credential material. An unavailable probe is not an
+empty or successful registry. Even all-true checks describe a current snapshot,
+not the failed Pod's network/credential behavior or permission to retry cleanup.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

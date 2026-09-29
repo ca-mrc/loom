@@ -122,6 +122,79 @@ def _retirement_diagnostic(raw: str) -> dict[str, str]:
     return {"status": "unavailable"}
 
 
+def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: dict[str, Any], namespace: str) -> dict[str, Any]:
+    """Fixed protected exec reads only the failed Job's bound registry records."""
+    from scripts.ops.nebius_retirement_registry_probe import CHECKS, ERRORS
+
+    from loom_service.environment_management.retirement import RetirementSettings
+
+    try:
+        name = job["metadata"]["name"]
+        installation = job["metadata"]["labels"]["loom.nebius/management-installation"]
+        if str(UUID(installation)) != installation or not UUID(installation).int:
+            raise ValueError
+        cm = kube.get("configmap", name, namespace)
+        # An immutable object can still be deleted/recreated. Require this
+        # instance to predate the original Job, failing closed on equal-second
+        # timestamps where creation lineage cannot be established.
+        config_created = datetime.fromisoformat(cm["metadata"]["creationTimestamp"])
+        job_created = datetime.fromisoformat(job["metadata"]["creationTimestamp"])
+        if (cm.get("immutable") is not True or cm["metadata"]["labels"].get("loom.nebius/retirement") != name
+                or cm["metadata"]["labels"].get("loom.nebius/management-installation") != installation
+                or config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created):
+            raise ValueError
+        settings = RetirementSettings.model_validate_json(cm["data"]["retirement.json"])
+        if (settings.namespace != namespace or not any(volume.get("name") == "retirement"
+                and volume.get("configMap", {}).get("name") == name for volume in job["spec"]["template"]["spec"]["volumes"])):
+            raise ValueError
+        managers = [pod for pod in pods if pod["metadata"].get("namespace") == namespace
+            and pod["metadata"].get("labels", {}).get("loom.nebius/management-installation") == installation
+            and pod["metadata"].get("labels", {}).get("app") == "loom-service"
+            and pod.get("spec", {}).get("serviceAccountName") == "loom-application-provisioner"
+            and not pod["metadata"].get("deletionTimestamp") and pod.get("status", {}).get("phase") == "Running"
+            and any(row.get("name") == "loom-service" and row.get("ready") is True
+                    for row in pod.get("status", {}).get("containerStatuses", []))]
+        if len(managers) != 1:
+            raise ValueError
+        manager = managers[0]
+
+        def same_manager(current: dict[str, Any]) -> bool:
+            return (all(current["metadata"].get(key) == manager["metadata"].get(key)
+                        for key in ("name", "namespace", "uid", "labels", "deletionTimestamp"))
+                    and current.get("spec") == manager["spec"]
+                    and current.get("status", {}).get("phase") == "Running"
+                    and any(row.get("name") == "loom-service" and row.get("ready") is True
+                            for row in current.get("status", {}).get("containerStatuses", [])))
+
+        before = kube.get("pod", manager["metadata"]["name"], namespace)
+        if not same_manager(before):
+            raise ValueError
+        targets = [target.model_dump(mode="json") for target in settings.targets]
+        payload = json.dumps(targets)
+        if len(payload.encode()) > 65536:
+            raise ValueError
+        source = Path(__file__).with_name("nebius_retirement_registry_probe.py").read_text()
+        raw = kube.run("exec", manager["metadata"]["name"], "-n", namespace, "-c", "loom-service", "--",
+                       "python", "-c", source, namespace, payload, timeout=90)
+        if (len(raw.encode()) > 16384
+                or not same_manager(kube.get("pod", manager["metadata"]["name"], namespace))):
+            raise ValueError
+        value = json.loads(raw)
+        if value.get("status") == "unavailable":
+            return {"status": "unavailable", "stage": value["stage"] if value.get("stage") in ("inputs", "database", "registry") else "unknown",
+                "error_type": value["error_type"] if value.get("error_type") in ERRORS else "OtherError"}
+        if value.get("status") != "observed" or value.get("read_only") is not True or len(value["targets"]) != len(targets):
+            raise ValueError
+        rows = []
+        for expected, row in zip(targets, value["targets"], strict=True):
+            if row["operation_id"] != expected["operation_id"] or any(type(row["checks"].get(key)) is not bool for key in CHECKS):
+                raise ValueError
+            rows.append({"operation_id": expected["operation_id"], "checks": {key: row["checks"][key] for key in CHECKS}})
+        return {"status": "observed", "read_only": True, "manager_pod_uid": manager["metadata"]["uid"], "targets": rows}
+    except Exception:
+        return {"status": "unavailable"}
+
+
 def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Read-only failed-Job evidence; never export log text or termination messages."""
     result: list[dict[str, Any]] = []
@@ -165,6 +238,8 @@ def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[d
         result.append({"namespace": namespace, "job": owner["name"], "job_uid": owner["uid"],
                        "pod": metadata["name"], "pod_uid": metadata["uid"], "container": container["name"],
                        "termination": termination, "diagnostic": diagnostic})
+        if diagnostic.get("status") == "retirement_blocked":
+            result[-1]["registry_probe"] = _retirement_registry_probe(kube, pods, job, namespace)
     return result
 
 
