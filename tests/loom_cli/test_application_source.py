@@ -307,3 +307,32 @@ def test_non_utf8_git_filename_fails_without_disclosing_source_content(repo):
     with pytest.raises(ValueError, match="invalid application source worktree"):
         with capture(repo):
             pytest.fail("unsupported name yielded")
+
+
+@pytest.mark.parametrize("missing_tree", [False, True])
+def test_sparse_index_never_lazy_fetches_or_yields_a_partial_snapshot(repo, tmp_path, missing_tree):
+    for directory in ("a", "b"):
+        (repo / directory).mkdir()
+        (repo / directory / "file").write_text(directory)
+    commit(repo)
+    tree = git(repo, "rev-parse", "HEAD:b")
+    git(repo, "sparse-checkout", "init", "--cone", "--sparse-index")
+    git(repo, "sparse-checkout", "set", "a")
+    marker = tmp_path / "remote-helper-ran"
+    helper = repo / ".git/ssh-fixture"
+    helper.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    helper.chmod(0o755)
+    if missing_tree:
+        (repo / ".git/objects" / tree[:2] / tree[2:]).unlink()
+        git(repo, "config", "extensions.partialClone", "origin")
+        git(repo, "config", "remote.origin.promisor", "true")
+        git(repo, "config", "remote.origin.url", "ssh://fixture.invalid/missing")
+        git(repo, "config", "core.sshCommand", str(helper))
+    yielded = False
+    try:
+        with capture(repo):
+            yielded = True
+    except ValueError:
+        pass
+    assert not marker.exists(), "capture must never invoke remote helpers or lazy fetch"
+    assert not yielded, "sparse source is unsupported, not a complete authored snapshot"
