@@ -82,6 +82,16 @@ def _history(request: ManagementRefreshInstallRequest) -> dict[str, str]:
     return result
 
 
+def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]:
+    """Retain the hashed input contract so a completion is a bounded predecessor."""
+    resources = request.resources
+    render = resources.switch.render
+    return {'before': render.before.model_dump(mode='json'), 'after': render.after.model_dump(mode='json'),
+        'active': render.active, 'candidate': render.candidate, 'profile': render.profile,
+        'shared_namespace_uid': resources.shared_namespace_uid, 'manager_revision': resources.manager_revision,
+        'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
+
+
 def _proof(request: ManagementRefreshInstallRequest, phase: str, state: Path, proof: Any) -> None:
     """Connected evidence must still bind this phase's recorded Job and settings."""
     record = json.loads(private_state._private_read(state / phase / 'stage.json', limit=4 * 1024**2))
@@ -132,11 +142,7 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
             history = _history(request)
             identity = {'schema': 'loom.nebius-management-refresh-install.v1', 'state_dir': str(state),
                 'operation_id': str(switch.operation_id), 'binding': asdict(resources.binding),
-                'input_digest': digest({'history': history, 'before': switch.render.before.model_dump(mode='json'),
-                    'after': switch.render.after.model_dump(mode='json'), 'active': switch.render.active,
-                    'candidate': switch.render.candidate, 'profile': switch.render.profile,
-                    'shared_namespace_uid': resources.shared_namespace_uid, 'manager_revision': resources.manager_revision,
-                    'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)})}
+                'input_digest': digest({'history': history, **refresh_contract(request)})}
             marker, journal = anchor / (str(switch.operation_id) + '.json'), state / 'refresh.json'
             if marker.exists() or marker.is_symlink():
                 if json.loads(private_state._private_read(marker)) != identity:
@@ -242,6 +248,7 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
                 receipt = {**identity, 'status': 'management_refreshed', 'revision': rendered.revision,
                     'phases': record['phases'], 'active_uid': _uid(active), 'active': _snapshot(active),
                     'switch_sha256': _hash(state / 'switch/cutover.json'), 'history': history,
+                    'contract': refresh_contract(request),
                     'manager_revision': resources.target_manager_revision, 'shared_revision': shared.shared.schema_revision}
                 path = state / 'completion.json'
                 if path.exists() or path.is_symlink():

@@ -116,6 +116,11 @@ def render_refresh(request: ManagementRefreshRenderRequest) -> RenderedManagemen
         config_name = 'loom-management-applications-' + rendered.revision[7:19]
         config = copy.deepcopy(next(doc for doc in rendered.files['10-config-network.yaml']
             if doc['kind'] == 'ConfigMap' and doc['metadata']['name'] == config_name))
+        # Private journals canonicalize nested mappings. Reconstructing a
+        # completion must not change these opaque ConfigMap JSON bytes merely
+        # because Pydantic retained a different insertion order in a dict field.
+        config['data']['installation.json'] = json.dumps(request.after.installation.model_dump(mode='json'),
+            sort_keys=True, separators=(',', ':'))
         # Normalize only the allowed delta back to the retained runtime. The
         # existing defaulting/security qualifier rejects any other candidate need.
         wanted['metadata'] = copy.deepcopy(metadata)
