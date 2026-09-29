@@ -62,6 +62,38 @@ def current_context() -> str | None:
     return _CONTEXT.get()
 
 
+@dataclass(frozen=True)
+class ManagedApplicationBinding:
+    """Stable application identity; mutable generations belong to login proofs."""
+
+    application_id: str
+    incarnation: str
+    management_origin: str
+    child_origin: str
+
+    def __post_init__(self) -> None:
+        try:
+            for value in (self.application_id, self.incarnation):
+                if not isinstance(value, str) or str(UUID(value)) != value or UUID(value).int == 0:
+                    raise ValueError
+            https_origin(self.management_origin)
+            https_origin(self.child_origin)
+            if self.management_origin == self.child_origin:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError("invalid managed application binding") from None
+
+    @classmethod
+    def from_dict(cls, value: object) -> ManagedApplicationBinding | None:
+        if value is None:
+            return None
+        if (not isinstance(value, dict) or set(value) != {
+            "application_id", "incarnation", "management_origin", "child_origin",
+        } or any(not isinstance(item, str) for item in value.values())):
+            raise ValueError("invalid managed application binding")
+        return cls(**value)
+
+
 @contextmanager
 def selected_context(name: str | None) -> Iterator[None]:
     if name is not None and (not isinstance(name, str) or _NAME.fullmatch(name) is None):

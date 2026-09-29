@@ -28,7 +28,7 @@ from pathlib import Path
 
 import tomli_w
 
-from loom_cli.contexts import ManagedEnvironmentBinding, current_context
+from loom_cli.contexts import ManagedApplicationBinding, ManagedEnvironmentBinding, current_context
 
 CONFIG_FILENAME = "config.toml"
 
@@ -71,6 +71,7 @@ class LoomConfig:
     auth_csrf_token: str | None = None
     local_providers: dict[str, LocalProvider] = field(default_factory=dict)
     managed_environment: ManagedEnvironmentBinding | None = None
+    managed_application: ManagedApplicationBinding | None = None
     # Session rotation saves to the config's source, even after a nested context
     # exits. Not serialized and not part of config value equality.
     _storage_path: Path | None = field(default=None, repr=False, compare=False)
@@ -80,6 +81,8 @@ class LoomConfig:
         self.validate_binding()
         if self.managed_environment is not None:
             out["managed_environment"] = asdict(self.managed_environment)
+        if self.managed_application is not None:
+            out["managed_application"] = asdict(self.managed_application)
         if self.tokens:
             out["tokens"] = dict(self.tokens)
         if self.server_url is not None:
@@ -104,8 +107,11 @@ class LoomConfig:
         return out
 
     def validate_binding(self) -> None:
-        if self.managed_environment is not None and self.server_url != self.managed_environment.child_origin:
-            raise ValueError("server URL conflicts with managed context binding")
+        if self.managed_environment is not None and self.managed_application is not None:
+            raise ValueError("context cannot have both environment and application bindings")
+        for binding in (self.managed_environment, self.managed_application):
+            if binding is not None and self.server_url != binding.child_origin:
+                raise ValueError("server URL conflicts with managed context binding")
 
 
 def load_config() -> LoomConfig:
@@ -173,6 +179,7 @@ def load_config() -> LoomConfig:
         auth_csrf_token=auth_csrf_token,
         local_providers=local_providers,
         managed_environment=ManagedEnvironmentBinding.from_dict(raw.get("managed_environment")),
+        managed_application=ManagedApplicationBinding.from_dict(raw.get("managed_application")),
         _storage_path=path,
     )
     cfg.validate_binding()
@@ -191,8 +198,8 @@ def _check_regular_destination(path: Path) -> None:
 def save_config(cfg: LoomConfig) -> None:
     path = cfg._storage_path or config_path()
     cfg.validate_binding()
-    if cfg.managed_environment is not None and path.parent.name != "contexts":
-        raise ValueError("a managed environment requires a separate named context")
+    if (cfg.managed_environment is not None or cfg.managed_application is not None) and path.parent.name != "contexts":
+        raise ValueError("a managed deployment requires a separate named context")
     if path.parent.is_symlink():
         raise ValueError("CLI config parent must be a regular directory")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,7 +222,8 @@ def save_config(cfg: LoomConfig) -> None:
             _check_regular_destination(path)
             existing = tomllib.loads(path.read_text())
             binding = ManagedEnvironmentBinding.from_dict(existing.get("managed_environment"))
-            if binding != cfg.managed_environment:
+            application = ManagedApplicationBinding.from_dict(existing.get("managed_application"))
+            if (binding, application) != (cfg.managed_environment, cfg.managed_application):
                 raise ValueError("existing context binding cannot be changed or removed") from None
             os.replace(temporary, path)
         cfg._storage_path = path

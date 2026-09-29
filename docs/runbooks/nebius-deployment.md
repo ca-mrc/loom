@@ -46,6 +46,61 @@ mutation requires explicit `--apply`. This is the supported hosted deployment en
 limited to disposable development targets; the shared-cluster rollout broker
 and its CLI command are retired.
 
+### Personal application owner workflow
+
+Use the verified management HTTPS origin and an ordinary owner **user session**
+in a named CLI context. Application login requires a user session, not a delegable
+API token. The management and application logins stay separate:
+
+```bash
+loom --context management-alice auth login --server https://MANAGEMENT_HOST \
+  --username ALICE --password env:LOOM_LOGIN_PASSWORD
+loom --context management-alice dev app create alice --release RELEASE_UUID \
+  --idempotency-key alice-create-1
+loom --context management-alice dev app wait OPERATION_UUID --timeout 300
+loom --context management-alice dev app status APPLICATION_UUID
+loom --context management-alice dev app login APPLICATION_UUID --browser
+```
+
+Replace uppercase placeholders with verified installation values. `--release`
+selects an application release already qualified in the management installation;
+it is not a branch, candidate ID or local directory. This command does not build
+or publish arbitrary local source. Use the exact `loom --context app-...` command
+printed after login to talk to that personal API. The default and management
+contexts, model-provider settings and credentials are not copied or replaced.
+Omit `--browser` on a headless machine.
+
+Subsequent lifecycle changes use the same management context:
+
+```bash
+loom --context management-alice dev app list
+loom --context management-alice dev app update APPLICATION_UUID --release NEXT_RELEASE_UUID
+loom --context management-alice dev app suspend APPLICATION_UUID
+loom --context management-alice dev app resume APPLICATION_UUID
+loom --context management-alice dev app destroy APPLICATION_UUID
+loom --context management-alice dev app retry BLOCKED_OPERATION_UUID
+```
+
+Each mutation prints a replay key and exact retry command before its POST. After a
+lost response, reuse that printed command, including its expected generation and
+management context; do not submit the request again with a new key. Without an
+explicit `--expected-generation`, lifecycle changes first read current status and
+fence the request to that observed generation. `wait` exits 0 only for completed,
+1 for blocked/superseded or request errors, and 2 for a local timeout. A timeout
+does not cancel remote work. Retry of a blocked operation is an explicit action,
+not a substitute for reconciling uncertain writes.
+
+Destroy stops only the owned application and retains shared development data and
+its identity claims; it is not a shared database, bucket or namespace purge.
+Update/resume rotate access; run application login again after the operation
+completes. Legacy `loom dev create --candidate` and `loom dev destroy` act on full
+environment identities and remain available for retained-environment recovery.
+They are not aliases for these application commands.
+
+This workflow requires an installed, ready application manager and qualified
+releases. Source tests and green CI do not establish installed HTTPS/login,
+concurrent-owner acceptance or arbitrary-source publication.
+
 ### Protected read-only installation inventory
 
 Before qualifying a managed multi-person installation, dispatch the existing

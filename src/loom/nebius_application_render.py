@@ -95,8 +95,12 @@ def render_application(
                                        [{"from": [ingress_peer], "ports": [{"protocol": "TCP", "port": port}]}]))
     outbound = [{"to": [_peer(data_ns, app)], "ports": [{"protocol": "TCP", "port": port}]}
                 for app, port in (("loom-postgres", 5432), ("loom-control-plane", 8080), ("loom-llm-gateway", 9100))]
-    outbound.append({"to": [_peer("kube-system", None) | {"podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
-                     "ports": [{"protocol": protocol, "port": 53} for protocol in ("UDP", "TCP")]})
+    outbound.append({
+        "to": [_peer("kube-system", None) | {"podSelector": {"matchExpressions": [
+            {"key": "k8s-app", "operator": "In", "values": ["kube-dns", "coredns"]},
+        ]}}],
+        "ports": [{"protocol": protocol, "port": 53} for protocol in ("UDP", "TCP")],
+    })
     outbound.append({"to": [{"ipBlock": {"cidr": "0.0.0.0/0", "except": [
         "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
     ]}}], "ports": [{"protocol": "TCP", "port": 443}]})

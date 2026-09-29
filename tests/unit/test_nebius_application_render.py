@@ -261,3 +261,21 @@ def test_ingress_and_egress_are_scoped_without_mutating_shared_network(platform_
                     peer["namespaceSelector"].get("matchLabels", {}).get("kubernetes.io/metadata.name") == shared.platform_namespace
                     for peer in rule.get("to", []))]
     assert {port["port"] for rule in service_peers for port in rule["ports"]} == {5432, 8080, 9100}
+
+
+def test_application_dns_allows_native_and_disposable_resolvers_only(platform_inputs):
+    from loom.nebius_application_render import render_application
+
+    result = render_application(*inputs(platform_inputs))
+    policy = named(result, "NetworkPolicy", "application-egress")["spec"]
+    assert policy["podSelector"] == {"matchLabels": {"app": "loom-service"}}
+    dns_rules = [rule for rule in policy["egress"] if any(port["port"] == 53 for port in rule["ports"])]
+    assert dns_rules == [{
+        "to": [{
+            "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}},
+            "podSelector": {"matchExpressions": [
+                {"key": "k8s-app", "operator": "In", "values": ["kube-dns", "coredns"]},
+            ]},
+        }],
+        "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+    }]

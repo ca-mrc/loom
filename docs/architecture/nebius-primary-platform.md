@@ -111,12 +111,21 @@ development-data access, not malicious-code isolation.
 Personal NetworkPolicies deny ingress/egress by default, admit API/web ingress
 only from the configured ingress controller, and permit API egress to the shared
 database/CP/Gateway, cluster DNS and public IPv4 HTTPS (excluding private,
-loopback and link-local destinations). This is not a hostname-level HTTPS
+loopback and link-local destinations). DNS is limited to TCP/UDP port 53 on
+`kube-system` Pods labelled `k8s-app=kube-dns` or `k8s-app=coredns`, covering
+disposable Kubernetes and native Nebius resolvers. This is not a hostname-level HTTPS
 allowlist. The renderer never changes the shared namespace's policies: a protected
 shared-side admission update is required for these connections to work. It also
 does not rename/recreate the existing shared foundation.
 
-No management route or provisioner invokes this renderer yet. Legacy frozen
+Operations keep their frozen rendered policies; upgrading the management source
+does not rewrite old plans. New create/update/resume plans use the current
+renderer. Disposable CNI coverage installs both the personal egress policies and
+shared ingress policies, verifies service-name access with both DNS labels, and
+retains rejection checks for foreign namespaces, frontend Pods and unrelated
+shared services. This does not establish installed personal-application readiness.
+
+Rendering alone does not admit or provision an application. Legacy frozen
 full-stack operations retain their original meaning. Credential provisioning,
 active registration/lifecycle fencing, schema coordination, shared network
 admission and source qualification remain prerequisites for activating the new
@@ -784,10 +793,29 @@ required. The existing `/auth/managed` browser route accepts the proof through i
 scrubbed fragment and requires an explicit sign-in click. Management login responses
 use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
 
-Protected live installation, application CLI wiring and arbitrary-source publication
-remain unfinished. The existing legacy `loom dev` client does not invoke these
-application APIs. This source capability does not enable the installed management
-service or prove an owner can use a deployed personal application.
+`loom dev app` invokes the application API for create, list, status, update,
+suspend, resume, retained destroy, operation retry/wait and login. Create/update
+require a qualified application `--release` UUID, not a legacy candidate ID or a
+local source path. Generation-fenced mutations print their exact retry command,
+including the selected management context, before submission. A timeout never
+cancels or automatically retries an operation; blocked and superseded operations
+are not reported as completed.
+
+Application login validates identity, origin and both deployment/access generations
+against completed active status. It consumes the one-use proof with a fresh HTTPS
+client, without management credentials, redirects or proxy-environment inheritance.
+The returned session must identify the expected ordinary user and current shared
+team; owner, member and viewer roles remain valid. The CLI saves child credentials
+in an `app-SLUG-APPLICATION_ID_HEX` context with an immutable application/incarnation
+and management/child-origin binding. Login refresh preserves explicitly configured
+child provider settings without copying management settings. Browser login obtains
+a separate proof in the URL fragment, never a query parameter or CLI output.
+
+The legacy `loom dev create --candidate` and environment lifecycle commands remain
+distinct for retained full-environment management/recovery; they do not silently
+switch to application APIs. See the [owner workflow](../runbooks/nebius-deployment.md#personal-application-owner-workflow).
+Arbitrary-source publication and installed multi-owner acceptance remain separate
+requirements. CLI/source coverage does not prove deployed personal readiness.
 
 ### Stopped application completion
 

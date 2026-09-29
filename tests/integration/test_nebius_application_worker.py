@@ -37,16 +37,17 @@ class HoldingCoordinator:
         self.cancelled_operations = set()
 
     async def start(self, lease):
-        await self.registry.frozen_plan(lease)
-        self.calls.append(('start', lease))
-        self.entered.set()
-        if self.error is not None:
-            raise self.error
         try:
+            await self.registry.frozen_plan(lease)
+            self.calls.append(('start', lease))
+            self.entered.set()
+            if self.error is not None:
+                raise self.error
             await asyncio.Event().wait()
-        finally:
+        except asyncio.CancelledError:
             self.cancelled.set()
             self.cancelled_operations.add(lease.operation_id)
+            raise
 
     async def stop(self, lease):
         await self.registry.frozen_plan(lease)
@@ -164,13 +165,28 @@ async def test_failure_budget_is_bounded_and_exception_details_are_not_persisted
     assert await registry.runnable_operations() == []
 
 
-async def test_timeout_drains_work_before_releasing_lease_and_keeps_charge(applications, monkeypatch):
+@pytest.mark.parametrize('stall_plan', [False, True])
+async def test_timeout_drains_work_before_releasing_lease_and_keeps_charge(applications, monkeypatch, stall_plan):
     from loom_service.application_management.worker import ApplicationWorker
 
     registry, factory, (alice, _), prepare, _, _ = applications
     operation = await registry.create(principal=alice, idempotency_key='timeout', **prepare())
     coordinator = HoldingCoordinator(registry)
     finish = registry.finish_attempt
+    plan = registry.frozen_plan
+    plan_calls = 0
+
+    async def slow_coordinator_plan(lease):
+        nonlocal plan_calls
+        plan_calls += 1
+        if plan_calls == 2:
+            # The worker's first lookup completes; cancellation interrupts the
+            # coordinator's own lookup, before it reaches its provider wait.
+            await asyncio.Event().wait()
+        return await plan(lease)
+
+    if stall_plan:
+        monkeypatch.setattr(registry, 'frozen_plan', slow_coordinator_plan)
 
     async def after_drain(*args, **kwargs):
         assert coordinator.cancelled.is_set()
@@ -178,6 +194,8 @@ async def test_timeout_drains_work_before_releasing_lease_and_keeps_charge(appli
 
     monkeypatch.setattr(registry, 'finish_attempt', after_drain)
     await ApplicationWorker(registry, coordinator, attempt_timeout=0.05).reconcile_once(operation.operation_id)
+    if stall_plan:
+        assert plan_calls == 2
     result = await registry.get_operation(operation.operation_id, principal=alice)
     assert result.phase == 'pending' and result.error_code == 'provider_timeout'
     async with factory() as session:
