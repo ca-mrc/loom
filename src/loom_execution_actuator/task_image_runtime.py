@@ -725,10 +725,14 @@ def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
         exclusive: list[dict[str, Any]] = []
         if _V2_MANIFEST.fullmatch(root["Key"]):
             for digest, owners in referenced.items():
-                blob = blobs_by_digest.get(digest)
-                if owners == {root["Key"]} and blob is not None and blob["Key"] not in deleted:
-                    if blob["LastModified"] < cutoff:
-                        exclusive.append(blob)
+                referenced_blob = blobs_by_digest.get(digest)
+                if (
+                    owners == {root["Key"]}
+                    and referenced_blob is not None
+                    and referenced_blob["Key"] not in deleted
+                    and referenced_blob["LastModified"] < cutoff
+                ):
+                    exclusive.append(referenced_blob)
         _delete_cache_object(client, bucket, root, deleted)
         total -= root["Size"]
         for blob in exclusive:
