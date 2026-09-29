@@ -163,3 +163,77 @@ def test_activation_cannot_start_without_retirement_or_reverse_after_activation(
     with pytest.raises(ValueError):
         run(refresh, tmp_path)
     assert refresh[1].calls == ['retire', 'activate']
+
+
+@pytest.fixture
+def drained_observation(refresh):
+    _, api = refresh
+    deployment = api.desired('retire')
+    deployment['status'] = {'observedGeneration': deployment['metadata']['generation']}
+    namespace = deployment['metadata']['namespace']
+    replica_set = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+        'name': 'loom-service-original', 'namespace': namespace, 'uid': str(uuid4()),
+        'generation': 2, 'labels': {'app': 'loom-service'}, 'ownerReferences': [{
+            'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': 'loom-service',
+            'uid': deployment['metadata']['uid'], 'controller': True, 'blockOwnerDeletion': True}]},
+        'spec': {'replicas': 0}, 'status': {'observedGeneration': 2}}
+    sets = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSetList', 'metadata': {'resourceVersion': '51'}, 'items': [replica_set]}
+    pods = {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '52'}, 'items': []}
+    return deployment, sets, pods
+
+
+def drain(refresh, observation):
+    from scripts.ops.nebius_management_refresh_switch import qualify_refresh_drain
+
+    return qualify_refresh_drain(refresh[0], deployment=observation[0], replicasets=observation[1], pods=observation[2])
+
+
+def test_exact_current_controller_generations_and_no_pods_prove_drain(refresh, drained_observation):
+    assert drain(refresh, drained_observation) is True
+
+
+@pytest.mark.parametrize('pending', ['deployment_generation', 'replica_set_generation', 'replica_set_unobserved',
+                                   'deployment_replicas', 'replica_set_replicas', 'terminating_pod'])
+def test_zero_replica_spec_without_full_observation_is_not_drain(refresh, drained_observation, pending):
+    deployment, sets, pods = drained_observation
+    replica_set = sets['items'][0]
+    if pending == 'deployment_generation':
+        deployment['status']['observedGeneration'] -= 1
+    elif pending == 'replica_set_generation':
+        replica_set['status']['observedGeneration'] -= 1
+    elif pending == 'replica_set_unobserved':
+        replica_set['status'].pop('observedGeneration')
+    elif pending == 'deployment_replicas':
+        deployment['status']['replicas'] = 1
+    elif pending == 'replica_set_replicas':
+        replica_set['spec']['replicas'] = 1
+    else:
+        pods['items'].append({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+            'namespace': deployment['metadata']['namespace'], 'name': 'loom-service-retiring',
+            'deletionTimestamp': '2026-09-29T00:00:00Z'}})
+    assert drain(refresh, drained_observation) is False
+
+
+@pytest.mark.parametrize('damage', ['foreign_owner', 'pagination', 'no_resource_version', 'wrong_namespace',
+                                  'wrong_deployment', 'wrong_set_kind', 'negative_replicas', 'boolean_generation'])
+def test_drain_rejects_incomplete_foreign_or_malformed_inventory(refresh, drained_observation, damage):
+    deployment, sets, _ = drained_observation
+    replica_set = sets['items'][0]
+    if damage == 'foreign_owner':
+        replica_set['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'pagination':
+        sets['metadata']['continue'] = 'another-page'
+    elif damage == 'no_resource_version':
+        sets['metadata'].pop('resourceVersion')
+    elif damage == 'wrong_namespace':
+        replica_set['metadata']['namespace'] = 'another-namespace'
+    elif damage == 'wrong_deployment':
+        deployment['metadata']['uid'] = str(uuid4())
+    elif damage == 'wrong_set_kind':
+        replica_set['kind'] = 'StatefulSet'
+    elif damage == 'negative_replicas':
+        replica_set['status']['replicas'] = -1
+    else:
+        replica_set['metadata']['generation'] = True
+    with pytest.raises(ValueError, match='drain'):
+        drain(refresh, drained_observation)
