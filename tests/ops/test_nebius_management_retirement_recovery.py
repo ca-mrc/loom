@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import copy
+import json
 from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_management_retirement import retirement_request as retirement_request
 from tests.ops.test_nebius_management_retirement import setup_request as setup_request
+from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
@@ -62,3 +64,61 @@ def test_recovery_requires_original_job_uid(retirement_request, uid):
 
     with pytest.raises(ValueError):
         recovery_documents(retirement_request[0], original_job_uid=uid)
+
+
+@pytest.fixture
+def staging(retirement_request, tmp_path):
+    request, _ = retirement_request
+    return dict(request=request, original_job_uid=str(uuid4()), api=PhaseAPI(request.binding),
+        state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+
+
+def test_recovery_intent_precedes_dns_and_job_and_replay_never_recreates(staging):
+    from scripts.ops.nebius_management_retirement_recovery import stage_recovery
+
+    api = staging["api"]
+    create = api.create_resource
+
+    def checked_create(doc):
+        assert (staging["anchor_dir"] / (staging["request"].binding.installation_id + ".json")).is_file()
+        record = json.loads((staging["state_dir"] / "resources/stage.json").read_bytes())
+        item = next(row for row in record["resources"].values() if row["desired"] == doc)
+        assert item["status"] == "create_intent" and item["uid"] is None
+        if doc["kind"] == "Job":
+            assert [row["kind"] for row in api.resources.values()] == ["NetworkPolicy"]
+        create(doc)
+
+    api.create_resource = checked_create
+    first = stage_recovery(**staging)
+    assert len(api.creates) == 2
+    frozen = copy.deepcopy(api.resources)
+    assert stage_recovery(**staging) == first
+    assert api.resources == frozen and len(api.creates) == 2
+
+
+@pytest.mark.parametrize("damage", ["anchor", "progress", "journal", "missing_job", "replaced_job", "changed_dns"])
+def test_recovery_evidence_loss_never_adopts_or_recreates(staging, damage):
+    from scripts.ops.nebius_management_retirement_recovery import stage_recovery
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    stage_recovery(**staging)
+    api, state = staging["api"], staging["state_dir"]
+    if damage == "anchor":
+        (staging["anchor_dir"] / (staging["request"].binding.installation_id + ".json")).unlink()
+    elif damage == "progress":
+        (state / "recovery.json").unlink()
+    elif damage == "journal":
+        (state / "resources/stage.json").unlink()
+    else:
+        key = next(key for key, doc in api.resources.items() if doc["kind"] == "Job")
+        if damage == "missing_job":
+            del api.resources[key]
+        elif damage == "replaced_job":
+            api.resources[key]["metadata"]["uid"] = str(uuid4())
+        else:
+            policy = next(doc for doc in api.resources.values() if doc["kind"] == "NetworkPolicy")
+            policy["spec"]["podSelector"] = {}
+    before = copy.deepcopy(api.resources)
+    with pytest.raises(ManagementStageError):
+        stage_recovery(**staging)
+    assert len(api.creates) == 2 and api.resources == before
