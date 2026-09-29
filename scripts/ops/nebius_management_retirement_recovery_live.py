@@ -49,11 +49,12 @@ class HTTPSRetirementRecoveryAPI(HTTPSRetirementDiagnosticAPI):
             raise RecoveryError("recovery_original") from None
         try:
             dns = self._request("GET", "/api/v1/namespaces/kube-system/services/coredns")
+            selector = dns.get("spec", {}).get("selector") if dns is not None else None
             if (dns is None or dns.get("apiVersion") != "v1" or dns.get("kind") != "Service"
                     or _uid(dns) != self.recovery.dns_service_uid
                     or dns["metadata"].get("name") != "coredns" or dns["metadata"].get("namespace") != "kube-system"
                     or dns["metadata"].get("deletionTimestamp") or dns["metadata"].get("ownerReferences")
-                    or dns.get("spec", {}).get("selector") != {"k8s-app": "coredns"}
+                    or not isinstance(selector, dict) or selector.get("k8s-app") != "coredns"
                     or dns["spec"].get("type") != "ClusterIP"
                     or not dns["spec"].get("clusterIP") or dns["spec"]["clusterIP"] == "None"
                     or not {("TCP", 53), ("UDP", 53)} <= {

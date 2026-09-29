@@ -1035,7 +1035,10 @@ contain only the existing `diagnostic_operation`, its
 `diagnostic_journal_sha256`, and the current `dns_service_uid`. Qualification
 reuses the original private-input chain, failed/inactive Job, manager/fence and
 namespace identities, and the completed diagnostic's strict Pod/report readback.
-It freshly checks the DNS Service UID and native selector before writes.
+It freshly checks the DNS Service UID and requires `k8s-app=coredns` in its
+selector before writes. Additional selector entries are permitted: Kubernetes
+combines them with AND, narrowing the same native DNS Pod set. A missing or
+changed native selector still blocks; this does not change DNS policy or grants.
 
 The exact-bundle recovery adds one DNS-only NetworkPolicy and one deterministic
 Job. Only the recovery Pod receives the added TCP/UDP 53 permission to DNS Pods
