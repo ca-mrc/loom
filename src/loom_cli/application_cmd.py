@@ -22,8 +22,10 @@ from loom_cli.server_client import HttpStatusError, NotLoggedInError
 
 def _retry_hint(arguments: list[str], key: str) -> None:
     context = current_context()
+    # A leading hyphen is valid in API keys but argparse needs the attached form.
+    key_args = [f"--idempotency-key={key}"] if key.startswith("-") else ["--idempotency-key", key]
     command = ["loom", *(["--context", context] if context is not None else []), "dev", "app", *arguments,
-               "--idempotency-key", key]
+               *key_args]
     print(f"Idempotency-Key: {key}\nRetry: {shlex.join(command)}", file=sys.stderr)
 
 

@@ -52,7 +52,19 @@ def application_login_http(monkeypatch, tmp_xdg_home):
         requests.append(request)
         row = state["status"]["registration"]
         if request.url.host == "manage.example.com":
-            assert request.headers["authorization"] == "Bearer management-secret"
+            if state.get("management_session"):
+                assert "authorization" not in request.headers
+                if request.url.path == "/api/v1/auth/me":
+                    assert request.headers["cookie"] == "__Host-loom_session=management-session"
+                    return httpx.Response(200, json={**state["session"], "csrf_token": "rotated-management-csrf"},
+                        headers={"set-cookie": "__Host-loom_session=rotated-management-session; Secure; HttpOnly; Path=/"})
+                if request.method == "POST":
+                    assert request.headers["cookie"] == "__Host-loom_session=rotated-management-session"
+                    assert request.headers["x-loom-csrf"] == "rotated-management-csrf"
+                else:
+                    assert request.headers["cookie"] == "__Host-loom_session=management-session"
+            else:
+                assert request.headers["authorization"] == "Bearer management-secret"
             if request.method == "GET":
                 assert request.url.path == f"/api/v1/applications/{row['application_id']}"
                 return httpx.Response(200, json=copy.deepcopy(state["status"]))
@@ -241,6 +253,32 @@ def test_failed_login_save_keeps_existing_credentials_and_redacts_error(applicat
         assert config_path().read_bytes() == original_child
     output = capsys.readouterr()
     assert "private-error" not in output.out + output.err and PROOF not in output.out + output.err
+
+
+def test_named_management_session_rotation_never_crosses_into_child_or_default(application_login_http):
+    state, requests = application_login_http
+    state["management_session"] = True
+    save_config(LoomConfig(server_url="https://default.example.com", auth_token="default-secret"))
+    original_default = config_path().read_bytes()
+    with selected_context("management-alice"):
+        save_config(LoomConfig(server_url="https://manage.example.com", auth_session_cookie="management-session",
+                              auth_session_cookie_name="__Host-loom_session", auth_csrf_token="old-management-csrf",
+                              tokens={"openai": "management-provider-secret"}))
+    assert main(["--context", "management-alice", "dev", "app", "login", APPLICATION]) == 0
+    assert [(r.method, r.url.path) for r in requests] == [
+        ("GET", f"/api/v1/applications/{APPLICATION}"), ("GET", "/api/v1/auth/me"),
+        ("POST", f"/api/v1/applications/{APPLICATION}/login"), ("POST", "/api/v1/auth/login/complete"),
+    ]
+    with selected_context("management-alice"):
+        cfg = load_config()
+        assert cfg.auth_session_cookie == "rotated-management-session" and cfg.auth_csrf_token == "rotated-management-csrf"
+        assert cfg.managed_application is None and cfg.tokens == {"openai": "management-provider-secret"}
+    with selected_context(CONTEXT):
+        cfg = load_config()
+        assert cfg.auth_session_cookie == "child-session" and cfg.auth_csrf_token == "child-csrf"
+        assert cfg.managed_application.management_origin == "https://manage.example.com"
+        assert not cfg.tokens
+    assert config_path().read_bytes() == original_default
 
 
 @pytest.mark.parametrize("opened", [True, False])
