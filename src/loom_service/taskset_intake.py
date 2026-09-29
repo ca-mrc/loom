@@ -116,6 +116,10 @@ async def parse_manifest_upload(
                     detail="verifier_required_for_evaluation",
                 ) from exc
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    # YAML parses unquoted ISO timestamps into datetime objects. Keep the
+    # persisted manifest JSON-compatible without injecting optional defaults.
+    if model.metadata.expires_at is not None:
+        parsed["metadata"]["expires_at"] = model.metadata.expires_at.isoformat()
     return model, parsed
 
 
@@ -349,6 +353,9 @@ async def submit_task_set(
         owning_team_id=team_id,
         slug=slug,
         display_name=manifest_model.metadata.display_name,
+        purpose=manifest_model.metadata.purpose,
+        expires_at=manifest_model.metadata.expires_at,
+        hold=manifest_model.metadata.hold,
         status="materializing",
         intents=normalized.effective_intents,
         evaluation_ready=False,
@@ -437,10 +444,14 @@ async def get_visible_task_set(
     *,
     team_id: UUID | None,
     task_set_id: str,
+    for_update: bool = False,
 ) -> TaskSet:
+    query = visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id)
+    if for_update:
+        query = query.with_for_update()
     row = (
         await session.execute(
-            visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id),
+            query,
         )
     ).scalar_one_or_none()
     if row is None:
@@ -472,6 +483,7 @@ async def rebuild_task_set(
         session,
         team_id=team_id,
         task_set_id=task_set_id,
+        for_update=True,
     )
     if task_set.status == "deleted":
         raise HTTPException(status_code=404, detail="task_set not found")
@@ -557,6 +569,7 @@ async def delete_task_set(
         session,
         team_id=team_id,
         task_set_id=task_set_id,
+        for_update=True,
     )
     active_jobs = (
         (

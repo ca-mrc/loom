@@ -4493,6 +4493,10 @@ class TaskSet(Base):
         ),
         UniqueConstraint("owning_team_id", "slug", name="task_sets_team_slug_uidx"),
         Index(
+            "task_sets_expiry_idx", "expires_at", "id",
+            postgresql_where=text("soft_deleted_at IS NULL AND NOT hold AND expires_at IS NOT NULL"),
+        ),
+        Index(
             "task_sets_team_visibility_status_idx",
             "owning_team_id",
             "visibility",
@@ -4531,6 +4535,9 @@ class TaskSet(Base):
         nullable=False,
         server_default=text("0"),
     )
+    purpose: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    hold: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     soft_deleted_at: Mapped[datetime | None] = mapped_column(
         TIMESTAMP(timezone=True),
         nullable=True,

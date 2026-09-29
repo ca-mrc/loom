@@ -101,7 +101,7 @@ async def _visible_task_contracts(
         return {}
     rows = (
         await session.execute(
-            visible_tasks(team_id=team_id)
+            visible_tasks(team_id=team_id, lock_task_sets=True)
             .with_only_columns(
                 Task.id,
                 Task.config,

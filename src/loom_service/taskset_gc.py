@@ -16,11 +16,14 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.schema import (
+    Batch,
     Task,
+    TaskBundleSource,
     TaskImageMaterialization,
     TaskSet,
     TaskSetGenerationGcCursor,
@@ -633,6 +636,99 @@ async def purge_abandoned_materialization_generations(
     return result
 
 
+def _taskset_has_work_or_history(*, active_only: bool) -> Any:
+    """Correlated reference predicate, including batches that have not fanned out.
+
+    A legacy batch without a resolved selection retains its team's sets: we
+    cannot prove which inputs it used from an arbitrary historical filter.
+    """
+    task_ids = select(Task.id).where(Task.task_set_id == TaskSet.id).correlate(TaskSet)
+    trial_ref = select(Trial.id).where(Trial.task_id.in_(task_ids))
+    batch_ref = select(Batch.id).where(
+        Batch.team_id == TaskSet.owning_team_id,
+        or_(
+            Batch.resolved_task_ids.is_(None),
+            Batch.resolved_task_ids == JSONB.NULL,
+            Batch.task_filter["task_set_id"].astext == TaskSet.id,
+            Batch.task_filter["task_set_ids"].contains(func.jsonb_build_array(TaskSet.id)),
+            exists(select(Task.id).where(
+                Task.task_set_id == TaskSet.id,
+                or_(
+                    Batch.resolved_task_ids.contains(func.jsonb_build_array(Task.id)),
+                    Batch.task_filter["task_ids"].contains(func.jsonb_build_array(Task.id)),
+                ),
+            ).correlate(TaskSet, Batch)),
+        ),
+    )
+    if active_only:
+        trial_ref = trial_ref.where(Trial.state.not_in(("succeeded", "failed", "cancelled")))
+        batch_ref = batch_ref.where(Batch.state.not_in(("finished", "cancelled")))
+    return or_(exists(trial_ref.correlate(TaskSet)), exists(batch_ref.correlate(TaskSet)))
+
+
+def _taskset_has_preparation() -> Any:
+    return or_(
+        exists(select(TaskSetMaterializationJob.id).where(
+            TaskSetMaterializationJob.task_set_id == TaskSet.id,
+            TaskSetMaterializationJob.state.in_(("queued", "claimed", "running")),
+        ).correlate(TaskSet)),
+        exists(select(TaskImageMaterialization.id).where(
+            TaskImageMaterialization.task_id.in_(
+                select(Task.id).where(Task.task_set_id == TaskSet.id).correlate(TaskSet),
+            ),
+            TaskImageMaterialization.state.in_(("queued", "claimed", "running")),
+        ).correlate(TaskSet)),
+    )
+
+
+async def retire_expired_task_sets(session: AsyncSession) -> int:
+    """Retire explicit, unheld expirations without deleting historical inputs.
+
+    Admission and lifecycle edits lock the same TaskSet rows. Recheck active
+    work in a new statement after the lock so a just-committed submission wins.
+    """
+    now = datetime.now(UTC)
+    eligible = (
+        TaskSet.soft_deleted_at.is_(None), TaskSet.expires_at <= now,
+        TaskSet.hold.is_(False), ~_taskset_has_preparation(),
+        ~_taskset_has_work_or_history(active_only=True),
+    )
+    retired = 0
+    rows = (await session.scalars(
+        select(TaskSet).where(*eligible).order_by(TaskSet.expires_at, TaskSet.id)
+        .limit(100).with_for_update(skip_locked=True),
+    )).all()
+    for row in rows:
+        still_eligible = await session.scalar(
+            select(TaskSet.id).where(TaskSet.id == row.id, *eligible),
+        )
+        if still_eligible is None:
+            continue
+        row.status = "deleted"
+        row.status_reason = "expired"
+        row.soft_deleted_at = now
+        row.updated_at = now
+        retired += 1
+    await session.commit()
+    return retired
+
+
+def _taskset_has_stored_input_refs(artifacts_bucket: str) -> Any:
+    prefix = func.concat(
+        "s3://", artifacts_bucket, "/tasksets/user/", TaskSet.owning_team_id,
+        "/", TaskSet.slug, "/",
+    )
+    return or_(
+        exists(select(TaskImageMaterialization.id).where(
+            func.starts_with(TaskImageMaterialization.task_source, prefix),
+        ).correlate(TaskSet)),
+        # Journal-managed bundles have their own version-aware lifecycle.
+        exists(select(TaskBundleSource.id).where(
+            func.starts_with(TaskBundleSource.source_uri, prefix),
+        ).correlate(TaskSet)),
+    )
+
+
 async def purge_expired_task_sets(
     session: AsyncSession,
     *,
@@ -649,6 +745,10 @@ async def purge_expired_task_sets(
             .where(
                 TaskSet.soft_deleted_at.is_not(None),
                 TaskSet.soft_deleted_at < cutoff,
+                TaskSet.hold.is_(False),
+                ~_taskset_has_preparation(),
+                ~_taskset_has_work_or_history(active_only=False),
+                ~_taskset_has_stored_input_refs(artifacts_bucket),
             )
             .order_by(TaskSet.soft_deleted_at, TaskSet.id)
             .limit(100),
@@ -659,6 +759,17 @@ async def purge_expired_task_sets(
     purged = 0
     for row in expired_rows:
         try:
+            # Only retired rows are eligible. Supported mutations/admission
+            # cannot restore or attach new work to them; recheck before S3 I/O.
+            current = await session.scalar(select(TaskSet).where(
+                TaskSet.id == row.id, TaskSet.soft_deleted_at < cutoff,
+                TaskSet.hold.is_(False), ~_taskset_has_preparation(),
+                ~_taskset_has_work_or_history(active_only=False),
+                ~_taskset_has_stored_input_refs(artifacts_bucket),
+            ))
+            if current is None:
+                await session.rollback()
+                continue
             prefix = _storage_prefix(team_id=row.owning_team_id, slug=row.slug)
             manifest_row = (await session.execute(
                 select(TaskSetManifest).where(TaskSetManifest.task_set_id == row.id),
@@ -696,6 +807,7 @@ async def purge_expired_task_sets(
                 current is None
                 or current.soft_deleted_at is None
                 or current.soft_deleted_at >= cutoff
+                or current.hold
             ):
                 await session.rollback()
                 continue
@@ -723,7 +835,9 @@ async def run_once(
     artifacts_bucket: str,
     retention_days: int,
 ) -> tuple[int, MaterializationGenerationGcResult]:
-    """Run both independent TaskSet cleanup contracts once."""
+    """Retire declared expirations, then run the two existing cleanup contracts."""
+    async with session_factory() as session:
+        await retire_expired_task_sets(session)
     async with session_factory() as session:
         purged = await purge_expired_task_sets(
             session,

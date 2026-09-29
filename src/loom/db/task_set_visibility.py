@@ -27,7 +27,7 @@ def visible_task_sets(*, team_id: UUID | None) -> Select[tuple[TaskSet]]:
     )
 
 
-def visible_tasks(*, team_id: UUID | None) -> Select[tuple[Task]]:
+def visible_tasks(*, team_id: UUID | None, lock_task_sets: bool = False) -> Select[tuple[Task]]:
     """Return tasks visible to the given team.
 
     Global tasks have no TaskSet. TaskSet-backed tasks are visible only
@@ -36,6 +36,10 @@ def visible_tasks(*, team_id: UUID | None) -> Select[tuple[Task]]:
     visible_task_set_ids = visible_task_sets(team_id=team_id).with_only_columns(
         TaskSet.id,
     )
+    if lock_task_sets:
+        # Admission holds share locks until its Batch/Trial commits. Expiry
+        # takes an update lock and rechecks work after admission has committed.
+        visible_task_set_ids = visible_task_set_ids.with_for_update(read=True)
     return select(Task).where(
         or_(
             Task.task_set_id.is_(None),

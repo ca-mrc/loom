@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import { taskSetDetailView } from "../api/catalogViews";
 
 const detail = {
+  hold: false, updated_at: "2026-09-29T12:00:00Z",
   task_set_id: "fixture", status: "ready", status_reason: null, task_count: 1,
   capabilities: [], evaluation_ready: true, intents: [], inferred_intents: [], manifest_intents: [],
 };

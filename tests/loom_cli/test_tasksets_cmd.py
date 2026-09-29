@@ -297,3 +297,20 @@ def test_not_logged_in_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty"))
     rc = main(["tasksets", "list"])
     assert rc == 2
+
+
+def test_lifecycle_preserves_unspecified_fields_and_sends_precondition(mock_server, capsys) -> None:
+    path = "/api/v1/tasksets/ts/team-uuid/sample-tasks"
+    current = {**_STATUS_RESPONSE, "purpose": "original", "expires_at": "2026-10-06T12:00:00Z",
+               "hold": False, "updated_at": "2026-09-29T12:00:00Z"}
+    mock_server.canned[("GET", path)] = httpx.Response(200, json=current)
+    mock_server.canned[("PATCH", path + "/lifecycle")] = httpx.Response(200, json={
+        "task_set_id": current["task_set_id"], "purpose": "original",
+        "expires_at": None, "hold": True, "updated_at": "2026-09-29T12:01:00Z",
+    })
+    assert main(["tasksets", "lifecycle", current["task_set_id"], "--no-expiry", "--hold"]) == 0
+    assert json.loads(mock_server.requests[-1].content) == {
+        "purpose": "original", "expires_at": None, "hold": True,
+        "expected_updated_at": current["updated_at"],
+    }
+    assert '"hold": true' in capsys.readouterr().out

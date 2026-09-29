@@ -2650,6 +2650,11 @@ async def rerun_failed_batch(
             status_code=400,
             detail=invalid_task_config_detail(invalid_rerun_tasks),
         )
+    # Serialize all selected inputs with expiry, including legacy selections
+    # without agent metadata. Exact failed agent/task pairs are checked below.
+    await validate_submission_agent_task_compatibility(
+        s, team_id=b.team_id, task_ids=valid_rerun_task_ids, trial_config={},
+    )
     rerun_trial_config = dict(b.trial_config)
     combinations = [dict(item) for item in b.combinations or []]
     runtime_profile_json = json.dumps(b.service_execution_runtime_profile or {})

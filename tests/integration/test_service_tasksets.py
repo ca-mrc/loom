@@ -435,3 +435,215 @@ async def test_byte_limits_still_reject_before_persisting(tasksets_setup, limit_
         Prefix=f"tasksets/user/{teams['team_a']}/",
     )
     assert not objects.get("Contents")
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_api_round_trip_and_boundaries(tasksets_setup) -> None:
+    app, tokens, _teams = tasksets_setup
+    headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+    manifest = _manifest_bytes().replace(
+        b"  display_name: Sample Tasks",
+        b"  display_name: Sample Tasks\n  purpose: retained qualification\n  hold: true\n  expires_at: 2026-10-06T12:00:00Z",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        submitted = await client.post("/api/v1/tasksets", headers=headers, files={
+            "manifest": ("manifest.yaml", manifest, "application/x-yaml"),
+        })
+        assert submitted.status_code == 202, submitted.text
+        path = "/api/v1/tasksets/" + submitted.json()["task_set_id"]
+        key = path.removeprefix("/api/v1/tasksets/ts/") + "/manifest.yaml"
+        original_manifest = app.state.minio_client.get_object(
+            Bucket=app.state.settings.artifacts_bucket, Key="tasksets/user/" + key,
+        )["Body"].read()
+        original = (await client.get(path, headers=headers)).json()
+        assert original["purpose"] == "retained qualification"
+        assert original["expires_at"] == "2026-10-06T12:00:00Z" and original["hold"] is True
+        payload = {"purpose": "temporary diagnostic", "hold": False,
+                   "expires_at": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+                   "expected_updated_at": original["updated_at"]}
+        foreign = await client.patch(path + "/lifecycle", json=payload, headers={
+            "Authorization": f"Bearer {tokens['team_b']}",
+        })
+        assert foreign.status_code == 404
+        legacy = await client.patch(path + "/lifecycle", json=payload, headers={
+            "Authorization": f"Bearer {tokens['legacy_a']}",
+        })
+        assert legacy.status_code == 403
+        invalid = await client.patch(path + "/lifecycle", headers=headers,
+                                     json={**payload, "expires_at": "2026-10-06T00:00:00"})
+        assert invalid.status_code == 422  # Time zone is mandatory.
+        updated = await client.patch(path + "/lifecycle", headers=headers, json=payload)
+        assert updated.status_code == 200, updated.text
+        stale = await client.patch(path + "/lifecycle", headers=headers, json=payload)
+        assert stale.status_code == 409
+        detail = (await client.get(path, headers=headers)).json()
+        item = (await client.get("/api/v1/tasksets", headers=headers)).json()["items"][0]
+        for key in ("purpose", "expires_at", "hold", "updated_at"):
+            assert detail[key] == item[key] == updated.json()[key]
+        cleared = await client.patch(path + "/lifecycle", headers=headers, json={
+            "purpose": "permanent original", "expires_at": None, "hold": True,
+            "expected_updated_at": updated.json()["updated_at"],
+        })
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["expires_at"] is None and cleared.json()["hold"] is True
+    # Policy edits do not rewrite the uploaded manifest/provenance.
+    key = path.removeprefix("/api/v1/tasksets/ts/") + "/manifest.yaml"
+    stored = app.state.minio_client.get_object(
+        Bucket=app.state.settings.artifacts_bucket, Key="tasksets/user/" + key,
+    )["Body"].read()
+    assert stored == original_manifest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protection", [
+    "none", "held", "permanent", "future", "preparation", "batch_active",
+    "batch_history", "trial_active", "trial_history",
+])
+async def test_expiry_protects_work_and_retains_historical_inputs(tasksets_setup, protection) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import delete, select, update
+
+    from loom.db.schema import Batch, TaskSet, TaskSetMaterializationJob, Trial
+    from loom_service.taskset_gc import purge_expired_task_sets, retire_expired_task_sets
+
+    app, tokens, teams = tasksets_setup
+    headers = {"Authorization": f"Bearer {tokens['team_a']}"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/tasksets", headers=headers, files={
+            "manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml"),
+        })
+        assert response.status_code == 202, response.text
+        ts_id = response.json()["task_set_id"]
+        task_id = ts_id + "/tasks/one"
+        original_manifest = app.state.minio_client.get_object(
+            Bucket=app.state.settings.artifacts_bucket,
+            Key=f"tasksets/user/{teams['team_a']}/sample-tasks/manifest.yaml",
+        )["Body"].read()
+        batch_id, trial_id = uuid4(), uuid4()
+        now = datetime.now(UTC)
+        expires = None if protection == "permanent" else now - timedelta(days=1)
+        if protection == "future":
+            expires = now + timedelta(days=1)
+        async with app.state.session_factory() as session:
+            await session.execute(update(TaskSet).where(TaskSet.id == ts_id).values(
+                expires_at=expires, hold=protection == "held", status="ready",
+            ))
+            if protection != "preparation":
+                await session.execute(update(TaskSetMaterializationJob).where(
+                    TaskSetMaterializationJob.task_set_id == ts_id,
+                ).values(state="succeeded"))
+            session.add(Task(id=task_id, task_set_id=ts_id, checksum="a" * 64,
+                             config={}, source="s3://retained/input.tar.gz"))
+            await session.flush()
+            if protection.startswith("batch_"):
+                session.add(Batch(id=batch_id, team_id=teams["team_a"], name="expiry-test",
+                                  task_filter={"task_set_ids": [ts_id]}, trial_config={},
+                                  state="submitted" if protection == "batch_active" else "finished",
+                                  resolved_task_ids=[task_id], created_by_token_prefix="test"))
+            if protection.startswith("trial_"):
+                session.add(Trial(id=trial_id, team_id=teams["team_a"], task_id=task_id,
+                                  config={}, requires_caps={},
+                                  state="queued" if protection == "trial_active" else "failed"))
+            await session.commit()
+        try:
+            async with app.state.session_factory() as session:
+                retired = await retire_expired_task_sets(session)
+            should_retire = protection in {"none", "batch_history", "trial_history"}
+            assert retired == int(should_retire)
+            visible = (await client.get("/api/v1/tasksets", headers=headers)).json()["items"]
+            assert bool(visible) is not should_retire
+            if should_retire:
+                detail = await client.get("/api/v1/tasks/" + task_id, headers=headers)
+                assert detail.status_code == 200, detail.text
+                assert detail.json()["source"] == "s3://retained/input.tar.gz"
+                foreign = await client.get("/api/v1/tasks/" + task_id, headers={
+                    "Authorization": f"Bearer {tokens['team_b']}",
+                })
+                assert foreign.json()["source"] is None
+            async with app.state.session_factory() as session:
+                # The grace period begins at retirement, not expires_at.
+                assert await purge_expired_task_sets(
+                    session, minio_client=app.state.minio_client,
+                    artifacts_bucket=app.state.settings.artifacts_bucket, retention_days=7,
+                ) == 0
+                if should_retire:
+                    await session.execute(update(TaskSet).where(TaskSet.id == ts_id).values(
+                        soft_deleted_at=now - timedelta(days=8),
+                    ))
+                    await session.commit()
+                purged = await purge_expired_task_sets(
+                    session, minio_client=app.state.minio_client,
+                    artifacts_bucket=app.state.settings.artifacts_bucket, retention_days=7,
+                )
+                assert purged == int(protection == "none")
+                assert (await session.scalar(select(Task.id).where(Task.id == task_id)) is None) == (protection == "none")
+            key = f"tasksets/user/{teams['team_a']}/sample-tasks/manifest.yaml"
+            if protection != "none":
+                assert app.state.minio_client.get_object(
+                    Bucket=app.state.settings.artifacts_bucket, Key=key,
+                )["Body"].read() == original_manifest
+        finally:
+            async with app.state.session_factory() as session:
+                await session.execute(delete(Trial).where(Trial.id == trial_id))
+                await session.execute(delete(Batch).where(Batch.id == batch_id))
+                await session.execute(delete(Task).where(Task.id == task_id))
+                await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_expiry_serializes_with_inflight_admission(tasksets_setup) -> None:
+    from uuid import uuid4
+
+    from sqlalchemy import delete, update
+
+    from loom.db.schema import Batch, TaskSet, TaskSetMaterializationJob
+    from loom_service.submission_compat import validate_submission_agent_task_compatibility
+    from loom_service.taskset_gc import retire_expired_task_sets
+
+    app, tokens, teams = tasksets_setup
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/v1/tasksets", headers={
+            "Authorization": f"Bearer {tokens['team_a']}",
+        }, files={"manifest": ("manifest.yaml", _manifest_bytes(), "application/x-yaml")})
+    ts_id = response.json()["task_set_id"]
+    task_id, batch_id = ts_id + "/tasks/one", uuid4()
+    async with app.state.session_factory() as session:
+        await session.execute(update(TaskSet).where(TaskSet.id == ts_id).values(
+            expires_at=datetime.now(UTC) - timedelta(days=1), status="ready",
+        ))
+        await session.execute(update(TaskSetMaterializationJob).where(
+            TaskSetMaterializationJob.task_set_id == ts_id,
+        ).values(state="succeeded"))
+        session.add(Task(id=task_id, task_set_id=ts_id, checksum="a" * 64, config={}))
+        await session.commit()
+    try:
+        async with app.state.session_factory() as admission:
+            await validate_submission_agent_task_compatibility(
+                admission, team_id=teams["team_a"], task_ids=[task_id], trial_config={},
+            )
+            # Admission owns a shared row lock before its batch becomes visible.
+            async with app.state.session_factory() as gc:
+                assert await retire_expired_task_sets(gc) == 0
+            admission.add(Batch(id=batch_id, team_id=teams["team_a"], name="in-flight",
+                                task_filter={}, trial_config={}, resolved_task_ids=[task_id],
+                                created_by_token_prefix="test", state="submitted"))
+            await admission.commit()
+        async with app.state.session_factory() as gc:
+            assert await retire_expired_task_sets(gc) == 0
+            await gc.execute(update(Batch).where(Batch.id == batch_id).values(state="finished"))
+            await gc.commit()
+            assert await retire_expired_task_sets(gc) == 1
+        async with app.state.session_factory() as admission:
+            from fastapi import HTTPException
+
+            with pytest.raises(HTTPException) as exc:
+                await validate_submission_agent_task_compatibility(
+                    admission, team_id=teams["team_a"], task_ids=[task_id], trial_config={},
+                )
+            assert exc.value.status_code == 404
+    finally:
+        async with app.state.session_factory() as session:
+            await session.execute(delete(Batch).where(Batch.id == batch_id))
+            await session.execute(delete(Task).where(Task.id == task_id))
+            await session.commit()

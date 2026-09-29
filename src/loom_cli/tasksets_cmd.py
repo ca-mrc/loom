@@ -1,4 +1,4 @@
-"""`loom tasksets {submit,status,rebuild,delete,list}` — manage team TaskSets.
+"""`loom tasksets {submit,status,lifecycle,rebuild,delete,list}` — manage team TaskSets.
 
 Wraps the routes in `src/loom_service/routes/tasksets.py`.
 Requires `loom auth login` to have been run first.
@@ -141,6 +141,9 @@ def _print_status_summary(body: dict[str, Any]) -> None:
     print(f"capabilities:  {', '.join(body['capabilities'])}")
     print(f"task_count:    {body['task_count']}")
     print(f"eval_ready:    {body['evaluation_ready']}")
+    print(f"purpose:       {body.get('purpose') or '(unspecified)'}")
+    print(f"expires_at:    {body.get('expires_at') or 'never'}")
+    print(f"hold:          {body.get('hold', False)}")
     if body.get("materialization_job_state"):
         print(f"job_state:     {body['materialization_job_state']}")
     fence = body.get("materialization_fence")
@@ -188,6 +191,28 @@ def _status(args: argparse.Namespace) -> int:
             print(json.dumps(body, indent=2))
         else:
             _print_status_summary(body)
+        return 0
+
+    return _run_with_error_handling(_body)
+
+
+def _lifecycle(args: argparse.Namespace) -> int:
+    def _body() -> int:
+        cfg = require_logged_in()
+        with authed_client(cfg) as c:
+            task_set_id = _resolve_task_set_id(c, args.id)
+            path = f"/api/v1/tasksets/{task_set_id}"
+            current = assert_2xx(c.get(path), action="read current lifecycle")
+            payload = {key: current[key] for key in ("purpose", "expires_at", "hold")}
+            if args.purpose is not None:
+                payload["purpose"] = args.purpose
+            if args.expires_at is not None or args.no_expiry:
+                payload["expires_at"] = None if args.no_expiry else args.expires_at
+            if args.hold is not None:
+                payload["hold"] = args.hold
+            payload["expected_updated_at"] = current["updated_at"]
+            body = assert_2xx(c.patch(path + "/lifecycle", json=payload), action="set lifecycle")
+        print(json.dumps(body, indent=2))
         return 0
 
     return _run_with_error_handling(_body)
@@ -290,6 +315,15 @@ def dispatch(argv: list[str]) -> int:
         "--format", choices=["text", "json"], default="text",
     )
     p_status.set_defaults(handler=_status)
+
+    p_lifecycle = sub.add_parser("lifecycle", help="Update explicit expiry, purpose, or hold.")
+    p_lifecycle.add_argument("id", help="TaskSet id (ts/...) or slug")
+    p_lifecycle.add_argument("--purpose")
+    expiry = p_lifecycle.add_mutually_exclusive_group()
+    expiry.add_argument("--expires-at", help="ISO 8601 timestamp with time zone")
+    expiry.add_argument("--no-expiry", action="store_true")
+    p_lifecycle.add_argument("--hold", action=argparse.BooleanOptionalAction, default=None)
+    p_lifecycle.set_defaults(handler=_lifecycle)
 
     p_rebuild = sub.add_parser(
         "rebuild",
