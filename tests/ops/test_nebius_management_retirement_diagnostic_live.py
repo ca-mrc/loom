@@ -292,3 +292,26 @@ def test_private_observation_is_bounded_before_any_file_write(tmp_path):
         _record_first_pod_observation(tmp_path, {"metadata": {"uid": str(uuid4())}},
                                       {"metadata": {"annotations": {"private-payload": "x" * 2_097_152}}})
     assert not (tmp_path / "pod-observation.json").exists()
+
+
+@pytest.mark.parametrize("case", ["configured_region", "wrong_region", "extra_policy_label",
+                                  "changed_policy_label", "missing_policy_label"])
+def test_nebius_region_label_is_bound_to_protected_foundation(live, capsys, case):
+    assert invoke(live, capsys, "install")[1]["status"] == "pending"
+    expected = complete(live)
+    labels = live.pods[0]["metadata"]["labels"]
+    labels["topology.kubernetes.io/region"] = "eu-west1" if case == "wrong_region" else "eu-north1"
+    if case == "extra_policy_label":
+        labels["app"] = "loom-service"
+    elif case == "changed_policy_label":
+        labels["loom.nebius/retirement"] = "another-retirement"
+    elif case == "missing_policy_label":
+        del labels["loom.nebius/retirement"]
+    code, report = invoke(live, capsys, "install")
+    assert code == 0
+    if case == "configured_region":
+        assert report["status"] == "retirement_diagnostic_observed" and report["probe"] == expected
+    else:
+        assert report["status"] == "blocked" and report["stage"] == "diagnostic_pod_labels"
+        assert not any("/log?" in url for _, url in live.calls)
+    assert len([url for method, url in live.calls if method == "POST" and "dryRun=" not in url]) == 1
