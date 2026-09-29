@@ -974,6 +974,207 @@ def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
     assert f"task-build-cache/v2/{'a' * 64}/0/manifest.json" in cache.objects
 
 
+def _digest(marker: str) -> str:
+    return (marker * 64)[:64]
+
+
+def _manifest_body(*digests: str) -> bytes:
+    return json.dumps(
+        {
+            "version": 1,
+            "files": [
+                {"path": f"{digest[:8]}.bin", "sha256": digest, "size": 1}
+                for digest in digests
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
+
+
+def _cache_moment(*, days: int):
+    from datetime import UTC, datetime, timedelta
+
+    return datetime.now(UTC) - timedelta(days=days)
+
+
+def _listed(key: str, size: int, when) -> dict[str, Any]:
+    return {"Key": key, "Size": size, "LastModified": when}
+
+
+def _manifest_key(marker: str, index: int = 0) -> str:
+    return f"task-build-cache/v2/{_digest(marker)}/{index}/manifest.json"
+
+
+def _blob_key(digest: str) -> str:
+    return f"task-build-cache/v2/blobs/{digest}"
+
+
+class _UnreadableGet(FakeS3):
+    def get_object(self, **kwargs):
+        raise ClientError(
+            {"Error": {"Code": "InternalError", "Message": "secret sdk detail"}},
+            "GetObject",
+        )
+
+
+class _BrokenStream(FakeS3):
+    def get_object(self, **kwargs):
+        result = super().get_object(**kwargs)
+        stream = result["Body"]
+
+        def read(_size=-1):
+            raise OSError("broken stream")
+
+        stream.read = read
+        return result
+
+
+def _live_manifest_cache(body: bytes) -> tuple[FakeS3, str, str, str]:
+    live = _digest("e")
+    orphan = _digest("f")
+    manifest_key = _manifest_key("a")
+    objects = {
+        _blob_key(live): b"ok",
+        _blob_key(orphan): b"xx",
+        manifest_key: body,
+    }
+    listing = [
+        _listed(_blob_key(orphan), 2, _cache_moment(days=10)),
+        _listed(_blob_key(live), 2, _cache_moment(days=10)),
+        _listed(manifest_key, len(body), _cache_moment(days=1)),
+    ]
+    return FakeS3(objects, listing=listing), manifest_key, live, orphan
+
+
+@pytest.mark.parametrize("kind", ["get", "stream", "malformed"])
+def test_unreadable_manifest_does_not_delete_referenced_blobs(kind, capsys) -> None:
+    body = b"not-json" if kind == "malformed" else _manifest_body(_digest("e"))
+    cache, manifest_key, live, orphan = _live_manifest_cache(body)
+    if kind == "get":
+        cache = _UnreadableGet(cache.objects, listing=cache.listing)
+    elif kind == "stream":
+        cache = _BrokenStream(cache.objects, listing=cache.listing)
+    runtime.trim_cache(cache, "cache", 0)
+    logged = capsys.readouterr().out
+    assert "manifest_unreadable" in logged
+    assert "secret sdk detail" not in logged
+    assert "broken stream" not in logged
+    assert _blob_key(live) in cache.objects
+    assert _blob_key(orphan) in cache.objects
+    assert manifest_key in cache.objects
+    assert cache.deletes == []
+    if kind != "get":
+        assert cache.bodies[0].closed
+    cache.objects[manifest_key] = _manifest_body(live)
+    if kind == "get":
+        cache.get_object = FakeS3.get_object.__get__(cache, FakeS3)
+    elif kind == "stream":
+        cache.get_object = FakeS3.get_object.__get__(cache, FakeS3)
+    runtime.trim_cache(cache, "cache", 0)
+    assert _blob_key(orphan) not in cache.objects
+    assert _blob_key(live) in cache.objects
+
+
+def test_over_budget_evicts_one_oldest_manifest_group() -> None:
+    mebibyte = 1024 * 1024
+    blob_size = 900 * mebibyte
+    objects: dict[str, bytes] = {}
+    listing = []
+    oldest_manifest = _manifest_key("1")
+    oldest_blob = _blob_key(_digest("1"))
+    for slot in range(1, 6):
+        digest = _digest(str(slot))
+        manifest_key = _manifest_key(str(slot))
+        body = _manifest_body(digest)
+        objects[manifest_key] = body
+        objects[_blob_key(digest)] = b"x"
+        listing.append(_listed(manifest_key, len(body), _cache_moment(days=13 - slot)))
+        listing.append(_listed(_blob_key(digest), blob_size, _cache_moment(days=10)))
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert oldest_manifest not in cache.objects
+    assert oldest_blob not in cache.objects
+    for slot in range(2, 6):
+        assert _manifest_key(str(slot)) in cache.objects
+        assert _blob_key(_digest(str(slot))) in cache.objects
+
+
+def test_orphan_is_removed_before_grace_protected_manifests(capsys) -> None:
+    mebibyte = 1024 * 1024
+    orphan = _digest("9")
+    objects: dict[str, bytes] = {_blob_key(orphan): b"x"}
+    listing = [_listed(_blob_key(orphan), 900 * mebibyte, _cache_moment(days=10))]
+    for slot in range(1, 6):
+        digest = _digest(str(slot))
+        manifest_key = _manifest_key(str(slot))
+        body = _manifest_body(digest)
+        objects[manifest_key] = body
+        objects[_blob_key(digest)] = b"x"
+        listing.append(_listed(manifest_key, len(body), _cache_moment(days=1)))
+        listing.append(_listed(_blob_key(digest), 700 * mebibyte, _cache_moment(days=10)))
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.deletes == [_blob_key(orphan)]
+    assert "grace_protected" not in capsys.readouterr().out
+    for slot in range(1, 6):
+        assert _manifest_key(str(slot)) in cache.objects
+        assert _blob_key(_digest(str(slot))) in cache.objects
+
+
+def test_shared_blob_is_reclaimed_only_with_its_last_manifest() -> None:
+    mebibyte = 1024 * 1024
+    shared = _digest("a")
+    older_only = _digest("b")
+    newer_only = _digest("c")
+    older = _manifest_key("1")
+    newer = _manifest_key("2")
+    objects = {
+        older: _manifest_body(shared, older_only),
+        newer: _manifest_body(shared, newer_only),
+        _blob_key(shared): b"s",
+        _blob_key(older_only): b"a",
+        _blob_key(newer_only): b"b",
+    }
+    listing = [
+        _listed(older, len(objects[older]), _cache_moment(days=12)),
+        _listed(newer, len(objects[newer]), _cache_moment(days=11)),
+        _listed(_blob_key(shared), 2500 * mebibyte, _cache_moment(days=10)),
+        _listed(_blob_key(older_only), 2000 * mebibyte, _cache_moment(days=10)),
+        _listed(_blob_key(newer_only), 2000 * mebibyte, _cache_moment(days=10)),
+    ]
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.deletes.index(_blob_key(older_only)) < cache.deletes.index(newer)
+    assert cache.deletes.index(_blob_key(shared)) > cache.deletes.index(newer)
+    assert _blob_key(shared) not in cache.objects
+    assert newer not in cache.objects
+    assert older not in cache.objects
+
+
+def test_legacy_tar_is_evicted_as_one_object() -> None:
+    key = f"task-build-cache/{_digest('c')}/0.tar"
+    cache = FakeS3(
+        {key: b"tar"},
+        listing=[_listed(key, 5 * 1024 * 1024 * 1024, _cache_moment(days=10))],
+    )
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.deletes == [key]
+
+
+def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> None:
+    key = _blob_key(_digest("d"))
+    cache = FakeS3(
+        {key: b"new"},
+        listing=[_listed(key, 5 * 1024 * 1024 * 1024, _cache_moment(days=1))],
+    )
+    runtime.trim_cache(cache, "cache", 0)
+    assert key in cache.objects
+    assert cache.deletes == []
+    logged = capsys.readouterr().out
+    assert "grace_protected" in logged
+    assert "InternalError" not in logged
+
+
 def test_publish_directory_oci_uses_skopeo_oci_transport(
     source_bundle, tmp_path, publisher
 ) -> None:
