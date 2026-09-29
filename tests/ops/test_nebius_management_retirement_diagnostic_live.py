@@ -281,3 +281,14 @@ def test_private_observation_never_follows_existing_symlink(live, capsys, tmp_pa
     assert invoke(live, capsys, "install")[1]["stage"] == "diagnostic_pod_observation"
     assert path.is_symlink() and foreign.read_bytes() == b"private-unchanged"
     assert not any("/log?" in url for _, url in live.calls)
+
+
+def test_private_observation_is_bounded_before_any_file_write(tmp_path):
+    from scripts.ops.nebius_management_retirement_diagnostic_live import (
+        _record_first_pod_observation,
+    )
+
+    with pytest.raises(ValueError):
+        _record_first_pod_observation(tmp_path, {"metadata": {"uid": str(uuid4())}},
+                                      {"metadata": {"annotations": {"private-payload": "x" * 2_097_152}}})
+    assert not (tmp_path / "pod-observation.json").exists()
