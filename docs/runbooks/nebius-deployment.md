@@ -919,6 +919,13 @@ owner operation as completed, verify the released reservations, and retry the
 original personal-application intent. HTTPS/login and suspend/resume still require
 their own acceptance evidence.
 
+Protected `inspect` includes `failed_retirement_jobs`: exact Job/Pod identities,
+container exit code/signal and allowlisted termination reason, plus a sanitized
+retirement result or import-error type when available. It reads at most three
+failed retirement Pods and bounded log tails; raw logs, exception messages and
+credential values are never exported. `retirement_blocked` alone does not identify
+the cause, and inspection never retries or replaces the failed Job.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
