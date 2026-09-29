@@ -257,3 +257,71 @@ def test_invalid_operation_is_rejected_before_private_markers_or_preflight(insta
     with pytest.raises(ManagementRefreshInstallError):
         run((request, api, state, anchor))
     assert not api.events and not state.exists()
+
+
+def activation(install):
+    from scripts.ops.nebius_management_refresh_install import qualify_refresh_activation
+
+    request, api, state, _ = install
+    return qualify_refresh_activation(request=request, api=api, state_dir=state)
+
+
+def test_activation_rechecks_all_phase_evidence_without_replaying_writes(install):
+    _, api, state, _ = install
+    api.public_ready = False
+    assert run(install)['phase'] == 'public'
+    before = {path: path.read_bytes() for path in state.rglob('*.json')}
+    writes = {phase: list(stage.creates) for phase, stage in api.stages.items()}
+    api.events.clear()
+    assert activation(install) is True
+    assert {phase: stage.creates for phase, stage in api.stages.items()} == writes
+    assert api.switch.calls == ['retire', 'activate']
+    assert {path: path.read_bytes() for path in before} == before
+    assert api.events == ['config', 'manager-probe', 'proof:manager-probe', 'shared-probe', 'proof:shared-probe',
+        'backup', 'proof:backup', 'migration', 'post-migration-probe', 'proof:post-migration-probe']
+
+
+@pytest.mark.parametrize('damage', ['no_parent', 'no_activation', 'wrong_input', 'missing_phase', 'child_hash',
+    'lost_child', 'unbound_report', 'changed_report', 'unavailable_object', 'migration_failed', 'migration_pending'])
+def test_activation_cannot_bypass_incomplete_or_changed_barriers(install, damage):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    _, api, state, _ = install
+    run(install)
+    parent = state / 'refresh.json'
+    record = json.loads(parent.read_text())
+    if damage == 'no_parent':
+        parent.unlink()
+    elif damage == 'lost_child':
+        (state / 'migration/stage.json').unlink()
+    elif damage == 'unavailable_object':
+        api.backup_available = False
+    elif damage in {'migration_failed', 'migration_pending'}:
+        setattr(api, 'failed' if damage == 'migration_failed' else 'pending', 'migration')
+    elif damage == 'changed_report':
+        original = api.verify_probe
+        def changed(*args):
+            value = original(*args)
+            value['probe']['operations_checked'] = 1
+            return value
+        api.verify_probe = changed
+    else:
+        if damage == 'no_activation':
+            record['activation_started'] = False
+        elif damage == 'wrong_input':
+            record['input_digest'] = 'sha256:' + '0' * 64
+        elif damage == 'missing_phase':
+            record['phases'].pop('post-migration-probe')
+        elif damage == 'child_hash':
+            record['phases']['migration']['sha256'] = '0' * 64
+        else:
+            record['phases']['manager-probe']['proof']['job_uid'] = str(uuid4())
+        parent.write_text(json.dumps(record))
+    writes = {phase: list(stage.creates) for phase, stage in api.stages.items()}
+    if damage == 'migration_pending':
+        assert activation(install) is False
+    else:
+        with pytest.raises(ManagementRefreshInstallError):
+            activation(install)
+    assert {phase: stage.creates for phase, stage in api.stages.items()} == writes
+    assert api.switch.calls == ['retire', 'activate']
