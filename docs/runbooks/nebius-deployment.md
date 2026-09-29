@@ -936,8 +936,12 @@ PostgreSQL enforces a bounded read-only, repeatable-read transaction; the probe
 performs only fixed SELECTs, never claims an operation or changes reservations.
 `registry_probe` exports named boolean checks against the retirement qualification
 contract, not database rows or credential material. An unavailable probe is not an
-empty or successful registry. Even all-true checks describe a current snapshot,
-not the failed Pod's network/credential behavior or permission to retry cleanup.
+empty or successful registry. Fixed `stage` and `error_type` values distinguish
+configuration/creation-lineage, manager selection, exec and output failures;
+`api_reason`, when present, is an allowlisted Kubernetes failure code, not its
+message. These labels do not relax the qualification checks. Even all-true checks
+describe a current snapshot, not the failed Pod's network/credential behavior or
+permission to retry cleanup.
 
 ## Before the first application
 
