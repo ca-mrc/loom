@@ -11,7 +11,13 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.ops.test_nebius_ingress_bootstrap import archive
-from tests.ops.test_nebius_management_gateway import bundle, operation, upgrade_operation
+from tests.ops.test_nebius_management_gateway import (
+    bundle,
+    diagnostic_operation,
+    operation,
+    startup_report,
+    upgrade_operation,
+)
 
 
 def module():
@@ -36,7 +42,8 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path):
+@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation])
+def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path, metadata_factory):
     import os
     import sys
 
@@ -46,7 +53,7 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     wheels.mkdir()
     for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
         (wheels / name).write_bytes(b'fixture wheel')
-    metadata = upgrade_operation(tmp_path)
+    metadata = metadata_factory(tmp_path)
     content = module().build_bundle(metadata, uv=uv, requirements=requirements, wheels=wheels)
     release = tmp_path / 'isolated'
     with zipfile.ZipFile(io.BytesIO(content)) as archive:
@@ -56,6 +63,8 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
             path.write_bytes(archive.read(name))
             path.chmod(0o600)
     script = 'from scripts.ops.nebius_management_entry import main; raise SystemExit(main("' + str(release / 'operation.json') + '", "qualify"))'
+    if metadata_factory is diagnostic_operation:
+        script = 'from scripts.ops.nebius_management_retirement_diagnostic_live import HTTPSRetirementDiagnosticAPI; ' + script
     result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
     assert result.returncode == 0, result.stderr
@@ -116,6 +125,58 @@ def test_rollout_records_bound_result_and_distinguishes_failure(tmp_path, monkey
     assert json.loads((evidence / "management-result.json").read_bytes()) == report
 
 
+@pytest.mark.parametrize("outcome", ["observed", "unavailable", "blocked", "invalid"])
+def test_diagnostic_rollout_exit_reports_delivery_not_retirement(tmp_path, monkeypatch, capsys, outcome):
+    """A delivered observation must not become a false failed workflow or cleanup success."""
+    import sys
+
+    target = module()
+    metadata = diagnostic_operation(tmp_path)
+    probe = startup_report()
+    if outcome == "unavailable":
+        probe.update(status="unavailable", stage="kubernetes_get", error_type="HTTPStatusError", http_status=403)
+        probe["checks"].remove("kubernetes")
+    report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
+    if outcome == "blocked":
+        report.update(status="blocked", stage="diagnostic_readback")
+    else:
+        report.update(status="management_retired" if outcome == "invalid" else "retirement_diagnostic_observed",
+            namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391", revision="sha256:" + "d" * 64, probe=probe)
+    uv, requirements, wheels = tmp_path / "uv", tmp_path / "requirements", tmp_path / "wheels"
+    uv.write_bytes(b"fixture uv")
+    requirements.write_bytes(b"fixture requirements")
+    wheels.mkdir()
+    for name in ("loom-0.0.0-py3-none-any.whl", "loom_bundle_checksum-0.1.0-py3-none-any.whl"):
+        (wheels / name).write_bytes(b"fixture wheel")
+    monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/hosts")
+    monkeypatch.setattr(target, "verify_source", lambda config: None)
+    monkeypatch.setattr(target.shutil, "which", lambda name: str(uv))
+    monkeypatch.setattr(target, "build_wheels", lambda *args, **kwargs: wheels)
+    calls = []
+
+    def run(args, **kwargs):
+        if args == [str(uv), "--version"]:
+            return subprocess.CompletedProcess(args, 0, b"uv 0.11.26 (x86_64-unknown-linux-gnu)\n", b"")
+        assert args[0] == "ssh" and args[-1] == "loom-nebius-management-install-v1"
+        _, sent = target.unpack_bundle(kwargs["input"])
+        assert sent == metadata
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b"private stderr")
+
+    monkeypatch.setattr(target.subprocess, "run", run)
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["rollout", "--operation", "install", "--requirements", str(requirements),
+                                    "--evidence-dir", str(evidence)])
+    assert target.main() == (1 if outcome in {"blocked", "invalid"} else 0)
+    expected = {"status": "blocked", "phase": "gateway_operation"} if outcome == "invalid" else report
+    assert json.loads(capsys.readouterr().out) == expected
+    assert json.loads((evidence / "management-result.json").read_bytes()) == expected
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("case", ["failure", "timeout", "wrong_action", "other_candidate"])
 def test_unknown_or_misbound_result_never_retries_or_leaks(tmp_path, monkeypatch, case):
     content, metadata = archive(bundle(tmp_path)), operation(tmp_path)
@@ -167,3 +228,65 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
     run = next(step for step in job["steps"] if step.get("name") == "Run fixed management operation")
     assert run["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_MANAGEMENT_SSH_KEY }}"
     assert not any("SERVICE_ACCOUNT" in name for name in run["env"])
+
+
+@pytest.mark.parametrize("diagnostic", [False, True])
+@pytest.mark.parametrize("action", ["preflight", "install"])
+def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, diagnostic, action):
+    import os
+
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/nebius-rollout.yml").read_text())
+    operation_name = "management-" + ("diagnostic-" if diagnostic else "") + action
+    choices = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]["operation"]["options"]
+    assert operation_name in choices
+    job = workflow["jobs"]["management"]
+    assert "management-diagnostic-preflight" in job["if"] and "management-diagnostic-install" in job["if"]
+    steps = job["steps"]
+    selector = next(s for s in steps if s.get("id") == "tooling")
+    runner = next(s for s in steps if s.get("name") == "Run fixed management operation")
+    assert selector["env"]["NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON }}"
+    assert runner["env"]["DIAGNOSTIC_SSH_KEY"] == "${{ secrets.NEBIUS_MANAGEMENT_DIAGNOSTIC_SSH_KEY }}"
+    original, probe = operation(tmp_path), diagnostic_operation(tmp_path)
+    probe["source_sha"] = "d" * 40
+    selected = probe if diagnostic else original
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # Fake only external executables; run the actual checked-in shell/Python
+    # selection and credential-file lifetime. Nothing contacts SSH or Kubernetes.
+    git = bindir / "git"
+    git.write_text('#!/bin/sh\ntest "$1 $2 $3" = "merge-base --is-ancestor $EXPECTED_SHA"\n')
+    git.chmod(0o700)
+    uv = bindir / "uv"
+    uv.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+assert sys.argv[sys.argv.index('--operation') + 1] == os.environ['EXPECTED_ACTION']
+assert json.loads(os.environ['NEBIUS_MANAGEMENT_OPERATION_JSON']) == json.loads(os.environ['EXPECTED_METADATA'])
+assert pathlib.Path(os.environ['LOOM_DEPLOY_SSH_KEY_FILE']).read_text().strip() == os.environ['EXPECTED_KEY']
+pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selected')
+''')
+    uv.chmod(0o700)
+    env = os.environ | {"PATH": str(bindir) + ":" + os.environ["PATH"], "MANAGEMENT_OPERATION": operation_name,
+        "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(original), "NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(probe),
+        "DEPLOY_SSH_KEY": "private-original-key", "DIAGNOSTIC_SSH_KEY": "private-diagnostic-key",
+        "DEPLOY_KNOWN_HOSTS": "fixture-host", "LOOM_DEPLOY_SSH_TARGET": "fixture-target", "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": selected["source_sha"], "EXPECTED_ACTION": action,
+        "EXPECTED_METADATA": json.dumps(selected), "EXPECTED_KEY": "private-diagnostic-key" if diagnostic else "private-original-key"}
+    for step in (selector, runner):
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, cwd=root, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert "private-" not in result.stdout + result.stderr
+    assert (tmp_path / "outputs").read_text() == "sha=" + selected["source_sha"] + "\n"
+    assert (tmp_path / "transport-invoked").read_text() == "selected"
+    assert not (tmp_path / "nebius-management-key").exists()
+    if diagnostic:
+        (tmp_path / "transport-invoked").unlink()
+        # Missing diagnostic key must fail, never use the original install key.
+        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | {"DIAGNOSTIC_SSH_KEY": ""},
+            cwd=root, capture_output=True, text=True, timeout=20)
+        assert result.returncode != 0 and not (tmp_path / "transport-invoked").exists()
+        # A diagnostic action cannot select an original retirement/install schema.
+        result = subprocess.run(["bash", "-e", "-c", selector["run"]],
+            env=env | {"NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(original)},
+            cwd=root, capture_output=True, text=True, timeout=20)
+        assert result.returncode != 0

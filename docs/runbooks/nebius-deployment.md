@@ -674,7 +674,7 @@ before retrying. Rollback is a separately reviewed forward node-group update;
 retain the enlarged disk and all data volumes rather than shrinking or deleting
 them. Capacity configuration alone is not installed acceptance.
 
-`nebius-rollout` provides two manual actions, `management-preflight` and
+`nebius-rollout` provides installation actions `management-preflight` and
 `management-install`, on `dev` in the protected `nebius-integration` environment.
 They share the existing rollout serialization. Neither accepts shell commands,
 manifests, credential values, a new capacity allocation or arbitrary code.
@@ -953,6 +953,46 @@ configuration/creation-lineage, manager selection, exec and output failures;
 message. These labels do not relax the qualification checks. Even all-true checks
 describe a current snapshot, not the failed Pod's network/credential behavior or
 permission to retry cleanup.
+
+### Diagnose startup in the original retirement runtime
+
+When operator/manager reads cannot establish the failed Pod's mounted credentials,
+database TLS or network access, use `management-diagnostic-preflight` and
+`management-diagnostic-install` through protected `nebius-rollout`. These actions
+select separate `NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON` and
+`NEBIUS_MANAGEMENT_DIAGNOSTIC_SSH_KEY` configuration. A missing diagnostic key
+cannot fall back to retirement authority. Preserve the original management
+metadata, SSH grant, inputs, failed Job and every journal.
+
+The operation schema is
+`loom.nebius-management-retirement-diagnostic-operation.v1`; its exact integrated
+`source_sha` supplies diagnostic tooling while `candidate` stays on the original
+retirement candidate. Use separate
+`nebius-management/retirement-diagnostic/{inputs.json,state,anchor}` paths and an
+exact-bundle SSH grant. Private inputs use
+`loom.nebius-management-retirement-diagnostic-private-inputs.v1` and bind the
+original `retirement_operation`, `retirement_state_sha256`, and
+`retirement_journal_sha256` hashes for `permissions`, `network` and `job`.
+Original private receipts and current resource UIDs/configurations must match;
+the original Job must remain failed and inactive.
+
+The fixed diagnostic creates one separate Job, retaining the original pinned
+image, settings/credential mounts, projected identity, security/scheduling and
+network-policy labels. Only its name, checked-in read-only command and bounded
+deadline differ. It reads exact target operations in a PostgreSQL-enforced
+read-only transaction and performs exact Namespace GETs. It cannot claim or
+reconcile operations. Repeating the qualified diagnostic reads the same Job;
+lost state, replacement resources, failed Jobs or ambiguous Pods never trigger
+a retry or replacement create.
+
+`retirement_diagnostic_observed` means a bounded, verified report was obtained,
+not that retirement succeeded. Check `probe.status` and `probe.stage`: settings,
+database binding, Kubernetes CA/token, database, Namespace GET/identity, or
+complete. Failures export only allowlisted error types/statuses, never raw logs
+or credential values. Even a complete probe proves only current startup access.
+Choose recovery from the exact operation/resource evidence, retain the failed
+Job and journals, and qualify the recovery separately. Reservation release and
+personal HTTPS/login/suspend-resume still require their own evidence.
 
 ## Before the first application
 

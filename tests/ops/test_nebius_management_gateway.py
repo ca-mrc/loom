@@ -39,6 +39,70 @@ def retirement_operation(tmp_path):
         "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
 
 
+def diagnostic_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement-diagnostic"
+    return {**metadata, "schema": "loom.nebius-management-retirement-diagnostic-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def startup_report():
+    return {"schema": "loom.nebius-retirement-startup-probe.v1", "status": "observed", "stage": "complete",
+        "checks": ["database_binding", "kubernetes_ca", "kubernetes_token", "database", "kubernetes"],
+        "operations": [{"operation_id": "18718d96-d389-40b3-a79b-11489924d0d6", "phase": "pending",
+            "runner_epoch": 0, "lease_present": False, "error_present": False, "resource_count": 3, "effects_started": False}]}
+
+
+def test_diagnostic_metadata_and_bounded_result_are_separate_from_retirement(tmp_path):
+    gateway = module()
+    metadata = diagnostic_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    report = {**metadata, "status": "retirement_diagnostic_observed", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "probe": startup_report(), "private": "never-return"}
+    result = gateway.safe_report(json.dumps(report).encode(), metadata)
+    assert result["probe"] == startup_report() and "private" not in result
+    for wrong in ("management_retired", "management_installed", "management_upgraded"):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report | {"status": wrong}).encode(), metadata)
+    report.update(status="pending", phase="retirement-diagnostic")
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["phase"] == "retirement-diagnostic"
+
+
+@pytest.mark.parametrize("change", ["raw_message", "checks", "operation_field", "boolean_epoch", "phase", "duplicate", "unknown_stage"])
+def test_startup_report_contract_cannot_leak_or_invent_observations(change):
+    gateway = module()
+    report = startup_report()
+    if change == "raw_message":
+        report["message"] = "private-provider-error"
+    elif change == "checks":
+        report["checks"] = []
+    elif change == "operation_field":
+        report["operations"][0]["lease_token"] = "private-token"
+    elif change == "boolean_epoch":
+        report["operations"][0]["runner_epoch"] = True
+    elif change == "phase":
+        report["operations"][0]["phase"] = "private-phase"
+    elif change == "duplicate":
+        report["operations"].append(dict(report["operations"][0]))
+    else:
+        report["stage"] = "private-stage"
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_startup_report(report)
+
+
+def test_unavailable_startup_report_is_observation_not_cleanup_success(tmp_path):
+    gateway = module()
+    metadata = diagnostic_operation(tmp_path)
+    probe = {"schema": "loom.nebius-retirement-startup-probe.v1", "status": "unavailable", "stage": "kubernetes_get",
+        "checks": ["database_binding", "kubernetes_ca", "kubernetes_token", "database"],
+        "operations": startup_report()["operations"], "error_type": "HTTPStatusError", "http_status": 403}
+    report = {**metadata, "status": "retirement_diagnostic_observed", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "probe": probe}
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["probe"] == probe
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_startup_report(probe | {"error_type": "private-error"})
+
+
 def test_retirement_authority_uses_separate_recovery_and_reports_no_bootstrap_success(tmp_path):
     gateway = module()
     metadata = retirement_operation(tmp_path)
