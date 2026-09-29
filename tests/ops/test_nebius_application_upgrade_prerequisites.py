@@ -91,7 +91,7 @@ def test_shared_material_matches_actual_development_consumers_without_writes(sha
     assert len(calls) == 4 and all('/namespaces/loom-nebius-platform/' in str(call.url) for call in calls)
 
 
-@pytest.mark.parametrize('drift', ['namespace', 'uid', 'ca', 'keyring', 'database', 'environment', 'profile', 'consumer_profile'])
+@pytest.mark.parametrize('drift', ['namespace', 'uid', 'ca', 'keyring', 'database', 'environment', 'profile', 'consumer_profile', 'guest_target'])
 def test_shared_drift_cannot_become_application_credentials(shared_checks, drift):
     from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
 
@@ -104,6 +104,10 @@ def test_shared_drift_cannot_become_application_credentials(shared_checks, drift
         rows['loom-platform-auth']['data']['secret-store-master-key'] = base64.b64encode(b'private-other').decode()
     elif drift == 'consumer_profile':
         rows['loom-service']['spec']['template']['spec']['containers'][0]['env'][0]['value'] = '{}'
+    elif drift == 'guest_target':
+        config = json.loads(rows['loom-platform-config']['data']['environment.json'])
+        config['guest_execution_target'] = {'target_id': 'nebius-guest-not-selected'}
+        rows['loom-platform-config']['data']['environment.json'] = json.dumps(config)
     else:
         rows['loom-platform-config']['data'][{'environment': 'environment.json', 'profile': 'profile.json'}[drift]] = '{}'
     with pytest.raises(ManagementPrerequisiteError) as error:
