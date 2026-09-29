@@ -74,11 +74,15 @@ def qualify_refresh_drain(request: ManagementRefreshSwitchRequest, *, deployment
             revision = metadata['resourceVersion']
             if (page['kind'] != kind + 'List' or page['apiVersion'] != version
                     or not isinstance(revision, str) or not 0 < len(revision) <= 128
-                    or metadata.get('continue') or not isinstance(rows, list) or len(rows) > 100
-                    or any(row['kind'] != kind or row['apiVersion'] != version
-                        or row['metadata']['namespace'] != namespace for row in rows)):
+                    or metadata.get('continue') or not isinstance(rows, list) or len(rows) > 100):
                 raise ValueError
-            return list(rows)
+            # Kubernetes typed collections omit item TypeMeta. Inherit absent
+            # fields only from this verified collection; never replace conflicts.
+            normalized = [{'apiVersion': version, 'kind': kind, **row} for row in rows]
+            if any(row['kind'] != kind or row['apiVersion'] != version
+                    or row['metadata']['namespace'] != namespace for row in normalized):
+                raise ValueError
+            return normalized
 
         sets = collection(replicasets, 'ReplicaSet', 'apps/v1')
         current_pods = collection(pods, 'Pod', 'v1')
