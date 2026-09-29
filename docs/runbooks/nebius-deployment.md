@@ -994,6 +994,17 @@ Choose recovery from the exact operation/resource evidence, retain the failed
 Job and journals, and qualify the recovery separately. Reservation release and
 personal HTTPS/login/suspend-resume still require their own evidence.
 
+If readback rejects the completed diagnostic Pod, fixed `diagnostic_pod_*` and
+`diagnostic_container_*` stages identify the failed check. After checking the
+current Job receipt and unique Pod identity/owner, the reader retains the first
+Job/Pod pair privately in `state/pod-observation.json` (owner-only, at most 2 MiB).
+This file can contain sensitive configuration/status: keep it on the protected
+gateway or in private operator evidence, never in CI artifacts or public logs.
+It is diagnostic history, not acceptance or recovery authority. Existing evidence
+is not overwritten, and every current label, template, security, termination and
+final readback check still applies. This capture adds no Kubernetes requests and
+does not rerun or replace either Job.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

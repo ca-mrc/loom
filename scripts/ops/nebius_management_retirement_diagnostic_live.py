@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from scripts.ops.nebius_application_setup import _PATHS
+from scripts.ops.nebius_certificate_gateway import _write
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_entry import _private
 from scripts.ops.nebius_management_evidence import _matches_backup_template
@@ -26,6 +27,25 @@ class DiagnosticError(ManagementStageError):
     def __init__(self, stage: str):
         super().__init__("retirement diagnostic evidence unavailable; preserve state")
         self.stage = stage
+
+
+def _record_first_pod_observation(state_dir: Path, job: dict[str, Any], pod: dict[str, Any]) -> None:
+    """Keep the first exact-owner observation private; never use it as authority."""
+    schema = "loom.nebius-retirement-pod-observation.v1"
+    value = {"schema": schema, "job": job, "pod": pod}
+    content = json.dumps(value, sort_keys=True).encode()
+    limit = 2 * 1024**2
+    if len(content) > limit:
+        raise ValueError
+    path = state_dir / "pod-observation.json"
+    try:
+        _write(path, content)
+    except FileExistsError:
+        # Preserve earlier failure evidence even if the current observation
+        # differs. The caller still validates every current field independently.
+        previous = json.loads(_private(path, limit))
+        if previous.get("schema") != schema or _uid(previous["job"]) != _uid(job):
+            raise ValueError from None
 
 
 class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
@@ -86,7 +106,7 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
                 return {"status": "pending", "phase": "retirement-diagnostic", **identity}
             if status.get("succeeded") != 1 or status.get("active", 0) != 0:
                 raise ValueError
-            stage = "diagnostic_pod"
+            stage = "diagnostic_pod_list"
             namespace, name, uid = (job["metadata"][key] for key in ("namespace", "name", "uid"))
             base = "/api/v1/namespaces/" + namespace + "/pods"
             listing = self._request("GET", base + "?" + urlencode({
@@ -94,27 +114,40 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
             if (listing is None or listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
                     or listing.get("metadata", {}).get("continue") or len(listing.get("items", [])) != 1):
                 raise ValueError
+            stage = "diagnostic_pod_identity"
             pod = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
             _uid(pod)
             meta = pod["metadata"]
-            labels = {**job["spec"]["template"]["metadata"].get("labels", {}),
-                "batch.kubernetes.io/controller-uid": uid}
             if (pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod" or meta.get("namespace") != namespace
-                    or meta.get("deletionTimestamp") or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", meta["name"])
-                    or meta.get("labels") != labels):
+                    or meta.get("deletionTimestamp") or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", meta["name"])):
                 raise ValueError
+            stage = "diagnostic_pod_owner"
             owners = meta.get("ownerReferences", [])
             if (len(owners) != 1 or any(owners[0].get(key) != value for key, value in {
                     "apiVersion": "batch/v1", "kind": "Job", "name": name, "uid": uid, "controller": True}.items())):
                 raise ValueError
+            stage = "diagnostic_pod_observation"
+            _record_first_pod_observation(state_dir, job, pod)
+            stage = "diagnostic_pod_labels"
+            labels = {**job["spec"]["template"]["metadata"].get("labels", {}),
+                "batch.kubernetes.io/controller-uid": uid}
+            if meta.get("labels") != labels:
+                raise ValueError
             expected, actual = job["spec"]["template"]["spec"], pod["spec"]
-            if (not _matches_backup_template(actual, expected) or pod.get("status", {}).get("phase") != "Succeeded"
-                    or actual.get("securityContext", {}) != expected.get("securityContext", {})
+            stage = "diagnostic_pod_template"
+            if not _matches_backup_template(actual, expected):
+                raise ValueError
+            stage = "diagnostic_pod_security"
+            if (actual.get("securityContext", {}) != expected.get("securityContext", {})
                     or actual.get("ephemeralContainers", []) != expected.get("ephemeralContainers", [])
                     or any(actual.get(field, False) != expected.get(field, False)
                         for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"))):
                 raise ValueError
+            stage = "diagnostic_pod_status"
+            if pod.get("status", {}).get("phase") != "Succeeded":
+                raise ValueError
             for field, status_field in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses")):
+                stage = "diagnostic_container_status"
                 names = {row["name"] for row in expected.get(field, [])}
                 states = pod["status"].get(status_field, [])
                 if (len(states) != len(names) or {row["name"] for row in states} != names
@@ -122,6 +155,7 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
                             for row in states)):
                     raise ValueError
                 for container, wanted in zip(actual.get(field, []), expected.get(field, []), strict=True):
+                    stage = "diagnostic_container_shape"
                     if (container.keys() - wanted.keys() - {"imagePullPolicy", "terminationMessagePath", "terminationMessagePolicy"}
                             or container.get("securityContext", {}) != wanted.get("securityContext", {})):
                         raise ValueError
