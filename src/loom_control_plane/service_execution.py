@@ -1803,6 +1803,30 @@ async def record_execution_event(
                     and diagnosed_trial.attempt_count == lease.attempt):
                 diagnosed_trial.failure_reason = "oom_killed"
                 diagnosed_trial.failure_message = diagnosis["message"]
+    if advances_projection and lease.cleanup_state == "complete" and lease.deleted_at is not None:
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if (
+            trial is not None
+            and trial.team_id == lease.team_id
+            and trial.attempt_count == lease.attempt
+            and trial.state in {"claimed", "running", "cancelled"}
+            and trial.cancellation_requested_at is not None
+            and trial.cancellation_observed_at is None
+        ):
+            pending_cleanup = await session.scalar(
+                select(ServiceExecutionLease.id).where(
+                    ServiceExecutionLease.trial_id == trial.id,
+                    ServiceExecutionLease.attempt == lease.attempt,
+                    ServiceExecutionLease.id != lease.id,
+                    ServiceExecutionLease.cleanup_state != "complete",
+                ).limit(1)
+            )
+            if pending_cleanup is None:
+                # A durable acknowledgement follows cleanup of the whole attempt,
+                # including a separate verifier. Replays cannot move the timestamp.
+                trial.cancellation_observed_at = max(
+                    trial.cancellation_requested_at, lease.deleted_at,
+                )
     lease.updated_at = datetime.now(UTC)
     await session.flush()
     return event, False

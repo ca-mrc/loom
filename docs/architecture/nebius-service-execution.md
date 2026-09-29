@@ -1,5 +1,11 @@
 # Nebius service execution contract
 
+Native cancellation keeps request and observation timestamps separate. A deleted
+lease acknowledges cancellation only when every lease of the current trial
+attempt (including a separate verifier) has completed cleanup. The acknowledgement
+is durable and idempotent; it does not change the trial's result or advance a
+different attempt. A client disconnect cannot revoke an accepted sandbox cleanup.
+
 Status: Nebius-only hosted architecture following the repository retirement
 of shared-cluster execution. The [platform contract](nebius-primary-platform.md)
 owns the deployment boundary. Repository cleanup preserves published migrations

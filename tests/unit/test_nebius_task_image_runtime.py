@@ -1211,6 +1211,45 @@ def test_trim_does_not_discard_roots_when_grace_prevents_reclaim(capsys):
     assert "budget_temporarily_unreachable" in capsys.readouterr().out
 
 
+def test_trim_expired_malformed_manifest_does_not_block_collection():
+    from datetime import UTC, datetime, timedelta
+    key = runtime._v2_manifest_key("a" * 64, 0)
+    cache = FakeS3({key: b"{"}, listing=[{
+        "Key": key, "Size": 1, "LastModified": datetime.now(UTC) - timedelta(days=8),
+    }])
+    runtime.trim_cache(cache, "cache", 0)
+    assert not cache.objects
+
+
+def test_trim_shared_blob_survives_while_another_root_is_retained(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    old, recent = now - timedelta(days=8), now - timedelta(days=1)
+    objects = _v2_cache_objects("a" * 64, 0, {"layer": b"shared"})
+    objects.update(_v2_cache_objects("b" * 64, 0, {"layer": b"shared"}))
+    listing = [{"Key": key, "Size": len(body), "LastModified": (
+        old if "/blobs/" in key or "/" + "a" * 64 + "/" in key else recent
+    )} for key, body in objects.items()]
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert runtime._v2_manifest_key("a" * 64, 0) not in cache.objects
+    assert runtime._v2_manifest_key("b" * 64, 0) in cache.objects
+    assert sum("/blobs/" in key for key in cache.objects) == 1
+
+
+def test_cache_mutation_failure_releases_owned_lock():
+    cache = FakeS3({})
+    with pytest.raises(RuntimeError, match="failed upload"):
+        with runtime._cache_mutation(cache, "cache") as acquired:
+            assert acquired is True
+            raise RuntimeError("failed upload")
+    assert not cache.objects
+    cache.objects[runtime._CACHE_MUTATION_LOCK] = b"other publisher"
+    with runtime._cache_mutation(cache, "cache") as acquired:
+        assert acquired is False
+    assert cache.objects == {runtime._CACHE_MUTATION_LOCK: b"other publisher"}
+
+
 def test_cache_publisher_and_gc_do_not_interleave(source_bundle, tmp_path):
     claim, _ = source_bundle
     directory = tmp_path / "cache-out"

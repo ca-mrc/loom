@@ -28,8 +28,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -217,10 +219,30 @@ def _agent_needs_model(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _print_trial_summary(item: dict[str, Any]) -> None:
+def _print_trial_progress(item: dict[str, Any], *, timeline: bool = False) -> None:
+    progress = item.get("progress")
+    if not isinstance(progress, dict):
+        return
+    print(f"progress:         {progress.get('label') or progress.get('stage') or 'unknown'}")
+    if progress.get("wait_message"):
+        print(f"waiting:          {progress['wait_message']}")
+    freshness = "stale" if progress.get("observation_stale") else (
+        "fresh" if progress.get("observed_at") else "unknown"
+    )
+    print(f"observation:      {freshness}")
+    if timeline:
+        print("timeline:")
+        for row in progress.get("timeline") or []:
+            seconds = row.get("seconds")
+            duration = "unknown" if seconds is None else f"{seconds}s"
+            print(f"  {row.get('label', 'unknown')}: {duration}")
+
+
+def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> None:
     print(f"id:               {item.get('id') or item.get('trial_id')}")
     print(f"task_id:          {item.get('task_id', '(unknown)')}")
     print(f"state:            {item.get('state', '(unknown)')}")
+    _print_trial_progress(item, timeline=timeline)
     if item.get("agent_name") is not None:
         print(f"agent:            {item['agent_name']}")
     if item.get("model") is not None:
@@ -1186,11 +1208,95 @@ def _trial_show(args: argparse.Namespace) -> int:
         if args.format == "json":
             _dump_json(body)
         else:
-            _print_trial_summary(body)
+            _print_trial_summary(body, timeline=getattr(args, "timeline", False))
             _print_trial_download_commands(body, args.trial_id)
         return 0
 
     return _run_with_error_handling(_body)
+
+
+def _trial_watch(args: argparse.Namespace) -> int:
+    """Observe public state and drain durable event pages, including after terminal."""
+    def _body() -> int:
+        if (args.after_seq < -1 or not 1 <= args.limit <= 1000
+                or not math.isfinite(args.poll_interval) or args.poll_interval < 0.1):
+            raise ValueError("require --after-seq >= -1, --limit 1..1000 and --poll-interval >= 0.1")
+        cfg = require_logged_in()
+        cursor = args.after_seq
+        previous: str | None = None
+        failures = 0
+
+        def emit(kind: str, value: dict[str, Any]) -> None:
+            print(json.dumps(redact_mapping({"kind": kind, **value}), separators=(",", ":")), flush=True)
+
+        with authed_client(cfg) as client:
+            while True:
+                try:
+                    trial = assert_2xx(client.get(f"/api/v1/trials/{args.trial_id}"), action="watch trial")
+                    progress = trial.get("progress") or {}
+                    signature = json.dumps([
+                        trial.get("state"), progress.get("stage"), progress.get("label"),
+                        progress.get("wait_message"), progress.get("observation_stale"),
+                        bool(progress.get("observed_at")),
+                    ], sort_keys=True)
+                    if signature != previous:
+                        if args.format == "json":
+                            emit("progress", {"state": trial.get("state"), "progress": trial.get("progress")})
+                        else:
+                            print(f"state:            {trial.get('state', 'unknown')}")
+                            _print_trial_progress(trial)
+                        previous = signature
+                    while True:
+                        page = assert_2xx(client.get(
+                            f"/api/v1/trials/{args.trial_id}/events",
+                            params={"after_seq": cursor, "limit": args.limit},
+                        ), action="watch trial events")
+                        events = page.get("events")
+                        if not isinstance(events, list) or len(events) > args.limit:
+                            raise ValueError("invalid event page")
+                        next_cursor = cursor
+                        for event in events:
+                            if not isinstance(event, dict) or type(event.get("seq")) is not int:
+                                raise ValueError("invalid event sequence")
+                            seq = event["seq"]
+                            if seq <= next_cursor:
+                                raise ValueError("event page did not advance monotonically")
+                            next_cursor = seq
+                        expected = next_cursor if events else None
+                        if page.get("next_after_seq") != expected:
+                            raise ValueError("inconsistent next event sequence")
+                        for event in events:
+                            if args.format == "json":
+                                emit("event", {"event": event})
+                            else:
+                                # Show event identity, not unbounded model/tool payloads.
+                                kind = event.get("kind") or event.get("type") or "activity"
+                                label = " ".join(str(kind).split())[:120]
+                                print(f"event {event['seq']}: {label}", flush=True)
+                            cursor = event["seq"]
+                        failures = 0
+                        if not events:
+                            break
+                    # State was read before draining. If it changed meanwhile,
+                    # the next iteration reads terminal state then drains again.
+                    if trial.get("state") in _TERMINAL_TRIAL_STATES:
+                        if args.format == "json":
+                            emit("result", {"trial": trial, "after_seq": cursor})
+                        else:
+                            _print_trial_summary(trial)
+                            _print_trial_download_commands(trial, args.trial_id)
+                        return 0
+                except httpx.TransportError:
+                    failures += 1
+                    if failures > 3:
+                        raise ValueError(f"watch connection failed; resume with --after-seq {cursor}") from None
+                    sys.stderr.write(f"Reconnecting trial watch after event {cursor}.\n")
+                time.sleep(args.poll_interval)
+
+    try:
+        return _run_with_error_handling(_body)
+    except KeyboardInterrupt:
+        return 130  # Observation has no cancellation authority.
 
 
 def _print_trial_cancel_next_steps(batch_id: str | None) -> None:
@@ -2018,7 +2124,7 @@ def dispatch(argv: list[str]) -> int:
     # --- trial ---
     p_trial = sub.add_parser(
         "trial",
-        help="Inspect or cancel trials (list/show/debug/download/cancel).",
+        help="Inspect or cancel trials (list/show/watch/debug/download/cancel).",
     )
     trial_sub = p_trial.add_subparsers(dest="trial_cmd", required=True)
 
@@ -2044,7 +2150,16 @@ def dispatch(argv: list[str]) -> int:
     )
     p_ts.add_argument("trial_id", help="Trial UUID.")
     p_ts.add_argument("--format", choices=["text", "json"], default="text")
+    p_ts.add_argument("--timeline", action="store_true", help="Show known stage durations; missing timings remain unknown.")
     p_ts.set_defaults(handler=_trial_show)
+
+    p_tw = trial_sub.add_parser("watch", help="Watch durable trial events and progress; Ctrl-C only stops watching.")
+    p_tw.add_argument("trial_id", help="Trial UUID.")
+    p_tw.add_argument("--format", choices=["text", "json"], default="text", help="json emits newline-delimited progress/event/result envelopes.")
+    p_tw.add_argument("--after-seq", type=int, default=-1, help="Resume after this event sequence.")
+    p_tw.add_argument("--limit", type=int, default=200, help="Events per page (1..1000).")
+    p_tw.add_argument("--poll-interval", type=float, default=2.0, help="Seconds between polls/reconnects (at least 0.1).")
+    p_tw.set_defaults(handler=_trial_watch)
 
     p_tdebug = trial_sub.add_parser(
         "debug",

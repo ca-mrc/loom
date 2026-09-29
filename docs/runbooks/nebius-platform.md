@@ -1097,6 +1097,19 @@ newer than 7 days stay. If those protected objects leave the bucket over the
 4 GiB target, the log emits `reason=grace_protected` and the sweep stops. Cache
 errors never mark a materialization ready.
 
+Publishers and GC serialize cache mutations using a conditional S3 lock object
+at `task-build-cache/.mutation-lock`. Each mutation first probes the endpoint's
+actual conditional-write behavior on its own disposable object. Servers that
+ignore the condition (including the older integration MinIO) use append-only
+publication with GC disabled and `reason=conditional_write_unsupported`; their
+cache budget requires operator attention. A busy lock skips that cache export.
+There is no automatic lock expiry: a crashed holder leaves GC/export deferred
+with `reason=cache_mutation_busy`. Before removing a stranded lock, stop/drain
+all builder publish containers sharing that cache bucket and confirm no holder
+can resume. Then delete only that lock and resume builders. Also drain old
+builders when first rolling out this protocol: older publishers do not honor it.
+Registry materialization identities and manifest-last publication are unchanged.
+
 `oci_export_format` selects BuildKit OCI output shape for measure gates:
 
 | Value | Behavior |

@@ -16,15 +16,17 @@ import subprocess
 import tarfile
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from loom_bundle_checksum import sha256_of_dir
 
 from loom.service_execution_materialization import (
@@ -445,12 +447,70 @@ def _blob_exists(client: Any, bucket: str, key: str) -> bool:
         raise
 
 
+_CACHE_MUTATION_LOCK = "task-build-cache/.mutation-lock"
+
+
+def _supports_conditional_cache_write(client: Any, bucket: str) -> bool:
+    # Some S3-compatible servers silently ignore If-None-Match. Qualify the
+    # actual endpoint using a disposable, uniquely owned object before locking.
+    key = f"task-build-cache/.conditional-probe/{uuid4()}"
+    try:
+        client.put_object(Bucket=bucket, Key=key, Body=b"probe")
+        try:
+            client.put_object(Bucket=bucket, Key=key, Body=b"probe", IfNoneMatch="*")
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412"}:
+                return True
+            raise
+        return False
+    finally:
+        client.delete_object(Bucket=bucket, Key=key)
+
+
+@contextmanager
+def _cache_mutation(client: Any, bucket: str) -> Iterator[bool | None]:
+    """Serialize cache publishers and GC; never steal a possibly live lock.
+
+    A crashed holder leaves a visible, fail-closed cache-only lock. Recovery
+    requires an operator to establish that all old publishers have stopped.
+    """
+    if not _supports_conditional_cache_write(client, bucket):
+        emit_stage("cache_gc", "deferred", reason="conditional_write_unsupported")
+        yield None  # Append-only cache publication is safe without GC.
+        return
+    try:
+        client.put_object(Bucket=bucket, Key=_CACHE_MUTATION_LOCK,
+                          Body=str(uuid4()).encode(), IfNoneMatch="*")
+    except ClientError as error:
+        if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412", "ConditionalRequestConflict", "409"}:
+            emit_stage("cache_gc", "deferred", reason="cache_mutation_busy")
+            yield False
+            return
+        raise
+    try:
+        yield True
+    finally:
+        client.delete_object(Bucket=bucket, Key=_CACHE_MUTATION_LOCK)
+
+
 def _publish_cache_blobs(
+    client: Any, claim: dict[str, Any], *, index: int, cache_dir: Path,
+) -> None:
+    with _cache_mutation(client, claim["cache_bucket"]) as acquired:
+        if acquired is not False:
+            _publish_cache_blobs_locked(client, claim, index=index, cache_dir=cache_dir,
+                                        collect=acquired is True)
+        else:
+            emit_stage("cache_export", "deferred", reason="cache_mutation_busy", component_index=index)
+
+
+def _publish_cache_blobs_locked(
     client: Any,
     claim: dict[str, Any],
     *,
     index: int,
     cache_dir: Path,
+    collect: bool = True,
 ) -> None:
     entries = _inventory_cache_directory(cache_dir)
     manifest = {
@@ -466,7 +526,8 @@ def _publish_cache_blobs(
         key = _v2_blob_key(item["sha256"])
         if not _blob_exists(client, claim["cache_bucket"], key):
             incoming += item["size"]
-    trim_cache(client, claim["cache_bucket"], incoming)
+    if collect:
+        _trim_cache_locked(client, claim["cache_bucket"], incoming)
     for item in entries:
         key = _v2_blob_key(item["sha256"])
         if _blob_exists(client, claim["cache_bucket"], key):
@@ -677,11 +738,18 @@ def _delete_cache_object(client: Any, bucket: str, item: dict[str, Any], deleted
 
 
 def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
-    """Bound disposable cache size and age without a second GC service.
+    """Bound disposable cache size/age while excluding concurrent publishers."""
+    with _cache_mutation(client, bucket) as acquired:
+        if acquired:
+            _trim_cache_locked(client, bucket, incoming_bytes)
 
-    A manifest read must finish for every retained root before any blob is
-    deleted. Eviction subtracts each blob once, when its last reference goes.
-    """
+
+def _trim_cache_locked(client: Any, bucket: str, incoming_bytes: int) -> None:
+    with stage_span("cache_gc"):
+        _trim_cache_inventory(client, bucket, incoming_bytes)
+
+
+def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None:
     roots: list[dict[str, Any]] = []
     blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
@@ -843,12 +911,16 @@ def publish(
                         else:
                             cache_archive = Path(temporary) / "cache.tar"
                             pack_cache(cache_dir, cache_archive)
-                            trim_cache(cache, claim["cache_bucket"], cache_archive.stat().st_size)
-                            cache.upload_file(
-                                str(cache_archive),
-                                claim["cache_bucket"],
-                                _cache_prefix(claim) + f"{index}.tar",
-                            )
+                            with _cache_mutation(cache, claim["cache_bucket"]) as acquired:
+                                if acquired is not False:
+                                    if acquired:
+                                        _trim_cache_locked(cache, claim["cache_bucket"], cache_archive.stat().st_size)
+                                    cache.upload_file(
+                                        str(cache_archive), claim["cache_bucket"],
+                                        _cache_prefix(claim) + f"{index}.tar",
+                                    )
+                                else:
+                                    emit_stage("cache_export", "deferred", reason="cache_mutation_busy", component_index=index)
     finally:
         if cache is not None:
             cache.close()
