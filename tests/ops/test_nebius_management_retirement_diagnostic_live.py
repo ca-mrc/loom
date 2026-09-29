@@ -13,19 +13,39 @@ import pytest
 from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import application_material as application_material
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_management_retirement_diagnostic_entry import checks as checks
 from tests.ops.test_nebius_management_retirement_diagnostic_entry import cloud as cloud
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import entry_inputs as entry_inputs
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import installation as installation
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import management_inputs as management_inputs
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    entry_inputs as entry_inputs,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    installation as installation,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_management_retirement_diagnostic_entry import material as material
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import platform_inputs as platform_inputs
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import private_diagnostic as private_diagnostic
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import private_retirement as private_retirement
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import private_upgrade as private_upgrade
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import retirement_request as retirement_request
-from tests.ops.test_nebius_management_retirement_diagnostic_entry import setup_request as setup_request
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    private_diagnostic as private_diagnostic,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    private_retirement as private_retirement,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    private_upgrade as private_upgrade,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    retirement_request as retirement_request,
+)
+from tests.ops.test_nebius_management_retirement_diagnostic_entry import (
+    setup_request as setup_request,
+)
 
 
 def resource_path(doc):

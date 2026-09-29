@@ -239,7 +239,16 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
-        if operation['schema'] == 'loom.nebius-management-retirement-operation.v1':
+        if operation['schema'] == 'loom.nebius-management-retirement-diagnostic-operation.v1':
+            from scripts.ops.nebius_management_retirement_diagnostic_entry import (
+                execute_diagnostic,
+                load_diagnostic_inputs,
+            )
+
+            diagnostic = load_diagnostic_inputs(operation)
+            qualified = operation
+            result = execute_diagnostic(diagnostic, operation, action)
+        elif operation['schema'] == 'loom.nebius-management-retirement-operation.v1':
             from scripts.ops.nebius_management_retirement_entry import (
                 execute_retirement,
                 load_retirement_inputs,

@@ -1,6 +1,7 @@
 """Diagnostic authority derived from exact original private retirement receipts."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import asdict, dataclass
@@ -75,3 +76,31 @@ def load_diagnostic_inputs(operation: dict[str, Any]) -> DiagnosticContext:
         return DiagnosticContext(context, receipts)
     except Exception:
         raise EntryError("management private retirement diagnostic inputs unqualified") from None
+
+
+def execute_diagnostic(context: DiagnosticContext, operation: dict[str, Any], action: str) -> dict[str, Any]:
+    from scripts.ops.nebius_management_entry import _operator_transport
+    from scripts.ops.nebius_management_retirement_diagnostic import stage_diagnostic
+    from scripts.ops.nebius_management_retirement_diagnostic_live import (
+        DiagnosticError,
+        HTTPSRetirementDiagnosticAPI,
+    )
+
+    if action not in {"preflight", "install"}:
+        raise EntryError("diagnostic action outside fixed authority")
+    stage = "diagnostic_original"
+    try:
+        trust, token = asyncio.run(_operator_transport(context.retirement.original_inputs.operator_connection))
+        with HTTPSRetirementDiagnosticAPI(context=context, ssl_context=trust, token=token) as api:
+            api.verify_identity(context.retirement.request.binding)
+            if action == "preflight":
+                return {"status": "preflight_qualified"}
+            stage = "diagnostic_stage"
+            state = Path(operation["state_dir"])
+            stage_diagnostic(request=context.retirement.request, api=api, state_dir=state,
+                anchor_dir=Path(operation["anchor_dir"]))
+            return api.result(state)
+    except DiagnosticError:
+        raise
+    except Exception:
+        raise DiagnosticError(stage) from None

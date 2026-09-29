@@ -29,6 +29,8 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_application_setup", "nebius_application_cloud_scope", "nebius_application_upgrade_prerequisites",
     "nebius_management_switch", "nebius_management_upgrade", "nebius_management_upgrade_live",
     "nebius_management_retirement", "nebius_management_retirement_entry",
+    "nebius_retirement_startup_probe", "nebius_management_retirement_diagnostic",
+    "nebius_management_retirement_diagnostic_entry", "nebius_management_retirement_diagnostic_live",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
@@ -44,7 +46,8 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "backup_job", "backup_pod_list", "backup_pod_identity", "backup_pod_template", "backup_pod_status",
     "backup_log", "backup_readback", "shared_material",
     "upgrade_config", "upgrade_admission", "upgrade_permissions", "upgrade_network", "upgrade_material",
-    "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate", "retirement"})
+    "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate", "retirement",
+    "diagnostic_original", "diagnostic_stage", "diagnostic_job", "diagnostic_pod", "diagnostic_log", "diagnostic_readback"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
