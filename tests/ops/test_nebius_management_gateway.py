@@ -6,6 +6,7 @@ import importlib
 import io
 import json
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_ingress_bootstrap import archive
@@ -51,6 +52,53 @@ def recovery_operation(tmp_path):
     root = tmp_path / "nebius-management/retirement-recovery"
     return {**metadata, "schema": "loom.nebius-management-retirement-recovery-operation.v1",
         "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def refresh_operation(tmp_path):
+    metadata = operation(tmp_path)
+    operation_id = str(uuid4())
+    root = tmp_path / 'nebius-management/refresh' / operation_id
+    return {**metadata, 'schema': 'loom.nebius-management-refresh-operation.v1', 'source_sha': metadata['candidate'],
+        'operation_id': operation_id, 'state_dir': str(root / 'state'), 'anchor_dir': str(root / 'anchor'),
+        'inputs_path': str(root / 'inputs.json')}
+
+
+def test_refresh_authority_binds_operation_uuid_layout_and_closed_results(tmp_path):
+    gateway = module()
+    metadata = refresh_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    common = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    for status in ('preflight_qualified', 'management_refreshed', 'pending', 'blocked'):
+        report = {**common, 'status': status, 'private': 'must-not-leave-gateway'}
+        if status in {'management_refreshed', 'pending'}:
+            report.update(namespace_uid=str(uuid4()), revision='sha256:' + 'f' * 64)
+        if status == 'pending':
+            report['phase'] = 'post-migration-probe'
+        elif status == 'blocked':
+            report['stage'] = 'refresh_activation'
+        result = gateway.safe_report(json.dumps(report).encode(), metadata)
+        assert result['operation_id'] == metadata['operation_id'] and 'private' not in result
+        report['operation_id'] = str(uuid4())
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report).encode(), metadata)
+
+
+@pytest.mark.parametrize('damage', ['nil_uuid', 'other_uuid_path', 'old_state', 'source_mismatch', 'extra_field'])
+def test_refresh_metadata_cannot_borrow_or_reset_another_operation(tmp_path, damage):
+    gateway = module()
+    metadata = refresh_operation(tmp_path)
+    if damage == 'nil_uuid':
+        metadata['operation_id'] = '00000000-0000-0000-0000-000000000000'
+    elif damage == 'other_uuid_path':
+        metadata['operation_id'] = str(uuid4())
+    elif damage == 'old_state':
+        metadata['state_dir'] = upgrade_operation(tmp_path)['state_dir']
+    elif damage == 'source_mismatch':
+        metadata['source_sha'] = 'e' * 40
+    else:
+        metadata['command'] = 'unqualified'
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_operation(metadata)
 
 
 def startup_report():
