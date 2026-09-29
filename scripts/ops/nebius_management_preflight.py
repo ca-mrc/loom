@@ -309,6 +309,25 @@ def _identity(item: dict[str, Any]) -> dict[str, Any]:
     return _fields(item["metadata"], ("name", "namespace", "uid"))
 
 
+def _dns_service_checks(item: dict[str, Any]) -> dict[str, Any]:
+    """Explain the known DNS binding without exporting labels or provider data."""
+    metadata, spec = item["metadata"], item["spec"]
+    if metadata.get("namespace") != "kube-system" or metadata.get("name") != "coredns":
+        return {}
+    selector = spec.get("selector")
+    ports = spec.get("ports") or []
+    return {"dns_checks": {
+        "not_deleting": not bool(metadata.get("deletionTimestamp")),
+        "no_owner_references": not bool(metadata.get("ownerReferences")),
+        "native_selector_exact": selector == {"k8s-app": "coredns"},
+        "native_selector_required": isinstance(selector, dict) and selector.get("k8s-app") == "coredns",
+        "legacy_selector_required": isinstance(selector, dict) and selector.get("k8s-app") == "kube-dns",
+        "cluster_ip_usable": bool(spec.get("clusterIP")) and spec["clusterIP"] != "None",
+        "tcp_53": any(row.get("protocol") == "TCP" and row.get("port") == 53 for row in ports),
+        "udp_53": any(row.get("protocol") == "UDP" and row.get("port") == 53 for row in ports),
+    }}
+
+
 def _resources(value: dict[str, Any]) -> dict[str, Any]:
     return _fields(value, RESOURCE_KEYS)
 
@@ -389,7 +408,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
             "overhead": _resources(item["spec"].get("overhead", {})),
             "pod_requests": _resources(item["spec"].get("resources", {}).get("requests", {})),
         } for item in pods],
-        "services": [{**_identity(item), "type": item["spec"].get("type"),
+        "services": [{**_identity(item), **_dns_service_checks(item), "type": item["spec"].get("type"),
             "load_balancer": [_fields(address, ("ip", "hostname")) for address in
                               item.get("status", {}).get("loadBalancer", {}).get("ingress", [])],
         } for item in services],
