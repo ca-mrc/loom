@@ -1126,7 +1126,11 @@ Registry materialization identities and manifest-last publication are unchanged.
 | Value | Behavior |
 | --- | --- |
 | `archive` (default) | `type=oci,dest=oci/NNNN.tar` → skopeo `oci-archive:` (unchanged). |
-| `directory` | Job rewrites dest to `oci/NNNN` with `tar=false` → skopeo `oci:`. Opt-in for Nebius timing compares; flip the default only after Job-log evidence.
+| `directory` | Job rewrites dest to `oci/NNNN` with `tar=false` → skopeo `oci:`. Opt-in for Nebius timing compares; flip the default only after Job-log evidence. |
+
+Directory publication accepts the empty `ingest/` staging directory left by
+BuildKit's OCI exporter. Nonempty staging paths, links and special files remain
+invalid; publication still validates the local image references before Skopeo.
 
 Warm/persistent BuildKit capacity is **not** implemented here: keep
 `cpu_millis` at 1000 and existing Job quotas. Daemon pools are deferred.
