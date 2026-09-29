@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.test_nebius_application_render import inputs as application_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -94,12 +95,17 @@ def test_manager_has_only_its_own_database_api_backup_and_shared_ingress(managem
     assert management_inputs == before
 
 
-def test_manager_accepts_current_publication_without_inheriting_standalone_task_policy(management_inputs):
+@pytest.mark.parametrize('guest', [False, True])
+def test_manager_accepts_current_publication_without_inheriting_standalone_task_policy(management_inputs, guest):
     deployment, _, profile = management_inputs
     foundation = deployment["installation"]["foundation"]
     config = json.loads(foundation["platform_config_json"])
     config["task_identity_policy"] = {"mode": "private-root-v1", "target_id": config["target_id"],
                                       "execution_namespace": config["execution_namespace"]}
+    if guest:
+        config['guest_execution_target'] = {'target_id': 'nebius-guest-current'}
+        profile.update(guest_runtime='qemu-tcg-v1', guest_runtime_volume_mib=1024,
+                       guest_max_artifact_bytes=64 * 1024**2)
     foundation["platform_config_json"] = json.dumps(config)
     profile["supports_task_identity"] = True
     before = copy.deepcopy(management_inputs)
@@ -109,6 +115,7 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
     assert all(doc["metadata"].get("namespace", deployment["namespace"]) == deployment["namespace"]
                for doc in documents(result))
     assert "task_identity_policy" not in result.config
+    assert 'guest_execution_target' not in result.config
     namespace = next(doc for doc in documents(result) if doc["kind"] == "Namespace")
     assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
 
@@ -290,3 +297,90 @@ def test_management_image_requires_bound_registry_and_immutable_digest(managemen
     management_inputs[2]["task_image_ref"] = image
     with pytest.raises(ValueError, match="management image"):
         render(management_inputs)
+
+
+@pytest.fixture
+def application_management_inputs(management_inputs, platform_inputs):
+    from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
+
+    data = management_inputs[0]
+    _, release, shared, _ = application_inputs(platform_inputs)
+    installation = data['installation']
+    installation['provider_runtime'] = None
+    installation['applications'] = {
+        'shared': shared.model_dump(mode='json'), 'releases': [release.model_dump(mode='json')],
+        'authority': ApplicationNamespaceAuthorityV1(installation_id=data['installation_id'],
+            namespace=data['namespace'], cluster_id=shared.cluster_id,
+            data_environment_id=shared.data_environment_id,
+            shared_namespace=shared.platform_namespace).model_dump(mode='json'),
+        'storage': {'data_environment_id': str(shared.data_environment_id), 'project_id': 'project-managed-storage',
+            'data_group_id': 'group-shared-data', 'source_group_id': 'group-shared-source'},
+        'runtime': {'concurrency': 4, 'poll_seconds': 5, 'kubernetes': {'kind': 'projected_service_account',
+            'endpoint': platform_inputs[0]['kubernetes_api_server'],
+            'ca_file': '/var/run/loom-management-kubernetes/ca.crt',
+            'token_file': '/var/run/loom-management-kubernetes/token'},
+            'cloud_credentials_file': '/var/run/loom-applications-cloud/credentials.json',
+            'database_connection_file': '/var/run/loom-applications-shared/manager-dsn',
+            'shared_credentials_file': '/var/run/loom-applications-shared/shared.json'},
+    }
+    return management_inputs
+
+
+def test_application_manager_uses_its_own_account_and_versioned_configuration(application_management_inputs):
+    before = copy.deepcopy(application_management_inputs)
+    result = render(application_management_inputs)
+    docs = documents(result)
+    suffix = result.revision[7:19]
+    accounts = {doc['metadata']['name'] for doc in docs if doc['kind'] == 'ServiceAccount'}
+    assert accounts == {'loom-platform', 'loom-application-provisioner'}
+    service = next(doc for doc in docs if doc['kind'] == 'Deployment')
+    template = pod(service)
+    assert template['serviceAccountName'] == 'loom-application-provisioner'
+    assert template['automountServiceAccountToken'] is False
+    volumes = {volume['name']: volume for volume in template['volumes']}
+    assert volumes['management-kubernetes']['projected']['sources'][0] == {
+        'serviceAccountToken': {'path': 'token', 'expirationSeconds': 3600}}
+    configs = {doc['metadata']['name']: doc for doc in docs if doc['kind'] == 'ConfigMap'}
+    name = 'loom-management-applications-' + suffix
+    assert configs[name]['immutable'] is True
+    assert json.loads(configs[name]['data']['installation.json'])['applications'] == before[0]['installation']['applications']
+    assert 'installation.json' not in configs['loom-platform-config']['data']
+    assert volumes['management-config']['configMap']['name'] == name
+    assert volumes['management-cloud']['secret']['secretName'] == 'loom-applications-cloud-' + suffix
+    assert volumes['application-shared']['secret']['secretName'] == 'loom-applications-shared-' + suffix
+    assert volumes['application-shared']['secret']['items'] == [
+        {'key': key, 'path': key} for key in ('manager-dsn', 'shared.json', 'ca.crt')]
+    mounts = {mount['name']: mount for mount in template['containers'][0]['volumeMounts']}
+    assert mounts['management-cloud']['mountPath'] == '/var/run/loom-applications-cloud'
+    assert mounts['application-shared'] == {'name': 'application-shared',
+        'mountPath': '/var/run/loom-applications-shared', 'readOnly': True}
+    env = {row['name']: row for row in template['containers'][0]['env']}
+    assert env['LOOM_SVC_DB_URL']['valueFrom']['secretKeyRef'] == {'name': 'loom-platform-db', 'key': 'service-url'}
+    assert env['LOOM_SECRET_STORE_MASTER_KEY']['valueFrom']['secretKeyRef'] == {
+        'name': 'loom-platform-auth', 'key': 'secret-store-master-key'}
+    assert not any(doc['kind'] in {'Secret', 'PersistentVolumeClaim'} for doc in docs)
+    assert [doc['metadata']['name'] for doc in docs if doc['kind'] == 'StatefulSet'] == ['loom-postgres']
+    for doc in docs:
+        if doc['kind'] in {'StatefulSet', 'Job', 'CronJob'}:
+            assert not any('application' in volume['name'] or 'management' in volume['name']
+                           for volume in pod(doc).get('volumes', []))
+    assert application_management_inputs == before
+
+
+@pytest.mark.parametrize('path,value', [
+    (('authority', 'installation_id'), '30000000-0000-4000-8000-000000000002'),
+    (('authority', 'namespace'), 'loom-nebius-management-foreign'),
+    (('runtime', 'kubernetes', 'endpoint'), 'https://foreign.example.com'),
+    (('runtime', 'kubernetes', 'ca_file'), '/ambient/ca.crt'),
+    (('runtime', 'kubernetes', 'token_file'), '/ambient/token'),
+    (('runtime', 'cloud_credentials_file'), '/ambient/cloud.json'),
+    (('runtime', 'database_connection_file'), '/ambient/manager-dsn'),
+    (('runtime', 'shared_credentials_file'), '/ambient/shared.json'),
+])
+def test_application_management_rejects_wrong_authority_and_unmounted_material(application_management_inputs, path, value):
+    config = application_management_inputs[0]['installation']['applications']
+    for key in path[:-1]:
+        config = config[key]
+    config[path[-1]] = value
+    with pytest.raises(ValueError, match='application management'):
+        render(application_management_inputs)

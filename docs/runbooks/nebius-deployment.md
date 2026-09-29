@@ -69,6 +69,12 @@ It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
+The `kube-system/coredns` Service entry also includes fixed `dns_checks`
+booleans for deletion/ownership, native or legacy selector matching, a usable
+cluster IP, and TCP/UDP port 53. These reuse the existing Service inventory read;
+they export no selector values, owner details or additional configuration.
+They explain current DNS qualification, not successful recovery or readiness.
+
 For up to three newest failed bootstrap Pods in the selected platform namespace,
 inspection checks the exact Job owner UID, terminal failure and expected bootstrap
 command before reading at most 50 log lines / 16 KiB per Pod. The artifact adds
@@ -674,7 +680,7 @@ before retrying. Rollback is a separately reviewed forward node-group update;
 retain the enlarged disk and all data volumes rather than shrinking or deleting
 them. Capacity configuration alone is not installed acceptance.
 
-`nebius-rollout` provides two manual actions, `management-preflight` and
+`nebius-rollout` provides installation actions `management-preflight` and
 `management-install`, on `dev` in the protected `nebius-integration` environment.
 They share the existing rollout serialization. Neither accepts shell commands,
 manifests, credential values, a new capacity allocation or arbitrary code.
@@ -779,6 +785,276 @@ It does **not** prove restoring that backup,
 credential renewal, two-owner lifecycle, or shared task/build execution. Those
 remain separate installed acceptance steps; a green workflow alone does not
 establish the fully operational multi-person environment.
+
+### Retained management upgrade for shared-data applications
+
+The same protected `management-preflight` and `management-install` actions can
+select `loom.nebius-management-upgrade-operation.v1`. This is a fixed upgrade of
+a completed management installation, not a retry of an incomplete bootstrap.
+Keep the original inputs, state, anchor, database, PVC and credentials unchanged.
+The upgrade uses separate `nebius-management/upgrade/inputs.json`, `state` and
+`anchor` paths and the same exact-bundle SSH authorization described above.
+The standalone authority installer accepts this exact upgrade layout while keeping
+SSH grants under the original `nebius-management/authority/<bundle-digest>` root.
+Use a dedicated key; bootstrap and upgrade inputs, journals and grants remain
+separate. Installing a grant alone does not stage inputs or run the upgrade.
+
+The new private input schema is
+`loom.nebius-management-upgrade-private-inputs.v1`. It contains the original
+v1 `original_operation` (including its input digest), the new `deployment`,
+published `candidate` and `profile`, the retained management `binding`,
+`shared_namespace_uid`, typed `prerequisites`, the current shared platform's
+40-character `foundation_candidate` commit, and five distinct private
+`material_files`: `manager_password`, `database_name`, `ca_pem`,
+`secret_store_master_keys`, and `cloud_credentials_json`. Operator access and
+ingress configuration come from the original private inputs, not new workload
+credentials. Do not place these private values in the public operation metadata.
+The new foundation pin qualifies the current shared deployment; do not rewrite
+the original input or historical ingress candidate pins after a publication.
+
+To prepare those shared inputs without an unprotected Kubernetes operation, run
+protected `nebius-rollout` with `operation=inspect` and
+`prepare_shared_inputs=true`. Its fixed gateway collector verifies the shared
+namespace and cluster identities against both inspection and the retained original
+management configuration. It reads only the shared ConfigMap, service Deployment,
+database/auth Secrets and namespace identities; it makes no Kubernetes writes.
+The gateway retains configuration/profile/public keyring, resource UIDs, database
+name, database CA and secret-store keys under the private
+`.loom/nebius-management/shared-input-observations/<observation_id>/` directory.
+It never copies the database administrator password, JWT keys or whole Secrets.
+Only the observation UUID and candidate commit return to Actions. Ordinary
+inspection does not collect credentials. Select that private snapshot when
+preparing upgrade inputs; the upgrade still checks it against live consumers.
+The deployed SSH wrapper must authorize the exact reviewed collector bytes and
+fixed cluster/namespace identities. A kubectl-only forced command cannot execute
+this collector. Install a hash-bound, read-only collector grant through the
+approved operator route, preserving the existing kubectl restrictions and a copy
+of the previous wrapper. Never replace the protected key with an operator shell
+key; a collector source change requires reviewing and updating its exact grant.
+
+Use the captured shared configuration for the new application binding. Its guest
+execution target reference may have advanced since management bootstrap; the
+upgrade qualifies that reference against the current shared ConfigMap without
+changing the target. Other retained foundation fields, management identity,
+database/storage, routes, credentials and original input bytes remain fixed.
+
+Prerequisites bind the management candidate ID, shared ConfigMap/service/database
+Secret/auth Secret UIDs, existing business bucket IDs and application IAM scope.
+Each application release ID selects a protected publication with matching source
+archive digest and service/web image digests. The shared development profile,
+database name, CA and encryption keys must match their actual shared consumers.
+The fixed SQL setup Job verifies the exact shared schema before granting the
+retained manager role; it does not migrate business data. Physical sizing reserves
+personal frontend/API workloads, with no per-person database, PVC or backup.
+
+Nebius provisioning-project admin alone cannot manage shared groups in another
+project. The application provisioner must have exactly its dedicated
+provisioning-project admin group and a tenant-owned membership-controller group
+with admin permits on the two selected shared groups only. The shared data/source
+groups may belong to that same tenant or the shared project; their exact IDs must
+have no IAM permits and object-policy access only to the bound development buckets. Qualify
+these existing grants read-only; the upgrade does not create cloud grants or
+request more bucket policies. It must not receive shared-project or tenant admin.
+
+The upgrade stages fixed application configuration, admission, network and
+credentials, then proves shared SQL setup. It fences legacy Pod creation and
+observes the old process fully retired before running management migrations and
+switching the retained Deployment. Unknown writes require readback, not a blind
+retry. There is no automatic restart of the legacy provisioner on failure.
+Preserve the stopped and original templates and all private journals for recovery.
+
+`pending` identifies admission, authority, database, retirement/retire, migration,
+activation or service readiness. Reinvoke only the same qualified operation to
+advance it. `management_upgraded` requires the exact new Deployment to be ready,
+the application provisioner healthy, and authenticated public HTTPS to pass.
+It does not establish a working personal deployment or multi-owner acceptance;
+create/status/login and safe suspend/resume remain required installed checks.
+
+### Retire superseded pre-execution allocations
+
+After the shared-data upgrade, blocked legacy full-stack creates may still hold
+compute reservations. Do not restart the legacy provisioner, increase the platform
+allowance to hide those reservations, or edit the database directly. The protected
+`management-preflight` and `management-install` actions also accept the fixed
+`loom.nebius-management-retirement-operation.v1` operation. It runs only explicitly
+bound retained-destroy operations in a one-shot Job, never the create queue.
+
+First refresh the ordinary owner's environment status and protected namespace
+inventory. This path supports generated personal environments whose original create
+never delivered credential material. Prepare the executor and recovery evidence
+before requesting owner `destroy_retained` with the observed generation and a stable
+idempotency key. Retain the returned operation ID; a request alone does not release
+capacity. Delivered-material environments are rejected and need a separately scoped
+retirement route, not additional credentials mounted into this Job.
+
+Keep separate `nebius-management/retirement/{inputs.json,state,anchor}` paths and
+an exact-bundle SSH grant. Never overwrite the bootstrap or upgrade inputs, journals,
+anchors or grants. Private inputs use
+`loom.nebius-management-retirement-private-inputs.v1` and contain:
+
+- The original `upgrade_operation`, SHA-256 of its completed `upgrade.json`, and
+  SHA-256 of its active `switch/switch.json`. All recorded phase hashes must match.
+- The unchanged upgraded `deployment` (only additive publication references are
+  allowed), and authenticated `candidate`, `profile` and `candidate_id`. The
+  operation's source SHA must equal this published candidate: its service image
+  must contain the retirement runtime.
+- Exact `targets`: the new `operation_id`, original `source_operation_id`, complete
+  destroyed-generation `registration`, and `namespace_uids` for all three retained
+  namespaces. Owner, incarnation, generation and resource identities are rechecked
+  against the registry before any operation is claimed.
+
+Preflight requires the exact upgraded management Deployment, no legacy-provisioner
+Pods, and unchanged policy/binding UIDs and full configuration from the retained
+upgrade fence journal. The Job uses a dedicated service account with target-namespace
+controller permissions, exact Namespace reads, projected Kubernetes identity and
+the management service database credential. It receives no cloud, administrator or
+secret-store master credentials and no PVC, Secret or Namespace deletion authority.
+
+Cleanup closes Pod admission, retains stopped/suspended controllers to fence delayed
+creates, and verifies owned workloads are idle. Existing retained-destroy completion
+releases CPU, memory and ephemeral-storage reservations while retaining storage
+charges, names, namespaces, PVCs and business data. No retained data is deleted.
+
+`pending` is not success. Reinvoke the same qualified operation and preserve its
+state; `management_retired` requires the exact recorded Job to complete. A failed
+Job, replaced resource, lost journal or uncertain write blocks automatic recovery:
+preserve the Job and both journals, inspect the exact owner operation and protected
+inventory, and repair the demonstrated cause before authorizing a replacement.
+There are no automatic Job retries or replacement creates. Finally read back each
+owner operation as completed, verify the released reservations, and retry the
+original personal-application intent. HTTPS/login and suspend/resume still require
+their own acceptance evidence.
+
+Protected `inspect` includes `failed_retirement_jobs`: exact Job/Pod identities,
+container exit code/signal and allowlisted termination reason, plus a sanitized
+retirement result or import-error type when available. It reads at most three
+failed retirement Pods and bounded log tails; raw logs, exception messages and
+credential values are never exported. `retirement_blocked` alone does not identify
+the cause, and inspection never retries or replaces the failed Job.
+
+For `retirement_blocked`, inspection also attempts a fixed registry probe through
+the matching, ready management service Pod. It qualifies the failed Job's immutable
+target configuration and the manager's installation, service account and Pod UID.
+With protected retirement-operation metadata configured, inspection compares both
+live UIDs and normalized configurations with the original private `retirement-job`
+create receipt. The fixed gateway probe reads that receipt in place and emits only
+a match result; it does not edit or create journals. Installation, management
+namespace and cluster namespace UIDs must match. A replacement, incomplete receipt,
+or mismatched configuration remains unavailable, without a timestamp fallback.
+The inspection SSH wrapper needs a separate exact-source, read-only grant for
+`nebius_retirement_journal_probe.py`, bound to the retained state path and original
+receipt identities. Install it through the same approved operator route as the
+shared-input collector, preserving existing grants and the previous wrapper.
+A collector-only or kubectl-only grant does not admit this probe; never replace
+the protected inspection key with a general operator key.
+Without protected metadata, the immutable ConfigMap must strictly predate the Job;
+missing or equal-second timestamps remain unavailable rather than ambiguous.
+PostgreSQL enforces a bounded read-only, repeatable-read transaction; the probe
+performs only fixed SELECTs, never claims an operation or changes reservations.
+`registry_probe` exports named boolean checks against the retirement qualification
+contract, not database rows or credential material. An unavailable probe is not an
+empty or successful registry. Fixed `stage` and `error_type` values distinguish
+configuration/creation-lineage, manager selection, exec and output failures;
+`api_reason`, when present, is an allowlisted Kubernetes failure code, not its
+message. These labels do not relax the qualification checks. Even all-true checks
+describe a current snapshot, not the failed Pod's network/credential behavior or
+permission to retry cleanup.
+
+### Diagnose startup in the original retirement runtime
+
+When operator/manager reads cannot establish the failed Pod's mounted credentials,
+database TLS or network access, use `management-diagnostic-preflight` and
+`management-diagnostic-install` through protected `nebius-rollout`. These actions
+select separate `NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON` and
+`NEBIUS_MANAGEMENT_DIAGNOSTIC_SSH_KEY` configuration. A missing diagnostic key
+cannot fall back to retirement authority. Preserve the original management
+metadata, SSH grant, inputs, failed Job and every journal.
+
+The operation schema is
+`loom.nebius-management-retirement-diagnostic-operation.v1`; its exact integrated
+`source_sha` supplies diagnostic tooling while `candidate` stays on the original
+retirement candidate. Use separate
+`nebius-management/retirement-diagnostic/{inputs.json,state,anchor}` paths and an
+exact-bundle SSH grant. Private inputs use
+`loom.nebius-management-retirement-diagnostic-private-inputs.v1` and bind the
+original `retirement_operation`, `retirement_state_sha256`, and
+`retirement_journal_sha256` hashes for `permissions`, `network` and `job`.
+Original private receipts and current resource UIDs/configurations must match;
+the original Job must remain failed and inactive.
+
+The fixed diagnostic creates one separate Job, retaining the original pinned
+image, settings/credential mounts, projected identity, security/scheduling and
+network-policy labels. Only its name, checked-in read-only command and bounded
+deadline differ. It reads exact target operations in a PostgreSQL-enforced
+read-only transaction and performs exact Namespace GETs. It cannot claim or
+reconcile operations. Repeating the qualified diagnostic reads the same Job;
+lost state, replacement resources, failed Jobs or ambiguous Pods never trigger
+a retry or replacement create.
+
+`retirement_diagnostic_observed` means a bounded, verified report was obtained,
+not that retirement succeeded. Check `probe.status` and `probe.stage`: settings,
+database binding, Kubernetes CA/token, database, Namespace GET/identity, or
+complete. Failures export only allowlisted error types/statuses, never raw logs
+or credential values. Even a complete probe proves only current startup access.
+Choose recovery from the exact operation/resource evidence, retain the failed
+Job and journals, and qualify the recovery separately. Reservation release and
+personal HTTPS/login/suspend-resume still require their own evidence.
+
+If readback rejects the completed diagnostic Pod, fixed `diagnostic_pod_*` and
+`diagnostic_container_*` stages identify the failed check. After checking the
+current Job receipt and unique Pod identity/owner, the reader retains the first
+Job/Pod pair privately in `state/pod-observation.json` (owner-only, at most 2 MiB).
+This file can contain sensitive configuration/status: keep it on the protected
+gateway or in private operator evidence, never in CI artifacts or public logs.
+It is diagnostic history, not acceptance or recovery authority. Existing evidence
+is not overwritten, and every current label, template, security, termination and
+final readback check still applies. This capture adds no Kubernetes requests and
+does not rerun or replace either Job.
+The reader qualifies one observed Nebius runtime addition:
+`topology.kubernetes.io/region`, only when absent from the recorded Job labels
+and exactly equal to the frozen foundation's configured region. Recorded labels
+cannot be replaced; missing, changed or other additional policy labels still fail.
+
+### Recover a qualified native-DNS retirement failure
+
+When the retained diagnostic reports `database` / `OperationalError` and the
+current `kube-system/coredns` Service uses `k8s-app=coredns`, use the separate
+`management-recovery-preflight` and `management-recovery-install` actions of
+protected `nebius-rollout`. They select only
+`NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON` and
+`NEBIUS_MANAGEMENT_RECOVERY_SSH_KEY`; neither the original installation nor the
+diagnostic key is a fallback. Preserve both old Jobs and all original grants,
+inputs, receipts and anchors. Do not resubmit owners' destroy requests.
+
+The operation schema is
+`loom.nebius-management-retirement-recovery-operation.v1`, with exact integrated
+`source_sha`, the unchanged original `candidate` and separate
+`nebius-management/retirement-recovery/{inputs.json,state,anchor}` paths. Private
+inputs use `loom.nebius-management-retirement-recovery-private-inputs.v1` and
+contain only the existing `diagnostic_operation`, its
+`diagnostic_journal_sha256`, and the current `dns_service_uid`. Qualification
+reuses the original private-input chain, failed/inactive Job, manager/fence and
+namespace identities, and the completed diagnostic's strict Pod/report readback.
+It freshly checks the DNS Service UID and native selector before writes.
+
+The exact-bundle recovery adds one DNS-only NetworkPolicy and one deterministic
+Job. Only the recovery Pod receives the added TCP/UDP 53 permission to DNS Pods
+in `kube-system`; the original rendering, image, identity, settings, mounts,
+security and scheduling remain unchanged. Before calling the existing retirement
+runtime, it reads every target and requires pending state, no previous claim,
+lease, error or effects. It never writes reservations directly or runs the create
+queue. Both objects share one intent-before-create journal; replay reads their
+recorded identities, never replaces a failed, missing or foreign Job.
+
+`pending` means to read the same operation again. `retirement_recovered` requires
+a verified completion report showing the exact original operations completed,
+leases/errors cleared, CPU/memory/ephemeral reservations released and storage
+unchanged. Job exit zero alone is not success. A `blocked` result at
+`recovery_runtime` retains the closed `recovery` report, including whether
+retirement may have started, but never raw exception text. Preserve uncertain
+effects and investigate; do not reset state or automatically create another Job.
+Only proven release permits retrying the recorded first-application intent;
+personal HTTPS/login/suspend-resume remains a separate acceptance gate.
 
 ## Before the first application
 

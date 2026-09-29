@@ -15,6 +15,27 @@ from loom_service.environment_management.steps import ProvisioningStep
 from tests.unit.test_nebius_environment_kubernetes_provider import context
 
 
+@pytest.mark.parametrize("action,expected", [
+    ("retained_owner_revoke", "retained_child_client_required"),
+    ("retained_key_revoke", "retained_cloud_client_required"),
+])
+async def test_unconfigured_revocation_client_cannot_be_silently_skipped(action, expected):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from loom_service.environment_management.retained_destroy import EnvironmentRetainedDestroy
+
+    source = context()
+    source.identities["credentials:material"] = "delivered"
+    ctx = replace(source, action="destroy_retained", source=source)
+    def unexpected(request):
+        pytest.fail("revocation unexpectedly attempted a Kubernetes call")
+    async with httpx.AsyncClient(base_url="https://kubernetes.test", transport=httpx.MockTransport(unexpected)) as http:
+        cleanup = EnvironmentRetainedDestroy(SimpleNamespace(), KubernetesEnvironmentProvider(http), None, None)
+        with pytest.raises(ProviderBlockedError, match=expected):
+            await cleanup.apply(ctx, ProvisioningStep("revoke", "credentials", {"action": action, "purpose": "canonical"}))
+
+
 def workload(kind):
     spec = {"template": {"metadata": {"labels": {"app": "loom-test"}},
                          "spec": {"containers": [{"name": "test", "image": "test@sha256:" + "a" * 64}]}}}

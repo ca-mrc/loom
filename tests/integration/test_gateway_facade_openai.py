@@ -891,6 +891,50 @@ async def test_facade_surfaces_upstream_401_records_failed_audit_row(
     assert "messages" not in row["request_params"]
 
 
+@pytest.mark.parametrize(
+    ("status", "message", "category"),
+    [
+        (403, "Permission denied for this model", "upstream_http_4xx"),
+        (404, "The model `gpt-4o` does not exist", "upstream_http_4xx"),
+        (429, "Rate limit reached for requests", "upstream_http_4xx"),
+        (503, "Upstream overloaded", "upstream_http_5xx"),
+    ],
+)
+async def test_facade_surfaces_upstream_errors_with_missing_usage(
+    facade_setup,
+    postgres_url: str,
+    status: int,
+    message: str,
+    category: str,
+) -> None:
+    """#2054: permission, model-not-found, rate-limit and upstream failures
+    keep their status, surface the upstream reason, and are audited as
+    failed calls with missing usage rather than a verified zero cost."""
+    app, jwt, _team_id, _trial_id, conn_id, captures = facade_setup
+    captures["response"] = httpx.Response(  # type: ignore[index]
+        status,
+        json={"error": {"message": message}},
+    )
+    r = await _post(
+        app,
+        jwt,
+        **{"x-loom-provider-connection-id": str(conn_id)},
+    )
+    assert r.status_code == status
+    assert message in r.json()["detail"]
+
+    sync_engine = create_engine(postgres_url)
+    with sync_engine.connect() as conn:
+        rows = list(conn.execute(text("SELECT provider_extras FROM llm_calls")))
+    sync_engine.dispose()
+    assert len(rows) == 1
+    extras = rows[0][0]
+    assert extras["_loom_call_status"] == "failed"
+    assert extras["_loom_failure_category"] == category
+    assert extras["_loom_failure_status_code"] == status
+    assert extras["_loom_usage_status"] == "missing"
+
+
 async def test_facade_redacts_api_key_from_upstream_error_body(
     facade_setup,
 ) -> None:

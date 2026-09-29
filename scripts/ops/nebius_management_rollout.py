@@ -142,7 +142,9 @@ def main() -> int:
     args.evidence_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     (args.evidence_dir / "management-result.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] in {"prepared", "preflight_qualified", "pending", "management_installed"} else 1
+    # Diagnostic success acknowledges report delivery, never retirement completion.
+    return 0 if result["status"] in {"prepared", "preflight_qualified", "pending", "management_installed",
+        "management_upgraded", "management_retired", "retirement_diagnostic_observed", "retirement_recovered"} else 1
 
 
 if __name__ == "__main__":

@@ -161,7 +161,11 @@ class HTTPSManagementStageAPI(ManagementKubernetesTransport):
 
 
 def _defaulted(api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, Any]:
-    observed = api.default_resource(desired)
+    return _qualified_defaulted(desired, api.default_resource(desired))
+
+
+def _qualified_defaulted(desired: dict[str, Any], observed: dict[str, Any]) -> dict[str, Any]:
+    """Qualify the same workload defaults for fixed create and upgrade previews."""
     if not _contains(_canonical_quantities(observed), _canonical_quantities(desired)):
         raise ManagementStageError("management defaulting changed requested configuration")
     kind = desired["kind"]

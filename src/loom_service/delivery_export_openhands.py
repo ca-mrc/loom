@@ -16,6 +16,7 @@ from loom.models.trajectory import (
     OpenHandsSdkRuntimeProvenanceEvent,
     TrajectoryEvent,
 )
+from loom_service.agent_catalog import get_agent
 from loom_service.delivery_export_tb2_v2 import (
     _fetch_artifact_bytes,
     _index_artifacts,
@@ -61,7 +62,10 @@ def validate_openhands_eligibility(
     trial: Trial,
 ) -> None:
     agent_name = _agent_name_for_trial(trial)
-    if agent_name != "openhands-sdk":
+    # `openhands` is the legacy alias of `openhands-sdk` (#2054); both run the
+    # same SDK runner, and the checks below still require its typed evidence.
+    entry = get_agent(agent_name)
+    if entry is None or entry.name != "openhands-sdk":
         raise OpenHandsExportError(
             "incompatible_agent",
             {

@@ -22,7 +22,7 @@ from loom.service_execution_materialization import (
     prepare_service_execution_input_manifest,
     service_execution_input_binding,
 )
-from loom.trajectory.storage import FakeObjectStore
+from loom.trajectory.storage import FakeObjectStore, ObjectReadback
 from loom_control_plane.service_execution_materializer import (
     MaterializationIntegrityError,
     ServiceExecutionMaterializer,
@@ -508,6 +508,34 @@ async def test_materializer_rejects_source_digest_mismatch() -> None:
             expected="sha256:" + hashlib.sha256(b"expected").hexdigest(),
             size=len(b"expected"),
         )
+
+
+@pytest.mark.parametrize("readback", [b"payload", b"PAYLOAD", b"short", b"payload-extra"])
+async def test_materializer_hashes_destination_when_store_has_no_full_checksum(readback) -> None:
+    class NoChecksumStore(FakeObjectStore):
+        async def stat_object(self, *, bucket, key):
+            # A multipart HEAD may give length but no full-object checksum.
+            return ObjectReadback(content_length=7, checksum_sha256=None)
+
+        async def stream_object(self, **kwargs):
+            for offset in range(0, len(readback), 3):
+                yield readback[offset:offset + 3]
+
+    source = FakeObjectStore(objects={("source", "input"): b"payload"})
+    materializer = ServiceExecutionMaterializer(
+        session_factory=None,  # type: ignore[arg-type]
+        source_store=source, source_bucket="source", canonical_store=NoChecksumStore(),
+        artifacts_bucket="canonical", trajectories_bucket="trajectories",
+    )
+    operation = materializer._copy_exact(
+        source_key="input", destination_key="output",
+        expected="sha256:" + hashlib.sha256(b"payload").hexdigest(), size=7,
+    )
+    if readback == b"payload":
+        await operation
+    else:
+        with pytest.raises(MaterializationIntegrityError, match="canonical_object_readback_mismatch"):
+            await operation
 
 
 async def test_materializer_loop_recovers_after_control_database_outage() -> None:

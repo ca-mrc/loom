@@ -77,6 +77,52 @@ def test_inventory_projects_capacity_and_routes_without_claiming_installation_re
     assert result["ingress_preflight"] == {"status": "not_configured"}
 
 
+@pytest.mark.parametrize("case,changes", [
+    ("native", {}),
+    ("owned", {"no_owner_references": False}),
+    ("extra_selector", {"native_selector_exact": False}),
+    ("legacy", {"native_selector_exact": False, "native_selector_required": False,
+                "legacy_selector_required": True}),
+    ("missing_selector", {"native_selector_exact": False, "native_selector_required": False}),
+    ("headless", {"cluster_ip_usable": False}),
+    ("tcp_only", {"udp_53": False}),
+    ("deleting", {"not_deleting": False}),
+])
+def test_inventory_reports_dns_binding_checks_without_payloads_or_new_requests(case, changes):
+    baseline = Cluster()
+    preflight.inspect(baseline, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    cluster = Cluster()
+    dns = {"metadata": {"name": "coredns", "namespace": "kube-system", "uid": "dns-uid",
+                        "annotations": {"private": "private-dns-annotation"}},
+           "spec": {"type": "ClusterIP", "clusterIP": "10.43.0.10", "selector": {"k8s-app": "coredns"},
+                    "ports": [{"protocol": "TCP", "port": 53, "targetPort": "dns-tcp"},
+                              {"protocol": "UDP", "port": 53, "targetPort": "dns-udp"}]}}
+    if case == "owned":
+        dns["metadata"]["ownerReferences"] = [{"name": "private-addon-owner", "uid": "private-owner-uid"}]
+    elif case == "extra_selector":
+        dns["spec"]["selector"]["private-key"] = "private-selector-value"
+    elif case == "legacy":
+        dns["spec"]["selector"] = {"k8s-app": "kube-dns"}
+    elif case == "missing_selector":
+        dns["spec"].pop("selector")
+    elif case == "headless":
+        dns["spec"]["clusterIP"] = "None"
+    elif case == "tcp_only":
+        dns["spec"]["ports"].pop()
+    elif case == "deleting":
+        dns["metadata"]["deletionTimestamp"] = "2026-09-29T00:00:00Z"
+    cluster.lists["services"].append(dns)
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    observed = result["services"][1]
+    assert observed["uid"] == "dns-uid"
+    assert observed["dns_checks"] == {"not_deleting": True, "no_owner_references": True,
+        "native_selector_exact": True, "native_selector_required": True, "legacy_selector_required": False,
+        "cluster_ip_usable": True, "tcp_53": True, "udp_53": True, **changes}
+    assert "dns_checks" not in result["services"][0]
+    assert "private-" not in json.dumps(result)
+    assert cluster.calls == baseline.calls
+
+
 def test_inspection_connects_optional_binding_without_exporting_it(monkeypatch):
     monkeypatch.setenv("NEBIUS_INGRESS_INSTALLATION_JSON", '{"private":"invalid-binding"}')
     result = preflight.inspect(Cluster(), namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
@@ -174,6 +220,8 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
     assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == [
         "rollout", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
         "management-preflight", "management-install",
+        "management-diagnostic-preflight", "management-diagnostic-install",
+        "management-recovery-preflight", "management-recovery-install",
     ]
     assert "inputs.operation == 'rollout'" in workflow["jobs"]["rollout"]["if"]
     job = workflow["jobs"]["inspect"]
@@ -188,3 +236,4 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
     assert "--apply" not in commands
     inspection = next(step for step in job["steps"] if "nebius_management_preflight.py" in step.get("run", ""))
     assert inspection["env"]["NEBIUS_INGRESS_INSTALLATION_JSON"] == "${{ vars.NEBIUS_INGRESS_INSTALLATION_JSON }}"
+    assert inspection["env"]["NEBIUS_MANAGEMENT_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_OPERATION_JSON }}"

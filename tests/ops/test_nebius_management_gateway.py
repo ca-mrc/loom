@@ -24,6 +24,165 @@ def operation(tmp_path):
         "inputs_sha256": "c" * 64}
 
 
+def upgrade_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/upgrade"
+    return {**metadata, "schema": "loom.nebius-management-upgrade-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"),
+        "inputs_path": str(root / "inputs.json")}
+
+
+def retirement_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement"
+    return {**metadata, "schema": "loom.nebius-management-retirement-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def diagnostic_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement-diagnostic"
+    return {**metadata, "schema": "loom.nebius-management-retirement-diagnostic-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def recovery_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement-recovery"
+    return {**metadata, "schema": "loom.nebius-management-retirement-recovery-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def startup_report():
+    return {"schema": "loom.nebius-retirement-startup-probe.v1", "status": "observed", "stage": "complete",
+        "checks": ["database_binding", "kubernetes_ca", "kubernetes_token", "database", "kubernetes"],
+        "operations": [{"operation_id": "18718d96-d389-40b3-a79b-11489924d0d6", "phase": "pending",
+            "runner_epoch": 0, "lease_present": False, "error_present": False, "resource_count": 3, "effects_started": False}]}
+
+
+def recovery_report():
+    return {"schema": "loom.nebius-retirement-recovery-report.v1", "status": "completed", "stage": "complete",
+        "retirement_started": True, "error_type": None, "startup": startup_report(), "operations": [{
+            "operation_id": "18718d96-d389-40b3-a79b-11489924d0d6", "phase": "completed",
+            "non_storage_released": True, "storage_preserved": True}]}
+
+
+def test_recovery_authority_reports_only_qualified_completion_or_closed_failure(tmp_path):
+    gateway = module()
+    metadata = recovery_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    report = {**metadata, "status": "retirement_recovered", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "recovery": recovery_report()}
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["recovery"] == recovery_report()
+    blocked = recovery_report() | {"status": "blocked", "stage": "retirement", "error_type": "ManagementError", "operations": []}
+    report.update(status="blocked", stage="recovery_runtime", recovery=blocked)
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["recovery"] == blocked
+    report["status"] = "retirement_recovered"
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+    for field in ("inputs_path", "state_dir", "anchor_dir"):
+        wrong = metadata | {field: diagnostic_operation(tmp_path)[field]}
+        with pytest.raises(gateway.GatewayError):
+            gateway.validate_operation(wrong)
+
+
+@pytest.mark.parametrize("change", ["raw_message", "missing_storage", "not_released", "foreign_operation",
+    "duplicate", "startup_unavailable", "prior_attempt", "not_started", "boolean_proof", "error"])
+def test_recovery_report_cannot_invent_release_or_leak_raw_failures(change):
+    gateway = module()
+    report = recovery_report()
+    if change == "raw_message":
+        report["message"] = "private-provider-error"
+    elif change == "missing_storage":
+        del report["operations"][0]["storage_preserved"]
+    elif change == "not_released":
+        report["operations"][0]["non_storage_released"] = False
+    elif change == "foreign_operation":
+        report["operations"][0]["operation_id"] = "18718d96-d389-40b3-a79b-11489924d0d7"
+    elif change == "duplicate":
+        report["operations"].append(dict(report["operations"][0]))
+    elif change == "startup_unavailable":
+        report["startup"] = None
+    elif change == "prior_attempt":
+        report["startup"]["operations"][0]["runner_epoch"] = 1
+    elif change == "not_started":
+        report["retirement_started"] = False
+    elif change == "boolean_proof":
+        report["operations"][0]["storage_preserved"] = 1
+    else:
+        report["error_type"] = "private-exception"
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_recovery_report(report)
+
+
+def test_diagnostic_metadata_and_bounded_result_are_separate_from_retirement(tmp_path):
+    gateway = module()
+    metadata = diagnostic_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    report = {**metadata, "status": "retirement_diagnostic_observed", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "probe": startup_report(), "private": "never-return"}
+    result = gateway.safe_report(json.dumps(report).encode(), metadata)
+    assert result["probe"] == startup_report() and "private" not in result
+    for wrong in ("management_retired", "management_installed", "management_upgraded"):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report | {"status": wrong}).encode(), metadata)
+    report.update(status="pending", phase="retirement-diagnostic")
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["phase"] == "retirement-diagnostic"
+
+
+@pytest.mark.parametrize("change", ["raw_message", "checks", "operation_field", "boolean_epoch", "phase", "duplicate", "unknown_stage"])
+def test_startup_report_contract_cannot_leak_or_invent_observations(change):
+    gateway = module()
+    report = startup_report()
+    if change == "raw_message":
+        report["message"] = "private-provider-error"
+    elif change == "checks":
+        report["checks"] = []
+    elif change == "operation_field":
+        report["operations"][0]["lease_token"] = "private-token"
+    elif change == "boolean_epoch":
+        report["operations"][0]["runner_epoch"] = True
+    elif change == "phase":
+        report["operations"][0]["phase"] = "private-phase"
+    elif change == "duplicate":
+        report["operations"].append(dict(report["operations"][0]))
+    else:
+        report["stage"] = "private-stage"
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_startup_report(report)
+
+
+def test_unavailable_startup_report_is_observation_not_cleanup_success(tmp_path):
+    gateway = module()
+    metadata = diagnostic_operation(tmp_path)
+    probe = {"schema": "loom.nebius-retirement-startup-probe.v1", "status": "unavailable", "stage": "kubernetes_get",
+        "checks": ["database_binding", "kubernetes_ca", "kubernetes_token", "database"],
+        "operations": startup_report()["operations"], "error_type": "HTTPStatusError", "http_status": 403}
+    report = {**metadata, "status": "retirement_diagnostic_observed", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "probe": probe}
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["probe"] == probe
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_startup_report(probe | {"error_type": "private-error"})
+
+
+def test_retirement_authority_uses_separate_recovery_and_reports_no_bootstrap_success(tmp_path):
+    gateway = module()
+    metadata = retirement_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    for status, phase in (("pending", "retirement"), ("management_retired", None)):
+        report = {**metadata, "status": status, "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+            "revision": "sha256:" + "f" * 64, "private": "do-not-report"}
+        if phase:
+            report["phase"] = phase
+        assert "private" not in gateway.safe_report(json.dumps(report).encode(), metadata)
+    report["status"] = "management_installed"
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+    metadata["inputs_path"] = str(tmp_path / "nebius-management/upgrade/inputs.json")
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_operation(metadata)
+
+
 def bundle(tmp_path):
     files = {name: b"fixture source" for name in module().SOURCES}
     files.update({"uv": b"fixture binary", "requirements.txt": b"fixture hashed dependencies",
@@ -162,3 +321,66 @@ def test_blocked_report_rejects_unqualified_diagnostic(tmp_path, stage):
     report.update(status="blocked", stage=stage)
     with pytest.raises(module().GatewayError):
         module().safe_report(json.dumps(report).encode(), metadata)
+
+
+def test_upgrade_bundle_uses_separate_private_recovery_and_fixed_existing_actions(tmp_path, monkeypatch):
+    metadata = upgrade_operation(tmp_path)
+    (tmp_path / 'nebius-management').mkdir(mode=0o700)
+    files = bundle(tmp_path)
+    files['operation.json'] = json.dumps(metadata).encode()
+    calls = []
+    monkeypatch.setattr(module(), 'run_private', lambda args, **kwargs: calls.append(args) or b'')
+    release = module().prepare_release(archive(files))
+    assert release.parent.parent == tmp_path / 'nebius-management/upgrade'
+    assert json.loads((release / 'operation.json').read_bytes()) == metadata
+    assert not (tmp_path / 'nebius-management/state').exists()
+    assert module().command(release, 'install')[-1] == 'install'
+    assert len(calls) == 4
+
+
+@pytest.mark.parametrize('change', ['old_state', 'old_anchor', 'old_inputs', 'legacy_schema', 'unknown_schema'])
+def test_upgrade_cannot_reuse_bootstrap_paths_or_implicit_schema(tmp_path, change):
+    metadata = upgrade_operation(tmp_path)
+    if change.startswith('old_'):
+        field = {'old_state': 'state_dir', 'old_anchor': 'anchor_dir', 'old_inputs': 'inputs_path'}[change]
+        metadata[field] = operation(tmp_path)[field]
+    else:
+        metadata['schema'] = ('loom.nebius-management-operation.v1' if change == 'legacy_schema' else 'unknown')
+    with pytest.raises(module().GatewayError):
+        module().validate_operation(metadata)
+
+
+@pytest.mark.parametrize('status,phase', [('management_upgraded', None),
+    *[('pending', phase) for phase in ('admission', 'authority', 'database', 'retirement', 'retire', 'migration', 'activate', 'service')]])
+def test_upgrade_report_preserves_fixed_progress_without_new_backup_or_private_data(tmp_path, status, phase):
+    metadata = upgrade_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace')}
+    report.update(status=status, phase=phase, namespace_uid='52f5b18c-7dd3-4095-bd7e-49f6a6330391',
+        revision='sha256:' + 'd' * 64, material='private-value')
+    safe = module().safe_report(json.dumps(report).encode(), metadata)
+    assert safe['status'] == status and 'private-value' not in json.dumps(safe) and 'backup' not in safe
+    if phase is not None:
+        assert safe['phase'] == phase
+    legacy = operation(tmp_path)
+    if status == 'management_upgraded' or phase not in {'database', 'migration', 'service'}:
+        with pytest.raises(module().GatewayError):
+            module().safe_report(json.dumps(report).encode(), legacy)
+
+
+def test_upgrade_cannot_report_bootstrap_success_or_unqualified_phase(tmp_path):
+    metadata = upgrade_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace')}
+    report.update(namespace_uid='52f5b18c-7dd3-4095-bd7e-49f6a6330391', revision='sha256:' + 'd' * 64)
+    for extra in ({'status': 'management_installed'}, {'status': 'pending', 'phase': 'backup'},
+                  {'status': 'pending', 'phase': 'private-value'}):
+        with pytest.raises(module().GatewayError):
+            module().safe_report(json.dumps(report | extra).encode(), metadata)
+
+
+@pytest.mark.parametrize('stage', ['shared_material', 'upgrade_material', 'upgrade_retire', 'upgrade_activate'])
+def test_upgrade_failure_keeps_only_fixed_stage_for_recovery(tmp_path, stage):
+    metadata = upgrade_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace')}
+    report.update(status='blocked', stage=stage, private='never-export')
+    safe = module().safe_report(json.dumps(report).encode(), metadata)
+    assert safe['stage'] == stage and 'never-export' not in json.dumps(safe)

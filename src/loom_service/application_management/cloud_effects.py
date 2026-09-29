@@ -29,7 +29,7 @@ from loom_service.environment_management.registry import ManagementError
 
 
 class ApplicationStorageAccessV1(BaseModel):
-    """Already-qualified shared groups in a protected provisioning project."""
+    """Account/key project and qualified shared groups, possibly cross-project."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     data_environment_id: UUID

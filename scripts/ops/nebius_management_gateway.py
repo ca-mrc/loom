@@ -26,6 +26,13 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_storage", "nebius_management_install", "nebius_management_evidence",
     "nebius_management_proofs", "nebius_management_live", "nebius_management_capacity",
     "nebius_management_cloud_scope", "nebius_management_prerequisites",
+    "nebius_application_setup", "nebius_application_cloud_scope", "nebius_application_upgrade_prerequisites",
+    "nebius_management_switch", "nebius_management_upgrade", "nebius_management_upgrade_live",
+    "nebius_management_retirement", "nebius_management_retirement_entry",
+    "nebius_retirement_startup_probe", "nebius_management_retirement_diagnostic",
+    "nebius_management_retirement_diagnostic_entry", "nebius_management_retirement_diagnostic_live",
+    "nebius_retirement_recovery_runner", "nebius_management_retirement_recovery",
+    "nebius_management_retirement_recovery_entry", "nebius_management_retirement_recovery_live",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
@@ -39,7 +46,14 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "install_storage", "install_migration", "install_backup", "install_schedule", "install_service", "install_public",
     "ready_database", "ready_migration", "ready_backup", "ready_service",
     "backup_job", "backup_pod_list", "backup_pod_identity", "backup_pod_template", "backup_pod_status",
-    "backup_log", "backup_readback"})
+    "backup_log", "backup_readback", "shared_material",
+    "upgrade_config", "upgrade_admission", "upgrade_permissions", "upgrade_network", "upgrade_material",
+    "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate", "retirement",
+    "diagnostic_original", "diagnostic_stage", "diagnostic_job", "diagnostic_pod", "diagnostic_log", "diagnostic_readback",
+    "diagnostic_pod_list", "diagnostic_pod_identity", "diagnostic_pod_owner", "diagnostic_pod_observation",
+    "diagnostic_pod_labels", "diagnostic_pod_template", "diagnostic_pod_security", "diagnostic_pod_status",
+    "diagnostic_container_status", "diagnostic_container_shape",
+    "recovery_original", "recovery_dns", "recovery_stage", "recovery_runtime"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -53,7 +67,10 @@ def validate_operation(value: dict[str, Any]) -> None:
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
             raise ValueError()
-        if value["schema"] != "loom.nebius-management-operation.v1":
+        if value["schema"] not in {"loom.nebius-management-operation.v1", "loom.nebius-management-upgrade-operation.v1",
+                                   "loom.nebius-management-retirement-operation.v1",
+                                   "loom.nebius-management-retirement-diagnostic-operation.v1",
+                                   "loom.nebius-management-retirement-recovery-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -68,7 +85,16 @@ def validate_operation(value: dict[str, Any]) -> None:
             if not path.is_absolute() or path != path.resolve() or not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(path)):
                 raise ValueError()
         state = Path(value["state_dir"])
-        if (state.name != "state" or state.parent.name != "nebius-management"
+        root = state.parent
+        separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
+                     "loom.nebius-management-retirement-operation.v1": "retirement",
+                     "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
+                     "loom.nebius-management-retirement-recovery-operation.v1": "retirement-recovery"}
+        if value["schema"] in separated:
+            if root.name != separated[value["schema"]]:
+                raise ValueError()
+            root = root.parent
+        if (state.name != "state" or root.name != "nebius-management"
                 or Path(value["anchor_dir"]) != state.parent / "anchor"
                 or Path(value["inputs_path"]) != state.parent / "inputs.json"):
             raise ValueError()
@@ -153,6 +179,96 @@ def prepare_release(content: bytes) -> Path:
         raise GatewayError("management tooling incomplete; retain private state") from None
 
 
+def validate_startup_report(value: dict[str, Any]) -> dict[str, Any]:
+    """Closed payload contract; no raw rows, provider messages or credential data."""
+    try:
+        fields = {"schema", "status", "stage", "checks", "operations"}
+        success = value["status"] == "observed"
+        steps = ["database_binding", "kubernetes_ca", "kubernetes_token", "database", "kubernetes"]
+        completed = {"settings": 0, "database_binding": 0, "kubernetes_ca": 1, "kubernetes_token": 2,
+                     "database": 3, "kubernetes_get": 4, "kubernetes_identity": 4, "complete": 5}
+        if (set(value) != fields | (set() if success else {"error_type", "http_status"})
+                or value["schema"] != "loom.nebius-retirement-startup-probe.v1"
+                or value["status"] not in {"observed", "unavailable"}
+                or success != (value["stage"] == "complete")
+                or value["checks"] != steps[:completed[value["stage"]]]):
+            raise ValueError
+        operations = value["operations"]
+        if (not isinstance(operations, list) or len(operations) > 16
+                or bool(operations) != ("database" in value["checks"])):
+            raise ValueError
+        seen = set()
+        for row in operations:
+            if (set(row) != {"operation_id", "phase", "runner_epoch", "lease_present", "error_present", "resource_count", "effects_started"}
+                    or str(UUID(row["operation_id"])) != row["operation_id"] or not UUID(row["operation_id"]).int
+                    or row["operation_id"] in seen or row["phase"] not in {"pending", "running", "blocked", "completed"}
+                    or any(type(row[key]) is not bool for key in ("lease_present", "error_present", "effects_started"))
+                    or any(type(row[key]) is not int or not 0 <= row[key] < 2**63 for key in ("runner_epoch", "resource_count"))):
+                raise ValueError
+            seen.add(row["operation_id"])
+        if not success:
+            errors = {"ValueError", "KeyError", "ValidationError", "FileNotFoundError", "PermissionError", "SSLError",
+                "TimeoutError", "OperationalError", "ProgrammingError", "InternalError", "StatementError",
+                "HTTPStatusError", "ConnectError", "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
+                "ProviderBlockedError", "ProviderRetryError", "OtherError"}
+            if value["error_type"] not in errors:
+                raise ValueError
+            code = value["http_status"]
+            if ((code is not None and (type(code) is not int or not 100 <= code <= 599))
+                    or (code is not None) != (value["error_type"] == "HTTPStatusError")):
+                raise ValueError
+        return value
+    except Exception:
+        raise GatewayError("invalid retirement startup observation") from None
+
+
+def validate_recovery_report(value: dict[str, Any]) -> dict[str, Any]:
+    """A completed Pod is insufficient: require exact, storage-preserving proof."""
+    try:
+        if (set(value) != {"schema", "status", "stage", "retirement_started", "error_type", "startup", "operations"}
+                or value["schema"] != "loom.nebius-retirement-recovery-report.v1"
+                or value["status"] not in {"completed", "blocked"}
+                or type(value["retirement_started"]) is not bool):
+            raise ValueError
+        complete = value["status"] == "completed"
+        stage = value["stage"]
+        if (stage not in {"settings", "startup", "operation_state", "reservation_before", "retirement", "completion", "complete"}
+                or complete != (stage == "complete")
+                or value["retirement_started"] != (stage in {"retirement", "completion", "complete"})):
+            raise ValueError
+        startup = value["startup"]
+        if startup is not None:
+            validate_startup_report(startup)
+        if stage not in {"settings", "startup"} and (startup is None or startup["status"] != "observed"):
+            raise ValueError
+        if stage in {"reservation_before", "retirement", "completion", "complete"}:
+            if any(row["phase"] != "pending" or row["runner_epoch"] != 0 or row["lease_present"]
+                   or row["error_present"] or row["effects_started"] for row in startup["operations"]):
+                raise ValueError
+        if complete:
+            if value["error_type"] is not None:
+                raise ValueError
+            operations = value["operations"]
+            if (not isinstance(operations, list) or len(operations) != len(startup["operations"])
+                    or {row["operation_id"] for row in operations} != {row["operation_id"] for row in startup["operations"]}):
+                raise ValueError
+            for row in operations:
+                if (set(row) != {"operation_id", "phase", "non_storage_released", "storage_preserved"}
+                        or row["phase"] != "completed" or row["non_storage_released"] is not True
+                        or row["storage_preserved"] is not True):
+                    raise ValueError
+        else:
+            errors = {"ValueError", "KeyError", "ValidationError", "FileNotFoundError", "PermissionError", "SSLError",
+                "TimeoutError", "OperationalError", "ProgrammingError", "InternalError", "StatementError",
+                "HTTPStatusError", "ConnectError", "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
+                "ProviderBlockedError", "ProviderRetryError", "ManagementError", "OtherError"}
+            if value["operations"] != [] or value["error_type"] not in errors:
+                raise ValueError
+        return value
+    except Exception:
+        raise GatewayError("invalid retirement recovery report") from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -160,7 +276,13 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             raise ValueError()
         value = json.loads(raw)
         status = value["status"]
-        if status not in {"preflight_qualified", "pending", "management_installed", "blocked"}:
+        upgrade = operation["schema"] == "loom.nebius-management-upgrade-operation.v1"
+        retirement = operation["schema"] == "loom.nebius-management-retirement-operation.v1"
+        diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
+        recovery = operation["schema"] == "loom.nebius-management-retirement-recovery-operation.v1"
+        success = ("retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
+            else "management_upgraded" if upgrade else "management_installed")
+        if status not in {"preflight_qualified", "pending", success, "blocked"}:
             raise ValueError()
         result = {"status": status}
         for key in ("source_sha", "candidate", "installation_id", "namespace"):
@@ -171,15 +293,25 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
             result["stage"] = value["stage"]
-        if status in {"pending", "management_installed"}:
+        if status in {"pending", success}:
             uid, revision = value["namespace_uid"], value["revision"]
             if str(UUID(uid)) != uid or UUID(uid).int == 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", revision):
                 raise ValueError()
             result.update(namespace_uid=uid, revision=revision)
         if status == "pending":
-            if value["phase"] not in {"database", "migration", "backup", "service"}:
+            phases = ({"retirement-recovery"} if recovery else {"retirement-diagnostic"} if diagnostic else {"retirement"} if retirement
+                else {"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
+                if upgrade else {"database", "migration", "backup", "service"})
+            if value["phase"] not in phases:
                 raise ValueError()
             result["phase"] = value["phase"]
+        if status == "retirement_diagnostic_observed":
+            result["probe"] = validate_startup_report(value["probe"])
+        if recovery and (status == "retirement_recovered" or (status == "blocked" and value["stage"] == "recovery_runtime")):
+            report = validate_recovery_report(value["recovery"])
+            if (report["status"] == "completed") != (status == "retirement_recovered"):
+                raise ValueError
+            result["recovery"] = report
         if status == "management_installed":
             backup = value["backup"]
             uid, checksum, size, key = (backup[name] for name in ("job_uid", "sha256", "bytes", "key"))

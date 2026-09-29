@@ -10,8 +10,12 @@ on:
       operation:
         description: Idle rollout, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install]
+        options: [rollout, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install]
         default: rollout
+      prepare_shared_inputs:
+        description: With inspect only, retain application upgrade inputs privately on the gateway (no cluster writes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -308,7 +312,9 @@ jobs:
       github.repository == 'qianyi-sun/loom' &&
       github.ref == 'refs/heads/dev' &&
       github.event_name == 'workflow_dispatch' &&
-      (inputs.operation == 'management-preflight' || inputs.operation == 'management-install')
+      (inputs.operation == 'management-preflight' || inputs.operation == 'management-install' ||
+       inputs.operation == 'management-diagnostic-preflight' || inputs.operation == 'management-diagnostic-install' ||
+       inputs.operation == 'management-recovery-preflight' || inputs.operation == 'management-recovery-install')
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     permissions:
@@ -325,11 +331,24 @@ jobs:
       - name: Select exact integrated management authority source
         id: tooling
         env:
+          MANAGEMENT_OPERATION: ${{ inputs.operation }}
           NEBIUS_MANAGEMENT_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_OPERATION_JSON }}
+          NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON }}
+          NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON }}
         run: |
           python3 - <<'PY'
           import json, os, re, subprocess
-          value = json.loads(os.environ['NEBIUS_MANAGEMENT_OPERATION_JSON'])
+          action = os.environ['MANAGEMENT_OPERATION']
+          if action not in {'management-preflight', 'management-install', 'management-diagnostic-preflight', 'management-diagnostic-install', 'management-recovery-preflight', 'management-recovery-install'}:
+              raise SystemExit('Fixed management operation required')
+          diagnostic = action.startswith('management-diagnostic-')
+          recovery = action.startswith('management-recovery-')
+          key = ('NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON' if recovery else
+                 'NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON' if diagnostic else 'NEBIUS_MANAGEMENT_OPERATION_JSON')
+          value = json.loads(os.environ[key])
+          if (diagnostic != (value['schema'] == 'loom.nebius-management-retirement-diagnostic-operation.v1') or
+              recovery != (value['schema'] == 'loom.nebius-management-retirement-recovery-operation.v1')):
+              raise SystemExit('Management operation schema differs from selected authority')
           sha = value['source_sha']
           if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):
               raise SystemExit('Exact management source commit required')
@@ -360,13 +379,33 @@ jobs:
         env:
           MANAGEMENT_OPERATION: ${{ inputs.operation }}
           DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_MANAGEMENT_SSH_KEY }}
+          DIAGNOSTIC_SSH_KEY: ${{ secrets.NEBIUS_MANAGEMENT_DIAGNOSTIC_SSH_KEY }}
+          RECOVERY_SSH_KEY: ${{ secrets.NEBIUS_MANAGEMENT_RECOVERY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
           LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
           NEBIUS_MANAGEMENT_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_OPERATION_JSON }}
+          NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON }}
+          NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON }}
         shell: bash
         run: |
           set -euo pipefail
           umask 077
+          case "$MANAGEMENT_OPERATION" in
+            management-preflight) operation=preflight ;;
+            management-install) operation=install ;;
+            management-diagnostic-preflight|management-diagnostic-install)
+              operation="${MANAGEMENT_OPERATION##*-}"
+              DEPLOY_SSH_KEY="$DIAGNOSTIC_SSH_KEY"
+              export NEBIUS_MANAGEMENT_OPERATION_JSON="$NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON"
+              ;;
+            management-recovery-preflight|management-recovery-install)
+              operation="${MANAGEMENT_OPERATION##*-}"
+              DEPLOY_SSH_KEY="$RECOVERY_SSH_KEY"
+              export NEBIUS_MANAGEMENT_OPERATION_JSON="$NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON"
+              ;;
+            *) exit 1 ;;
+          esac
+          unset DIAGNOSTIC_SSH_KEY RECOVERY_SSH_KEY NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON
           export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-management-key"
           export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-management-known-hosts"
           trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
@@ -376,11 +415,6 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
           unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
-          case "$MANAGEMENT_OPERATION" in
-            management-preflight) operation=preflight ;;
-            management-install) operation=install ;;
-            *) exit 1 ;;
-          esac
           uv run --no-sync python -m scripts.ops.nebius_management_rollout \
             --operation "$operation" --requirements "$RUNNER_TEMP/management-requirements.txt" \
             --evidence-dir "$RUNNER_TEMP/nebius-management"
@@ -420,7 +454,9 @@ jobs:
       - run: uv sync --locked --no-dev --extra cluster
       - name: Inspect installation prerequisites without changing cluster state
         env:
+          PREPARE_SHARED_INPUTS: ${{ inputs.prepare_shared_inputs }}
           NEBIUS_INGRESS_INSTALLATION_JSON: ${{ vars.NEBIUS_INGRESS_INSTALLATION_JSON }}
+          NEBIUS_MANAGEMENT_OPERATION_JSON: ${{ vars.NEBIUS_MANAGEMENT_OPERATION_JSON }}
           DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
           LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
@@ -441,9 +477,13 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
           unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          extra_args=()
+          if [[ "$PREPARE_SHARED_INPUTS" == 'true' ]]; then
+            extra_args+=(--prepare-shared-inputs)
+          fi
           uv run --no-sync python scripts/ops/nebius_management_preflight.py \
             --kubeconfig "$REMOTE_KUBECONFIG" --expected-cluster-id "$CLUSTER_ID" \
-            --evidence-dir "$RUNNER_TEMP/nebius-inspect"
+            --evidence-dir "$RUNNER_TEMP/nebius-inspect" "${extra_args[@]}"
       - name: Preserve sanitized installation inventory
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

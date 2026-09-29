@@ -76,6 +76,29 @@ def sha256(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
+def source_archive_digest(revision: str) -> str:
+    """Hash actual committed source bytes; never substitute a digest of Git SHA."""
+    try:
+        def git(*arguments: str) -> bytes:
+            result = subprocess.run(['git', *arguments], cwd=ROOT, check=False, capture_output=True, timeout=30)
+            if result.returncode:
+                raise ValueError()
+            return result.stdout.strip()
+
+        if (SHA.fullmatch(revision) is None or git('rev-parse', 'HEAD') != revision.encode()
+                or git('status', '--porcelain', '--untracked-files=normal')):
+            raise ValueError()
+        with tempfile.TemporaryFile() as archive:
+            result = subprocess.run(['git', 'archive', '--format=tar', revision], cwd=ROOT,
+                stdout=archive, stderr=subprocess.PIPE, check=False, timeout=60)
+            if result.returncode or not 0 < archive.tell() <= 512 * 1024**2:
+                raise ValueError()
+            archive.seek(0)
+            return 'sha256:' + hashlib.file_digest(archive, 'sha256').hexdigest()
+    except Exception:
+        raise ValueError('candidate source archive unavailable or checkout changed') from None
+
+
 def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -260,6 +283,11 @@ def create_candidate(
     result["images"] = {
         component: {"image_ref": row["image_ref"]} for component, row in document["images"].items()
     }
+    if "source_archive_sha256" in document:
+        source_digest = document["source_archive_sha256"]
+        if not isinstance(source_digest, str) or DIGEST.fullmatch(source_digest) is None:
+            raise ValueError("invalid candidate source archive digest")
+        result["source_archive_sha256"] = source_digest
     provenance = sha256(encoded(result))
     admissions = [
         _sign_admission(document["images"][component], document["policy_sha256"], provenance,
@@ -515,6 +543,7 @@ def build(args: argparse.Namespace) -> None:
     version = version or "nebius-" + candidate
     if AGENT_VERSION.fullmatch(version) is None:
         raise ValueError("invalid agent version label")
+    source_digest = source_archive_digest(candidate) if mode != "harness-only" else None
     args.output.mkdir(parents=True, exist_ok=False)
     _diagnostic_dir = args.output
     component_manifest = load_manifest(ROOT / "config/component-ownership.toml")
@@ -530,6 +559,8 @@ def build(args: argparse.Namespace) -> None:
         "registry_prefix": args.registry_prefix,
         "images": {},
     }
+    if source_digest is not None:
+        document['source_archive_sha256'] = source_digest
     with tempfile.TemporaryDirectory(prefix="loom-nebius-build-") as temporary:
         work = Path(temporary)
         scanner = install_trivy(work, architecture="amd64")
