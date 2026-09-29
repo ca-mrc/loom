@@ -817,6 +817,30 @@ switch to application APIs. See the [owner workflow](../runbooks/nebius-deployme
 Arbitrary-source publication and installed multi-owner acceptance remain separate
 requirements. CLI/source coverage does not prove deployed personal readiness.
 
+### Local application source capture
+
+`loom_cli.application_source.capture_application_source` is an internal capture
+boundary for the future owner upload/build flow, not a deployment command. It
+snapshots current tracked and nonignored untracked Git worktree bytes, including
+dirty edits and local deletions, into a private temporary directory outside the
+checkout. Normal Git exclusions are retained; ambient Git tree/index overrides
+are ignored and fsmonitor/hooks and optional index writes are disabled.
+Mandatory exclusions also remove VCS/runtime/owner state, environment files
+(except `.env.example`) and known private-key names even when tracked.
+This is not a detector for secrets authored under arbitrary other names.
+
+`loom.application_source.ApplicationSourceManifestV1` binds the sorted paths,
+bytes, normalized executable modes and relative link targets with a canonical
+SHA256 digest. It is separate from task-source and qualified-release authority;
+the optional base commit is informational, never CI approval. Capture rejects
+escaping/dangling/cyclic links, special/nonowned/hardlinked files, submodules,
+unmerged indices and included-file/parent/inventory changes. Transfer bounds are
+25,000 files, 512 MiB aggregate and 8 MiB canonical manifest, not execution quotas.
+Consumers must use the verified manifest reader rather than reopen unchecked
+paths. The owned temporary snapshot is removed on exit, including errors.
+Publication, global build-capacity admission, image building, release qualification
+and installed source-to-deploy acceptance remain separate, unimplemented consumers.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
