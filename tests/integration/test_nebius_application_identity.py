@@ -31,6 +31,8 @@ def principal(**changes):
 def enroll(access, app, incarnation, owner, *, generation=1, schema=None):
     from loom.nebius_application_identity import ApplicationDatabaseIdentity
 
+    if schema is None:
+        schema = service_schema_head()
     return ApplicationDatabaseIdentity(access).enroll(
         app, incarnation, generation, schema_revision=service_schema_head() if schema is None else schema, principal=owner)
 
