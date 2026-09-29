@@ -84,6 +84,14 @@ def _original(request: ManagementUpgradeRequest) -> tuple[dict[str, Any], str]:
         value['installation'].pop('provider_runtime', None)
         value['installation'].pop('applications', None)
         value['installation'].pop('publications')
+        foundation = value['installation']['foundation']
+        config = json.loads(foundation['platform_config_json'])
+        # The shared operator can add a guest execution target independently of
+        # management. This is a live-qualified reference, not a resource owned by
+        # this upgrade. All other retained data/infrastructure fields stay fixed;
+        # prerequisite checks still require the exact current shared ConfigMap.
+        config.pop('guest_execution_target', None)
+        foundation['platform_config_json'] = json.dumps(config, sort_keys=True)
     if (before != after or original.deployment.installation.provider_runtime is None
             or any(publication not in setup.deployment.installation.publications
                 for publication in original.deployment.installation.publications)

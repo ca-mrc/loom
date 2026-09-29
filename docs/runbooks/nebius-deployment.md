@@ -815,6 +815,18 @@ It never copies the database administrator password, JWT keys or whole Secrets.
 Only the observation UUID and candidate commit return to Actions. Ordinary
 inspection does not collect credentials. Select that private snapshot when
 preparing upgrade inputs; the upgrade still checks it against live consumers.
+The deployed SSH wrapper must authorize the exact reviewed collector bytes and
+fixed cluster/namespace identities. A kubectl-only forced command cannot execute
+this collector. Install a hash-bound, read-only collector grant through the
+approved operator route, preserving the existing kubectl restrictions and a copy
+of the previous wrapper. Never replace the protected key with an operator shell
+key; a collector source change requires reviewing and updating its exact grant.
+
+Use the captured shared configuration for the new application binding. Its guest
+execution target reference may have advanced since management bootstrap; the
+upgrade qualifies that reference against the current shared ConfigMap without
+changing the target. Other retained foundation fields, management identity,
+database/storage, routes, credentials and original input bytes remain fixed.
 
 Prerequisites bind the management candidate ID, shared ConfigMap/service/database
 Secret/auth Secret UIDs, existing business bucket IDs and application IAM scope.
