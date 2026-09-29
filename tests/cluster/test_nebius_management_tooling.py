@@ -74,6 +74,9 @@ from scripts.ops.nebius_management_retirement_diagnostic import diagnostic_docum
 from scripts.ops.nebius_management_retirement_diagnostic_live import HTTPSRetirementDiagnosticAPI
 from scripts.ops.nebius_management_retirement_recovery import recovery_documents
 from scripts.ops.nebius_management_retirement_recovery_live import HTTPSRetirementRecoveryAPI
+from scripts.ops.nebius_management_refresh_entry import RefreshPrivateInputs
+from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
+from loom.nebius_management_refresh_probe import RefreshProbeSettings
 from loom_service.environment_management.deployment import ManagementDeployment
 from loom_service.environment_management.retirement import RetirementTarget
 raw = json.loads(Path(sys.argv[2]).read_bytes())
@@ -90,12 +93,14 @@ exec(recovery_job['spec']['template']['spec']['containers'][0]['command'][2], re
 print(json.dumps({'command': command[:2], 'schema': probe['SCHEMA'],
     'settings_path': str(probe['SETTINGS_PATH']), 'adapter': HTTPSRetirementDiagnosticAPI.__name__,
     'recovery_schema': recovery['SCHEMA'], 'recovery_adapter': HTTPSRetirementRecoveryAPI.__name__,
-    'embedded_startup_schema': recovery['_startup'].SCHEMA}))
+    'embedded_startup_schema': recovery['_startup'].SCHEMA,
+    'refresh': [RefreshPrivateInputs.__name__, HTTPSManagementRefreshInstaller.__name__, RefreshProbeSettings.__name__]}))
 """
     result = json.loads(run_private([str(release / "venv/bin/python"), "-I", "-c", code,
                                     str(release), str(fixture)], timeout=30))
     assert result == {"command": ["python", "-c"], "schema": "loom.nebius-retirement-startup-probe.v1",
         "settings_path": "/var/run/loom-retirement/retirement.json", "adapter": "HTTPSRetirementDiagnosticAPI",
         "recovery_schema": "loom.nebius-retirement-recovery-report.v1", "recovery_adapter": "HTTPSRetirementRecoveryAPI",
-        "embedded_startup_schema": "loom.nebius-retirement-startup-probe.v1"}
+        "embedded_startup_schema": "loom.nebius-retirement-startup-probe.v1",
+        "refresh": ["RefreshPrivateInputs", "HTTPSManagementRefreshInstaller", "RefreshProbeSettings"]}
     assert prepare_release(content) == release
