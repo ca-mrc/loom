@@ -50,7 +50,8 @@ def connected_refresh(completed_upgrade, monkeypatch):
     binding = request.resources.binding
     app = request.resources.switch.render.after.installation.applications
     values = {_key(doc): copy.deepcopy(doc) for doc in completed_upgrade[2].store.resources.values()}
-    values.update(copy.deepcopy(root.retained))
+    for key, document in root.retained.items():
+        values.setdefault(key, copy.deepcopy(document))
     bundle = json.loads((root.upgrade.original_state / 'bootstrap/material/material.json').read_text())
     for name, doc in _documents(bundle['material'], binding, bundle['operation_id']).items():
         doc['metadata']['uid'] = bundle['resources'][name]['uid']
@@ -114,7 +115,7 @@ def connected_refresh(completed_upgrade, monkeypatch):
 
     def key_for(path):
         pieces = path.strip('/').split('/')
-        ns = pieces[pieces.index('namespaces') + 1] if 'namespaces' in pieces else ''
+        ns = pieces[pieces.index('namespaces') + 1] if 'namespaces' in pieces else '-'
         return kinds[pieces[-2]] + ':' + ns + ':' + pieces[-1]
 
     def handler(message):
