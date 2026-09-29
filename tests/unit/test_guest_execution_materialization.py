@@ -310,7 +310,10 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
             "sizeLimit": f"{plan.task_resources.ephemeral_storage_mib}Mi"}
         assert container["startupProbe"]["exec"]["command"] == [
             "/loom/bin/loom-sandbox-runtime", "--check-socket", f"/loom/sandboxes/{role}/sandbox.sock"]
-        assert container["startupProbe"]["failureThreshold"] == 60
+        # Disk preparation (30s) plus boot (90s) must finish before kubelet's
+        # own bounded startup deadline, including on allocated guest plans.
+        startup = container["startupProbe"]
+        assert 120 < startup["periodSeconds"] * startup["failureThreshold"] <= 180
         mounted = {item["name"] for item in container["volumeMounts"]}
         assert mounted == {"runtime", f"{role}-socket", f"{role}-guest-state"}
     assert all("guest-state" not in mount["name"] for container in [
@@ -334,24 +337,3 @@ async def test_service_admission_uses_deployment_opt_in(monkeypatch, ready):
     else:
         with pytest.raises(HTTPException, match="nested_docker_unqualified"):
             await admit_execution_backend(session, **args)
-
-
-def test_guest_startup_probe_allows_disk_preparation_and_boot_deadlines():
-    task, trial, profile = _guest_inputs()
-    plan = _compile(task, trial, profile)
-    lease = _lease()
-    lease.execution_class_id = plan.execution_class_id
-    lease.runtime_contract_json = plan.canonical_payload()
-    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
-    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
-    lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
-    job = render_execution_job(lease, target=ExecutionTargetRuntime(
-        target_id=lease.target_id, namespace=lease.namespace_name,
-    ))
-    sidecars = job["spec"]["template"]["spec"]["initContainers"][1:]
-    assert {sidecar["name"] for sidecar in sidecars} == {"task-sandbox", "verifier-sandbox"}
-    for sidecar in sidecars:
-        probe = sidecar["startupProbe"]
-        # The runtime bounds disk preparation at30s and guest boot at90s.
-        # Kubernetes must not kill either sandbox before those budgets expire.
-        assert probe["periodSeconds"] * probe["failureThreshold"] > 120

@@ -264,7 +264,10 @@ func startDocker(environment []string) error {
 }
 
 func waitDockerStartup(exited <-chan error, socket string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// A deployed one-vCPU TCG guest needed 38.8 seconds for a healthy daemon
+	// to initialize. Keep a finite budget inside the outer 90-second boot
+	// deadline without mistaking that normal startup for a failed daemon.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return waitDocker(ctx, exited, socket)
 }

@@ -68,6 +68,13 @@ an incomplete environment. Kubernetes ownership and cleanup reconciliation
 remain authoritative; local process tests do not establish controller-restart
 or hosted cleanup qualification.
 
+Startup is bounded separately from task commands. Disk preparation has 30 seconds;
+the subsequent guest boot has 90 seconds, including up to 60 seconds for Docker
+to expose its private readiness API. The Kubernetes startup probe allows 150
+seconds so it does not interrupt these stages. A healthy Docker daemon on a
+one-vCPU TCG guest can take longer than 30 seconds to initialize. Daemon exit,
+deadline expiry and cancellation still retire the incarnation without reuse.
+
 ## Resources, networking and artifacts
 
 Minimum declared resources are 1000 CPU millicores, 512 MiB RAM and 160 MiB
