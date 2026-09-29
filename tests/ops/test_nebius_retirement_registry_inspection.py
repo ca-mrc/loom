@@ -118,7 +118,8 @@ def test_manager_replacement_after_probe_discards_its_observations(retirement_re
             return super().response()
 
     cluster = Replaced(retirement_request[0])
-    assert inspect(cluster)["failed_retirement_jobs"][0]["registry_probe"] == {"status": "unavailable"}
+    assert inspect(cluster)["failed_retirement_jobs"][0]["registry_probe"] == {
+        "status": "unavailable", "stage": "manager_after", "error_type": "ValueError"}
 
 
 @pytest.mark.parametrize("created", ["2026-09-29T00:00:00Z", "2026-09-28T00:00:01Z", None])
@@ -131,7 +132,9 @@ def test_replaced_or_ambiguous_config_cannot_redirect_original_job_probe(retirem
     cluster.targets = settings["targets"]
     result = inspect(cluster)
     assert cluster.executions == 0
-    assert result["failed_retirement_jobs"][0]["registry_probe"] == {"status": "unavailable"}
+    assert result["failed_retirement_jobs"][0]["registry_probe"] == {
+        "status": "unavailable", "stage": "configuration_lineage",
+        "error_type": "TypeError" if created is None else "ValueError"}
 
 
 def test_pod_get_type_metadata_does_not_hide_valid_registry_diagnostics(retirement_request):
@@ -145,6 +148,36 @@ def test_pod_get_type_metadata_does_not_hide_valid_registry_diagnostics(retireme
 
     cluster = TypedGet(retirement_request[0])
     assert inspect(cluster)["failed_retirement_jobs"][0]["registry_probe"]["status"] == "observed"
+
+
+@pytest.mark.parametrize("failure,stage,error_type", [
+    ("identity", "configuration_identity", "ValueError"),
+    ("lineage", "configuration_lineage", "ValueError"),
+    ("settings", "settings", "ValidationError"),
+    ("manager", "manager_selection", "ValueError"),
+    ("exec", "exec", "DeploymentError"),
+])
+def test_probe_failure_identifies_boundary_without_private_error_text(retirement_request, failure, stage, error_type):
+    class Failed(RegistryCluster):
+        def run(self, *args, **kwargs):
+            if args[0] == "exec" and failure == "exec":
+                raise preflight.DeploymentError("kubectl exec failed with exit code 1: Forbidden")
+            return super().run(*args, **kwargs)
+
+    cluster = Failed(retirement_request[0])
+    if failure == "identity":
+        cluster.cm["immutable"] = False
+    elif failure == "lineage":
+        cluster.cm["metadata"]["creationTimestamp"] = cluster.job["metadata"]["creationTimestamp"]
+    elif failure == "settings":
+        cluster.cm["data"]["retirement.json"] = '{"private":"private-value"}'
+    elif failure == "manager":
+        cluster.manager["status"]["containerStatuses"][0]["ready"] = False
+    result = inspect(cluster)
+    probe = result["failed_retirement_jobs"][0]["registry_probe"]
+    assert probe == {"status": "unavailable", "stage": stage, "error_type": error_type,
+                     **({"api_reason": "Forbidden"} if failure == "exec" else {})}
+    assert "private-" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("mutation", ["writeable", "wrong_operation", "payload_boolean", "too_large"])
@@ -163,7 +196,25 @@ def test_probe_output_is_not_trusted_as_read_only_or_correctly_bound(retirement_
             return result
 
     result = inspect(BadOutput(retirement_request[0]))
-    assert result["failed_retirement_jobs"][0]["registry_probe"] == {"status": "unavailable"}
+    assert result["failed_retirement_jobs"][0]["registry_probe"] == {
+        "status": "unavailable", "stage": "output", "error_type": "ValueError"}
+    assert "private-" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("kind", ["unknown_type", "unknown_api_reason"])
+def test_probe_failure_never_exports_unknown_error_type_or_reason(retirement_request, kind):
+    class Failed(RegistryCluster):
+        def run(self, *args, **kwargs):
+            if args[0] == "exec":
+                error = (type("private-error-type", (Exception,), {}) if kind == "unknown_type"
+                         else preflight.DeploymentError)
+                raise error("kubectl exec failed with exit code 1: private-message")
+            return super().run(*args, **kwargs)
+
+    result = inspect(Failed(retirement_request[0]))
+    assert result["failed_retirement_jobs"][0]["registry_probe"] == {
+        "status": "unavailable", "stage": "exec",
+        "error_type": "OtherError" if kind == "unknown_type" else "DeploymentError"}
     assert "private-" not in json.dumps(result)
 
 

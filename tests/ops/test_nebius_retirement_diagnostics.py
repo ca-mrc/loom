@@ -55,7 +55,8 @@ def test_inspection_exposes_failed_retirement_identity_and_safe_termination_not_
     assert result["failed_retirement_jobs"] == [{"namespace": cluster.namespace, "job": cluster.job_name,
         "job_uid": "job-uid", "pod": cluster.pod["metadata"]["name"], "pod_uid": "pod-uid",
         "container": cluster.container_name, "termination": {"exit_code": 1, "signal": 0, "reason": "Error"},
-        "diagnostic": {"status": "retirement_blocked"}, "registry_probe": {"status": "unavailable"}}]
+        "diagnostic": {"status": "retirement_blocked"}, "registry_probe": {
+            "status": "unavailable", "stage": "configuration_identity", "error_type": "KeyError"}}]
     assert "private-" not in json.dumps(result)
     assert all(call[0] in {"get", "config", "logs"} for call in cluster.calls)
 

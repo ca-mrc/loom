@@ -128,25 +128,30 @@ def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: d
 
     from loom_service.environment_management.retirement import RetirementSettings
 
+    stage = "configuration_identity"
     try:
         name = job["metadata"]["name"]
         installation = job["metadata"]["labels"]["loom.nebius/management-installation"]
         if str(UUID(installation)) != installation or not UUID(installation).int:
             raise ValueError
         cm = kube.get("configmap", name, namespace)
+        if (cm.get("immutable") is not True or cm["metadata"]["labels"].get("loom.nebius/retirement") != name
+                or cm["metadata"]["labels"].get("loom.nebius/management-installation") != installation):
+            raise ValueError
         # An immutable object can still be deleted/recreated. Require this
         # instance to predate the original Job, failing closed on equal-second
         # timestamps where creation lineage cannot be established.
+        stage = "configuration_lineage"
         config_created = datetime.fromisoformat(cm["metadata"]["creationTimestamp"])
         job_created = datetime.fromisoformat(job["metadata"]["creationTimestamp"])
-        if (cm.get("immutable") is not True or cm["metadata"]["labels"].get("loom.nebius/retirement") != name
-                or cm["metadata"]["labels"].get("loom.nebius/management-installation") != installation
-                or config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created):
+        if config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created:
             raise ValueError
+        stage = "settings"
         settings = RetirementSettings.model_validate_json(cm["data"]["retirement.json"])
         if (settings.namespace != namespace or not any(volume.get("name") == "retirement"
                 and volume.get("configMap", {}).get("name") == name for volume in job["spec"]["template"]["spec"]["volumes"])):
             raise ValueError
+        stage = "manager_selection"
         managers = [pod for pod in pods if pod["metadata"].get("namespace") == namespace
             and pod["metadata"].get("labels", {}).get("loom.nebius/management-installation") == installation
             and pod["metadata"].get("labels", {}).get("app") == "loom-service"
@@ -166,19 +171,26 @@ def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: d
                     and any(row.get("name") == "loom-service" and row.get("ready") is True
                             for row in current.get("status", {}).get("containerStatuses", [])))
 
+        stage = "manager_before"
         before = kube.get("pod", manager["metadata"]["name"], namespace)
         if not same_manager(before):
             raise ValueError
+        stage = "payload"
         targets = [target.model_dump(mode="json") for target in settings.targets]
         payload = json.dumps(targets)
         if len(payload.encode()) > 65536:
             raise ValueError
         source = Path(__file__).with_name("nebius_retirement_registry_probe.py").read_text()
+        stage = "exec"
         raw = kube.run("exec", manager["metadata"]["name"], "-n", namespace, "-c", "loom-service", "--",
                        "python", "-c", source, namespace, payload, timeout=90)
-        if (len(raw.encode()) > 16384
-                or not same_manager(kube.get("pod", manager["metadata"]["name"], namespace))):
+        stage = "output"
+        if len(raw.encode()) > 16384:
             raise ValueError
+        stage = "manager_after"
+        if not same_manager(kube.get("pod", manager["metadata"]["name"], namespace)):
+            raise ValueError
+        stage = "output"
         value = json.loads(raw)
         if value.get("status") == "unavailable":
             return {"status": "unavailable", "stage": value["stage"] if value.get("stage") in ("inputs", "database", "registry") else "unknown",
@@ -191,8 +203,18 @@ def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: d
                 raise ValueError
             rows.append({"operation_id": expected["operation_id"], "checks": {key: row["checks"][key] for key in CHECKS}})
         return {"status": "observed", "read_only": True, "manager_pod_uid": manager["metadata"]["uid"], "targets": rows}
-    except Exception:
-        return {"status": "unavailable"}
+    except Exception as error:
+        kind = type(error).__name__
+        result = {"status": "unavailable", "stage": stage, "error_type": kind if kind in {
+            *ERRORS, "DeploymentError", "JSONDecodeError", "TypeError", "TimeoutExpired", "FileNotFoundError",
+        } else "OtherError"}
+        # Kubectl already sanitizes API failures. Project only known reason
+        # codes; never return its message or an arbitrary exception's payload.
+        if isinstance(error, DeploymentError):
+            reason = str(error).rpartition(": ")[2]
+            if reason in {"Forbidden", "Unauthorized", "NotFound", "BadRequest", "CommandFailed", "DeadlineExceeded"}:
+                result["api_reason"] = reason
+        return result
 
 
 def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
