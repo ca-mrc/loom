@@ -36,6 +36,8 @@ _LABEL = "loom.nebius/management-installation"
 _CONFIG_PATH = "/var/run/loom-management"
 _KUBERNETES_PATH = "/var/run/loom-management-kubernetes"
 _CLOUD_PATH = "/var/run/loom-management-cloud"
+_APPLICATION_CLOUD_PATH = "/var/run/loom-applications-cloud"
+_APPLICATION_SHARED_PATH = "/var/run/loom-applications-shared"
 
 
 class ManagementDeployment(BaseModel):
@@ -70,15 +72,25 @@ class ManagementDeployment(BaseModel):
             raise ValueError("management host must be separate from existing and child routes")
         if self.backup_bucket in config["buckets"].values():
             raise ValueError("management requires an independent backup bucket")
-        runtime = self.installation.provider_runtime
+        application = self.installation.applications
+        runtime = application.runtime if application is not None else self.installation.provider_runtime
         if runtime is None:
             raise ValueError("management deployment requires an explicit provider runtime")
+        if application is not None and (
+                application.authority.installation_id != self.installation_id
+                or application.authority.namespace != self.namespace
+                or application.runtime.database_connection_file != Path(_APPLICATION_SHARED_PATH + "/manager-dsn")
+                or application.runtime.shared_credentials_file != Path(_APPLICATION_SHARED_PATH + "/shared.json")):
+            raise ValueError("application management authority or mounted credentials differ")
+        cloud_path = _APPLICATION_CLOUD_PATH if application is not None else _CLOUD_PATH
         if (runtime.kubernetes.endpoint != config["kubernetes_api_server"].rstrip("/")
                 or runtime.kubernetes.ca_file != Path(_KUBERNETES_PATH + "/ca.crt")
                 or (runtime.kubernetes.token_file != Path(_KUBERNETES_PATH + "/token")
                     if isinstance(runtime.kubernetes, ProjectedKubernetesConnection)
                     else runtime.kubernetes.credentials_file != Path(_KUBERNETES_PATH + "/credentials.json"))
-                or runtime.cloud_credentials_file != Path(_CLOUD_PATH + "/credentials.json")):
+                or runtime.cloud_credentials_file != Path(cloud_path + "/credentials.json")):
+            if application is not None:
+                raise ValueError("application management must use the bound cluster and mounted credentials")
             raise ValueError("management provider must use the bound cluster and mounted credentials")
         return self
 
@@ -129,8 +141,10 @@ def render_management(
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     cm["data"] = {
         "environment.json": canonical(runtime_config).decode(),
-        "installation.json": deployment.installation.model_dump_json(),
     }
+    application = deployment.installation.applications
+    if application is None:
+        cm["data"]["installation.json"] = deployment.installation.model_dump_json()
     account = _obj("ServiceAccount", "loom-platform", ns)
     account["automountServiceAccountToken"] = False
     ingress_peer = {
@@ -152,6 +166,11 @@ def render_management(
                              if doc["metadata"]["name"] == "loom-service"],
         "80-backup.yaml": templates["80-backup.yaml"],
     }
+    management_config = cm
+    if application is not None:
+        management_config = _obj("ConfigMap", "loom-management-applications-" + revision[7:19], ns)
+        management_config.update(immutable=True, data={"installation.json": deployment.installation.model_dump_json()})
+        files["10-config-network.yaml"].append(management_config)
     service = next(doc for doc in files["40-services.yaml"] if doc["kind"] == "Deployment")
     pod = service["spec"]["template"]["spec"]
     container = pod["containers"][0]
@@ -168,16 +187,17 @@ def render_management(
     ]
     container["readinessProbe"]["httpGet"]["path"] = "/api/v1/health/ready"
     pod["volumes"].append({"name": "management-config", "configMap": {
-        "name": cm["metadata"]["name"], "items": [{"key": "installation.json", "path": "installation.json"}],
+        "name": management_config["metadata"]["name"], "items": [{"key": "installation.json", "path": "installation.json"}],
     }})
     container["volumeMounts"].append({"name": "management-config", "mountPath": _CONFIG_PATH, "readOnly": True})
-    runtime = deployment.installation.provider_runtime
+    runtime = application.runtime if application is not None else deployment.installation.provider_runtime
     assert runtime is not None  # Validated by ManagementDeployment.
     if isinstance(runtime.kubernetes, ProjectedKubernetesConnection):
-        provisioner = _obj("ServiceAccount", "loom-management-provisioner", ns)
+        account_name = "loom-application-provisioner" if application is not None else "loom-management-provisioner"
+        provisioner = _obj("ServiceAccount", account_name, ns)
         provisioner["automountServiceAccountToken"] = False
         files["10-config-network.yaml"].append(provisioner)
-        pod["serviceAccountName"] = "loom-management-provisioner"
+        pod["serviceAccountName"] = account_name
         pod["volumes"].append({"name": "management-kubernetes", "projected": {
             "defaultMode": 0o440, "sources": [
                 {"serviceAccountToken": {"path": "token", "expirationSeconds": 3600}},
@@ -191,8 +211,14 @@ def render_management(
         pod["volumes"][-1]["secret"]["items"] = [
             {"key": name, "path": name} for name in ("ca.crt", "credentials.json")
         ]
-    _mount_secret(pod, "management-cloud", "loom-management-cloud", _CLOUD_PATH)
+    cloud_name = "loom-applications-cloud-" + revision[7:19] if application is not None else "loom-management-cloud"
+    _mount_secret(pod, "management-cloud", cloud_name, _APPLICATION_CLOUD_PATH if application is not None else _CLOUD_PATH)
     pod["volumes"][-1]["secret"]["items"] = [{"key": "credentials.json", "path": "credentials.json"}]
+    if application is not None:
+        _mount_secret(pod, "application-shared", "loom-applications-shared-" + revision[7:19], _APPLICATION_SHARED_PATH)
+        pod["volumes"][-1]["secret"]["items"] = [
+            {"key": key, "path": key} for key in ("manager-dsn", "shared.json", "ca.crt")
+        ]
     migration = files["30-migrate.yaml"][0]
     migration["metadata"]["name"] = "loom-management-migrate-" + revision.removeprefix("sha256:")[:12]
     migration_pod = migration["spec"]["template"]["spec"]

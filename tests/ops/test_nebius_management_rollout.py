@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.ops.test_nebius_ingress_bootstrap import archive
-from tests.ops.test_nebius_management_gateway import bundle, operation
+from tests.ops.test_nebius_management_gateway import bundle, operation, upgrade_operation
 
 
 def module():
@@ -34,6 +34,33 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert result.read("scripts/ops/nebius_management_entry.py") == (
             Path(__file__).resolve().parents[2] / "scripts/ops/nebius_management_entry.py").read_bytes()
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
+
+
+def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path):
+    import os
+    import sys
+
+    uv, requirements, wheels = tmp_path / 'uv', tmp_path / 'requirements', tmp_path / 'wheels'
+    uv.write_bytes(b'fixture uv')
+    requirements.write_bytes(b'fixture requirements')
+    wheels.mkdir()
+    for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
+        (wheels / name).write_bytes(b'fixture wheel')
+    metadata = upgrade_operation(tmp_path)
+    content = module().build_bundle(metadata, uv=uv, requirements=requirements, wheels=wheels)
+    release = tmp_path / 'isolated'
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        for name in archive.namelist():
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(archive.read(name))
+            path.chmod(0o600)
+    script = 'from scripts.ops.nebius_management_entry import main; raise SystemExit(main("' + str(release / 'operation.json') + '", "qualify"))'
+    result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
+        timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {'status': 'tooling_qualified'}
+    assert not Path(metadata['inputs_path']).exists()
 
 
 @pytest.mark.parametrize("action,status", [("preflight", "preflight_qualified"), ("install", "pending"),
@@ -60,12 +87,16 @@ def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_p
     assert result["status"] == status and "never-transfer" not in json.dumps(result) and len(calls) == 1
 
 
-def test_rollout_records_bound_blocked_report_and_exits_failure(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('status', ['blocked', 'management_upgraded'])
+def test_rollout_records_bound_result_and_distinguishes_failure(tmp_path, monkeypatch, capsys, status):
     import sys
     target = module()
-    metadata = operation(tmp_path)
-    report = {"status": "blocked", "stage": "storage_class",
+    metadata = upgrade_operation(tmp_path) if status == 'management_upgraded' else operation(tmp_path)
+    report = {"status": status, "stage": "storage_class",
               **{key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
+    if status == 'management_upgraded':
+        report.pop('stage')
+        report.update(namespace_uid='52f5b18c-7dd3-4095-bd7e-49f6a6330391', revision='sha256:' + 'd' * 64)
     monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
     monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
     monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
@@ -78,9 +109,9 @@ def test_rollout_records_bound_blocked_report_and_exits_failure(tmp_path, monkey
     monkeypatch.setattr(target, "build_bundle", lambda *args, **kwargs: b"qualified bundle")
     monkeypatch.setattr(target, "transfer", lambda *args, **kwargs: report)
     evidence = tmp_path / "evidence"
-    monkeypatch.setattr(sys, "argv", ["rollout", "--operation", "preflight", "--requirements", str(tmp_path / "requirements"),
+    monkeypatch.setattr(sys, "argv", ["rollout", "--operation", "install", "--requirements", str(tmp_path / "requirements"),
                                     "--evidence-dir", str(evidence)])
-    assert target.main() == 1
+    assert target.main() == (1 if status == 'blocked' else 0)
     assert json.loads(capsys.readouterr().out) == report
     assert json.loads((evidence / "management-result.json").read_bytes()) == report
 

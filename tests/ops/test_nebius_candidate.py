@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +18,42 @@ from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
 
 from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+
+@pytest.fixture
+def source_checkout(tmp_path, monkeypatch):
+    root = tmp_path / 'checkout'
+    root.mkdir()
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True).stdout
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Source fixture')
+    (root / 'source.txt').write_text('actual source bytes\n')
+    git('add', 'source.txt')
+    git('commit', '-qm', 'source fixture')
+    revision = git('rev-parse', 'HEAD').decode().strip()
+    archive = git('archive', '--format=tar', revision)
+    monkeypatch.setattr(candidate, 'ROOT', root)
+    return root, revision, archive
+
+
+def test_published_source_digest_measures_archive_bytes_not_git_identity(source_checkout):
+    _, revision, archive = source_checkout
+    result = candidate.source_archive_digest(revision)
+    assert result == 'sha256:' + hashlib.sha256(archive).hexdigest()
+    assert result != 'sha256:' + hashlib.sha256(revision.encode()).hexdigest()
+
+
+@pytest.mark.parametrize('change', ['tracked', 'untracked', 'wrong_revision'])
+def test_source_proof_rejects_checkout_that_cannot_describe_published_images(source_checkout, change):
+    root, revision, _ = source_checkout
+    if change == 'wrong_revision':
+        revision = '0' * 40
+    else:
+        (root / ('source.txt' if change == 'tracked' else 'untracked.txt')).write_text('not committed\n')
+    with pytest.raises(ValueError):
+        candidate.source_archive_digest(revision)
 
 
 def test_tooling_step_ignores_unrelated_apt_sources() -> None:
@@ -473,6 +510,10 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         return ""
 
     monkeypatch.setattr(candidate, "_run", run)
+    def source_digest(revision):
+        assert revision == 'a' * 40
+        return 'sha256:' + 'f' * 64
+    monkeypatch.setattr(candidate, 'source_archive_digest', source_digest, raising=False)
     def copy_image(archive, tag, *, timeout_seconds):
         assert timeout_seconds == 1200
         run("skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}")
@@ -506,6 +547,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         assert not (output / "runtime-profile.json").exists()
     else:
         manifest = json.loads((output / "candidate.json").read_text())
+        assert manifest['source_archive_sha256'] == 'sha256:' + 'f' * 64
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert profile["execution_class_id"] == (
             "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"

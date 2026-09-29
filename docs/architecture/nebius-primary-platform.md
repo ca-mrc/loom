@@ -723,6 +723,49 @@ files, not owner requests. Invalid startup material exposes no application manag
 Shutdown removes owner admission and drains the worker before closing its clients.
 Management readiness includes actual application-worker poll health when configured.
 
+The management renderer accepts this application runtime instead of the legacy
+environment provisioner. It uses `loom-application-provisioner`, projected cluster
+credentials, and separate application cloud/shared-material Secret references.
+Application installation configuration is an immutable revision-named ConfigMap;
+the management database and admin/master-key references remain unchanged. This
+renderer creates no credentials and does not upgrade an existing installation:
+the initial installer remains create-only and legacy-runtime-only. Protected
+upgrade, old-process retirement and first-owner installed qualification remain
+required before enabling this configuration live.
+
+The fixed shared SQL setup command, `loom.nebius_application_database_install`,
+accepts only protected namespace/data/schema configuration and Secret-provided
+credentials. It qualifies the namespace-local TLS database route, coordinates
+with the existing schema lock, creates a missing ordinary manager login and
+installs the existing access routines. Retries authenticate the retained password
+and preserve the role identity; mismatches or a lost bound role fail rather than
+rotating or adopting credentials. It preserves business records and runs no
+business-schema migration. Personal APIs must never invoke this administrator
+command.
+
+The fixed protected setup adapter uses the existing create-only recovery journal
+for application admission, shared observer permissions, shared network access and
+the SQL setup Job. Management-to-shared PostgreSQL ingress is separate from the
+personal application policies. It binds both namespace identities, exposes the
+admission type-checking barrier that must precede bootstrap permissions, and never
+retries an uncertain Job creation. A failed Job requires explicit recovery.
+The material phase delivers only three immutable revision-named Secrets: the
+retained SQL manager password for the setup Job, and the application's management
+cloud and shared SQL/CA/keyring bundles. It never generates new shared master keys,
+rotates existing credentials or overwrites bootstrap Secrets. Protected caller
+qualification of material provenance and actual cloud permissions remains required.
+The management cutover is a fixed UID/resource-version-conditioned update of the
+existing `loom-service` Deployment. It retains the original template, records each
+update intent before sending it, and reconciles uncertain replies without repeating
+the write. A narrowly scoped CREATE admission policy prevents delayed controller
+requests from starting `loom-management-provisioner` Pods in the management
+namespace. Retirement requires that actual denial, current zero controller
+replicas, and no remaining Pods, including terminating ones. The database and new
+application manager are not fenced. The new template is previewed and checked
+before activation; no automatic recovery restarts the legacy provisioner.
+The protected entry connects these adapters, but source/test coverage is not an
+installed upgrade: the first personal HTTPS login still needs installed proof.
+
 `POST /applications/{id}/login` exchanges the owning management **user session**
 for a 90-second one-use proof, never a shared password or database credential.
 Delegable bearer tokens cannot request a full browser session, which could otherwise
@@ -1119,6 +1162,22 @@ tooling and a separately stored, digest-pinned private input file. It transfers 
 operator or runtime credentials through Actions. Installed restoration, credential
 renewal and multi-owner acceptance must still be completed before this source-level
 installer can be described as an operational environment.
+
+The fixed application-runtime upgrade composes the existing setup stages and
+management Deployment switch without replaying bootstrap. It validates the
+original input digest, completed phase journals, namespace UID and retained
+Deployment snapshot. Separate upgrade state preserves the original configuration,
+database, credentials and journals. The publication catalog may add a qualified
+candidate but cannot remove or rewrite retained entries. New application
+configuration/account and shared-access setup precede retirement; the fixed
+management migration waits for the old process to stop. Only then may the new
+template activate. A resumed operation never retires the new process or
+automatically restarts the legacy worker. Public verification explicitly requires
+`application_provisioner` readiness and authenticated management routes; legacy or
+absent worker health is insufficient. The protected entry connects the upgrade to
+live shared-material/IAM and actual-subject qualification. Running that protected
+upgrade and proving personal-application readiness remain installed acceptance,
+not results inferred from the connection's tests.
 
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,

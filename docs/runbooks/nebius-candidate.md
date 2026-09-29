@@ -119,7 +119,14 @@ download the exact attempt's artifact. Never resolve tags in an already accepted
 candidate or overwrite an evidence bundle.
 
 `candidate.json` is a plain publication record: repository/ref, commit, workflow
-run and six digest references. Renderer and deployer consume those fields without
+run and published image digest references. New platform publications also record
+`source_archive_sha256`, measured from the actual `git archive --format=tar`
+bytes at the exact clean candidate checkout. This is a committed-source archive
+digest, not a hash of the commit identifier or an arbitrary-local-source upload.
+The shared-data application upgrade requires this published value to match its
+application release; older records without it remain valid for existing legacy
+consumers, but cannot supply personal application provenance.
+Renderer and deployer consume those fields without
 detached signatures, profile hashes or another reconstruction/verification layer.
 Optional format inspection is available with:
 

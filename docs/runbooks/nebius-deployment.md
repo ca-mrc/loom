@@ -780,6 +780,74 @@ credential renewal, two-owner lifecycle, or shared task/build execution. Those
 remain separate installed acceptance steps; a green workflow alone does not
 establish the fully operational multi-person environment.
 
+### Retained management upgrade for shared-data applications
+
+The same protected `management-preflight` and `management-install` actions can
+select `loom.nebius-management-upgrade-operation.v1`. This is a fixed upgrade of
+a completed management installation, not a retry of an incomplete bootstrap.
+Keep the original inputs, state, anchor, database, PVC and credentials unchanged.
+The upgrade uses separate `nebius-management/upgrade/inputs.json`, `state` and
+`anchor` paths and the same exact-bundle SSH authorization described above.
+
+The new private input schema is
+`loom.nebius-management-upgrade-private-inputs.v1`. It contains the original
+v1 `original_operation` (including its input digest), the new `deployment`,
+published `candidate` and `profile`, the retained management `binding`,
+`shared_namespace_uid`, typed `prerequisites`, the current shared platform's
+40-character `foundation_candidate` commit, and five distinct private
+`material_files`: `manager_password`, `database_name`, `ca_pem`,
+`secret_store_master_keys`, and `cloud_credentials_json`. Operator access and
+ingress configuration come from the original private inputs, not new workload
+credentials. Do not place these private values in the public operation metadata.
+The new foundation pin qualifies the current shared deployment; do not rewrite
+the original input or historical ingress candidate pins after a publication.
+
+To prepare those shared inputs without an unprotected Kubernetes operation, run
+protected `nebius-rollout` with `operation=inspect` and
+`prepare_shared_inputs=true`. Its fixed gateway collector verifies the shared
+namespace and cluster identities against both inspection and the retained original
+management configuration. It reads only the shared ConfigMap, service Deployment,
+database/auth Secrets and namespace identities; it makes no Kubernetes writes.
+The gateway retains configuration/profile/public keyring, resource UIDs, database
+name, database CA and secret-store keys under the private
+`.loom/nebius-management/shared-input-observations/<observation_id>/` directory.
+It never copies the database administrator password, JWT keys or whole Secrets.
+Only the observation UUID and candidate commit return to Actions. Ordinary
+inspection does not collect credentials. Select that private snapshot when
+preparing upgrade inputs; the upgrade still checks it against live consumers.
+
+Prerequisites bind the management candidate ID, shared ConfigMap/service/database
+Secret/auth Secret UIDs, existing business bucket IDs and application IAM scope.
+Each application release ID selects a protected publication with matching source
+archive digest and service/web image digests. The shared development profile,
+database name, CA and encryption keys must match their actual shared consumers.
+The fixed SQL setup Job verifies the exact shared schema before granting the
+retained manager role; it does not migrate business data. Physical sizing reserves
+personal frontend/API workloads, with no per-person database, PVC or backup.
+
+Nebius provisioning-project admin alone cannot manage shared groups in another
+project. The application provisioner must have exactly its dedicated
+provisioning-project admin group and a tenant-owned membership-controller group
+with admin permits on the two selected shared groups only. The shared data/source
+groups may belong to that same tenant or the shared project; their exact IDs must
+have no IAM permits and object-policy access only to the bound development buckets. Qualify
+these existing grants read-only; the upgrade does not create cloud grants or
+request more bucket policies. It must not receive shared-project or tenant admin.
+
+The upgrade stages fixed application configuration, admission, network and
+credentials, then proves shared SQL setup. It fences legacy Pod creation and
+observes the old process fully retired before running management migrations and
+switching the retained Deployment. Unknown writes require readback, not a blind
+retry. There is no automatic restart of the legacy provisioner on failure.
+Preserve the stopped and original templates and all private journals for recovery.
+
+`pending` identifies admission, authority, database, retirement/retire, migration,
+activation or service readiness. Reinvoke only the same qualified operation to
+advance it. `management_upgraded` requires the exact new Deployment to be ready,
+the application provisioner healthy, and authenticated public HTTPS to pass.
+It does not establish a working personal deployment or multi-owner acceptance;
+create/status/login and safe suspend/resume remain required installed checks.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
