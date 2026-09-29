@@ -190,9 +190,9 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
                       storage_class='local-path')
         foundation['platform_config_json'] = json.dumps(config)
         installation['applications']['runtime']['kubernetes']['endpoint'] = endpoint
-        installation['applications']['shared']['schema_revision'] = '0168'
+        installation['applications']['shared']['schema_revision'] = '0169'
         for release in installation['applications']['releases']:
-            release['schema_revision'] = '0168'
+            release['schema_revision'] = '0169'
         deployment = ManagementDeployment.model_validate(raw)
         rendered = render_management(deployment, candidate=candidate, profile=profile,
             repo_root=Path(__file__).resolve().parents[2])
@@ -249,7 +249,7 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
         binding = ManagementBinding(str(deployment.installation_id), namespace, identities[namespace],
             core.read_namespace('kube-system').metadata.uid)
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(request, uuid4()),
-            binding, identities[shared], '0168', '0168')
+            binding, identities[shared], '0169', '0169')
         for phase in ('manager-probe', 'shared-probe', 'migration', 'post-migration-probe'):
             state = tmp_path / phase
             with HTTPSManagementRefreshResourcesAPI(request=resources, phase=phase,
@@ -265,7 +265,7 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
                 assert observed is not None
                 assert observed['probe'] == {'schema': 'loom.nebius-management-refresh-probe.v1',
                     'status': 'qualified', 'mode': 'shared' if phase == 'shared-probe' else 'manager',
-                    'revision': '0168', 'operations_checked': 0}
+                    'revision': '0169', 'operations_checked': 0}
         for (ns, name), uid in retained.items():
             assert core.read_namespaced_secret(name, ns).metadata.uid == uid
     finally:
