@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import json
 import os
 import ssl
 import time
@@ -37,7 +38,9 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(180)
-async def test_retirement_real_defaulting_and_scoped_service_account(retirement_request, environment_registry, tmp_path):
+async def test_retirement_real_defaulting_and_scoped_service_account(
+    retirement_request, environment_registry, isolated_migration_postgres_url, tmp_path, monkeypatch,
+):
     from kubernetes import client, utils
     from scripts.ops.nebius_management_material import ManagementBinding
     from scripts.ops.nebius_management_retirement import (
@@ -47,6 +50,7 @@ async def test_retirement_real_defaulting_and_scoped_service_account(retirement_
     )
     from scripts.ops.nebius_management_retirement_entry import HTTPSRetirementStageAPI
     from scripts.ops.nebius_management_stage import ManagementStageError
+    from sqlalchemy.engine import make_url
 
     from loom.db.nebius_environment_schema import NebiusPlatformReservation
     from loom_service.application_management.deployment import render_application_setup
@@ -55,8 +59,11 @@ async def test_retirement_real_defaulting_and_scoped_service_account(retirement_
         KubernetesEnvironmentProvider,
     )
     from loom_service.environment_management.retirement import (
+        RetirementSettings,
         RetirementTarget,
         reconcile_retirement,
+        retirement_database_url,
+        run_retirement,
     )
 
     request = retirement_request[0]
@@ -149,10 +156,30 @@ async def test_retirement_real_defaulting_and_scoped_service_account(retirement_
                 assert response.json()["status"]["allowed"] is allowed, (namespace, resource, verb)
         async with httpx.AsyncClient(base_url=endpoint, verify=ssl.create_default_context(cadata=ca),
                 headers={"Authorization": "Bearer " + token}, trust_env=False, timeout=10) as runtime:
+            settings_doc = next(doc for doc in docs["job"].values() if doc["kind"] == "ConfigMap")
+            settings = RetirementSettings.model_validate(json.loads(settings_doc["data"]["retirement.json"]))
+            projected_ca, projected_token = tmp_path / "projected-ca.crt", tmp_path / "projected-token"
+            projected_ca.write_text(ca)
+            projected_token.write_text(token)
+            projected_token.chmod(0o440)
+            # Retarget only disposable transport addresses/mounts. Exercise the
+            # actual startup, projected-token auth and pre-claim qualification.
+            settings = settings.model_copy(update={"kubernetes": settings.kubernetes.model_copy(update={
+                "endpoint": endpoint, "ca_file": projected_ca, "token_file": projected_token,
+            })})
+            database_url = (f"postgresql://loom_service:fixture@loom-postgres.{binding.namespace}.svc:5432/loom"
+                "?sslmode=verify-full&sslrootcert=/var/run/loom-db/ca.crt")
+
+            def disposable_database(value, namespace):
+                assert value == database_url and namespace == binding.namespace
+                retirement_database_url(value, namespace)
+                return make_url(isolated_migration_postgres_url)
+
+            monkeypatch.setattr("loom_service.environment_management.retirement.retirement_database_url", disposable_database)
             async with asyncio.timeout(75):
-                phase = await reconcile_retirement(factory, target, KubernetesEnvironmentProvider(runtime))
+                await run_retirement(settings, database_url)
             operation = await registry.get_operation(target.operation_id, principal=alice)
-            assert phase == "completed", operation.error_code
+            assert operation.phase == "completed", operation.error_code
             assert await reconcile_retirement(factory, target, KubernetesEnvironmentProvider(runtime)) == "completed"
         assert (await registry.get_operation(foreign.operation_id, principal=bob)).phase == "pending"
         async with factory() as session:
