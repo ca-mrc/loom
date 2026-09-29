@@ -147,8 +147,16 @@ def running(refresh, connected):
     return api, state, fake, replica, pod
 
 
-def test_ready_refresh_requires_actual_current_owned_pod_and_final_deployment_readback(running):
-    api, state, _, _, _ = running
+@pytest.mark.parametrize('native', [False, True])
+def test_ready_refresh_requires_actual_current_owned_pod_and_final_deployment_readback(running, native):
+    api, state, _, replica, pod = running
+    if native:
+        for item in (replica, pod):
+            item.pop('apiVersion')
+            item.pop('kind')
+        pod['metadata']['labels']['topology.kubernetes.io/region'] = api.refresh.render.after.installation.foundation.platform_config['region']
+        pod['spec'].setdefault('tolerations', []).extend([{'key': 'node.kubernetes.io/' + key, 'operator': 'Exists',
+            'effect': 'NoExecute', 'tolerationSeconds': 300} for key in ('not-ready', 'unreachable')])
     assert api.workload_ready() is True
     assert state['deployment_reads'] == 2
     assert all(message.method == 'GET' for message in state['calls'])
