@@ -52,6 +52,23 @@ def test_fixed_probe_without_mount_reports_settings_failure_without_traceback():
     assert result.stderr == "" and "private-" not in result.stdout
 
 
+@pytest.mark.parametrize("raw,error", [(b"private-invalid-json", "ValidationError"), (b"[]", "ValidationError"),
+    (b"x" * 262145, "ValueError")])
+def test_malformed_or_oversized_settings_never_start_network_checks(tmp_path, monkeypatch, capsys, raw, error):
+    from scripts.ops import nebius_retirement_startup_probe as probe
+
+    path = tmp_path / "retirement.json"
+    path.write_bytes(raw)
+    monkeypatch.setattr(probe, "SETTINGS_PATH", path)
+    monkeypatch.setattr(probe, "observe_startup", lambda *args: pytest.fail("unexpected network startup"))
+    assert probe.main() == 0
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["stage"] == "settings" and result["error_type"] == error
+    assert result["status"] == "unavailable" and result["checks"] == []
+    assert captured.err == "" and "private-" not in captured.out
+
+
 @pytest.mark.parametrize("damage,stage,error", [
     ("database", "database_binding", "ValueError"),
     ("ca", "kubernetes_ca", "FileNotFoundError"),

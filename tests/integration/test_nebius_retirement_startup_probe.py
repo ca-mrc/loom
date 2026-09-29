@@ -4,8 +4,8 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from psycopg.errors import ReadOnlySqlTransaction
 from sqlalchemy import event, select, text
-from sqlalchemy.exc import InternalError
 
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentOperation,
@@ -79,7 +79,7 @@ async def test_probe_connection_cannot_write_to_operation(environment_registry, 
         return engine
 
     monkeypatch.setattr(probe, "create_async_engine", inject_write)
-    with pytest.raises(InternalError, match="read-only transaction"):
+    with pytest.raises(ReadOnlySqlTransaction, match="read-only transaction"):
         await probe.database_snapshot(factory.kw["bind"].url, (target,))
     assert attempts == [True]
     async with factory() as session:
@@ -97,3 +97,19 @@ async def test_missing_or_foreign_target_fails_without_claiming(environment_regi
     async with factory() as session:
         assert (await session.get(NebiusEnvironmentOperation, target.operation_id)).runner_epoch == 0
         assert await session.scalar(text("SHOW transaction_read_only")) == "off"
+
+
+async def test_snapshot_refuses_unenforced_read_only_connection(environment_registry, monkeypatch):
+    from scripts.ops import nebius_retirement_startup_probe as probe
+
+    _, factory, _, _ = environment_registry
+    target = RetirementTarget.model_validate(await prepare_retirement(environment_registry))
+    original = probe.create_async_engine
+
+    def unenforced(url, **kwargs):
+        kwargs["connect_args"]["options"] = "-c default_transaction_read_only=off"
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(probe, "create_async_engine", unenforced)
+    with pytest.raises(ValueError, match="read_only_required"):
+        await probe.database_snapshot(factory.kw["bind"].url, (target,))
