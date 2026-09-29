@@ -108,6 +108,7 @@ from loom_control_plane.service_execution import (
     finalize_committed_service_execution,
     persist_execution_catalog,
     record_execution_event,
+    recover_execution_node_attribution,
     refresh_execution_target_health,
     request_trial_execution_cancellation,
     reserve_trial_execution,
@@ -167,7 +168,12 @@ async def _cleanup_service_execution_test_rows(postgres_url: str):  # type: igno
             )
             await session.execute(
                 delete(AdminAuditEvent).where(
-                    AdminAuditEvent.action == "service_execution.step_token.minted"
+                    AdminAuditEvent.action.in_(
+                        (
+                            "service_execution.step_token.minted",
+                            "execution.node_attribution.recovered",
+                        )
+                    )
                 )
             )
             owned_trials = select(Trial.id).join(Team).where(Team.name.like("service-execution-%"))
@@ -1737,8 +1743,12 @@ async def test_provisioning_pending_limit_is_race_safe_before_claim(
         await engine.dispose()
 
 
+@pytest.mark.parametrize("cleanup_node_field", [{}, {"node_name": None}])
+@pytest.mark.parametrize("historical_recovery", [False, True])
 async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead(
     postgres_url: str,
+    cleanup_node_field: dict[str, object],
+    historical_recovery: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -1834,6 +1844,48 @@ async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead
                 )
             ).scalar_one()
             assert reservation.state == "awaiting_settlement"
+            # The Pod disappears before its bill arrives. Sparse teardown
+            # observations must retain the node that incurred the charge.
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=current.generation,
+                desired_state="cancel",
+                now=pod_stopped + timedelta(seconds=1),
+            )
+            if historical_recovery:
+                # Old observations lost the node before the lease became immutable.
+                current.node_name = None
+                await session.flush()
+            for ordinal, state in [(3, "terminating"), (4, "deleted")]:
+                await record_execution_event(
+                    session,
+                    lease_id=lease.id,
+                    generation=current.generation,
+                    ordinal=ordinal,
+                    event_kind="kubernetes_observed",
+                    payload={"normalized_state": state, **cleanup_node_field},
+                    observed_at=pod_stopped + timedelta(seconds=ordinal),
+                )
+            await session.commit()
+
+        async with sessions() as session:
+            reservation = (
+                await session.execute(
+                    select(ExecutionCostReservation).where(
+                        ExecutionCostReservation.lease_id == lease.id
+                    )
+                )
+            ).scalar_one()
+            if historical_recovery:
+                recovered = await recover_execution_node_attribution(
+                    session, lease_id=lease.id, apply=True
+                )
+                assert recovered["status"] == "recovered"
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None and current.deleted_at is not None
             node_cost, created = await record_execution_node_cost(
                 session,
                 target_id=target.target_id,
@@ -1848,7 +1900,7 @@ async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead
                 provider_billed_microusd=4_000_000,
                 billing_source="nebius-invoice-export",
                 billing_source_version="invoice-2026-08",
-                observed_at=pod_stopped + timedelta(seconds=1),
+                observed_at=pod_stopped + timedelta(seconds=5),
             )
             assert created is True
             assert node_cost.allocated_microusd == 1_000_000
@@ -1857,7 +1909,7 @@ async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead
                 session,
                 reservation_id=reservation.id,
                 billing_complete_through=pod_stopped,
-                now=pod_stopped + timedelta(seconds=2),
+                now=pod_stopped + timedelta(seconds=6),
             )
             await session.commit()
             assert settled.state == "settled"
@@ -1889,6 +1941,300 @@ async def test_provider_node_bill_allocates_requested_share_and_exposes_overhead
             assert allocation.dominant_resource_fraction_ppb == 250_000_000
             assert allocation.overlap_seconds == 100
             assert allocation.allocated_microusd == 1_000_000
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "valid",
+        "missing_pod",
+        "no_evidence",
+        "conflicting_nodes",
+        "wrong_pod",
+        "wrong_job",
+        "outside_generation",
+        "missing_event_pod",
+    ],
+)
+async def test_node_recovery_api_previews_audits_and_rejects_ambiguous_evidence(
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+) -> None:
+    import httpx
+
+    from loom_control_plane.routes import admin
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            event, _ = await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={
+                    "normalized_state": "running",
+                    "pod_uid": "pod-recovery",
+                    "job_uid": "job-recovery",
+                    "node_name": "node-recovery",
+                },
+                observed_at=now,
+            )
+            await enqueue_execution_transition(
+                session,
+                lease_id=lease.id,
+                expected_generation=1,
+                desired_state="cancel",
+                payload={"reason": "test recovery after deletion"},
+                now=now,
+            )
+            lease.node_name = None  # Simulate the projection written by the old code.
+            payload = dict(event.payload_json)
+            if scenario == "missing_pod":
+                lease.pod_uid = None
+            elif scenario == "no_evidence":
+                payload["node_name"] = None
+            elif scenario == "wrong_pod":
+                payload["pod_uid"] = "different-pod"
+            elif scenario == "wrong_job":
+                payload["job_uid"] = "different-job"
+            elif scenario == "missing_event_pod":
+                payload.pop("pod_uid")
+            elif scenario == "outside_generation":
+                event.generation = 3
+            elif scenario == "conflicting_nodes":
+                conflicting = {**payload, "node_name": "other-node"}
+                session.add(
+                    ServiceExecutionEvent(
+                        id=uuid4(),
+                        lease_id=lease.id,
+                        generation=1,
+                        ordinal=3,
+                        event_kind="kubernetes_observed",
+                        idempotency_key=str(uuid4()),
+                        payload_json=conflicting,
+                        payload_sha256=canonical_digest(conflicting),
+                        observed_at=now,
+                    )
+                )
+            event.payload_json = payload
+            event.payload_sha256 = canonical_digest(payload)
+            await session.flush()
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=2,
+                ordinal=2,
+                event_kind="kubernetes_observed",
+                payload={"normalized_state": "deleted"},
+                observed_at=now,
+            )
+            await session.commit()
+            before = (
+                lease.generation,
+                lease.last_event_ordinal,
+                lease.observed_state,
+                lease.pod_started_at,
+                lease.pod_terminated_at,
+            )
+
+        async def verify_token(session, authorization, **kwargs):
+            del session, kwargs
+            if authorization is None:
+                return None
+            return AuthContext(
+                token_hash=b"recovery-test",
+                type="admin",
+                scopes=["admin:worker_pools"] if authorization == "Bearer admin" else ["read:own"],
+                team_id=None,
+                expires_at=None,
+            )
+
+        monkeypatch.setattr(admin, "verify_bearer_token", verify_token)
+        app = FastAPI()
+        app.state.session_factory = sessions
+        app.include_router(admin.router)
+        url = f"/admin/execution-leases/{lease.id}/recover-node-attribution"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            assert (await client.post(url, json={"apply": True})).status_code == 403
+            assert (
+                await client.post(
+                    url, json={"apply": True}, headers={"Authorization": "Bearer member"}
+                )
+            ).status_code == 403
+            headers = {"Authorization": "Bearer admin", "x-request-id": "recovery-test"}
+            assert (
+                await client.post(url, json={"apply": "true"}, headers=headers)
+            ).status_code == 422
+            preview = await client.post(url, json={}, headers=headers)
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current is not None and current.node_name is None
+                assert (
+                    await session.scalar(
+                        select(func.count(AdminAuditEvent.id)).where(
+                            AdminAuditEvent.target_id == str(lease.id)
+                        )
+                    )
+                    == 0
+                )
+            if scenario == "valid":
+                assert preview.status_code == 200, preview.text
+                assert preview.json()["status"] == "recoverable"
+                assert preview.json()["evidence_event_ids"] == [str(event.id)]
+                async with sessions() as session:
+                    # The database exception must not permit other deleted-row edits.
+                    with pytest.raises(DBAPIError, match="immutable outside materialization"):
+                        await session.execute(
+                            update(ServiceExecutionLease)
+                            .where(ServiceExecutionLease.id == lease.id)
+                            .values(node_name="node-recovery", last_event_ordinal=99)
+                        )
+                    await session.rollback()
+                responses = await asyncio.gather(
+                    *[client.post(url, json={"apply": True}, headers=headers) for _ in range(2)]
+                )
+                assert all(response.status_code == 200 for response in responses)
+                assert sorted(response.json()["status"] for response in responses) == [
+                    "recovered",
+                    "unchanged",
+                ]
+            else:
+                assert preview.status_code == 409, preview.text
+                applied = await client.post(url, json={"apply": True}, headers=headers)
+                assert applied.status_code == 409, applied.text
+                async with sessions() as session:
+                    # Direct SQL must reject the same unsupported attribution.
+                    with pytest.raises(DBAPIError, match="immutable outside materialization"):
+                        await session.execute(
+                            update(ServiceExecutionLease)
+                            .where(ServiceExecutionLease.id == lease.id)
+                            .values(node_name="node-recovery")
+                        )
+                    await session.rollback()
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None
+            assert current.node_name == ("node-recovery" if scenario == "valid" else None)
+            assert (
+                current.generation,
+                current.last_event_ordinal,
+                current.observed_state,
+                current.pod_started_at,
+                current.pod_terminated_at,
+            ) == before
+            audit = (
+                await session.scalars(
+                    select(AdminAuditEvent).where(
+                        AdminAuditEvent.target_id == str(lease.id),
+                        AdminAuditEvent.action == "execution.node_attribution.recovered",
+                    )
+                )
+            ).all()
+            assert len(audit) == (1 if scenario == "valid" else 0)
+            if audit:
+                assert audit[0].event_metadata["evidence_event_ids"] == [str(event.id)]
+                assert audit[0].request_id == "recovery-test"
+                for forbidden in (None, "different-node"):
+                    with pytest.raises(DBAPIError, match="immutable outside materialization"):
+                        await session.execute(
+                            update(ServiceExecutionLease)
+                            .where(ServiceExecutionLease.id == lease.id)
+                            .values(node_name=forbidden)
+                        )
+                    await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("changed_field", ["node_name", "pod_uid"])
+async def test_kubernetes_node_attribution_rejects_identity_changes(
+    postgres_url: str,
+    changed_field: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=2,
+                event_kind="kubernetes_observed",
+                payload={"normalized_state": "running", "pod_uid": "pod-a", "node_name": "node-a"},
+                observed_at=now,
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            # A delayed pre-scheduling observation is historical evidence only.
+            await record_execution_event(
+                session,
+                lease_id=lease.id,
+                generation=1,
+                ordinal=1,
+                event_kind="kubernetes_observed",
+                payload={"normalized_state": "pending", "node_name": None},
+                observed_at=now - timedelta(seconds=1),
+            )
+            await session.commit()
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None
+            assert (current.node_name, current.pod_uid, current.observed_state) == (
+                "node-a",
+                "pod-a",
+                "running",
+            )
+
+        async with sessions() as session:
+            payload = {
+                "normalized_state": "running",
+                "pod_uid": "pod-a",
+                "node_name": "node-a",
+                changed_field: "different-identity",
+            }
+            with pytest.raises(ServiceExecutionConflict, match=f"{changed_field} changed"):
+                await record_execution_event(
+                    session,
+                    lease_id=lease.id,
+                    generation=1,
+                    ordinal=3,
+                    event_kind="kubernetes_observed",
+                    payload=payload,
+                    observed_at=now + timedelta(seconds=1),
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None
+            assert (current.node_name, current.pod_uid, current.last_event_ordinal) == (
+                "node-a",
+                "pod-a",
+                2,
+            )
+            assert (
+                await session.scalar(
+                    select(func.count(ServiceExecutionEvent.id)).where(
+                        ServiceExecutionEvent.lease_id == lease.id,
+                    )
+                )
+                == 2
+            )
     finally:
         await engine.dispose()
 

@@ -34,6 +34,44 @@ when the backend cannot supply the full counter contract. Native sampling writes
 directly to the durable ledger; the worker outbox described below applies to
 worker-backed executions.
 
+## Durable node attribution
+
+Native execution leases retain their observed `node_name` when later Kubernetes
+observations omit it or report `null`, including after Pod deletion. A different
+non-null node for the same lease is rejected, as are conflicting Pod identities.
+Older event ordinals remain historical evidence and cannot change the projection.
+
+This preserves the node match needed to allocate a provider bill after cleanup.
+Settlement still requires a persisted execution interval and imported provider
+billing coverage; resource reservations are not actual costs.
+
+### Recover historical missing nodes
+
+After migration `0167`, administrators with `admin:worker_pools` can use
+`POST /admin/execution-leases/{lease_id}/recover-node-attribution` for an explicitly
+selected lease. Send `{}` to preview; the response reports `recoverable`, the
+candidate `node_name`, persisted Pod identity, and supporting `evidence_event_ids`.
+Preview does not write the lease or an audit event. Send `{"apply": true}` to
+recompute and apply the recovery under a row lock. Successful recovery returns
+`recovered` and writes an `execution.node_attribution.recovered` admin audit event
+in the same transaction. Repeated or concurrent applications return `unchanged`
+after the first write; an existing node is never replaced.
+
+Recovery requires a persisted Pod UID and exactly one node supported by retained
+Kubernetes events between the lease's immutable resource generation and current
+command generation. Named observations with conflicting Pod/Job identities or
+different nodes cause HTTP 409. Missing evidence also causes HTTP 409; observations
+without a Pod UID cannot establish attribution. The database independently checks
+the evidence before allowing a deleted lease's null node to be filled. It still
+rejects clearing or changing an existing node and unrelated deleted-record edits.
+
+This is an explicit operator repair, not an automatic migration backfill. It
+preserves lifecycle states, ordinals, and timestamps. It neither settles costs nor
+reallocates previously imported bills. Preview and repair the affected leases
+before importing their provider bills. Missing termination evidence and existing
+misallocated bills require separate reconciliation. Downgrading `0167` restores
+the prior mutation guard while retaining recovered node values and audit records.
+
 ## Durability and recovery
 
 Each active execution checkpoints its latest report under the worker's private

@@ -5,6 +5,9 @@ lease acknowledges cancellation only when every lease of the current trial
 attempt (including a separate verifier) has completed cleanup. The acknowledgement
 is durable and idempotent; it does not change the trial's result or advance a
 different attempt. A client disconnect cannot revoke an accepted sandbox cleanup.
+For historical missing acknowledgements, an authorized repeat cancellation can
+fill the timestamp from retained deletion evidence once all current-attempt
+leases are complete; it does not edit the immutable leases or resubmit work.
 
 Status: Nebius-only hosted architecture following the repository retirement
 of shared-cluster execution. The [platform contract](nebius-primary-platform.md)
