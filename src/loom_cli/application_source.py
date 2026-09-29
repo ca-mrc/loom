@@ -43,12 +43,13 @@ class _Inventory:
     directories: tuple[tuple[str, tuple[int, ...]], ...]
 
 
-def _git(root: Path, *args: str, unborn: bool = False) -> bytes:
+def _git(root: Path, *args: str, missing_ok: bool = False) -> bytes:
     """Bound read-only Git output/time, disabling ambient tree and hook overrides."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     # Keep normal global/system excludes; -c below disables executable hooks
     # without turning normally ignored local credentials into upload candidates.
-    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+               GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
     command = ["git", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
                "-c", "core.hooksPath=/dev/null", "--literal-pathspecs", "-C", str(root), *args]
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env) as process:
@@ -69,7 +70,7 @@ def _git(root: Path, *args: str, unborn: bool = False) -> bytes:
                     if len(chunks) > _MAX_GIT_OUTPUT:
                         raise ValueError("application source Git inventory too large")
             code = process.wait(timeout=max(0.001, deadline - time.monotonic()))
-            if code != 0 and not (unborn and code == 1 and not chunks):
+            if code != 0 and not (missing_ok and code == 1 and not chunks):
                 raise ValueError("application source Git read failed")
             return bytes(chunks)
         finally:
@@ -88,13 +89,13 @@ def _excluded(path: str) -> bool:
 
 def _selected_paths(root: Path) -> dict[str, bool]:
     selected: dict[str, bool] = {}
-    for row in _git(root, "ls-files", "--stage", "-z").split(b"\0"):
+    for row in _git(root, "ls-files", "--sparse", "--stage", "-z").split(b"\0"):
         if not row:
             continue
         metadata, raw_path = row.split(b"\t", 1)
         mode, _object, stage = metadata.split(b" ")
-        if stage != b"0" or mode == b"160000":
-            raise ValueError("application source contains unmerged entries or submodules")
+        if stage != b"0" or mode in {b"160000", b"040000"}:
+            raise ValueError("application source contains unmerged entries, submodules or sparse directories")
         path = raw_path.decode("utf-8")
         if not _excluded(path):
             selected[source_path(path)] = True
@@ -142,7 +143,7 @@ def _temporary_parent(root: Path) -> Path:
 
 
 def _base_commit(root: Path) -> str | None:
-    value = _git(root, "rev-parse", "--verify", "-q", "HEAD", unborn=True).strip().decode("ascii")
+    value = _git(root, "rev-parse", "--verify", "-q", "HEAD", missing_ok=True).strip().decode("ascii")
     if value and (len(value) not in {40, 64} or any(char not in "0123456789abcdef" for char in value)):
         raise ValueError("invalid application source base commit")
     return value or None
@@ -156,6 +157,8 @@ def capture_application_source(root: Path) -> Iterator[CapturedApplicationSource
         actual = _git(root, "rev-parse", "--show-toplevel").rstrip(b"\n").decode("utf-8")
         if Path(actual).resolve() != root:
             raise ValueError("application source must select the complete Git worktree root")
+        if _git(root, "config", "--bool", "--get", "core.sparseCheckout", missing_ok=True).strip() == b"true":
+            raise ValueError("application source sparse checkouts are unsupported")
         base = _base_commit(root)
         before = _inventory(root)
     except (OSError, ValueError, subprocess.SubprocessError):
