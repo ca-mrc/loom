@@ -457,16 +457,22 @@ class InClusterKubernetesJobApi:
         seen: set[str] = set()
         for status in statuses:
             name = getattr(status, "name", None)
-            if (
-                name not in {"execution", "task-sandbox", "verifier-sandbox"}
-                and not str(name or "").startswith("fixture-")
-            ) or name in seen:
+            if not isinstance(name, str) or name in seen:
+                continue
+            if name not in {
+                "execution",
+                "task-sandbox",
+                "verifier-sandbox",
+            } and not name.startswith("fixture-"):
                 continue
             seen.add(name)
             try:
                 text = self._core.read_namespaced_pod_log(
-                    name=pod_name, namespace=namespace, container=name,
-                    tail_lines=100, limit_bytes=4096,
+                    name=pod_name,
+                    namespace=namespace,
+                    container=name,
+                    tail_lines=100,
+                    limit_bytes=4096,
                 )
             except Exception:
                 continue
