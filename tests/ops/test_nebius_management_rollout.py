@@ -15,6 +15,7 @@ from tests.ops.test_nebius_management_gateway import (
     bundle,
     diagnostic_operation,
     operation,
+    startup_report,
     upgrade_operation,
 )
 
@@ -122,6 +123,58 @@ def test_rollout_records_bound_result_and_distinguishes_failure(tmp_path, monkey
     assert target.main() == (1 if status == 'blocked' else 0)
     assert json.loads(capsys.readouterr().out) == report
     assert json.loads((evidence / "management-result.json").read_bytes()) == report
+
+
+@pytest.mark.parametrize("outcome", ["observed", "unavailable", "blocked", "invalid"])
+def test_diagnostic_rollout_exit_reports_delivery_not_retirement(tmp_path, monkeypatch, capsys, outcome):
+    """A delivered observation must not become a false failed workflow or cleanup success."""
+    import sys
+
+    target = module()
+    metadata = diagnostic_operation(tmp_path)
+    probe = startup_report()
+    if outcome == "unavailable":
+        probe.update(status="unavailable", stage="kubernetes_get", error_type="HTTPStatusError", http_status=403)
+        probe["checks"].remove("kubernetes")
+    report = {key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}
+    if outcome == "blocked":
+        report.update(status="blocked", stage="diagnostic_readback")
+    else:
+        report.update(status="management_retired" if outcome == "invalid" else "retirement_diagnostic_observed",
+            namespace_uid="52f5b18c-7dd3-4095-bd7e-49f6a6330391", revision="sha256:" + "d" * 64, probe=probe)
+    uv, requirements, wheels = tmp_path / "uv", tmp_path / "requirements", tmp_path / "wheels"
+    uv.write_bytes(b"fixture uv")
+    requirements.write_bytes(b"fixture requirements")
+    wheels.mkdir()
+    for name in ("loom-0.0.0-py3-none-any.whl", "loom_bundle_checksum-0.1.0-py3-none-any.whl"):
+        (wheels / name).write_bytes(b"fixture wheel")
+    monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
+    monkeypatch.setenv("LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE", "/private/hosts")
+    monkeypatch.setattr(target, "verify_source", lambda config: None)
+    monkeypatch.setattr(target.shutil, "which", lambda name: str(uv))
+    monkeypatch.setattr(target, "build_wheels", lambda *args, **kwargs: wheels)
+    calls = []
+
+    def run(args, **kwargs):
+        if args == [str(uv), "--version"]:
+            return subprocess.CompletedProcess(args, 0, b"uv 0.11.26 (x86_64-unknown-linux-gnu)\n", b"")
+        assert args[0] == "ssh" and args[-1] == "loom-nebius-management-install-v1"
+        _, sent = target.unpack_bundle(kwargs["input"])
+        assert sent == metadata
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b"private stderr")
+
+    monkeypatch.setattr(target.subprocess, "run", run)
+    evidence = tmp_path / "evidence"
+    monkeypatch.setattr(sys, "argv", ["rollout", "--operation", "install", "--requirements", str(requirements),
+                                    "--evidence-dir", str(evidence)])
+    assert target.main() == (1 if outcome in {"blocked", "invalid"} else 0)
+    expected = {"status": "blocked", "phase": "gateway_operation"} if outcome == "invalid" else report
+    assert json.loads(capsys.readouterr().out) == expected
+    assert json.loads((evidence / "management-result.json").read_bytes()) == expected
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("case", ["failure", "timeout", "wrong_action", "other_candidate"])
