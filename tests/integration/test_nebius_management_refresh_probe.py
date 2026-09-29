@@ -1,6 +1,7 @@
 """Actual PostgreSQL enforces refresh inspection without touching owner work."""
 from __future__ import annotations
 
+import asyncio
 import copy
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from tests.integration.test_nebius_application_operations import applications as
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.integration.test_nebius_platform_bootstrap import platform_database as platform_database
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -220,3 +222,24 @@ async def test_probe_rejects_unbounded_snapshot_before_fetching_private_plans(ap
         await probe.database_snapshot(factory.kw['bind'].url, settings(prepared))
     assert any('octet_length' in query for query in queries)
     assert not any(query.startswith('SELECT nebius_application_operations.operation_id') for query in queries)
+
+
+def test_probe_uses_the_real_bootstrapped_nonadmin_service_role_over_tls(platform_database, platform_inputs, monkeypatch):
+    from sqlalchemy.engine import make_url
+
+    from loom import nebius_platform_bootstrap as bootstrap
+    from loom.nebius_management_refresh_probe import RefreshProbeSettings, database_snapshot
+    from tests.unit.test_nebius_application_render import inputs
+
+    monkeypatch.setattr(bootstrap, 'database_url', lambda _value, _namespace: platform_database)
+    password = 'disposable-probe-service-' + 'x' * 30
+    monkeypatch.setenv('LOOM_DB_URL', platform_database)
+    monkeypatch.setenv('LOOM_DB_SERVICE_PASSWORD', password)
+    bootstrap.bootstrap_management_database({'namespace': 'loom-nebius-management'})
+    service = make_url(platform_database).set(drivername='postgresql+psycopg', username='loom_service', password=password)
+    shared = inputs(platform_inputs)[2].model_copy(update={'schema_revision': '0168'})
+    for mode in ('manager', 'shared'):
+        config = RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision='0168', shared=shared)
+        assert asyncio.run(database_snapshot(service, config)) == {
+            'schema': 'loom.nebius-management-refresh-probe.v1', 'status': 'qualified', 'mode': mode,
+            'revision': '0168', 'operations_checked': 0}
