@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import ssl
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -106,7 +105,7 @@ def test_stage_replay_preserves_resource_uids(resources_request, tmp_path, phase
     assert all(value['kind'] in {'ConfigMap', 'Job'} for value in retained.values())
 
 
-def test_unknown_create_and_lost_stage_cannot_be_reissued(resources_request, tmp_path):
+def test_unknown_create_cannot_be_reissued(resources_request, tmp_path):
     from scripts.ops.nebius_management_refresh_resources import stage_refresh_resources
     from scripts.ops.nebius_management_stage import ManagementStageError
 
@@ -127,7 +126,7 @@ def test_invalid_scope_fails_before_any_resource_write(resources_request, tmp_pa
     if damage == 'operation':
         request = replace(request, switch=replace(request.switch, operation_id=UUID(int=0)))
     elif damage == 'namespace':
-        request = replace(request, binding=replace(request.binding, namespace='another'))
+        request = replace(request, binding=replace(request.binding, namespace='loom-nebius-management-another'))
     elif damage == 'shared_uid':
         request = replace(request, shared_namespace_uid=str(UUID(int=0)))
     elif damage == 'revision':
@@ -140,7 +139,10 @@ def test_invalid_scope_fails_before_any_resource_write(resources_request, tmp_pa
 
 
 def test_readiness_checks_recorded_job_but_does_not_claim_probe_or_backup_proof(resources_request, tmp_path):
-    from scripts.ops.nebius_management_refresh_resources import refresh_resources_ready, stage_refresh_resources
+    from scripts.ops.nebius_management_refresh_resources import (
+        refresh_resources_ready,
+        stage_refresh_resources,
+    )
     from scripts.ops.nebius_management_stage import ManagementStageError
 
     api = PhaseAPI(resources_request.binding)
@@ -160,7 +162,8 @@ def test_https_adapter_rejects_wider_document_even_with_valid_resource_name(reso
     from scripts.ops.nebius_management_refresh_resources import HTTPSManagementRefreshResourcesAPI
     from scripts.ops.nebius_management_stage import ManagementStageError
 
-    with HTTPSManagementRefreshResourcesAPI(request=resources_request, phase='migration', api_server='https://kubernetes.example',
+    endpoint = resources_request.switch.render.after.installation.applications.runtime.kubernetes.endpoint
+    with HTTPSManagementRefreshResourcesAPI(request=resources_request, phase='migration', api_server=endpoint,
             ssl_context=ssl.create_default_context()) as api:
         migration, = documents(resources_request, 'migration')
         assert api._approved(migration).endswith('/namespaces/loom-nebius-management/jobs')
