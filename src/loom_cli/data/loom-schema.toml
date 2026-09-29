@@ -675,12 +675,6 @@ used_by     = ["loom-service"]
 python_type = "Path"
 default     = "/tmp/loom-taskset-upstream"
 
-[service_config.taskset_quota_max_count_per_team]
-used_by     = ["loom-service"]
-python_type = "int"
-default     = 50
-description = "Default maximum active (non-deleted) TaskSets allowed per team. Per-team overrides live in team_quotas.taskset_max_count."
-
 [service_config.taskset_quota_max_storage_bytes_per_team]
 used_by     = ["loom-service"]
 python_type = "int"

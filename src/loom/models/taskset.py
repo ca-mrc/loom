@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _API_VERSION = "loom.taskset/v1"
 _KIND = "UserTaskSet"
@@ -47,6 +47,10 @@ def bundle_object_key(*, prefix: str, relative_path: str) -> str:
 
 class TaskSetMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+    purpose: str | None = Field(default=None, min_length=1, max_length=1024)
+    expires_at: AwareDatetime | None = None
+    hold: bool = False
 
     name: str = Field(min_length=1, max_length=128)
     display_name: str = Field(min_length=1, max_length=256)

@@ -19,6 +19,7 @@ from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
+    Task,
     TaskSet,
     TaskSetManifest,
     TaskSetMaterializationJob,
@@ -174,6 +175,9 @@ async def tasksets_setup(
         with sl() as s:
             s.execute(delete(TaskSetMaterializationJob))
             s.execute(delete(TaskSetManifest))
+            # TaskSet's SET NULL FK would leak private task rows into the
+            # global catalog of subsequent tests sharing this database.
+            s.execute(delete(Task).where(Task.task_set_id.is_not(None)))
             s.execute(delete(TaskSet))
             s.execute(delete(Token))
             s.execute(delete(User))

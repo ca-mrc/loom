@@ -83,7 +83,6 @@ class LoomServiceSettings(BaseSettings):
     taskset_materializer_transforms_enabled: bool = False
     taskset_materializer_upstream_cache_root: Path = Path("/tmp/loom-taskset-upstream")
     taskset_quota_max_bundle_bytes: int = 5368709120
-    taskset_quota_max_count_per_team: int = 50
     taskset_quota_max_storage_bytes_per_team: int = 21474836480
     team_quota_max_attempts_ceiling_default: int = 3
     team_registration_open: bool = False

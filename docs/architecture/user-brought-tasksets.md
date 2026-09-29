@@ -7,7 +7,7 @@ benchmark catalog. TaskSet IDs have the stable form
 
 ## Access and lifecycle
 
-TaskSet routes require a current team. Submission, rebuild, and deletion also
+TaskSet routes require a current team. Submission, lifecycle updates, rebuild, and deletion also
 require the `submit` scope and an identified user; an unowned legacy team token
 cannot create user-facing TaskSets.
 
@@ -22,10 +22,58 @@ Statuses are:
 - `ready` — all selected tasks materialized;
 - `partial` — usable tasks exist and some inputs failed;
 - `failed` — no usable result was produced; and
-- `deleted` — soft-deleted by its owner.
+- `deleted` — soft-deleted by its owner or automatically expired.
 
 Task filtering rechecks TaskSet ownership even when callers supply exact task
 IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
+
+## Storage limits
+
+TaskSets have no per-team count limit. Both ordinary submission and deployment
+canaries continue to enforce team storage bytes (20 GiB by default) and the
+individual bundle limit (5 GiB by default). Team storage overrides still apply.
+The retired `taskset_quota_max_count_per_team` setting is no longer supported;
+historical `team_quotas.taskset_max_count` values are retained for rollback and
+have no effect on admission. Task counts remain available for display.
+
+## Expiration and retention
+
+Ordinary uploads and all pre-existing sets default to `expires_at: null` (never)
+and `hold: false`. Set descriptive `metadata.purpose`, an explicit timezone-aware
+`metadata.expires_at`, and optional `metadata.hold` in the upload manifest.
+No name or age heuristic assigns expiry. Temporary diagnostics can use seven
+days and acceptance fixtures thirty days when their owner explicitly chooses
+that policy; permanent originals remain non-expiring.
+
+Owners can change the current policy without rewriting the original manifest:
+
+```sh
+loom tasksets lifecycle my-fixture --purpose "temporary diagnostic" --expires-at 2026-10-06T12:00:00Z --no-hold
+loom tasksets lifecycle my-original --no-expiry --hold
+loom tasksets status my-fixture --format json
+```
+
+The equivalent `PATCH /api/v1/tasksets/{id}/lifecycle` accepts `purpose`,
+`expires_at`, `hold`, and `expected_updated_at` from a fresh detail/list response.
+It replaces the policy atomically, requires an identified user in the owning
+team with submit scope, and returns 409 on a concurrent change. Retired sets
+cannot be edited or rebuilt. Detail/list API, CLI status and web detail expose
+the policy. Clearing a hold does not reset the deadline: set a new deadline in
+the same update when acceptance completes.
+
+The existing hourly GC retires expired, unheld sets only after preparation jobs
+and active Batch/Trial work finish. Admission and policy edits serialize with
+retirement. Retired sets leave task selection immediately; the seven-day default
+grace period starts at retirement, not at the original expiry time.
+
+Root cleanup retains any historical Batch/Trial reference and image input,
+and leaves source-journal-managed bundles to their version-aware lifecycle.
+Legacy batches without a frozen selection conservatively retain their team's
+inputs. Thus expiry does not destroy retained download/export/reproduction
+material. A historical set can leave active selection while its data remains
+stored and counts toward storage bytes. Unreferenced roots alone are eligible
+for physical cleanup after the grace period. New policies never retroactively
+expire existing sets; operators must review and explicitly backfill them.
 
 ## Batch purpose
 

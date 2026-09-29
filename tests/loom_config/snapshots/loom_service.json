@@ -314,11 +314,6 @@
     "default": "5368709120",
     "required": false
   },
-  "taskset_quota_max_count_per_team": {
-    "annotation": "<class 'int'>",
-    "default": "50",
-    "required": false
-  },
   "taskset_quota_max_storage_bytes_per_team": {
     "annotation": "<class 'int'>",
     "default": "21474836480",

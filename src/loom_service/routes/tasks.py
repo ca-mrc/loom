@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.benchmark_profiles import resolve_benchmark_selectors
@@ -79,7 +79,10 @@ async def _owned_task_set_ids(
                 select(TaskSet.id).where(
                     TaskSet.id.in_(task_set_ids),
                     TaskSet.owning_team_id == team_id,
-                    TaskSet.soft_deleted_at.is_(None),
+                    or_(
+                        TaskSet.soft_deleted_at.is_(None),
+                        TaskSet.status_reason == "expired",
+                    ),
                 ),
             )
         ).scalars(),

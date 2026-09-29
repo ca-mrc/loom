@@ -2307,6 +2307,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tasksets/{task_set_id}/lifecycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Task Set Lifecycle */
+        patch: operations["update_task_set_lifecycle_api_v1_tasksets__task_set_id__lifecycle_patch"];
+        trace?: never;
+    };
     "/api/v1/tasksets/{task_set_id}/rebuild": {
         parameters: {
             query?: never;
@@ -6892,6 +6909,13 @@ export interface components {
             error_summary?: unknown[];
             /** Evaluation Ready */
             evaluation_ready: boolean;
+            /** Expires At */
+            expires_at?: string | null;
+            /**
+             * Hold
+             * @default false
+             */
+            hold: boolean;
             /** Inferred Intents */
             inferred_intents: string[];
             /** Intents */
@@ -6901,6 +6925,8 @@ export interface components {
             materialization_fence?: components["schemas"]["MaterializationFenceResponse"] | null;
             /** Materialization Job State */
             materialization_job_state?: string | null;
+            /** Purpose */
+            purpose?: string | null;
             /** Status */
             status: string;
             /** Status Reason */
@@ -6911,8 +6937,49 @@ export interface components {
             task_preview?: string[];
             /** Task Set Id */
             task_set_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
             /** Warnings */
             warnings?: components["schemas"]["TaskSetWarning"][];
+        };
+        /** TaskSetLifecycleResponse */
+        TaskSetLifecycleResponse: {
+            /** Expires At */
+            expires_at?: string | null;
+            /**
+             * Hold
+             * @default false
+             */
+            hold: boolean;
+            /** Purpose */
+            purpose?: string | null;
+            /** Task Set Id */
+            task_set_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** TaskSetLifecycleUpdate */
+        TaskSetLifecycleUpdate: {
+            /**
+             * Expected Updated At
+             * Format: date-time
+             */
+            expected_updated_at: string;
+            /** Expires At */
+            expires_at?: string | null;
+            /**
+             * Hold
+             * @default false
+             */
+            hold: boolean;
+            /** Purpose */
+            purpose?: string | null;
         };
         /** TaskSetListItem */
         TaskSetListItem: {
@@ -6925,14 +6992,28 @@ export interface components {
             display_name: string;
             /** Evaluation Ready */
             evaluation_ready: boolean;
+            /** Expires At */
+            expires_at?: string | null;
+            /**
+             * Hold
+             * @default false
+             */
+            hold: boolean;
             /** Intents */
             intents: string[];
+            /** Purpose */
+            purpose?: string | null;
             /** Status */
             status: string;
             /** Task Count */
             task_count: number;
             /** Task Set Id */
             task_set_id: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** TaskSetListResponse */
         TaskSetListResponse: {
@@ -13509,6 +13590,43 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_task_set_lifecycle_api_v1_tasksets__task_set_id__lifecycle_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                task_set_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TaskSetLifecycleUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSetLifecycleResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

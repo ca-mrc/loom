@@ -196,6 +196,11 @@ export default function TaskSetDetail(): JSX.Element {
 
       <p className="text-sm text-slate-600">Trajectory generation uses task sets. Evaluation-ready historical or admin-imported sets include a verifier; new evaluation batches use native benchmark tasks.</p>
       <Link className="inline-block text-sm text-accent hover:underline" to={`/batches/new?taskSet=${encodeURIComponent(ts.task_set_id)}`}>Configure a batch with this task source →</Link>
+      <dl className="grid gap-2 text-sm text-slate-600">
+        <div><dt className="inline font-medium">Purpose: </dt><dd className="inline">{ts.purpose || "Unspecified"}</dd></div>
+        <div><dt className="inline font-medium">Expires: </dt><dd className="inline">{ts.expires_at ? new Date(ts.expires_at).toLocaleString() : "Never"}</dd></div>
+        <div><dt className="inline font-medium">Retention hold: </dt><dd className="inline">{ts.hold ? "On — automatic expiry paused" : "Off"}</dd></div>
+      </dl>
       <Tabs
         items={
           [

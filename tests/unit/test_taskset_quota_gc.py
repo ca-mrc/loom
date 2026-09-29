@@ -265,78 +265,6 @@ class TestGCQueryWindow:
         assert soft_deleted_at is None
 
 
-class TestQuotaCheckLogic:
-    """Tests for the quota count enforcement helper logic."""
-
-    @pytest.mark.asyncio
-    async def test_quota_allows_when_under_limit(self) -> None:
-        """Submission should succeed when active count < max."""
-        from unittest.mock import AsyncMock
-
-        from loom_service.taskset_intake import check_taskset_count_quota
-
-        session = AsyncMock()
-        # Mock: no TeamQuota row exists -> use default
-        execute_results = [
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-            MagicMock(scalar_one=MagicMock(return_value=10)),
-        ]
-        session.execute = AsyncMock(side_effect=execute_results)
-
-        # Should not raise
-        await check_taskset_count_quota(
-            session, team_id=uuid4(), default_max_count=50,
-        )
-
-    @pytest.mark.asyncio
-    async def test_quota_rejects_when_at_limit(self) -> None:
-        """Submission should be rejected (429) when active count >= max."""
-        from unittest.mock import AsyncMock
-
-        from fastapi import HTTPException
-
-        from loom_service.taskset_intake import check_taskset_count_quota
-
-        session = AsyncMock()
-        execute_results = [
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-            MagicMock(scalar_one=MagicMock(return_value=50)),
-        ]
-        session.execute = AsyncMock(side_effect=execute_results)
-
-        with pytest.raises(HTTPException) as exc_info:
-            await check_taskset_count_quota(
-                session, team_id=uuid4(), default_max_count=50,
-            )
-        assert exc_info.value.status_code == 429
-        assert "taskset_quota_exceeded" in exc_info.value.detail
-
-    @pytest.mark.asyncio
-    async def test_quota_uses_team_override(self) -> None:
-        """Per-team override should take precedence over default."""
-        from unittest.mock import AsyncMock
-
-        from fastapi import HTTPException
-
-        from loom_service.taskset_intake import check_taskset_count_quota
-
-        team_quota = MagicMock()
-        team_quota.taskset_max_count = 5
-
-        session = AsyncMock()
-        execute_results = [
-            MagicMock(scalar_one_or_none=MagicMock(return_value=team_quota)),
-            MagicMock(scalar_one=MagicMock(return_value=5)),
-        ]
-        session.execute = AsyncMock(side_effect=execute_results)
-
-        with pytest.raises(HTTPException) as exc_info:
-            await check_taskset_count_quota(
-                session, team_id=uuid4(), default_max_count=50,
-            )
-        assert exc_info.value.status_code == 429
-
-
 class TestTeamStorageBytes:
     """Tests for team storage accounting helpers."""
 
@@ -546,11 +474,9 @@ source:
 """
         bundle = b"x" * 900
         session = MagicMock()
-        session.execute = AsyncMock(side_effect=[
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-            MagicMock(scalar_one=MagicMock(return_value=0)),
-            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),
-        ])
+        session.execute = AsyncMock(return_value=MagicMock(
+            scalar_one_or_none=MagicMock(return_value=None),
+        ))
         session.flush = AsyncMock()
         session.rollback = AsyncMock()
         session.commit = AsyncMock()
@@ -577,7 +503,6 @@ source:
                         filename="bundle.tar.gz",
                         file=io.BytesIO(bundle),
                     ),
-                    taskset_quota_max_count=50,
                     taskset_quota_max_storage_bytes=500,
                     manifest_max_bytes=4096,
                     bundle_max_bytes=4096,

@@ -18,7 +18,6 @@ from uuid import UUID
 import yaml  # type: ignore[import-untyped]
 from fastapi import HTTPException, UploadFile
 from pydantic import ValidationError
-from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -117,6 +116,10 @@ async def parse_manifest_upload(
                     detail="verifier_required_for_evaluation",
                 ) from exc
         raise HTTPException(status_code=400, detail=exc.errors()) from exc
+    # YAML parses unquoted ISO timestamps into datetime objects. Keep the
+    # persisted manifest JSON-compatible without injecting optional defaults.
+    if model.metadata.expires_at is not None:
+        parsed["metadata"]["expires_at"] = model.metadata.expires_at.isoformat()
     return model, parsed
 
 
@@ -224,40 +227,6 @@ async def check_taskset_storage_quota(
         )
 
 
-async def check_taskset_count_quota(
-    session: AsyncSession,
-    *,
-    team_id: UUID,
-    default_max_count: int,
-) -> None:
-    """Reject if team has hit their active TaskSet count quota."""
-    quota_row = (
-        await session.execute(
-            select(TeamQuota).where(TeamQuota.team_id == team_id),
-        )
-    ).scalar_one_or_none()
-    max_count = (
-        quota_row.taskset_max_count
-        if quota_row is not None and quota_row.taskset_max_count is not None
-        else default_max_count
-    )
-
-    active_count_result = await session.execute(
-        select(sa_func.count())
-        .select_from(TaskSet)
-        .where(
-            TaskSet.owning_team_id == team_id,
-            TaskSet.soft_deleted_at.is_(None),
-        ),
-    )
-    active_count = active_count_result.scalar_one()
-    if active_count >= max_count:
-        raise HTTPException(
-            status_code=429,
-            detail="taskset_quota_exceeded",
-        )
-
-
 async def submit_task_set(
     session: AsyncSession,
     *,
@@ -268,17 +237,11 @@ async def submit_task_set(
     verifier_upload: UploadFile | None,
     transform_upload: UploadFile | None,
     bundle_upload: UploadFile | None = None,
-    taskset_quota_max_count: int = 50,
     taskset_quota_max_storage_bytes: int = 21_474_836_480,
     manifest_max_bytes: int = 1_048_576,
     bundle_max_bytes: int = 5_368_709_120,
     before_commit: Callable[[TaskSetIntakeResult], Awaitable[None]] | None = None,
 ) -> TaskSetIntakeResult:
-    await check_taskset_count_quota(
-        session,
-        team_id=team_id,
-        default_max_count=taskset_quota_max_count,
-    )
     manifest_model, raw_manifest = await parse_manifest_upload(
         manifest_upload,
         max_bytes=manifest_max_bytes,
@@ -390,6 +353,9 @@ async def submit_task_set(
         owning_team_id=team_id,
         slug=slug,
         display_name=manifest_model.metadata.display_name,
+        purpose=manifest_model.metadata.purpose,
+        expires_at=manifest_model.metadata.expires_at,
+        hold=manifest_model.metadata.hold,
         status="materializing",
         intents=normalized.effective_intents,
         evaluation_ready=False,
@@ -478,10 +444,14 @@ async def get_visible_task_set(
     *,
     team_id: UUID | None,
     task_set_id: str,
+    for_update: bool = False,
 ) -> TaskSet:
+    query = visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id)
+    if for_update:
+        query = query.with_for_update()
     row = (
         await session.execute(
-            visible_task_sets(team_id=team_id).where(TaskSet.id == task_set_id),
+            query,
         )
     ).scalar_one_or_none()
     if row is None:
@@ -513,6 +483,7 @@ async def rebuild_task_set(
         session,
         team_id=team_id,
         task_set_id=task_set_id,
+        for_update=True,
     )
     if task_set.status == "deleted":
         raise HTTPException(status_code=404, detail="task_set not found")
@@ -598,6 +569,7 @@ async def delete_task_set(
         session,
         team_id=team_id,
         task_set_id=task_set_id,
+        for_update=True,
     )
     active_jobs = (
         (

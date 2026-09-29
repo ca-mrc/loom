@@ -18,7 +18,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from loom.auth import AuthContext
@@ -62,9 +62,28 @@ class TaskSetSubmitResponse(BaseModel):
     materialization_job_id: str
 
 
-class TaskSetDetailResponse(BaseModel):
+class TaskSetLifecycle(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    purpose: str | None = Field(default=None, min_length=1, max_length=1024)
+    expires_at: AwareDatetime | None = None
+    hold: bool = False
+
+
+class TaskSetLifecycleUpdate(TaskSetLifecycle):
+    # Full replacement with a version precondition avoids lost concurrent edits.
+    expected_updated_at: AwareDatetime
+
+
+class TaskSetLifecycleResponse(TaskSetLifecycle):
+    task_set_id: str
+    updated_at: datetime
+
+
+class TaskSetDetailResponse(TaskSetLifecycle):
+    model_config = ConfigDict(extra="forbid")
+
+    updated_at: datetime
     display_name: str | None = None
     task_preview: list[str] = Field(default_factory=list)
     task_set_id: str
@@ -127,7 +146,7 @@ def _materialization_fence(
     )
 
 
-class TaskSetListItem(BaseModel):
+class TaskSetListItem(TaskSetLifecycle):
     model_config = ConfigDict(extra="forbid")
 
     task_set_id: str
@@ -137,6 +156,7 @@ class TaskSetListItem(BaseModel):
     evaluation_ready: bool
     task_count: int
     created_at: datetime
+    updated_at: datetime
 
 
 class TaskSetListResponse(BaseModel):
@@ -183,7 +203,6 @@ async def create_task_set(
         verifier_upload=verifier,
         transform_upload=transform,
         bundle_upload=bundle,
-        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
         taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
         manifest_max_bytes=settings.taskset_manifest_max_bytes,
         bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
@@ -207,6 +226,10 @@ async def list_task_sets(sc: SessionAndCtx) -> TaskSetListResponse:
                 intents=list(row.intents),
                 evaluation_ready=row.evaluation_ready,
                 task_count=row.task_count,
+                purpose=row.purpose,
+                expires_at=row.expires_at,
+                hold=row.hold,
+                updated_at=row.updated_at,
                 created_at=row.created_at,
             )
             for row in rows
@@ -244,6 +267,10 @@ async def get_task_set(
         select(Task.id).where(Task.task_set_id == task_set_id).order_by(Task.id).limit(5),
     )).all()
     return TaskSetDetailResponse(
+        purpose=task_set.purpose,
+        expires_at=task_set.expires_at,
+        hold=task_set.hold,
+        updated_at=task_set.updated_at,
         display_name=task_set.display_name,
         task_preview=list(task_preview),
         task_set_id=task_set.id,
@@ -292,3 +319,30 @@ async def delete_task_set_route(task_set_id: str, sc: SessionAndCtx) -> None:
     require_submitting_user(ctx)
     team_id = _team_id_for_read(ctx)
     await delete_task_set(session, team_id=team_id, task_set_id=task_set_id)
+
+
+@router.patch(
+    "/tasksets/{task_set_id:path}/lifecycle",
+    response_model=TaskSetLifecycleResponse,
+)
+async def update_task_set_lifecycle(
+    task_set_id: str, payload: TaskSetLifecycleUpdate, sc: SessionAndCtx,
+) -> TaskSetLifecycleResponse:
+    session, ctx = sc
+    require_scope(ctx, "submit")
+    require_submitting_user(ctx)
+    task_set = await get_visible_task_set(
+        session, team_id=_require_team_id(ctx), task_set_id=task_set_id, for_update=True,
+    )
+    if task_set.updated_at != payload.expected_updated_at:
+        raise HTTPException(status_code=409, detail="task_set_changed; refresh before updating")
+    task_set.purpose = payload.purpose
+    task_set.expires_at = payload.expires_at
+    task_set.hold = payload.hold
+    task_set.updated_at = datetime.now(UTC)
+    result = TaskSetLifecycleResponse(
+        task_set_id=task_set.id, purpose=task_set.purpose,
+        expires_at=task_set.expires_at, hold=task_set.hold, updated_at=task_set.updated_at,
+    )
+    await session.commit()
+    return result
