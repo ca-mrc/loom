@@ -86,6 +86,8 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    from loom_cli.application_cmd import add_application_subparser
+
     parser = sub.add_parser("dev", help="Manage personal Nebius environments on your logged-in management server")
     commands = parser.add_subparsers(dest="dev_command", required=True)
     create = commands.add_parser("create", help="Request an isolated personal environment from an approved candidate")
@@ -108,3 +110,4 @@ def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[
     wait.add_argument("operation_id")
     wait.add_argument("--timeout", type=float, default=300)
     parser.set_defaults(handler=_run)
+    add_application_subparser(commands)
