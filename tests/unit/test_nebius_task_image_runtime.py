@@ -128,6 +128,8 @@ class FakeS3:
         self.closed = True
 
     def put_object(self, **kwargs):
+        if kwargs.get("IfNoneMatch") == "*" and kwargs["Key"] in self.objects:
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
         self.objects[kwargs["Key"]] = kwargs["Body"]
 
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
@@ -1173,6 +1175,59 @@ def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> Non
     logged = capsys.readouterr().out
     assert "grace_protected" in logged
     assert "InternalError" not in logged
+@pytest.mark.parametrize("orphan_mib,layer_mib,expected_roots", [(0, 900, 4), (900, 700, 5)])
+def test_trim_budget_counts_actual_reclaimable_blobs(orphan_mib, layer_mib, expected_roots):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    objects = {}
+    listing = []
+    for i in range(5):
+        content = f"layer-{i}".encode()
+        part = _v2_cache_objects(f"{i:064x}", 0, {"layer": content})
+        objects.update(part)
+        for key, value in part.items():
+            blob = "/blobs/" in key
+            listing.append({"Key": key, "Size": layer_mib * 1024**2 if blob else len(value),
+                            "LastModified": now - timedelta(days=10 if blob else 1, seconds=5-i)})
+    if orphan_mib:
+        key = runtime._v2_blob_key("f" * 64)
+        objects[key] = b"orphan"
+        listing.append({"Key": key, "Size": orphan_mib * 1024**2, "LastModified": now-timedelta(days=10)})
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert sum(k.endswith("manifest.json") for k in cache.objects) == expected_roots
+    assert sum("/blobs/" in k for k in cache.objects) == expected_roots
+
+
+def test_trim_does_not_discard_roots_when_grace_prevents_reclaim(capsys):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    objects = _v2_cache_objects("a" * 64, 0, {"layer": b"large"})
+    listing = [{"Key": key, "Size": 5 * 1024**3 if "/blobs/" in key else len(value),
+                "LastModified": now-timedelta(days=1)} for key,value in objects.items()]
+    cache = FakeS3(dict(objects), listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.objects == objects
+    assert "budget_temporarily_unreachable" in capsys.readouterr().out
+
+
+def test_cache_publisher_and_gc_do_not_interleave(source_bundle, tmp_path):
+    claim, _ = source_bundle
+    directory = tmp_path / "cache-out"
+    directory.mkdir()
+    (directory / "layer").write_bytes(b"layer")
+    class InterleavedS3(FakeS3):
+        def upload_file(self, filename, bucket, key):
+            before = dict(self.objects)
+            runtime.trim_cache(self, bucket, runtime._CACHE_TOTAL_BYTES)
+            assert self.objects == before
+            super().upload_file(filename,bucket,key)
+    cache = InterleavedS3(_v2_cache_objects("f" * 64, 0, {"layer": b"other-cache"}))
+    runtime._publish_cache_blobs(cache, claim, index=0, cache_dir=directory)
+    manifest = json.loads(cache.objects[runtime._v2_manifest_key(claim["materialization_key"],0)])
+    assert all(runtime._v2_blob_key(e["sha256"]) in cache.objects for e in manifest["files"])
+
+
 @pytest.mark.parametrize("failure", ["get", "read", "parse"])
 def test_trim_cache_defers_blob_sweep_until_retained_manifest_is_readable(failure, capsys) -> None:
     from datetime import UTC, datetime, timedelta
