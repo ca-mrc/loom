@@ -585,8 +585,10 @@ commit marker, file sizes, and every SHA-256, then streams every file to the
 stable `trials/<team>/<trial>/attempts/<attempt>/bundles/<artifact>/` namespace.
 Canonical S3 copies use 8 MiB multipart requests for large streams, retaining
 only a bounded part buffer. Each retry owns immutable request bytes; a timed-out
-transport thread cannot consume another attempt's file cursor. Source failure
-or cancellation aborts the incomplete multipart upload before publication.
+transport thread cannot consume another attempt's file cursor. Initiation uses
+one SDK attempt; a late successful initiation is reclaimed after cancellation
+or timeout. Source failure or cancellation attempts to abort the incomplete
+multipart upload; network failure can still require bucket lifecycle cleanup.
 The existing complete-file digest and destination readback checks still gate
 canonical acknowledgement.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and

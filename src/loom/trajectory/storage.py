@@ -965,6 +965,46 @@ class MinioObjectStore:
             etag = await self._run_client_call("upload_part_stream", _do)
             upload.parts.append((part_number, etag))
 
+    async def _create_stream_upload(self, *, bucket: str, key: str) -> MultipartUpload:
+        # Initiation is not safely replayable: a timed-out SDK call can still
+        # create an upload. Keep ownership until that thread returns, and let
+        # it abort a late result instead of abandoning an unknown upload ID.
+        lock = threading.Lock()
+        abandoned = False
+        allocated: MultipartUpload | None = None
+        client_kwargs = dict(self._client_kwargs)
+        client_kwargs["config"] = self._client_config.merge(Config(retries={"max_attempts": 0}))
+
+        def create() -> MultipartUpload:
+            nonlocal allocated
+            client = boto3.client(**client_kwargs)
+            self._configure_client_events(client)
+            try:
+                upload = MultipartUpload(
+                    bucket=bucket, key=key,
+                    upload_id=client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"],
+                )
+                with lock:
+                    if not abandoned:
+                        allocated = upload
+                        return upload
+                with contextlib.suppress(Exception):
+                    client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload.upload_id)
+                return upload
+            finally:
+                client.close()
+
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(create), timeout=self._operation_timeout)
+        except BaseException:
+            with lock:
+                abandoned = True
+                owned = allocated
+            if owned is not None:
+                with contextlib.suppress(Exception):
+                    await self.abort_multipart_upload(owned)
+            raise
+
     async def put_object_stream(
         self,
         *,
@@ -981,7 +1021,7 @@ class MinioObjectStore:
         async def send_part() -> None:
             nonlocal upload
             if upload is None:
-                upload = await self.create_multipart_upload(bucket=bucket, key=key)
+                upload = await self._create_stream_upload(bucket=bucket, key=key)
             part_number = len(upload.parts) + 1
             if part_number > _S3_MAX_UPLOAD_PARTS:
                 raise ValueError("object stream exceeds the multipart part limit")
