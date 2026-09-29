@@ -168,7 +168,7 @@ function MaterializationCard({
   const materialization = trial.materialization;
   if (!materialization) return null;
   const bundle = materialization.bundle;
-  const unavailable = materialization.state === "unavailable";
+  const unavailable = materialization.state === "unavailable" || materialization.output_commit_state === "unavailable";
   return (
     <Card>
       <Card.Header
@@ -177,7 +177,7 @@ function MaterializationCard({
         headingLevel="h2"
         actions={
           <StatusPill variant={unavailable ? "failed" : materialization.canonical_ready ? "success" : "running"}>
-            {materialization.state}
+            {unavailable ? "unavailable" : materialization.state}
           </StatusPill>
         }
       />
@@ -205,7 +205,7 @@ function MaterializationCard({
           <StatCard label="Pool" value={materialization.pool_id} />
           <StatCard label="Execution" value={materialization.execution_state} />
           <StatCard label="Lifecycle" value={materialization.lifecycle_stage} />
-          <StatCard label="Compute result" value={materialization.compute_state ?? "pending"} />
+          <StatCard label="Compute result" value={materialization.compute_state ?? (["succeeded", "failed", "cancelled"].includes(trial.state) ? trial.state : "pending")} />
           <StatCard label="Output commit" value={materialization.output_commit_state} />
           <StatCard
             label="Submitted to scheduled (includes preparation)"
@@ -277,6 +277,8 @@ function MaterializationCard({
 
             </div>
           </div>
+        ) : unavailable ? (
+          <p className="text-sm text-slate-600">Trial output unavailable. See the final diagnostic above.</p>
         ) : (
           <Button disabled variant="secondary" title="The complete bundle becomes available only after canonical integrity checks pass.">
             Complete Trial bundle pending
@@ -579,7 +581,7 @@ function Trajectory({ trialId, terminal, trajectoryReady }: { trialId: string; t
     if (useFallback) return "fallback polling";
     if (stream.status === "open") return "live";
     if (stream.status === "connecting") return "connecting…";
-    if (stream.status === "complete") return "complete";
+    if (stream.status === "complete") return renderedEvents.length === 0 ? "ended without recorded events" : "complete";
     if (stream.status === "reconnect") return "reconnecting…";
     return stream.status;
   })();

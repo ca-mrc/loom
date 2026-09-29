@@ -1001,6 +1001,11 @@ class ServiceExecutionMaterializer:
             != lease_data["output_marker_sha256"]
         ):
             raise MaterializationIntegrityError("runtime_result_projection_drift")
+        # Cancellation can win while a completed runtime result is uploading.
+        # Preserve that immutable source document, but derive public terminal
+        # events from the cancellation that owns the Trial's final state.
+        if trial_result_raw.get("cancelled") is True:
+            runtime_result = runtime_result.model_copy(update={"status": "cancelled", "partial_evidence": True})
         trace_body = derivation_inputs.get(_TRACE_PATH)
         exception_info = read_exception_info(runtime_result, derivation_inputs)
         if runtime_result.status == "succeeded" and trace_body is None:

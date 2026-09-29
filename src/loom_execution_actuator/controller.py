@@ -242,7 +242,7 @@ class ExecutionActuator:
             await self._close_output_before_delete(
                 lease,
                 now=now,
-                cancel_immediately=lease.desired_state == "cancel",
+                cancel_immediately=lease.desired_state == "cancel" and lease.pod_uid is None,
             )
         if observation.normalized_state in _FAILURE_REASONS:
             KUBERNETES_PENDING_TOTAL.labels(reason=observation.normalized_state.value).inc()
@@ -378,17 +378,21 @@ class ExecutionActuator:
                 diagnostic=diagnostic,
             )
             await session.commit()
-        await self._close_output_before_delete(
-            lease,
-            now=now,
-            cancel_immediately=cancel_immediately,
-        )
+        # Cancellation must signal the runtime now, but leave its output-only
+        # authority open while SIGTERM drains and uploads partial evidence.
+        # Reconciliation closes the window after commit or the existing deadline.
+        grace_seconds = self._delete_grace_seconds
+        if cancel_immediately:
+            if lease.cleanup_deadline_at is not None:
+                grace_seconds = max(0, min(300, int((lease.cleanup_deadline_at - now).total_seconds())))
+        else:
+            await self._close_output_before_delete(lease, now=now)
         with KUBERNETES_API_SECONDS.labels(operation="delete").time():
             await self._kubernetes.delete_job(
                 namespace=self._target.namespace,
                 job_name=lease.job_name,
                 expected_uid=observation.job_uid,
-                grace_period_seconds=self._delete_grace_seconds,
+                grace_period_seconds=grace_seconds,
             )
 
     async def _ack(

@@ -854,7 +854,10 @@ async def get_trial(
                         "message": "The canonical Trial bundle failed integrity validation.",
                     }
                     if canonical_bundle_error is not None
-                    else None
+                    else {
+                        "code": materialization.output_unavailable_reason or "output_unavailable",
+                        "message": "Execution ended before output could be retained; no canonical bundle is available.",
+                    } if materialization.output_commit_state == "unavailable" else None
                 )
             ),
             "trajectory_sha256": materialization.canonical_trajectory_sha256,

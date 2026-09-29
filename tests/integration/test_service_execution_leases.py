@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -3475,10 +3477,11 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
 async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     postgres_url: str,
     source_task_id: str | None,
-    rewards: dict[str, float],
-    aggregate_reward: float,
+    rewards: dict[str, float] | None,
+    aggregate_reward: float | None,
     runtime_status: str = "succeeded",
     late_cancellation: str | None = None,
+    cancel_before_commit: bool = False,
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -3631,6 +3634,8 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             ),
             "verifier/output.json": canonical_document({"rewards": rewards}),
         }
+        if cancel_before_commit:
+            bundle_payloads.pop("verifier/output.json")
         result_document = _runtime_result_payload(lease, started_at=now)
         result_document["status"] = runtime_status
         result_document["partial_evidence"] = runtime_status != "succeeded"
@@ -3642,9 +3647,9 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             outputs=[
                 {
                     **declaration.model_dump(mode="json"),
-                    "state": "captured",
-                    "size_bytes": len(bundle_payloads[declaration.relative_path]),
-                    "sha256": digest_bytes(bundle_payloads[declaration.relative_path]),
+                    "state": "captured" if declaration.relative_path in bundle_payloads else "missing",
+                    "size_bytes": len(bundle_payloads[declaration.relative_path]) if declaration.relative_path in bundle_payloads else None,
+                    "sha256": digest_bytes(bundle_payloads[declaration.relative_path]) if declaration.relative_path in bundle_payloads else None,
                 }
                 for declaration in runtime_contract.output_declarations
             ],
@@ -3717,13 +3722,41 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 ordered_parts=(receipt,),
                 upload_token=upload_token,
             )
+        if cancel_before_commit:
+            async with sessions() as session:
+                assert await request_trial_execution_cancellation(session, trial_id=trial_id, now=now)
+                assert await request_trial_execution_cancellation(session, trial_id=trial_id, now=now) is None
+                with pytest.raises(ServiceExecutionBrokerError, match="fenced"):
+                    await authorize_service_execution_peer(session, peer_ip="10.24.7.21", identity=identity)
+                await authorize_service_execution_peer(session, peer_ip="10.24.7.21", identity=identity, purpose="output")
+                await session.commit()
+            cancel_kube = _FakeKubernetesJobApi()
+            cancel_kube.jobs[lease.job_name] = KubernetesJobObservation(
+                namespace=target.namespace_name, job_name=lease.job_name, lease_id=str(lease.id),
+                resource_generation=1, target_id=target.target_id,
+                execution_unit_key=str(lease.execution_unit_key),
+                normalized_state=NormalizedJobState.RUNNING, job_uid="job-materialize",
+                pod_uid="pod-materialize", pod_ip="10.24.7.21", resource_version="2",
+            )
+            cancel_actuator = ExecutionActuator(sessions=sessions, kubernetes=cancel_kube,
+                target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+                controller_id="cancel-output-race")
+            await cancel_actuator.run_commands_once(now=now)
+            assert cancel_kube.delete_count == 1 and not cancel_kube.jobs
+            await cancel_actuator.reconcile_full_once(now=now + timedelta(seconds=1))
+            async with sessions() as session:
+                current = await session.get(ServiceExecutionLease, lease.id)
+                assert current is not None and current.output_commit_state == "uploading"
+                assert current.deleted_at is None and current.cleanup_state == "pending"
         await route.commit(
             lease=lease,
             session_id=upload_session_id,
             upload_token=upload_token,
         )
 
-        if late_cancellation is None:
+        if cancel_before_commit:
+            await cancel_actuator.reconcile_full_once(now=now + timedelta(seconds=4))
+        elif late_cancellation is None:
             async with sessions() as session:
                 current = await session.get(ServiceExecutionLease, lease.id, with_for_update=True)
                 assert current is not None
@@ -3786,7 +3819,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             trial = await session.get(Trial, trial_id)
             assert current is not None and trial is not None
             if late_cancellation != "already_deleted":
-                assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
+                assert trial.state == ("materializing" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
                 assert trial.result is not None
                 assert trial.result["aggregate_reward"] == aggregate_reward
                 assert trial.result["reward"] == rewards
@@ -3826,7 +3859,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current is not None and trial is not None
             assert current.materialization_state == "pending"
             assert current.materialization_error_code == "transient_materialization_error"
-            assert trial.state == ("materializing" if runtime_status == "succeeded" else "failed")
+            assert trial.state == ("materializing" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
             assert trial.result is not None
             assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
                 result_document
@@ -3897,8 +3930,8 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert current.canonical_trajectory_sha256 is not None
             assert current.source_cleanup_state == "complete"
             assert current.source_cleanup_attempts == 2
-            assert trial.state == ("succeeded" if runtime_status == "succeeded" else "failed")
-            assert trial.failure_reason == (None if runtime_status == "succeeded" else "timed_out")
+            assert trial.state == ("succeeded" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
+            assert trial.failure_reason == ("cancelled" if cancel_before_commit else None if runtime_status == "succeeded" else runtime_status)
             assert trial.result == projected_result
             from loom_service.routes.batches import _rollup_from_trials
 
@@ -3917,16 +3950,14 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 "step_start",
                 "llm_call",
                 "step_end",
-                "verifier_start",
-                "verifier_end",
-                *([] if runtime_status == "succeeded" else ["trial_error"]),
+                *([] if cancel_before_commit else ["verifier_start", "verifier_end"]),
+                *([] if cancel_before_commit or runtime_status == "succeeded" else ["trial_error"]),
                 "trial_end",
             ]
             assert events[-1].payload["reward"] == rewards
             assert events[-1].payload["final_state"] == trial.state
-            assert next(event for event in events if event.kind == "verifier_end").payload[
-                "result"
-            ]["rewards"] == rewards
+            if not cancel_before_commit:
+                assert next(event for event in events if event.kind == "verifier_end").payload["result"]["rewards"] == rewards
             storage_files = artifact.storage["files"]
             source_evidence = artifact.storage["source_evidence"]
             assert [item["relative_path"] for item in source_evidence] == [
@@ -3986,14 +4017,30 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 )
 
         app.dependency_overrides[authed_session] = fixture_session
+        if cancel_before_commit:
+            class CanonicalClient:
+                def get_object(self, *, Bucket, Key):  # type: ignore[no-untyped-def]  # noqa: N803
+                    payload = canonical_store.objects[(Bucket, Key)]
+                    return {"Body": io.BytesIO(payload), "ContentLength": len(payload)}
+            app.state.minio_client = CanonicalClient()
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get("/api/v1/trials")
+            if cancel_before_commit:
+                downloaded = await client.get(f"/api/v1/trials/{trial_id}/bundle/download")
+                assert downloaded.status_code == 200, downloaded.text
+                with tarfile.open(fileobj=io.BytesIO(downloaded.content), mode="r:gz") as archive:
+                    raw = archive.extractfile("files/result.json")
+                    assert raw is not None and json.load(raw)["status"] == runtime_status
+                    assert "files/artifacts/answer.txt" in archive.getnames()
+                atif = json.loads(canonical_store.objects[("trajectories", atif_key)])
+                assert atif["metadata"]["final_state"] == "cancelled"
+                assert atif["metadata"].get("reward") is None
         assert response.status_code == 200, response.text
         item = next(item for item in response.json()["items"] if item["id"] == str(trial_id))
         assert item["aggregate_reward"] == aggregate_reward
-        assert item["state"] == ("succeeded" if runtime_status == "succeeded" else "failed")
+        assert item["state"] == ("succeeded" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
     finally:
         await engine.dispose()
 
@@ -4854,5 +4901,58 @@ async def test_private_terminus_sandboxes_reserve_full_pod_resources(
                        for item in pod["initContainers"][1:])
             trial = await session.get(Trial, trial_id)
             assert trial is not None and (trial.state, trial.attempt_count) == ("claimed", 1)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("runtime_status", ["cancelled", "task_error"])
+async def test_cancel_during_upload_preserves_partial_canonical_evidence(
+    postgres_url: str, runtime_status: str,
+) -> None:
+    await test_materializer_commits_complete_bundle_after_execution_cleanup(
+        postgres_url=postgres_url, source_task_id=None, rewards=None, aggregate_reward=None,
+        runtime_status=runtime_status, cancel_before_commit=True,
+    )
+
+
+async def test_cancelled_pod_without_output_closes_at_bounded_deadline(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    kube = _FakeKubernetesJobApi()
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        actuator = ExecutionActuator(sessions=sessions, kubernetes=kube,
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="bounded-cancel")
+        await actuator.run_commands_once(now=now)
+        kube.jobs[lease.job_name] = kube.jobs[lease.job_name].model_copy(update={
+            "normalized_state": NormalizedJobState.RUNNING, "pod_uid": "cancel-pod",
+            "pod_ip": "10.24.7.25", "resource_version": "2",
+        })
+        await actuator.reconcile_full_once(now=now)
+        async with sessions() as session:
+            await request_trial_execution_cancellation(session, trial_id=trial_id, now=now)
+            await session.commit()
+        await actuator.run_commands_once(now=now)
+        assert kube.delete_count == 1 and not kube.jobs
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=299))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None and current.output_commit_state == "not_started"
+            assert current.cleanup_state == "pending" and current.deleted_at is None
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=300))
+        async with sessions() as session:
+            current = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            assert current is not None and trial is not None
+            assert current.cleanup_state == "complete" and current.deleted_at is not None
+            assert current.output_unavailable_reason == "cleanup_deadline_elapsed"
+            assert trial.state == "cancelled" and trial.attempt_count == 1
+            assert trial.result["reward"] is None
+            assert trial.result["output_unavailable_reason"] == "cleanup_deadline_elapsed"
     finally:
         await engine.dispose()
