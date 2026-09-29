@@ -69,6 +69,12 @@ It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
+The `kube-system/coredns` Service entry also includes fixed `dns_checks`
+booleans for deletion/ownership, native or legacy selector matching, a usable
+cluster IP, and TCP/UDP port 53. These reuse the existing Service inventory read;
+they export no selector values, owner details or additional configuration.
+They explain current DNS qualification, not successful recovery or readiness.
+
 For up to three newest failed bootstrap Pods in the selected platform namespace,
 inspection checks the exact Job owner UID, terminal failure and expected bootstrap
 command before reading at most 50 log lines / 16 KiB per Pod. The artifact adds
