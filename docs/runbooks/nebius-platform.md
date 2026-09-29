@@ -1482,3 +1482,12 @@ images/profile/settings, retiring the failed replacement. Normal bootstrap does
 not reactivate a retired target. Retain both reviewed renders and do not
 automatically downgrade the database. Task egress still requires separate
 installed network qualification before claiming it is supported.
+
+Verified cache downloads are reused across components during the trusted prepare
+phase of one Job. The index references at most 256 MiB of already materialized
+cache-in files; it creates no additional retained blob store. Each component
+receives independent writable copies, and the index disappears before the
+untrusted builder starts. Failed imports remove their destinations; stale index
+entries are discarded. Larger/no-sharing inputs continue through bounded normal
+downloads. This does not share cache across tasks or teams, change donor policy,
+or retain a BuildKit daemon.

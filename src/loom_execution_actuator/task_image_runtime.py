@@ -52,6 +52,7 @@ _FILE_LIMIT = 2000
 _BUNDLE_BYTES = 512 * 1024 * 1024
 _CACHE_BYTES = 1024 * 1024 * 1024
 _CACHE_TOTAL_BYTES = 4 * _CACHE_BYTES
+_CACHE_REUSE_BYTES = 256 * 1024 * 1024
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _KEY = re.compile(r"[0-9a-f]{64}\Z")
 # Stable Job-log markers for stage timing (Phase 2). Logs only — no DB schema.
@@ -417,6 +418,7 @@ def _materialize_cache_blobs(
     materialization_key: str,
     index: int,
     destination: Path,
+    verified: dict[str, tuple[Path, int]] | None = None,
 ) -> None:
     """Import a v2 manifest + content-addressed blobs into cache-in/{index}."""
     with tempfile.TemporaryDirectory(prefix="loom-cache-manifest-") as temporary:
@@ -437,13 +439,23 @@ def _materialize_cache_blobs(
     destination.mkdir(parents=True, exist_ok=False)
     downloaded_bytes = 0
     downloaded: set[str] = set()
+    # Only trusted prepare reads/writes these independent cache-in copies. The
+    # builder starts after prepare exits; this index never survives the Job.
+    if verified is not None:
+        for digest, (path, size) in list(verified.items()):
+            if not path.is_file() or path.is_symlink() or path.stat().st_size != size:
+                del verified[digest]
+    reuse_bytes = sum(size for _, size in verified.values()) if verified is not None else 0
     try:
         with tempfile.TemporaryDirectory(prefix="loom-cache-blob-") as blob_tmp:
             for entry in entries:
                 target = destination / entry["path"]
                 target.parent.mkdir(parents=True, exist_ok=True)
                 temporary_path = Path(blob_tmp) / entry["sha256"]
-                if entry["sha256"] not in downloaded:
+                prior = verified.get(entry["sha256"]) if verified is not None else None
+                if prior is not None:
+                    temporary_path = prior[0]
+                elif entry["sha256"] not in downloaded:
                     downloaded_bytes += _download(
                         client,
                         bucket=claim["cache_bucket"],
@@ -453,10 +465,13 @@ def _materialize_cache_blobs(
                     )
                     if _sha256_file(temporary_path) != entry["sha256"]:
                         raise BuildPreparationError("cache blob digest mismatch")
-                    downloaded.add(entry["sha256"])
+                downloaded.add(entry["sha256"])
                 if temporary_path.stat().st_size != entry["size"]:
                     raise BuildPreparationError("cache blob size mismatch")
                 shutil.copyfile(temporary_path, target)
+                if verified is not None and prior is None and reuse_bytes + entry["size"] <= _CACHE_REUSE_BYTES:
+                    verified[entry["sha256"]] = (target, entry["size"])
+                    reuse_bytes += entry["size"]
         emit_stage("cache_import", "transfer", component_index=index,
                    logical_bytes=sum(entry["size"] for entry in entries),
                    locally_reused_bytes=sum(entry["size"] for entry in entries) - downloaded_bytes,
@@ -652,6 +667,7 @@ def _try_import_cache(
     *,
     index: int,
     work: Path,
+    verified: dict[str, tuple[Path, int]] | None = None,
 ) -> None:
     transfer = _cache_transfer_mode(claim)
     archive_parent = Path(tempfile.mkdtemp(prefix="loom-cache-"))
@@ -666,6 +682,7 @@ def _try_import_cache(
                         materialization_key=key,
                         index=index,
                         destination=cache_directory,
+                        verified=verified,
                     )
                 except FileNotFoundError:
                     emit_stage(
@@ -738,11 +755,12 @@ def prepare(claim: dict[str, Any], work: Path, secrets: Path) -> None:
             return
         cache = _client(claim, secrets / "cache")
         try:
+            verified: dict[str, tuple[Path, int]] = {}
             for index, _ in enumerate(derive_task_image_build_components(claim["task_config"])):
                 with stage_span("cache_import", component_index=index), cache_request_counts(
                     cache, "cache_import", component_index=index,
                 ):
-                    _try_import_cache(cache, claim, index=index, work=work)
+                    _try_import_cache(cache, claim, index=index, work=work, verified=verified)
         finally:
             cache.close()
 

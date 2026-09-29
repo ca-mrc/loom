@@ -933,6 +933,25 @@ def test_prepare_reuses_verified_blobs_across_components_with_bound(
     assert second.read_bytes() == b"shared"
 
 
+def test_failed_component_cannot_leave_reusable_partial_files(source_bundle, tmp_path):
+    claim, _ = source_bundle
+    key = claim["materialization_key"]
+    objects = _v2_cache_objects(key, 0, {"a-good": b"shared", "z-bad": b"expected"})
+    objects.update(_v2_cache_objects(key, 1, {"a-good": b"shared"}))
+    objects[runtime._v2_blob_key(hashlib.sha256(b"expected").hexdigest())] = b"broken"
+    cache = FakeS3(objects)
+    verified = {}
+    with pytest.raises(runtime.BuildPreparationError):
+        runtime._materialize_cache_blobs(cache, claim, materialization_key=key,
+                                         index=0, destination=tmp_path / "failed", verified=verified)
+    assert not (tmp_path / "failed").exists()
+    runtime._materialize_cache_blobs(cache, claim, materialization_key=key,
+                                     index=1, destination=tmp_path / "good", verified=verified)
+    assert (tmp_path / "good/a-good").read_bytes() == b"shared"
+    shared_key = runtime._v2_blob_key(hashlib.sha256(b"shared").hexdigest())
+    assert cache.gets.count(shared_key) == 2
+
+
 def test_blob_import_downloads_a_repeated_digest_once(source_bundle, tmp_path, capsys):
     claim, _ = source_bundle
     objects = _v2_cache_objects(claim["materialization_key"], 0, {
