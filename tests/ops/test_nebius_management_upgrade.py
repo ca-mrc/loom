@@ -218,6 +218,58 @@ def test_failed_preflight_keeps_running_legacy_and_creates_nothing(upgrade, tmp_
     assert not (tmp_path / 'upgrade').exists()
 
 
+@pytest.mark.parametrize('qualified', [True, False])
+def test_current_shared_guest_reference_requires_preflight_and_preserves_bootstrap(upgrade, tmp_path, qualified):
+    from scripts.ops.nebius_management_upgrade import ManagementUpgradeError
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    request, api = upgrade
+    original_files = {path: path.read_bytes() for root in (request.original_state, request.original_anchor)
+        for path in root.rglob('*.json')}
+    raw = request.setup.deployment.model_dump(mode='json')
+    foundation = raw['installation']['foundation']
+    config = json.loads(foundation['platform_config_json'])
+    config['guest_execution_target'] = {'target_id': 'nebius-guest-current'}
+    foundation['platform_config_json'] = json.dumps(config, sort_keys=True)
+    changed = replace(request, setup=replace(request.setup, deployment=ManagementDeployment.model_validate(raw)))
+    api.preflight_failure = not qualified
+    before = len(api.store.creates)
+    if qualified:
+        assert run((changed, api), tmp_path)['phase'] == 'admission'
+        assert len(api.store.creates) > before
+    else:
+        with pytest.raises(ManagementUpgradeError):
+            run((changed, api), tmp_path)
+        assert len(api.store.creates) == before
+    assert api.events[:1] == ['preflight']
+    assert not api.switch.calls
+    assert all(path.read_bytes() == value for path, value in original_files.items())
+    assert 'guest_execution_target' not in request.original.deployment.installation.foundation.platform_config
+
+
+@pytest.mark.parametrize('key', ['buckets', 'cluster_id', 'namespace', 'public_host', 'storage_class'])
+def test_shared_reference_refresh_cannot_change_retained_data_or_infrastructure(upgrade, tmp_path, key):
+    from scripts.ops.nebius_management_upgrade import ManagementUpgradeError
+
+    request, api = upgrade
+    foundation = request.setup.deployment.installation.foundation
+    config = copy.deepcopy(foundation.platform_config)
+    config['guest_execution_target'] = {'target_id': 'nebius-guest-current'}
+    if key == 'buckets':
+        config[key]['artifacts'] += '-different'
+    else:
+        config[key] += '-different'
+    installation = request.setup.deployment.installation.model_copy(update={'foundation':
+        foundation.model_copy(update={'platform_config_json': json.dumps(config)})})
+    changed = replace(request, setup=replace(request.setup,
+        deployment=request.setup.deployment.model_copy(update={'installation': installation})))
+    before = len(api.store.creates)
+    with pytest.raises(ManagementUpgradeError):
+        run((changed, api), tmp_path)
+    assert len(api.store.creates) == before and not api.switch.calls and not api.events
+
+
 @pytest.mark.parametrize('change', ['append', 'remove', 'rewrite'])
 def test_upgrade_allows_new_protected_publication_without_rewriting_retained_catalog(upgrade, tmp_path, change):
     from scripts.ops.nebius_management_upgrade import ManagementUpgradeError

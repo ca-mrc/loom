@@ -134,8 +134,16 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
             raise ValueError()
         state = Path(config["state_dir"])
         root = state.parent
+        if config["schema"] == "loom.nebius-management-upgrade-operation.v1":
+            if root.name != "upgrade":
+                raise ValueError()
+            root = root.parent
+        elif config["schema"] != "loom.nebius-management-operation.v1":
+            raise ValueError()
         if (state.name != "state" or root.name != "nebius-management" or root.parent.name != ".loom"
-                or not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(root)) or root != root.resolve()):
+                or Path(config["anchor_dir"]) != state.parent / "anchor"
+                or Path(config["inputs_path"]) != state.parent / "inputs.json"
+                or not re.fullmatch(r"/[A-Za-z0-9_./-]+", str(state)) or state != state.resolve()):
             raise ValueError()
     except (ValueError, KeyError, TypeError, zipfile.BadZipFile):
         raise InstallError("invalid management installation bundle") from None
