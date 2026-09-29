@@ -788,6 +788,10 @@ a completed management installation, not a retry of an incomplete bootstrap.
 Keep the original inputs, state, anchor, database, PVC and credentials unchanged.
 The upgrade uses separate `nebius-management/upgrade/inputs.json`, `state` and
 `anchor` paths and the same exact-bundle SSH authorization described above.
+The standalone authority installer accepts this exact upgrade layout while keeping
+SSH grants under the original `nebius-management/authority/<bundle-digest>` root.
+Use a dedicated key; bootstrap and upgrade inputs, journals and grants remain
+separate. Installing a grant alone does not stage inputs or run the upgrade.
 
 The new private input schema is
 `loom.nebius-management-upgrade-private-inputs.v1`. It contains the original
