@@ -122,7 +122,38 @@ def _retirement_diagnostic(raw: str) -> dict[str, str]:
     return {"status": "unavailable"}
 
 
-def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: dict[str, Any], namespace: str) -> dict[str, Any]:
+def _retirement_journal_bound(job: dict[str, Any], cm: dict[str, Any], namespace_uids: dict[str, str]) -> bool:
+    """Compare live identities with private create receipts without exporting them."""
+    from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+    from scripts.ops.nebius_management_gateway import validate_operation
+
+    from loom.nebius_platform_render import digest
+
+    operation = json.loads(os.environ["NEBIUS_MANAGEMENT_OPERATION_JSON"])
+    validate_operation(operation)
+    namespace = job["metadata"]["namespace"]
+    installation = job["metadata"]["labels"]["loom.nebius/management-installation"]
+    if (operation["schema"] != "loom.nebius-management-retirement-operation.v1"
+            or (operation["namespace"], operation["installation_id"]) != (namespace, installation)):
+        raise ValueError
+    expected = {"binding": {"installation_id": installation, "namespace": namespace,
+        "namespace_uid": namespace_uids[namespace], "kube_system_uid": namespace_uids["kube-system"]},
+        "resources": {_key(doc): {"uid": _uid(doc), "snapshot": digest(_snapshot(doc))} for doc in (job, cm)}}
+    target = os.environ["LOOM_DEPLOY_SSH_TARGET"]
+    if re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target) is None:
+        raise ValueError
+    arguments = ["python3", "-", operation["state_dir"], json.dumps(expected)]
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
+        "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+        "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
+        "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target, shlex.join(arguments)]
+    result = subprocess.run(command, input=Path(__file__).with_name("nebius_retirement_journal_probe.py").read_text(),
+        capture_output=True, text=True, timeout=40, check=False)
+    return result.returncode == 0 and len(result.stdout) <= 256 and json.loads(result.stdout) == {"status": "matched"}
+
+
+def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: dict[str, Any], namespace: str,
+                               namespace_uids: dict[str, str]) -> dict[str, Any]:
     """Fixed protected exec reads only the failed Job's bound registry records."""
     from scripts.ops.nebius_retirement_registry_probe import CHECKS, ERRORS
 
@@ -138,14 +169,19 @@ def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: d
         if (cm.get("immutable") is not True or cm["metadata"]["labels"].get("loom.nebius/retirement") != name
                 or cm["metadata"]["labels"].get("loom.nebius/management-installation") != installation):
             raise ValueError
-        # An immutable object can still be deleted/recreated. Require this
-        # instance to predate the original Job, failing closed on equal-second
-        # timestamps where creation lineage cannot be established.
-        stage = "configuration_lineage"
-        config_created = datetime.fromisoformat(cm["metadata"]["creationTimestamp"])
-        job_created = datetime.fromisoformat(job["metadata"]["creationTimestamp"])
-        if config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created:
-            raise ValueError
+        if os.environ.get("NEBIUS_MANAGEMENT_OPERATION_JSON"):
+            # Exact UID/snapshot receipts also work when server timestamps tie.
+            # A selected but mismatched journal must never fall back to a guess.
+            stage = "configuration_journal"
+            if not _retirement_journal_bound(job, cm, namespace_uids):
+                raise ValueError
+        else:
+            # Without protected journal metadata retain the conservative check.
+            stage = "configuration_lineage"
+            config_created = datetime.fromisoformat(cm["metadata"]["creationTimestamp"])
+            job_created = datetime.fromisoformat(job["metadata"]["creationTimestamp"])
+            if config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created:
+                raise ValueError
         stage = "settings"
         settings = RetirementSettings.model_validate_json(cm["data"]["retirement.json"])
         if (settings.namespace != namespace or not any(volume.get("name") == "retirement"
@@ -217,7 +253,7 @@ def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: d
         return result
 
 
-def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]], namespace_uids: dict[str, str]) -> list[dict[str, Any]]:
     """Read-only failed-Job evidence; never export log text or termination messages."""
     result: list[dict[str, Any]] = []
     inspected = 0
@@ -261,7 +297,7 @@ def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[d
                        "pod": metadata["name"], "pod_uid": metadata["uid"], "container": container["name"],
                        "termination": termination, "diagnostic": diagnostic})
         if diagnostic.get("status") == "retirement_blocked":
-            result[-1]["registry_probe"] = _retirement_registry_probe(kube, pods, job, namespace)
+            result[-1]["registry_probe"] = _retirement_registry_probe(kube, pods, job, namespace, namespace_uids)
     return result
 
 
@@ -331,7 +367,8 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
-        "failed_retirement_jobs": _failed_retirement_jobs(kube, pods),
+        "failed_retirement_jobs": _failed_retirement_jobs(kube, pods,
+            {row["metadata"]["name"]: row["metadata"]["uid"] for row in namespaces}),
         "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
                                              namespace=namespace, expected_cluster_id=expected_cluster_id),
         "public_host": config["public_host"],
