@@ -200,9 +200,9 @@ jobs:
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: ubuntu-24.04
-    # Real ingress, native fixture execution and admission run serially here.
-    # Keep per-test deadlines; allow the complete selected suite to finish.
-    timeout-minutes: 25
+    # Serial qualification measured 24m41s before setup/cleanup. Leave bounded
+    # hosted-runner headroom while retaining every per-test deadline.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:

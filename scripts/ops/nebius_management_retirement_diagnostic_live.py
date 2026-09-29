@@ -79,15 +79,32 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
         except Exception:
             raise DiagnosticError("diagnostic_original") from None
 
+    def _job_receipt(self, state_dir: Path) -> dict[str, Any]:
+        record = json.loads(_private(state_dir / "job/stage.json", 4 * 1024**2))
+        _validate_record(record, {"schema": "loom.nebius-management-stage.v1", "binding": asdict(self.binding),
+            "revision": digest(self.documents), "phase": "retirement-diagnostic"}, self.documents)
+        item, = record["resources"].values()
+        return dict(item)
+
+    def _report(self, value: dict[str, Any]) -> dict[str, Any]:
+        report = validate_startup_report(value)
+        operation_ids = {str(target.operation_id) for target in self.context.request.targets}
+        if report["operations"] and {row["operation_id"] for row in report["operations"]} != operation_ids:
+            raise ValueError
+        return report
+
+    def _result_report(self, report: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "retirement_diagnostic_observed", **identity, "probe": report}
+
+    def _pending(self, identity: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "pending", "phase": "retirement-diagnostic", **identity}
+
     def result(self, state_dir: Path) -> dict[str, Any]:
         stage = "diagnostic_job"
         try:
             self.verify_identity(self.binding)
             revision = digest(self.documents)
-            record = json.loads(_private(state_dir / "job/stage.json", 4 * 1024**2))
-            _validate_record(record, {"schema": "loom.nebius-management-stage.v1", "binding": asdict(self.binding),
-                "revision": revision, "phase": "retirement-diagnostic"}, self.documents)
-            item, = record["resources"].values()
+            item = self._job_receipt(state_dir)
 
             def job_readback() -> dict[str, Any]:
                 job = self.get_resource(item["desired"])
@@ -103,7 +120,7 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
                 raise ValueError
             identity = {"namespace_uid": self.binding.namespace_uid, "revision": revision}
             if conditions.get("Complete") != "True":
-                return {"status": "pending", "phase": "retirement-diagnostic", **identity}
+                return self._pending(identity)
             if status.get("succeeded") != 1 or status.get("active", 0) != 0:
                 raise ValueError
             stage = "diagnostic_pod_list"
@@ -176,15 +193,12 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
                     if len(content) + len(chunk) > 16384:
                         raise ValueError
                     content.extend(chunk)
-            report = validate_startup_report(json.loads(content))
-            operation_ids = {str(target.operation_id) for target in self.context.request.targets}
-            if report["operations"] and {row["operation_id"] for row in report["operations"]} != operation_ids:
-                raise ValueError
+            report = self._report(json.loads(content))
             stage = "diagnostic_readback"
             if self._request("GET", path) != pod or job_readback() != job:
                 raise ValueError
             self.verify_identity(self.binding)
-            return {"status": "retirement_diagnostic_observed", **identity, "probe": report}
+            return self._result_report(report, identity)
         except DiagnosticError:
             raise
         except Exception:

@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import base64
 import copy
+import io
 import json
 import os
 import ssl
 import subprocess
+import sys
 import time
-from dataclasses import replace
+import zipfile
+from dataclasses import asdict, replace
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -66,9 +70,81 @@ def _database_dump(url):
     return result.stdout
 
 
+def _native_dns_labels(cluster, core):
+    """Use the native Nebius DNS selector without changing the frozen Loom policy."""
+    from kubernetes import client
+
+    apps = client.AppsV1Api(core.api_client)
+    spec = core.api_client.sanitize_for_serialization(apps.read_namespaced_deployment("coredns", "kube-system"))["spec"]
+    spec["selector"] = {"matchLabels": {"k8s-app": "coredns"}}
+    spec["template"]["metadata"]["labels"] = {"k8s-app": "coredns"}
+    name = "coredns-native-fixture"
+    apps.create_namespaced_deployment("kube-system", {"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name}, "spec": spec})
+    _run(cluster, "kubectl", "rollout", "status", "deployment/" + name, "-n", "kube-system", "--timeout=60s")
+    service = core.patch_namespaced_service("kube-dns", "kube-system", {"spec": {"selector": {"k8s-app": "coredns"}}})
+    assert service.spec.selector == {"k8s-app": "coredns"}
+    native_service = core.create_namespaced_service("kube-system", {"apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "coredns"}, "spec": {"selector": {"k8s-app": "coredns"},
+            "ports": [{"name": "dns-" + protocol.lower(), "protocol": protocol, "port": 53, "targetPort": 53}
+                for protocol in ("TCP", "UDP")]}})
+    discovery = client.DiscoveryV1Api(core.api_client)
+    deadline = time.monotonic() + 30
+    while True:
+        endpoints = [endpoint for row in discovery.list_namespaced_endpoint_slice(
+            "kube-system", label_selector="kubernetes.io/service-name=kube-dns").items
+            for endpoint in row.endpoints if endpoint.conditions.ready]
+        if endpoints and all(endpoint.target_ref and endpoint.target_ref.name.startswith(name + "-") for endpoint in endpoints):
+            break
+        assert time.monotonic() < deadline, "disposable native DNS endpoints did not become ready"
+        time.sleep(0.25)
+    return native_service.metadata.uid
+
+
+def _bundled_recovery_documents(request, original_job_uid, tmp_path):
+    """Render from transported sources with no workspace scripts on sys.path."""
+    from scripts.ops.nebius_management_rollout import build_bundle
+
+    from tests.ops.test_nebius_management_gateway import recovery_operation
+
+    uv, requirements, wheels = tmp_path / "uv", tmp_path / "requirements", tmp_path / "wheels"
+    uv.write_bytes(b"unused fixture uv")
+    requirements.write_bytes(b"unused fixture requirements")
+    wheels.mkdir()
+    for name in ("loom-0.0.0-py3-none-any.whl", "loom_bundle_checksum-0.1.0-py3-none-any.whl"):
+        (wheels / name).write_bytes(b"unused fixture wheel")
+    bundle = build_bundle(recovery_operation(tmp_path), uv=uv, requirements=requirements, wheels=wheels)
+    root = tmp_path / "operator-bundle"
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        archive.extractall(root)
+    (root / "request.json").write_text(json.dumps({"binding": asdict(request.binding),
+        "deployment": request.deployment.model_dump(mode="json"), "candidate": request.candidate,
+        "profile": request.profile, "targets": [target.model_dump(mode="json") for target in request.targets],
+        "original_job_uid": original_job_uid}))
+    program = """
+import json
+from pathlib import Path
+from scripts.ops.nebius_management_material import ManagementBinding
+from scripts.ops.nebius_management_retirement import RetirementInstallRequest
+from scripts.ops.nebius_management_retirement_recovery import recovery_documents
+from loom_service.environment_management.deployment import ManagementDeployment
+from loom_service.environment_management.retirement import RetirementTarget
+raw = json.loads(Path('request.json').read_text())
+request = RetirementInstallRequest(ManagementBinding(**raw['binding']),
+    ManagementDeployment.model_validate(raw['deployment']), raw['candidate'], raw['profile'],
+    tuple(RetirementTarget.model_validate(row) for row in raw['targets']), Path.cwd())
+print(json.dumps(recovery_documents(request, original_job_uid=raw['original_job_uid'])))
+"""
+    result = subprocess.run([sys.executable, "-c", program], cwd=root, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")})
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("dns_label", ["kube-dns", "coredns"])
 @pytest.mark.timeout(600)
 async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
-    retirement_request, environment_registry, isolated_migration_postgres_url, tmp_path,
+    retirement_request, environment_registry, isolated_migration_postgres_url, tmp_path, dns_label,
 ):
     from kubernetes import client, utils
     from scripts.ops.nebius_management_material import ManagementBinding
@@ -80,10 +156,19 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
     )
     from scripts.ops.nebius_management_retirement_entry import HTTPSRetirementStageAPI
 
-    from loom.db.nebius_environment_schema import NebiusEnvironmentResource
+    from loom.db.nebius_environment_schema import (
+        NebiusEnvironmentOperation,
+        NebiusEnvironmentResource,
+    )
     from loom_service.environment_management.credentials import generate_management_material
     from loom_service.environment_management.deployment import render_management
+    from loom_service.environment_management.kubernetes_provider import (
+        KubernetesEnvironmentProvider,
+    )
+    from loom_service.environment_management.provider import ProvisioningContext
+    from loom_service.environment_management.registry import OperationLease
     from loom_service.environment_management.retirement import RetirementTarget
+    from loom_service.environment_management.steps import ProvisioningStep
 
     # Catch regressions in executable imports, projected fsGroup/0440 access,
     # verify-full DB credentials, policy labels and real API Pod/log readback.
@@ -93,6 +178,15 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
     async with factory() as session:
         resource_count = len((await session.scalars(select(NebiusEnvironmentResource).where(
             NebiusEnvironmentResource.operation_id == target.operation_id))).all())
+        source = await session.get(NebiusEnvironmentOperation, target.source_operation_id)
+        source_context = ProvisioningContext(OperationLease(source.operation_id, source.environment_id,
+            source.deployment_generation, source.runner_epoch, uuid4()), source.plan_json["registration"],
+            source.plan_json["config"], {})
+        source_rows = (await session.scalars(select(NebiusEnvironmentResource).where(
+            NebiusEnvironmentResource.operation_id == target.source_operation_id))).all()
+        namespace_documents = {row.payload_json["metadata"]["name"]: KubernetesEnvironmentProvider._expected(
+            source_context, ProvisioningStep(row.resource_key, row.kind, row.payload_json))
+            for row in source_rows if row.kind == "kubernetes" and row.payload_json.get("kind") == "Namespace"}
     database_dump = _database_dump(isolated_migration_postgres_url)
     tag = "cr.eu-north1.nebius.cloud/test/service:retirement-probe-" + uuid4().hex
     postgres_tag = tag.replace("/service:", "/postgres:")
@@ -115,9 +209,7 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             ns.metadata.uid, core.read_namespace("kube-system").metadata.uid)
         uids = {}
         for name in target.namespace_uids:
-            created = core.create_namespace({"metadata": {"name": name, "labels": {
-                "loom.nebius/environment-id": str(target.registration.environment_id),
-                "loom.nebius/incarnation": str(target.registration.incarnation)}}})
+            created = core.create_namespace(namespace_documents[name])
             uids[name] = UUID(created.metadata.uid)
         target = target.model_copy(update={"namespace_uids": uids})
         deployment = request.deployment.model_dump(mode="json")
@@ -140,6 +232,7 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             utils.create_from_dict(core.api_client, doc)
         _run(cluster, "kubectl", "rollout", "status", "statefulset/loom-postgres", "-n", namespace, "--timeout=90s")
         _run(cluster, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s")
+        dns_uid = _native_dns_labels(cluster, core) if dns_label == "coredns" else None
         # initdb's temporary Unix-socket server can satisfy pg_isready before
         # the final TCP server starts. Wait on reads; never retry a SQL write.
         deadline = time.monotonic() + 30
@@ -184,6 +277,13 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
              "-n", namespace, "--timeout=90s")
         original_uid = batch.read_namespaced_job(original_name, namespace).metadata.uid
         database(database_dump + "\nGRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO loom_service;\n")
+        # The dump predates namespace creation. Bind ONLY this disposable
+        # source fixture to its real UIDs before testing the locking registry.
+        for name, uid in uids.items():
+            database(sql.SQL("UPDATE nebius_environment_resources SET provider_identity={} "
+                "WHERE operation_id={} AND kind='kubernetes' AND payload_json->>'kind'='Namespace' "
+                "AND payload_json->'metadata'->>'name'={};").format(sql.Literal(str(uid)),
+                    sql.Literal(str(target.source_operation_id)), sql.Literal(name)).as_string())
         snapshot = "SELECT row_to_json(r)::text FROM (SELECT * FROM nebius_environment_operations ORDER BY operation_id) r;" \
                    "SELECT row_to_json(r)::text FROM (SELECT * FROM nebius_environment_resources ORDER BY operation_id,sequence) r;" \
                    "SELECT row_to_json(r)::text FROM (SELECT * FROM nebius_platform_reservations ORDER BY environment_id) r;"
@@ -199,12 +299,21 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
                 assert time.monotonic() < deadline, "diagnostic did not complete"
                 time.sleep(0.5)
             assert result["status"] == "retirement_diagnostic_observed"
-            assert result["probe"] == {"schema": "loom.nebius-retirement-startup-probe.v1",
+            expected_probe = {"schema": "loom.nebius-retirement-startup-probe.v1",
                 "status": "observed", "stage": "complete", "checks": ["database_binding", "kubernetes_ca",
                     "kubernetes_token", "database", "kubernetes"], "operations": [{
                         "operation_id": str(target.operation_id), "phase": "pending", "runner_epoch": 0,
                         "lease_present": False, "error_present": False, "resource_count": resource_count,
                         "effects_started": False}]}
+            if dns_label == "coredns":
+                # Characterize the installed failure before adding explicit
+                # recovery authority. Do not silently change the original
+                # renderer: its policies and journal are frozen evidence.
+                expected_probe = {"schema": "loom.nebius-retirement-startup-probe.v1",
+                    "status": "unavailable", "stage": "database", "checks": ["database_binding",
+                        "kubernetes_ca", "kubernetes_token"], "operations": [],
+                    "error_type": "OperationalError", "http_status": None}
+            assert result["probe"] == expected_probe
             assert stage_diagnostic(api=api, **args) == staged
             assert api.result(args["state_dir"]) == result
         assert database(snapshot) == before
@@ -214,6 +323,59 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             assert core.read_namespace(name).metadata.uid == str(uid)
             assert not core.list_namespaced_resource_quota(name).items
             assert not core.list_namespaced_pod(name).items
+        if dns_label == "coredns":
+            from scripts.ops.nebius_management_retirement_recovery import (
+                recovery_documents,
+                stage_recovery,
+            )
+            from scripts.ops.nebius_management_retirement_recovery_entry import RecoveryContext
+            from scripts.ops.nebius_management_retirement_recovery_live import (
+                HTTPSRetirementRecoveryAPI,
+            )
+
+            reservations = "SELECT cpu_millis,memory_mib,storage_mib,ephemeral_storage_mib " \
+                "FROM nebius_platform_reservations WHERE environment_id='" + str(target.registration.environment_id) + "';"
+            storage_before = database(reservations).strip().split("|")[2]
+            phases = _bundled_recovery_documents(request, original_uid, tmp_path)
+            assert phases == recovery_documents(request, original_job_uid=original_uid)
+            recovery, = phases["job"].values()
+            recovery_name = recovery["metadata"]["name"]
+            diagnostic = DiagnosticContext(context, receipts)
+            recovery_context = RecoveryContext(diagnostic, {"state_dir": str(args["state_dir"])}, original_uid, dns_uid)
+            recovery_args = dict(request=request, original_job_uid=original_uid,
+                state_dir=tmp_path / "recovery", anchor_dir=tmp_path / "recovery-anchor")
+            with HTTPSRetirementDiagnosticAPI(context=diagnostic, ssl_context=trust, token=None) as diagnostic_api:
+                with HTTPSRetirementRecoveryAPI(context=recovery_context, diagnostic_api=diagnostic_api,
+                        ssl_context=trust, token=None) as recovery_api:
+                    staged_recovery = stage_recovery(api=recovery_api, **recovery_args)
+                    _run(cluster, "kubectl", "wait", "--for=condition=Complete", "job/" + recovery_name,
+                         "-n", namespace, "--timeout=120s")
+                    result = recovery_api.result(recovery_args["state_dir"])
+                    assert result["status"] == "retirement_recovered", result
+                    assert stage_recovery(api=recovery_api, **recovery_args) == staged_recovery
+                    assert recovery_api.result(recovery_args["state_dir"]) == result
+            report = result["recovery"]
+            assert report["status"] == "completed", json.dumps(report) + database(
+                "SELECT phase,error_code FROM nebius_environment_operations WHERE operation_id='"
+                + str(target.operation_id) + "';")
+            assert report["startup"] == {"schema": "loom.nebius-retirement-startup-probe.v1",
+                "status": "observed", "stage": "complete", "checks": ["database_binding", "kubernetes_ca",
+                    "kubernetes_token", "database", "kubernetes"], "operations": [{
+                        "operation_id": str(target.operation_id), "phase": "pending", "runner_epoch": 0,
+                        "lease_present": False, "error_present": False, "resource_count": resource_count,
+                        "effects_started": False}]}
+            assert report["operations"] == [{"operation_id": str(target.operation_id), "phase": "completed",
+                "non_storage_released": True, "storage_preserved": True}]
+            assert database(reservations).strip() == "0|0|" + storage_before + "|0"
+            assert database("SELECT phase || '|' || (lease_token IS NULL)::text || '|' || (error_code IS NULL)::text "
+                "FROM nebius_environment_operations WHERE operation_id='" + str(target.operation_id) + "';").strip() == "completed|true|true"
+            assert batch.read_namespaced_job(original_name, namespace).metadata.uid == original_uid
+            assert len(batch.list_namespaced_job(namespace).items) == 3
+            for name, uid in uids.items():
+                assert core.read_namespace(name).metadata.uid == str(uid)
+                quota, = core.list_namespaced_resource_quota(name).items
+                assert quota.spec.hard == {"pods": "0"}
+                assert not core.list_namespaced_pod(name).items
     except Exception as error:
         # No raw logs or Secret/config contents: enough disposable Pod status to
         # distinguish fixture scheduling from the runtime's sanitized report.
