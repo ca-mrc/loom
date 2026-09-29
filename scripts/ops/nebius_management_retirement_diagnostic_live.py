@@ -97,9 +97,11 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
             pod = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
             _uid(pod)
             meta = pod["metadata"]
+            labels = {**job["spec"]["template"]["metadata"].get("labels", {}),
+                "batch.kubernetes.io/controller-uid": uid}
             if (pod.get("apiVersion") != "v1" or pod.get("kind") != "Pod" or meta.get("namespace") != namespace
                     or meta.get("deletionTimestamp") or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", meta["name"])
-                    or meta.get("labels", {}).get("batch.kubernetes.io/controller-uid") != uid):
+                    or meta.get("labels") != labels):
                 raise ValueError
             owners = meta.get("ownerReferences", [])
             if (len(owners) != 1 or any(owners[0].get(key) != value for key, value in {
