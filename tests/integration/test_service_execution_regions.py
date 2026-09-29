@@ -170,7 +170,7 @@ async def test_regional_fallback_keeps_one_claim_and_rolls_back_rejected_target(
             monkeypatch.setattr(
                 scheduler,
                 "workload_requirements_from_task",
-                lambda task: project(task).model_copy(update={"data_residency": "us"}),
+                lambda task, trial=None: project(task, trial).model_copy(update={"data_residency": "us"}),
             )
         async with sessions() as session:
             lease = await scheduler.reserve_next_service_execution(
