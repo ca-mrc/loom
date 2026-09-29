@@ -7,8 +7,14 @@ import json
 import pytest
 from sqlalchemy import select
 
-from loom.db.nebius_environment_schema import NebiusEnvironmentOperation, NebiusEnvironmentResource, NebiusPlatformReservation
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from loom.db.nebius_environment_schema import (
+    NebiusEnvironmentOperation,
+    NebiusEnvironmentResource,
+    NebiusPlatformReservation,
+)
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.integration.test_nebius_environment_retirement import prepare_retirement
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -52,3 +58,58 @@ async def test_read_only_probe_reports_qualification_without_claiming(environmen
         rows = (await session.scalars(select(NebiusEnvironmentResource).where(
             NebiusEnvironmentResource.operation_id == target["operation_id"]))).all()
         assert rows and all(row.phase == "planned" for row in rows)
+
+
+async def test_fixed_probe_source_executes_without_installed_probe_module(environment_registry, monkeypatch, capsys):
+    from pathlib import Path
+
+    import sqlalchemy
+    from scripts.ops import nebius_retirement_registry_probe as probe
+    from sqlalchemy.engine import URL, make_url
+
+    _, factory, _, _ = environment_registry
+    target = await prepare_retirement(environment_registry)
+    namespace = "loom-nebius-management"
+    protected_url = URL.create("postgresql", username="loom_service", password="private-probe-credential",
+        host=f"loom-postgres.{namespace}.svc", port=5432, database="loom",
+        query={"sslmode": "verify-full", "sslrootcert": "/var/run/loom-db/ca.crt"})
+    fixture_url = factory.kw["bind"].url.set(drivername="postgresql+psycopg")
+    original = sqlalchemy.create_engine
+
+    def connect_to_fixture(url, **kwargs):
+        # Only substitute the disposable DB address/auth; retain real driver,
+        # transaction options, queries and all CLI validation/serialization.
+        assert make_url(url) == protected_url.set(drivername="postgresql+psycopg")
+        return original(fixture_url, **kwargs)
+
+    monkeypatch.setattr(sqlalchemy, "create_engine", connect_to_fixture)
+    monkeypatch.setenv("LOOM_SVC_DB_URL", protected_url.render_as_string(hide_password=False))
+    monkeypatch.setattr("sys.argv", ["-c", namespace, json.dumps([target])])
+    with pytest.raises(SystemExit) as stopped:
+        exec(compile(Path(probe.__file__).read_text(), "<protected-probe>", "exec"), {"__name__": "__main__"})
+    assert stopped.value.code == 0
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+    assert report["status"] == "observed" and report["read_only"] is True
+    assert all(report["targets"][0]["checks"].values())
+    assert "private-" not in captured.out + captured.err
+    async with factory() as session:
+        operation = await session.get(NebiusEnvironmentOperation, target["operation_id"])
+        assert operation.phase == "pending" and operation.runner_epoch == 0
+
+
+async def test_probe_refuses_a_connection_without_server_read_only_enforcement(environment_registry, monkeypatch):
+    from scripts.ops import nebius_retirement_registry_probe as probe
+
+    _, factory, _, _ = environment_registry
+    target = await prepare_retirement(environment_registry)
+    original = probe.create_engine
+
+    def unenforced(url, **kwargs):
+        kwargs["connect_args"]["options"] = "-c default_transaction_read_only=off"
+        return original(url, **kwargs)
+
+    monkeypatch.setattr(probe, "create_engine", unenforced)
+    url = factory.kw["bind"].url.set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    with pytest.raises(ValueError, match="read_only_required"):
+        await asyncio.to_thread(probe.observe, url, [target])
