@@ -813,8 +813,17 @@ CP, Gateway, canonical storage and web/TLS remain in the primary region.
 
 The optional Terraform `regional_execution_targets` map in the existing platform
 root composes `modules/regional-execution`. Each entry creates exactly one MK8s
-control plane with audit logging, one fixed system node and one min-zero CPU
-execution group (technical default maximum100, explicit lower values honored).
+control plane with audit logging and retained system/execution node groups.
+Active targets run one fixed system node and one min-zero CPU execution group
+(technical default maximum100, explicit lower values honored). Set a target's
+`suspended = true` in the owning Terraform inputs to fix both groups at zero
+and disable execution autoscaling; the examples start suspended. First disable
+Loom routing and finish or cancel regional work, then review/apply the saved
+plan and verify native nodes, VMs and disks after drain. Disabling routing alone
+does not stop the system-node charge. Resume only after reviewing capacity/cost
+and restoring system readiness. Retained storage and other services require
+separate billing checks. See the Terraform platform README for the input-map
+replacement caveat.
 The dedicated regional system node has no custom `NoSchedule` taint: native
 addons must schedule there before the cluster network can initialize. In the
 observed eu-west1 bootstrap, Cilium Operator did not tolerate
