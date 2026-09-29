@@ -146,7 +146,8 @@ def test_entry_dispatch_and_bound_public_reports_preserve_original_history(compl
     assert {path: path.read_bytes() for path in original} == original
 
 
-def test_blocked_refresh_entry_reports_only_bound_phase_not_provider_payload(completed_upgrade, monkeypatch, capsys):
+@pytest.mark.parametrize('stage', ['activation', 'resource_inventory', 'publication', 'persistent_storage'])
+def test_blocked_refresh_entry_reports_only_bound_phase_not_provider_payload(completed_upgrade, monkeypatch, capsys, stage):
     from scripts.ops import nebius_management_entry as entry
     from scripts.ops import nebius_management_refresh_entry as refresh
     from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
@@ -156,12 +157,12 @@ def test_blocked_refresh_entry_reports_only_bound_phase_not_provider_payload(com
 
     @contextmanager
     def unavailable(_context, _operation):
-        raise ManagementRefreshInstallError('activation') from RuntimeError('private-provider-payload')
+        raise ManagementRefreshInstallError(stage) from RuntimeError('private-provider-payload')
         yield
 
     monkeypatch.setattr(refresh, 'connected_refresh_api', unavailable)
     assert entry.main(str(path), 'install') == 0
     report = json.loads(capsys.readouterr().out)
-    assert report == {'status': 'blocked', 'stage': 'refresh_activation', **{key: metadata[key]
+    assert report == {'status': 'blocked', 'stage': 'refresh_' + stage, **{key: metadata[key]
         for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
     assert 'private-provider-payload' not in json.dumps(report)

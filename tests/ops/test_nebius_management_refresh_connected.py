@@ -299,6 +299,44 @@ def test_preflight_rejects_drift_before_any_refresh_write(connected_refresh, dri
     assert not writes(state) and not state.storage_calls and not state.public_calls
 
 
+@pytest.mark.parametrize('kind,stage', [('Secret', 'resource_inventory'), ('PersistentVolume', 'persistent_storage')])
+def test_preflight_reports_the_failed_retained_check_without_writes(connected_refresh, kind, stage):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+    document = next(row for row in state.values.values() if row['kind'] == kind)
+    document['metadata']['uid'] = str(uuid4())
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        api.preflight(state.request)
+    assert error.value.stage == stage
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
+@pytest.mark.parametrize('detail,expected', [
+    ('foundation', 'foundation'), ('shared_material', 'shared_material'),
+    ('platform_capacity', 'platform_capacity'), ('publication', 'publication'),
+    ('cloud_identity', 'cloud_identity'), ('public_route', 'public_route'),
+    ('private-provider-payload', 'prerequisites'), (None, 'prerequisites'),
+    (['private-provider-payload'], 'prerequisites'),
+])
+def test_preflight_keeps_only_closed_prerequisite_stages(connected_refresh, monkeypatch, detail, expected):
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+
+    def unavailable(_request):
+        api.checks.diagnostic_stage = detail
+        raise ManagementPrerequisiteError('private-provider-payload')
+
+    monkeypatch.setattr(api.checks, 'preflight', unavailable)
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        api.preflight(state.request)
+    assert error.value.stage == expected
+    assert 'private-provider-payload' not in str(error.value)
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
 @pytest.mark.parametrize('failure', ['backup', 'activation_probe', 'public'])
 def test_connected_barrier_failure_never_skips_proof_or_replays_effects(connected_refresh, failure):
     from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
