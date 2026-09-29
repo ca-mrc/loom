@@ -9,8 +9,10 @@ from dataclasses import replace
 
 import pytest
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
-from tests.ops.test_nebius_management_refresh_resources import resources_request as resources_request
-from tests.ops.test_nebius_management_refresh_switch import API as SwitchAPI
+from tests.ops.test_nebius_management_refresh_resources import (
+    resources_request as resources_request,
+)
+from tests.ops.test_nebius_management_refresh_switch import API as SWITCH_API
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
@@ -34,7 +36,7 @@ def install(resources_request, tmp_path):
     class API:
         def __init__(self):
             self.stages = {}
-            self.switch = SwitchAPI(resources_request.switch)
+            self.switch = SWITCH_API(resources_request.switch)
             self.switch.drained = self.switch.qualified = True
             self.pending = self.failed = None
             self.public_ready = True
