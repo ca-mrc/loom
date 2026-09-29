@@ -134,8 +134,10 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
             raise ValueError()
         state = Path(config["state_dir"])
         root = state.parent
-        if config["schema"] == "loom.nebius-management-upgrade-operation.v1":
-            if root.name != "upgrade":
+        separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
+                     "loom.nebius-management-retirement-operation.v1": "retirement"}
+        if config["schema"] in separated:
+            if root.name != separated[config["schema"]]:
                 raise ValueError()
             root = root.parent
         elif config["schema"] != "loom.nebius-management-operation.v1":

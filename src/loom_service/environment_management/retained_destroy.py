@@ -30,7 +30,7 @@ from loom_service.environment_management.steps import ProvisioningStep
 class EnvironmentRetainedDestroy:
     def __init__(
         self, registry: EnvironmentRegistry, kubernetes: KubernetesEnvironmentProvider,
-        cloud: NebiusSdkEnvironmentApi, child: ChildEnvironmentClient,
+        cloud: NebiusSdkEnvironmentApi | None, child: ChildEnvironmentClient | None,
     ):
         self.registry, self.kubernetes, self.cloud, self.child = registry, kubernetes, cloud, child
         self.cleanup = RetainedKubernetesCleanup(kubernetes)
@@ -156,6 +156,8 @@ class EnvironmentRetainedDestroy:
                 return await self.kubernetes.apply(source, original)
             return await self.cleanup.stop(source, original, cleanup_id=context.lease.operation_id)
         if action == "retained_owner_revoke":
+            if self.child is None:
+                raise ProviderBlockedError("retained_child_client_required")
             material = await self.registry.load_material(context.lease, "credentials:material")
             try:
                 token = tomllib.loads(material["loom-admin-secret"]["secrets.toml"])["admin"]["token"]
@@ -171,6 +173,8 @@ class EnvironmentRetainedDestroy:
             # Unknown earlier cloud creates remain retained, not guessed/deleted.
             if "credentials:material" not in source.identities:
                 return "not-delivered"
+            if self.cloud is None:
+                raise ProviderBlockedError("retained_cloud_client_required")
             purpose = step.payload["purpose"]
             key = "iam:" + purpose + ":access_key"
             identity = source.identities.get(key)
