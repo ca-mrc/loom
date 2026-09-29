@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import ssl
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -89,6 +90,15 @@ def test_migration_and_backup_are_manager_only_and_operation_specific(resources_
     second = replace(request, switch=replace(request.switch, operation_id=uuid4()))
     assert documents(second, 'migration')[0]['metadata']['name'] != migration['metadata']['name']
     assert documents(second, 'backup')[0]['metadata']['name'] != backup['metadata']['name']
+
+
+def test_probe_config_survives_canonical_private_input_roundtrip(resources_request):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    render = resources_request.switch.render
+    after = ManagementDeployment.model_validate_json(json.dumps(render.after.model_dump(mode='json'), sort_keys=True))
+    restored = replace(resources_request, switch=replace(resources_request.switch, render=replace(render, after=after)))
+    assert documents(restored, 'manager-probe') == documents(resources_request, 'manager-probe')
 
 
 @pytest.mark.parametrize('phase', ['config', 'manager-probe', 'shared-probe', 'backup', 'migration', 'post-migration-probe'])

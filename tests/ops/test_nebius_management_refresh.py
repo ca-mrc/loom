@@ -198,3 +198,11 @@ def test_candidate_runtime_contract_change_requires_a_wider_operation(refresh_re
     monkeypatch.setattr(module, 'render_management', altered)
     with pytest.raises(ValueError, match='refresh'):
         build(refresh_request)
+
+
+def test_refresh_config_survives_canonical_private_input_roundtrip(refresh_request):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    after = ManagementDeployment.model_validate_json(json.dumps(
+        refresh_request.after.model_dump(mode='json'), sort_keys=True))
+    assert build(replace(refresh_request, after=after)) == build(refresh_request)
