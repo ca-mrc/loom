@@ -22,7 +22,16 @@ def test_unsupported_conditional_write_keeps_cache_append_only(shared_minio, tmp
         # returning NotImplemented. It must never be trusted as a mutex.
         assert not runtime._supports_conditional_cache_write(client, bucket)
         legacy_key = f"task-build-cache/{'b' * 64}/0.tar"
-        client.put_object(Bucket=bucket, Key=legacy_key, Body=b"retained")
+        with runtime.cache_request_counts(client, "probe"):
+            client.put_object(Bucket=bucket, Key=legacy_key, Body=b"retained")
+            client.head_object(Bucket=bucket, Key=legacy_key)
+            client.list_objects_v2(Bucket=bucket)
+            with client.get_object(Bucket=bucket, Key=legacy_key)["Body"] as body:
+                assert body.read() == b"retained"
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert events[-1]["request_attempts"] == {
+            "PutObject": 1, "HeadObject": 1, "ListObjectsV2": 1, "GetObject": 1,
+        }
         runtime.trim_cache(client, bucket, runtime._CACHE_TOTAL_BYTES)
         assert client.get_object(Bucket=bucket, Key=legacy_key)["Body"].read() == b"retained"
         directory = tmp_path / "cache"

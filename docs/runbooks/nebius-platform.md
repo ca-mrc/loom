@@ -1128,6 +1128,19 @@ OCI output (`--output type=oci`); `oci_export` records resulting bytes (archive
 size or directory file-byte sum). Grep Job logs for `loom_task_image_stage`
 when comparing cold builds.
 
+Blob import/export `transfer` markers report `logical_bytes` (all manifest file
+paths), `unique_digests`, `manifest_bytes`, and the successful object payload
+bytes downloaded, uploaded, or reused. Repeated digests download once per
+component and copy locally to each path. These are neither network wire bytes
+nor measured disk allocation. A failed transfer has no completed transfer marker.
+`requests` markers count SDK HTTP attempts by S3 operation, including retries and
+multipart requests; absent instrumentation is `null`, not zero. Export includes
+GC and lock-probe requests; nested GC counts are a subset and must not be added
+again. GC inventory reports actual reclaimed, remaining, and incoming bytes.
+Stage wall times also overlap: `solve` includes OCI export and `cache_export`
+includes GC. Keep raw markers when comparing cold/exact/donor builds; do not sum
+overlapping durations or present reservation estimates as measured peak disk.
+
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
 `max_concurrent` accepts 1–16, defaults to 1, bounds unfinished builds including
