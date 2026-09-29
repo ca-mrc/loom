@@ -37,16 +37,17 @@ class HoldingCoordinator:
         self.cancelled_operations = set()
 
     async def start(self, lease):
-        await self.registry.frozen_plan(lease)
-        self.calls.append(('start', lease))
-        self.entered.set()
-        if self.error is not None:
-            raise self.error
         try:
+            await self.registry.frozen_plan(lease)
+            self.calls.append(('start', lease))
+            self.entered.set()
+            if self.error is not None:
+                raise self.error
             await asyncio.Event().wait()
-        finally:
+        except asyncio.CancelledError:
             self.cancelled.set()
             self.cancelled_operations.add(lease.operation_id)
+            raise
 
     async def stop(self, lease):
         await self.registry.frozen_plan(lease)
