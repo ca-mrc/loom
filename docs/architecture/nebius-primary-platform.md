@@ -823,8 +823,9 @@ requirements. CLI/source coverage does not prove deployed personal readiness.
 boundary for the future owner upload/build flow, not a deployment command. It
 snapshots current tracked and nonignored untracked Git worktree bytes, including
 dirty edits and local deletions, into a private temporary directory outside the
-checkout. Normal Git exclusions are retained; ambient Git tree/index overrides
-are ignored and fsmonitor/hooks, lazy fetch, remote protocols and optional index
+checkout. Normal Git exclusions are retained; ambient `GIT_*` tree/index/config
+overrides (including alternate global-config files) are ignored. Fsmonitor/hooks,
+lazy fetch, remote protocols and optional index
 writes are disabled. Sparse checkouts/indices are rejected rather than expanded
 through remote helpers or silently treated as complete source.
 Mandatory exclusions also remove VCS/runtime/owner state, environment files
