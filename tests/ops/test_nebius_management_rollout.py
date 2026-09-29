@@ -16,8 +16,8 @@ from tests.ops.test_nebius_management_gateway import (
     diagnostic_operation,
     operation,
     recovery_operation,
-    refresh_operation,
     recovery_report,
+    refresh_operation,
     startup_report,
     upgrade_operation,
 )
@@ -45,7 +45,7 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation])
+@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation, refresh_operation])
 def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path, metadata_factory):
     import os
     import sys
@@ -71,6 +71,9 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     elif metadata_factory is recovery_operation:
         script = ('from scripts.ops.nebius_management_retirement_recovery_live import HTTPSRetirementRecoveryAPI; '
                   'from scripts.ops.nebius_retirement_recovery_runner import run_recovery; ') + script
+    elif metadata_factory is refresh_operation:
+        script = ('from scripts.ops.nebius_management_refresh_entry import load_refresh_inputs; '
+                  'from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller; ') + script
     result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
     assert result.returncode == 0, result.stderr
@@ -309,5 +312,10 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
         # A diagnostic action cannot select an original retirement/install schema.
         result = subprocess.run(["bash", "-e", "-c", selector["run"]],
             env=env | {"NEBIUS_MANAGEMENT_" + authority.upper() + "_OPERATION_JSON": json.dumps(original)},
+            cwd=root, capture_output=True, text=True, timeout=20)
+        assert result.returncode != 0
+        result = subprocess.run(["bash", "-e", "-c", selector["run"]],
+            env=env | {"MANAGEMENT_OPERATION": "management-" + action,
+                       "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(selected)},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0

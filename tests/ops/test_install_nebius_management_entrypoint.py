@@ -50,6 +50,43 @@ def test_preview_preserves_keys_and_creates_nothing(inputs):
     assert keys.read_bytes() == before and not root.exists()
 
 
+@pytest.mark.parametrize('case', ['nil', 'noncanonical', 'other_id', 'flat_path', 'wrong_root',
+                                  'mixed_anchor', 'mixed_inputs', 'other_candidate'])
+def test_refresh_grant_rejects_misbound_identity_and_paths_before_writes(tmp_path, case):
+    (tmp_path / '.loom').mkdir(mode=0o700)
+    (tmp_path / '.ssh').mkdir(mode=0o700)
+    keys = tmp_path / '.ssh/authorized_keys'
+    keys.write_bytes(b'# preserve existing authority\n')
+    keys.chmod(0o600)
+    root = tmp_path / '.loom/nebius-management'
+    metadata = refresh_operation(root.parent)
+    operation_root = Path(metadata['state_dir']).parent
+    if case == 'nil':
+        metadata['operation_id'] = '00000000-0000-0000-0000-000000000000'
+    elif case == 'noncanonical':
+        metadata['operation_id'] = metadata['operation_id'].upper()
+    elif case == 'other_id':
+        metadata['operation_id'] = '11111111-1111-4111-8111-111111111111'
+    elif case in {'flat_path', 'wrong_root'}:
+        parent = root / 'refresh' if case == 'flat_path' else root / 'upgrade' / operation_root.name
+        for field, name in [('state_dir', 'state'), ('anchor_dir', 'anchor'), ('inputs_path', 'inputs.json')]:
+            metadata[field] = str(parent / name)
+    elif case in {'mixed_anchor', 'mixed_inputs'}:
+        field, name = ('anchor_dir', 'anchor') if case == 'mixed_anchor' else ('inputs_path', 'inputs.json')
+        metadata[field] = str(root / name)
+    else:
+        metadata['candidate'] = 'f' * 40
+    content = archive({'operation.json': json.dumps(metadata).encode(),
+        'scripts/ops/nebius_management_gateway.py': b'# fixed gateway\n',
+        'scripts/ops/nebius_certificate_gateway.py': b'# fixed supervisor\n'})
+    wire = struct.pack('>I', 11) + b'ssh-ed25519' + struct.pack('>I', 32) + b'i' * 32
+    key = 'ssh-ed25519 ' + base64.b64encode(wire).decode()
+    before = keys.read_bytes()
+    with pytest.raises(module().InstallError):
+        module().install(content, expected_sha256=hashlib.sha256(content).hexdigest(), public_key=key, apply=True)
+    assert keys.read_bytes() == before and not root.exists()
+
+
 def test_grant_is_exact_fixed_command_preserves_existing_keys_and_checks_sources(inputs):
     root, keys, key, content, digest = inputs
     before = keys.read_bytes()
