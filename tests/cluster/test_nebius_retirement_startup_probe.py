@@ -71,21 +71,22 @@ def _database_dump(url):
 
 
 def _native_dns_labels(cluster, core):
-    """Use the native Nebius DNS selector without changing the frozen Loom policy."""
+    """Native DNS can add a restrictive selector; keep the frozen Loom policy."""
     from kubernetes import client
 
     apps = client.AppsV1Api(core.api_client)
     spec = core.api_client.sanitize_for_serialization(apps.read_namespaced_deployment("coredns", "kube-system"))["spec"]
-    spec["selector"] = {"matchLabels": {"k8s-app": "coredns"}}
-    spec["template"]["metadata"]["labels"] = {"k8s-app": "coredns"}
+    selector = {"k8s-app": "coredns", "loom.test/dns-instance": "native"}
+    spec["selector"] = {"matchLabels": selector}
+    spec["template"]["metadata"]["labels"] = selector
     name = "coredns-native-fixture"
     apps.create_namespaced_deployment("kube-system", {"apiVersion": "apps/v1", "kind": "Deployment",
         "metadata": {"name": name}, "spec": spec})
     _run(cluster, "kubectl", "rollout", "status", "deployment/" + name, "-n", "kube-system", "--timeout=60s")
-    service = core.patch_namespaced_service("kube-dns", "kube-system", {"spec": {"selector": {"k8s-app": "coredns"}}})
-    assert service.spec.selector == {"k8s-app": "coredns"}
+    service = core.patch_namespaced_service("kube-dns", "kube-system", {"spec": {"selector": selector}})
+    assert service.spec.selector == selector
     native_service = core.create_namespaced_service("kube-system", {"apiVersion": "v1", "kind": "Service",
-        "metadata": {"name": "coredns"}, "spec": {"selector": {"k8s-app": "coredns"},
+        "metadata": {"name": "coredns"}, "spec": {"selector": selector,
             "ports": [{"name": "dns-" + protocol.lower(), "protocol": protocol, "port": 53, "targetPort": 53}
                 for protocol in ("TCP", "UDP")]}})
     discovery = client.DiscoveryV1Api(core.api_client)
