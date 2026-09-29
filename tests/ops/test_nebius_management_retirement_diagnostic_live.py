@@ -198,8 +198,13 @@ def test_changed_original_state_prevents_any_diagnostic_mutation(live, capsys):
 
 def test_diagnostic_readback_rejects_ambiguous_foreign_or_changed_pod_and_private_logs(live, capsys):
     assert invoke(live, capsys, "install")[1]["status"] == "pending"
-    for change in ("duplicate", "owner", "missing_policy_label", "changed_policy_label", "extra_policy_label",
-                   "command", "restart", "sidecar", "raw_log", "oversized", "wrong_operation", "replaced_after_log"):
+    stages = {"duplicate": "diagnostic_pod_list", "owner": "diagnostic_pod_owner",
+        "missing_policy_label": "diagnostic_pod_labels", "changed_policy_label": "diagnostic_pod_labels",
+        "extra_policy_label": "diagnostic_pod_labels", "command": "diagnostic_pod_template",
+        "restart": "diagnostic_container_status", "sidecar": "diagnostic_pod_template",
+        "raw_log": "diagnostic_log", "oversized": "diagnostic_log", "wrong_operation": "diagnostic_log",
+        "replaced_after_log": "diagnostic_readback"}
+    for change, stage in stages.items():
         complete(live)
         live.pod_readback = None
         if change == "duplicate":
@@ -232,5 +237,58 @@ def test_diagnostic_readback_rejects_ambiguous_foreign_or_changed_pod_and_privat
             live.pod_readback["metadata"]["uid"] = str(uuid4())
         code, report = invoke(live, capsys, "install")
         assert code == 0 and report["status"] == "blocked", change
-        assert report["stage"] in {"diagnostic_pod", "diagnostic_log", "diagnostic_readback"}, change
+        assert report["stage"] == stage, change
     assert len([url for method, url in live.calls if method == "POST" and "dryRun=" not in url]) == 1
+
+
+def test_rejected_pod_retains_first_private_observation_without_changing_validation(live, capsys):
+    assert invoke(live, capsys, "install")[1]["status"] == "pending"
+    complete(live)
+    live.pods[0]["spec"]["containers"][0]["command"] = ["private-pod-command"]
+    job = next(doc for doc in live.rows.values() if doc.get("kind") == "Job"
+               and doc["metadata"]["name"].startswith("loom-retirement-probe-"))
+    first_pod = copy.deepcopy(live.pods[0])
+    assert invoke(live, capsys, "install")[1]["status"] == "blocked"
+    path = Path(live.metadata["state_dir"]) / "pod-observation.json"
+    raw = path.read_bytes()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(raw) == {"schema": "loom.nebius-retirement-pod-observation.v1", "job": job, "pod": first_pod}
+    assert not any("/log?" in url for _, url in live.calls)
+    # The private snapshot is diagnostic history, never authority for accepting
+    # the current Pod or a reason to overwrite earlier failure evidence.
+    expected = complete(live)
+    result = invoke(live, capsys, "install")[1]
+    assert result["status"] == "retirement_diagnostic_observed" and result["probe"] == expected
+    assert path.read_bytes() == raw
+    assert len([url for method, url in live.calls if method == "POST" and "dryRun=" not in url]) == 1
+
+
+def test_foreign_pod_is_not_retained_as_original_job_observation(live, capsys):
+    assert invoke(live, capsys, "install")[1]["status"] == "pending"
+    complete(live)
+    live.pods[0]["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    assert invoke(live, capsys, "install")[1]["stage"] == "diagnostic_pod_owner"
+    assert not (Path(live.metadata["state_dir"]) / "pod-observation.json").exists()
+
+
+def test_private_observation_never_follows_existing_symlink(live, capsys, tmp_path):
+    assert invoke(live, capsys, "install")[1]["status"] == "pending"
+    complete(live)
+    foreign = tmp_path / "unrelated-private-file"
+    foreign.write_bytes(b"private-unchanged")
+    path = Path(live.metadata["state_dir"]) / "pod-observation.json"
+    path.symlink_to(foreign)
+    assert invoke(live, capsys, "install")[1]["stage"] == "diagnostic_pod_observation"
+    assert path.is_symlink() and foreign.read_bytes() == b"private-unchanged"
+    assert not any("/log?" in url for _, url in live.calls)
+
+
+def test_private_observation_is_bounded_before_any_file_write(tmp_path):
+    from scripts.ops.nebius_management_retirement_diagnostic_live import (
+        _record_first_pod_observation,
+    )
+
+    with pytest.raises(ValueError):
+        _record_first_pod_observation(tmp_path, {"metadata": {"uid": str(uuid4())}},
+                                      {"metadata": {"annotations": {"private-payload": "x" * 2_097_152}}})
+    assert not (tmp_path / "pod-observation.json").exists()

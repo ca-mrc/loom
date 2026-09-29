@@ -47,7 +47,10 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "backup_log", "backup_readback", "shared_material",
     "upgrade_config", "upgrade_admission", "upgrade_permissions", "upgrade_network", "upgrade_material",
     "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate", "retirement",
-    "diagnostic_original", "diagnostic_stage", "diagnostic_job", "diagnostic_pod", "diagnostic_log", "diagnostic_readback"})
+    "diagnostic_original", "diagnostic_stage", "diagnostic_job", "diagnostic_pod", "diagnostic_log", "diagnostic_readback",
+    "diagnostic_pod_list", "diagnostic_pod_identity", "diagnostic_pod_owner", "diagnostic_pod_observation",
+    "diagnostic_pod_labels", "diagnostic_pod_template", "diagnostic_pod_security", "diagnostic_pod_status",
+    "diagnostic_container_status", "diagnostic_container_shape"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
