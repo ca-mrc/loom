@@ -134,7 +134,9 @@ def complete_recovery(live):
     return report
 
 
-def test_connected_recovery_preserves_old_evidence_and_requires_release_report(recovery, capsys):
+@pytest.mark.parametrize("extra_selector", [{}, {"loom.test/dns-instance": "native"}])
+def test_connected_recovery_preserves_old_evidence_and_requires_release_report(recovery, capsys, extra_selector):
+    recovery.rows["/api/v1/namespaces/kube-system/services/coredns"]["spec"]["selector"].update(extra_selector)
     frozen = copy.deepcopy(recovery.rows)
     assert invoke(recovery, capsys, "preflight")[1]["status"] == "preflight_qualified"
     assert not Path(recovery.metadata["state_dir"]).exists()
@@ -146,6 +148,18 @@ def test_connected_recovery_preserves_old_evidence_and_requires_release_report(r
     assert invoke(recovery, capsys, "install")[1] == result
     assert all(recovery.rows[key] == value for key, value in frozen.items())
     assert len([url for method, url in recovery.calls if method == "POST" and "dryRun=" not in url]) == 2
+
+
+@pytest.mark.parametrize("selector", [
+    {}, {"loom.test/dns-instance": "native"},
+    {"k8s-app": "kube-dns", "loom.test/dns-instance": "native"}, None, [],
+])
+def test_additional_dns_selectors_cannot_replace_required_native_selector(recovery, capsys, selector):
+    recovery.rows["/api/v1/namespaces/kube-system/services/coredns"]["spec"]["selector"] = selector
+    code, result = invoke(recovery, capsys, "install")
+    assert code == 0 and result["status"] == "blocked" and result["stage"] == "recovery_dns"
+    assert not any(method == "POST" for method, _ in recovery.calls)
+    assert not Path(recovery.metadata["state_dir"]).exists()
 
 
 @pytest.mark.parametrize("damage", ["dns_uid", "dns_selector", "dns_deleting", "diagnostic_success", "diagnostic_uid",
