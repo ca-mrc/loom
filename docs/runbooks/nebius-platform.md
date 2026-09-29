@@ -1086,9 +1086,16 @@ bucket:
 | `blobs` (default) | Content-addressed `task-build-cache/v2/{mat}/{index}/manifest.json` plus shared `task-build-cache/v2/blobs/{sha256}`. Prepare dual-reads legacy `…/{mat}/{index}.tar` on blob miss so mixed rollouts stay warm. Publish uploads only missing digests under the **current** materialization key. |
 | `tar` | Whole-archive path only (instant rollback to pre-blob behavior). |
 
-Trim/GC still runs in-process on publish: oldest manifests and legacy tars are
-evicted under the 4 GiB / 7‑day budget; unreferenced v2 blobs older than 7 days
-are deleted afterward. Cache errors never mark a materialization ready.
+Trim/GC still runs in-process on publish, before the new cache upload. It reads
+every v2 manifest first. If any retained manifest cannot be fetched, read, or
+parsed, the sweep stops and deletes nothing; the Job log emits
+`loom_task_image_stage=cache_gc` with `reason=manifest_unreadable`. Otherwise
+it deletes blobs older than 7 days that no manifest names, then evicts the
+oldest past-grace manifests and legacy tars. A blob's bytes count once and are
+reclaimed only when its last manifest reference disappears. Roots and blobs
+newer than 7 days stay. If those protected objects leave the bucket over the
+4 GiB target, the log emits `reason=grace_protected` and the sweep stops. Cache
+errors never mark a materialization ready.
 
 `oci_export_format` selects BuildKit OCI output shape for measure gates:
 

@@ -660,9 +660,29 @@ def pack_cache(directory: Path, archive: Path) -> None:
             output.add(path, arcname=path.relative_to(directory).as_posix(), recursive=False)
 
 
+def _read_cache_manifest(client: Any, bucket: str, key: str) -> list[str]:
+    """Return blob digests. Close the response body even when the read or parse fails."""
+    response = client.get_object(Bucket=bucket, Key=key)
+    body = response["Body"]
+    try:
+        payload = body.read()
+    finally:
+        body.close()
+    return [entry["sha256"] for entry in _parse_cache_manifest(payload)]
+
+
+def _delete_cache_object(client: Any, bucket: str, item: dict[str, Any], deleted: set[str]) -> None:
+    client.delete_object(Bucket=bucket, Key=item["Key"])
+    deleted.add(item["Key"])
+
+
 def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
-    """Bound disposable cache size and age without a second GC service."""
-    legacy_or_manifest: list[dict[str, Any]] = []
+    """Bound disposable cache size and age without a second GC service.
+
+    A manifest read must finish for every retained root before any blob is
+    deleted. Eviction subtracts each blob once, when its last reference goes.
+    """
+    roots: list[dict[str, Any]] = []
     blobs: list[dict[str, Any]] = []
     for page in client.get_paginator("list_objects_v2").paginate(
         Bucket=bucket, Prefix="task-build-cache/"
@@ -670,39 +690,57 @@ def trim_cache(client: Any, bucket: str, incoming_bytes: int) -> None:
         for item in page.get("Contents", []):
             key = item["Key"]
             if _LEGACY_TAR.fullmatch(key) or _V2_MANIFEST.fullmatch(key):
-                legacy_or_manifest.append(item)
+                roots.append(item)
             elif _V2_BLOB.fullmatch(key):
                 blobs.append(item)
+    referenced: dict[str, set[str]] = {}
+    try:
+        for root in roots:
+            if not _V2_MANIFEST.fullmatch(root["Key"]):
+                continue
+            for digest in _read_cache_manifest(client, bucket, root["Key"]):
+                referenced.setdefault(digest, set()).add(root["Key"])
+    except (ClientError, BuildPreparationError, OSError):
+        emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
+        return
+    blobs_by_digest = {item["Key"].rsplit("/", 1)[-1]: item for item in blobs}
     total = (
-        sum(item["Size"] for item in legacy_or_manifest)
+        sum(item["Size"] for item in roots)
         + sum(item["Size"] for item in blobs)
         + incoming_bytes
     )
     cutoff = datetime.now(UTC) - timedelta(days=7)
-    remaining: list[dict[str, Any]] = []
-    for item in sorted(legacy_or_manifest, key=lambda row: row["LastModified"]):
-        if total <= _CACHE_TOTAL_BYTES and item["LastModified"] >= cutoff:
-            remaining.append(item)
+    deleted: set[str] = set()
+    for blob in sorted(blobs, key=lambda row: row["LastModified"]):
+        digest = blob["Key"].rsplit("/", 1)[-1]
+        if digest in referenced or blob["LastModified"] >= cutoff:
             continue
-        client.delete_object(Bucket=bucket, Key=item["Key"])
-        total -= item["Size"]
-    referenced: set[str] = set()
-    for item in remaining:
-        if not _V2_MANIFEST.fullmatch(item["Key"]):
+        _delete_cache_object(client, bucket, blob, deleted)
+        total -= blob["Size"]
+    for root in sorted(roots, key=lambda row: row["LastModified"]):
+        if total <= _CACHE_TOTAL_BYTES:
+            break
+        if root["LastModified"] >= cutoff:
             continue
-        try:
-            response = client.get_object(Bucket=bucket, Key=item["Key"])
-            body = response["Body"].read()
-            response["Body"].close()
-            for entry in _parse_cache_manifest(body):
-                referenced.add(entry["sha256"])
-        except (ClientError, BuildPreparationError, OSError):
-            continue
-    for item in sorted(blobs, key=lambda row: row["LastModified"]):
-        digest = item["Key"].rsplit("/", 1)[-1]
-        if digest in referenced or item["LastModified"] >= cutoff:
-            continue
-        client.delete_object(Bucket=bucket, Key=item["Key"])
+        exclusive: list[dict[str, Any]] = []
+        if _V2_MANIFEST.fullmatch(root["Key"]):
+            for digest, owners in referenced.items():
+                blob = blobs_by_digest.get(digest)
+                if owners == {root["Key"]} and blob is not None and blob["Key"] not in deleted:
+                    if blob["LastModified"] < cutoff:
+                        exclusive.append(blob)
+        _delete_cache_object(client, bucket, root, deleted)
+        total -= root["Size"]
+        for blob in exclusive:
+            _delete_cache_object(client, bucket, blob, deleted)
+            total -= blob["Size"]
+        for owners in referenced.values():
+            owners.discard(root["Key"])
+    if total > _CACHE_TOTAL_BYTES and any(
+        item["LastModified"] >= cutoff and item["Key"] not in deleted
+        for item in (*roots, *blobs)
+    ):
+        emit_stage("cache_gc", "deferred", reason="grace_protected")
 
 
 def _output_path(work: Path, relative: str, *, directory: bool = False) -> Path:
