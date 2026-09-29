@@ -7,12 +7,15 @@ The protected parent must bind the settings and qualify the actual probe Pod.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import Text, cast, func, select, text
-from sqlalchemy.engine import URL
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
@@ -23,6 +26,7 @@ from loom.nebius_application_contract import (
 )
 
 SCHEMA = "loom.nebius-management-refresh-probe.v1"
+SETTINGS_PATH = Path("/var/run/loom-management-refresh/probe.json")
 _ACTIVE_PHASES = ("pending", "running", "blocked")
 _PLAN_KEYS = {"schema_version", "registration", "release", "shared", "files", "platform_envelope"}
 _TRANSITION_KEYS = {"source_operation_id", "requires_previous_retirement"}
@@ -92,6 +96,8 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
     try:
         async with asyncio.timeout(150):
             settings = RefreshProbeSettings.model_validate(settings.model_dump())
+            if settings.mode == "shared" and settings.expected_revision != settings.shared.schema_revision:
+                raise ValueError
             factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
             async with factory.begin() as session:
                 if await session.scalar(text("SHOW transaction_read_only")) != "on":
@@ -120,3 +126,37 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
         raise ValueError("refresh_probe_unqualified") from None
     finally:
         await engine.dispose()
+
+
+def refresh_database_url(value: str, settings: RefreshProbeSettings) -> URL:
+    """Accept only the retained, TLS-verified namespace-local service identity."""
+    try:
+        namespace = settings.namespace if settings.mode == "manager" else settings.shared.platform_namespace
+        url = make_url(value)
+        if (url.drivername != "postgresql" or url.username != "loom_service" or not url.password
+                or url.host != f"loom-postgres.{namespace}.svc" or url.port != 5432 or url.database != "loom"
+                or dict(url.query) != {"sslmode": "verify-full", "sslrootcert": "/var/run/loom-db/ca.crt"}):
+            raise ValueError
+        return url.set(drivername="postgresql+psycopg")
+    except Exception:
+        raise ValueError("refresh_probe_unqualified") from None
+
+
+def main() -> int:
+    try:
+        with SETTINGS_PATH.open("rb") as stream:
+            raw = stream.read(262145)
+        if len(raw) > 262144:
+            raise ValueError
+        settings = RefreshProbeSettings.model_validate_json(raw)
+        url = refresh_database_url(os.environ["LOOM_REFRESH_DB_URL"], settings)
+        report = asyncio.run(database_snapshot(url, settings))
+    except Exception:
+        print(json.dumps({"schema": SCHEMA, "status": "unqualified"}, sort_keys=True))
+        return 1
+    print(json.dumps(report, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
