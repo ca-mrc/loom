@@ -123,10 +123,13 @@ def test_0167_drift_is_repaired_without_rewriting_frozen_images(repair_database,
     migrate(repair_database, "upgrade", "head")
     with repair_database.connect() as connection:
         assert _snapshot_rows(connection) == frozen
+        version_before_downgrade = connection.scalar(
+            text("SELECT version_num FROM alembic_version")
+        )
     with pytest.raises(DBAPIError, match="cannot discard legacy verifier compatibility"):
         migrate(repair_database, "downgrade", "0168")
     with repair_database.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0169"
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == version_before_downgrade
         assert _snapshot_rows(connection) == frozen
 
 
