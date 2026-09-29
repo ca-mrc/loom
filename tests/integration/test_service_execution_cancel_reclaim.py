@@ -219,6 +219,16 @@ async def test_native_cleanup_acknowledges_cancel_without_client_replay(postgres
         async with sessions() as session:
             trial = await session.get(Trial, trial_id)
             assert trial is not None and trial.cancellation_observed_at == acknowledged_at
+            # A historical deletion written before native acknowledgement was
+            # implemented can be repaired by the same authorized cancel replay.
+            trial.cancellation_observed_at = None
+            await session.commit()
+        await cancel_trial_under_authority(
+            session_factory=sessions, trial_id=trial_id, team_id=lease.team_id,
+        )
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.cancellation_observed_at == acknowledged_at
     finally:
         await engine.dispose()
 
