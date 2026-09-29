@@ -86,7 +86,9 @@ async def qualify_application_cloud(*, sdk: Any, scope: ApplicationCloudScope, c
                 _resource(group, identity, parent)
                 for membership in memberships:
                     if membership['metadata']['id'] == identity:
-                        _require(membership == group)
+                        # ListMemberOf omits Group.Get status/counters. Compare
+                        # authority identity, not these unequal API projections.
+                        _resource(membership, identity, parent)
                 permits = await _pages(api['permits'].list, v1.ListAccessPermitRequest, parent_id=identity)
                 _require(len(permits) == len(resources))
                 observed = set()
