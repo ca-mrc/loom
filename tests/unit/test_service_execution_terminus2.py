@@ -75,11 +75,18 @@ async def test_timeout_retains_native_files_without_post_deadline_ledger_or_uplo
 
     _patch_harbor(monkeypatch)
     harbor, context = module._import_terminus2()
-    deadline = AttemptDeadline.after(0.05)
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: clock() + clock_offset)
+    deadline = AttemptDeadline.after(60)
 
     class HangingHarbor(harbor):
         async def run(self, *args):
+            nonlocal clock_offset
             await super().run(*args)
+            # Exercise expiry after native output exists, regardless of setup IO.
+            clock_offset += 61
             await asyncio.sleep(10)
 
     async def sync(*args, **kwargs):

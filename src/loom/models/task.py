@@ -85,7 +85,7 @@ class ServiceLifecycleConfig(BaseModel):
     startup_command: tuple[str, ...] = Field(default=(), max_length=64)
     startup_timeout_sec: float = Field(default=60, gt=0, le=300, allow_inf_nan=False)
     readiness: HealthcheckSpec
-    readiness_timeout_sec: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
+    readiness_timeout_sec: float = Field(default=30, gt=0, le=1800, allow_inf_nan=False)
     readiness_scope: Literal["startup_and_handoff", "startup_only"] = Field(
         default="startup_and_handoff", exclude_if=lambda value: value == "startup_and_handoff",
     )

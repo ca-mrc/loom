@@ -68,6 +68,180 @@ def test_startup_only_readiness_requires_initializer_and_preserves_old_defaults(
         ServiceLifecycleConfig(readiness={"command": "true"}, readiness_scope="startup_only")
 
 
+def test_long_readiness_is_explicit_bounded_and_preserves_startup_defaults():
+    from loom.models.task import ServiceLifecycleConfig
+
+    default = ServiceLifecycleConfig(readiness={"command": "true"})
+    assert default.readiness_timeout_sec == 30
+    assert default.startup_timeout_sec == 60
+    declared = ServiceLifecycleConfig(
+        readiness={"command": "test -f /tmp/ready"}, readiness_timeout_sec=1800,
+    )
+    assert ServiceLifecycleConfig.model_validate_json(declared.model_dump_json()) == declared
+    with pytest.raises(ValidationError):
+        ServiceLifecycleConfig(readiness={"command": "true"}, startup_timeout_sec=301)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, 1800.01, float("inf"), float("nan")])
+def test_readiness_rejects_unbounded_or_invalid_budgets(timeout):
+    from loom.models.task import ServiceLifecycleConfig
+
+    with pytest.raises(ValidationError):
+        ServiceLifecycleConfig(readiness={"command": "true"}, readiness_timeout_sec=timeout)
+
+
+def test_long_readiness_does_not_extend_compiled_phase_budgets():
+    task, trial, profile = inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["service_lifecycle"]["readiness_timeout_sec"] = 1800
+    raw["agent"]["timeout_sec"] = 900
+    raw["verifier"]["timeout_sec"] = 120
+    task = TaskConfig.model_validate(raw)
+    profile = profile.model_copy(update={"service_lifecycle_ready": True})
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile,
+        source_provenance=_provenance(), task_revision_sha256=_REVISION,
+    )
+    assert plan.main.timeout_seconds == 900
+    assert plan.verifier.timeout_seconds == 120
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["phase-deadline", "cancelled"])
+async def test_long_readiness_cannot_outlive_phase_or_cancellation(tmp_path, monkeypatch, ending):
+    import asyncio
+    import time
+
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["service_lifecycle"]["readiness_timeout_sec"] = 1800
+    task = TaskConfig.model_validate(raw)
+    (tmp_path / "instruction.md").write_text("Use the prepared service")
+    started = asyncio.Event()
+    stopped = []
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: clock() + clock_offset)
+
+    class WaitingSandbox(Sandbox):
+        async def run_healthcheck(self, hc=None):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def stop_processes(self):
+            stopped.append(True)
+            await super().stop_processes()
+
+    driver = WaitingSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "1")
+    if ending == "phase-deadline":
+        monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 60))
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def forbidden_agent(**kwargs):
+        pytest.fail("Agent entered before service readiness")
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", forbidden_agent)
+    running = asyncio.create_task(module.run_agent(tmp_path, task, trial))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        if ending == "cancelled":
+            running.cancel()
+        else:
+            # Expire the real asyncio phase timer only after readiness starts.
+            clock_offset += 61
+        expected = TimeoutError if ending == "phase-deadline" else asyncio.CancelledError
+        done, _ = await asyncio.wait({running}, timeout=2)
+        assert running in done, "Runtime did not enforce its deadline or cancellation"
+        with pytest.raises(expected):
+            await running
+    finally:
+        if not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+    assert stopped
+    assert driver.state == "stopped"
+    assert not (tmp_path / ".loom/workspace.tar").exists()
+
+
+@pytest.mark.asyncio
+async def test_long_handoff_readiness_is_cut_off_by_finalization_deadline(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = inputs()
+    raw = task.model_dump(mode="json")
+    raw["environment"]["service_lifecycle"]["readiness_timeout_sec"] = 1800
+    task = TaskConfig.model_validate(raw)
+    (tmp_path / "instruction.md").write_text("Use the prepared service")
+    handoff_started = asyncio.Event()
+    agent_started = asyncio.Event()
+    stopped = []
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: clock() + clock_offset)
+
+    class WaitingHandoffSandbox(Sandbox):
+        checks = 0
+
+        async def run_healthcheck(self, hc=None):
+            self.checks += 1
+            if self.checks == 2:
+                handoff_started.set()
+                await asyncio.Event().wait()
+
+        async def stop_processes(self):
+            stopped.append(True)
+            await super().stop_processes()
+
+    driver = WaitingHandoffSandbox()
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 60))
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30")
+
+    async def identity(_):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        agent_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(module, "_execution_identity", identity)
+    monkeypatch.setattr(module, "run_terminus2", terminus)
+    running = asyncio.create_task(module.run_agent(tmp_path, task, trial))
+    try:
+        await asyncio.wait_for(agent_started.wait(), timeout=5)
+        clock_offset += 61
+        await asyncio.wait_for(handoff_started.wait(), timeout=5)
+        clock_offset += 30
+        done, _ = await asyncio.wait({running}, timeout=2)
+        assert running in done, "Handoff outlived its finalization deadline"
+        with pytest.raises(TimeoutError) as caught:
+            await running
+        assert not isinstance(caught.value, module.AgentTimeoutFinalizedError)
+    finally:
+        if not running.done():
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+    assert stopped
+    assert driver.state == "stopped"
+    assert not (tmp_path / ".loom/workspace.tar").exists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, "startup", "snapshot", "verifier"])
 async def test_service_survives_snapshot_until_private_verifier_finishes(tmp_path, monkeypatch, failure):
