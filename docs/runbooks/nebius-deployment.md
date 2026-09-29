@@ -929,9 +929,20 @@ the cause, and inspection never retries or replaces the failed Job.
 For `retirement_blocked`, inspection also attempts a fixed registry probe through
 the matching, ready management service Pod. It qualifies the failed Job's immutable
 target configuration and the manager's installation, service account and Pod UID.
-The immutable ConfigMap must strictly predate the original Job; replacement,
-missing, or equal-second creation timestamps make the probe unavailable rather
-than attributing ambiguous settings to that failure.
+With protected retirement-operation metadata configured, inspection compares both
+live UIDs and normalized configurations with the original private `retirement-job`
+create receipt. The fixed gateway probe reads that receipt in place and emits only
+a match result; it does not edit or create journals. Installation, management
+namespace and cluster namespace UIDs must match. A replacement, incomplete receipt,
+or mismatched configuration remains unavailable, without a timestamp fallback.
+The inspection SSH wrapper needs a separate exact-source, read-only grant for
+`nebius_retirement_journal_probe.py`, bound to the retained state path and original
+receipt identities. Install it through the same approved operator route as the
+shared-input collector, preserving existing grants and the previous wrapper.
+A collector-only or kubectl-only grant does not admit this probe; never replace
+the protected inspection key with a general operator key.
+Without protected metadata, the immutable ConfigMap must strictly predate the Job;
+missing or equal-second timestamps remain unavailable rather than ambiguous.
 PostgreSQL enforces a bounded read-only, repeatable-read transaction; the probe
 performs only fixed SELECTs, never claims an operation or changes reservations.
 `registry_probe` exports named boolean checks against the retirement qualification

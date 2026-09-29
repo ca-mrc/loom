@@ -188,3 +188,4 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
     assert "--apply" not in commands
     inspection = next(step for step in job["steps"] if "nebius_management_preflight.py" in step.get("run", ""))
     assert inspection["env"]["NEBIUS_INGRESS_INSTALLATION_JSON"] == "${{ vars.NEBIUS_INGRESS_INSTALLATION_JSON }}"
+    assert inspection["env"]["NEBIUS_MANAGEMENT_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_OPERATION_JSON }}"
