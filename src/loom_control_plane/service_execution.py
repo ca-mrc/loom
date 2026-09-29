@@ -123,7 +123,7 @@ _EVENT_ALLOWED_DESIRED = {
     "artifact_committed": frozenset({"start", "finalize"}),
     "trajectory_committed": frozenset({"start", "finalize"}),
     "usage_reported": frozenset({"start", "finalize"}),
-    "result_reported": frozenset({"finalize"}),
+    "result_reported": frozenset({"finalize", "cancel"}),
     "kubernetes_observed": frozenset(
         {"create", "start", "finalize", "cancel", "timeout", "retry", "delete_pending"}
     ),
@@ -1099,7 +1099,9 @@ async def mark_execution_output_unavailable(
         raise ServiceExecutionFenceError("execution generation is stale")
     if lease.output_commit_state in {"committed", "unavailable"}:
         return lease
-    cancellation_may_close_now = allow_cancel_before_deadline and lease.desired_state == "cancel"
+    cancellation_may_close_now = (
+        allow_cancel_before_deadline and lease.desired_state == "cancel" and lease.pod_uid is None
+    )
     if (
         lease.revoked_at is None
         or lease.cleanup_state != "pending"
@@ -1438,6 +1440,8 @@ async def record_execution_event(
         surface=event_kind,
         allow_terminal_event=(
             event_kind in _TERMINAL_EVENT_KINDS
+            or (event_kind == "result_reported" and lease.desired_state == "cancel"
+                and lease.output_commit_state == "committed")
             or (
                 event_kind == "kubernetes_observed"
                 and lease.desired_state
@@ -1531,6 +1535,18 @@ async def record_execution_event(
         ):
             # The fenced deletion event closes this attempt; its raw result and
             # usage remain intact. Existing DB triggers release the team counter.
+            if lease.output_commit_state == "committed":
+                committed = await _committed_result_finalization_payload(session, lease=lease)
+                trial.result = {**committed["result"], "cancelled": True}
+            elif trial.result is None:
+                trial.result = {
+                    "schema_version": "loom.service-execution-trial-result.v1",
+                    "cancelled": True,
+                    "partial_evidence": True,
+                    "reward": None,
+                    "aggregate_reward": None,
+                    "output_unavailable_reason": lease.output_unavailable_reason,
+                }
             trial.state = "cancelled"
             trial.finished_at = observed_at
             trial.failure_reason = "cancelled"
@@ -1942,7 +1958,7 @@ async def record_committed_runtime_result(
             desired_state="finalize",
             now=observed_at,
         )
-    if lease.desired_state != "finalize":
+    if lease.desired_state not in {"finalize", "cancel"}:
         raise ServiceExecutionConflict("runtime result cannot enter finalize state")
     event, _ = await record_execution_event(
         session,
@@ -1968,7 +1984,7 @@ async def _committed_result_finalization_payload(
             select(ServiceExecutionEvent)
             .where(
                 ServiceExecutionEvent.lease_id == lease.id,
-                ServiceExecutionEvent.generation == lease.resource_generation,
+                ServiceExecutionEvent.generation.in_((lease.resource_generation, lease.generation)),
                 ServiceExecutionEvent.event_kind == "result_reported",
             )
             .order_by(ServiceExecutionEvent.ordinal.desc())

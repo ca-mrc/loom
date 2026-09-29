@@ -1254,3 +1254,21 @@ Browser-session cancellation carries the session and CSRF credentials to the
 control plane, which independently validates the caller's submit scope and team.
 Bearer-token cancellation retains the same authority checks. Neither path may
 substitute an administrator credential for the ordinary user.
+
+
+Cancellation immediately revokes model/input authority and issues UID-bound Job
+termination. It does not mark an active runtime's output unavailable before
+SIGTERM: the existing five-minute cleanup deadline bounds its output-only drain
+and Kubernetes grace period. The runtime may commit partial evidence using its
+original resource generation while the cancellation command owns the newer
+control generation. Resource absence is finalized after output commits, or after
+the bounded window expires with an explicit unavailable diagnostic. An attempt
+that never acquired a Pod can finish without waiting for this drain.
+
+A cancelled attempt's committed raw result remains immutable. Its Trial result,
+canonical terminal event and ATIF retain cancellation, including when cancellation
+wins during result upload. Canonical materialization and downloads continue after
+compute deletion; cancellation does not permit new model calls or automatic
+attempts. Missing output is shown as unavailable, not perpetually pending.
+Cancelled/unscored output remains ineligible for training delivery; successful
+supplemental attempts continue through the existing family selection rules.

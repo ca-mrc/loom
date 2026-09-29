@@ -565,6 +565,30 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.queryByText("Trial outcome unknown")).not.toBeInTheDocument();
   });
 
+  it("shows a final unavailable diagnostic for cancelled output instead of a pending bundle", async () => {
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+      ...TRIAL_BODY, state: "cancelled", finished_at: "2026-09-28T21:48:40Z",
+      materialization: {
+        state: "not_started", lifecycle_stage: "cancelled", compute_state: null,
+        output_commit_state: "unavailable", canonical_ready: false,
+        backend: "nebius", pool_id: "nebius-cpu", execution_state: "deleted",
+        attempts: 0, source_cleanup_state: "not_ready", source_cleanup_attempts: 0,
+        atif_sha256: null, trajectory_sha256: null, committed_at: null,
+        next_attempt_at: null, output_committed_at: null, pod_scheduled_at: null,
+        pod_started_at: null, pod_terminated_at: null, started_at: null,
+        submitted_at: "2026-09-28T21:40:00Z", source_bundle: null,
+        source_cleanup_error_message: null, source_retain_until: null,
+        error: { code: "cleanup_deadline_elapsed", message: "Execution ended before output could be retained; no canonical bundle is available." },
+        bundle: null,
+      },
+    });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>,
+      { route: `/trials/${TRIAL_ID}` });
+    expect(await screen.findByText("Trial output unavailable. See the final diagnostic above.")).toBeInTheDocument();
+    expect(screen.queryByText("Complete Trial bundle pending")).not.toBeInTheDocument();
+    expect(screen.getByText(/no canonical bundle is available/)).toBeInTheDocument();
+  });
+
   it("keeps a Nebius trial active while materializing and downloads the complete bundle", async () => {
     const fetchMock = fetchSpy(
       { ok: true, body: { events: [], next_cursor: null } },

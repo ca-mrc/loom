@@ -112,6 +112,10 @@ async def test_cancelled_output_unavailable_agrees_across_public_projections(
         assert materialization["output_commit_state"] == "unavailable"
         assert materialization["state"] == "not_started"
         assert materialization["canonical_ready"] is False
+        assert materialization["error"]["code"] == (
+            "operator_cancelled" if trial_state == "cancelled" else "output_marker_missing"
+        )
+        assert "no canonical bundle" in materialization["error"]["message"]
         assert summary["output_commit_states"] == {"unavailable": 1}
         assert summary["materialization_states"] == {"not_started": 1}
         assert summary["canonical_ready_count"] == 0
