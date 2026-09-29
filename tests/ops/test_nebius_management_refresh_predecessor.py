@@ -75,12 +75,12 @@ def test_completed_upgrade_yields_bound_retained_runtime_without_writes(complete
     assert {value['kind'] for value in result.retained.values()} >= {'ConfigMap', 'Secret', 'Job', 'RoleBinding', 'ValidatingAdmissionPolicy'}
 
 
-def complete_refresh(root, predecessor=None):
-    """Run real journals with external cluster/proof boundaries doubled."""
+def refresh_case(root, predecessor=None):
+    """Prepare the real parent request, without staging or cutover."""
     from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
     from scripts.ops.nebius_management_refresh_resources import ManagementRefreshResourcesRequest
     from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
-    from tests.ops.test_nebius_management_refresh_install import install_case, run
+    from tests.ops.test_nebius_management_refresh_install import install_case
 
     prior = predecessor or root
     setup = root.upgrade.setup
@@ -100,6 +100,17 @@ def complete_refresh(root, predecessor=None):
     case = install_case(resources, directory, history={**prior.history, inputs: checksum(inputs)},
         installation_anchor=root.upgrade.original_anchor)
     case[1].switch.document['metadata'].update(resourceVersion='30', generation=5)
+    return case
+
+
+def complete_refresh(root, predecessor=None):
+    """Run real journals with external cluster/proof boundaries doubled."""
+    from tests.ops.test_nebius_management_refresh_install import run
+
+    case = refresh_case(root, predecessor)
+    operation_id = case[0].resources.switch.operation_id
+    directory = case[2].parent
+    inputs = directory / 'inputs.json'
     assert run(case)['status'] == 'management_refreshed'
     selector = {'kind': 'refresh', 'operation_id': str(operation_id), 'inputs_path': str(inputs),
         'inputs_sha256': checksum(inputs), 'state_dir': str(directory / 'state'), 'anchor_dir': str(directory / 'anchor'),
