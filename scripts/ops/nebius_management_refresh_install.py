@@ -92,6 +92,12 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
         'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
 
 
+def _identity(request: ManagementRefreshInstallRequest, state: Path, history: dict[str, str]) -> dict[str, Any]:
+    return {'schema': 'loom.nebius-management-refresh-install.v1', 'state_dir': str(state),
+        'operation_id': str(request.resources.switch.operation_id), 'binding': asdict(request.resources.binding),
+        'input_digest': digest({'history': history, **refresh_contract(request)})}
+
+
 def _proof(request: ManagementRefreshInstallRequest, phase: str, state: Path, proof: Any) -> None:
     """Connected evidence must still bind this phase's recorded Job and settings."""
     record = json.loads(private_state._private_read(state / phase / 'stage.json', limit=4 * 1024**2))
@@ -121,6 +127,56 @@ def _proof(request: ManagementRefreshInstallRequest, phase: str, state: Path, pr
             raise ValueError
 
 
+def qualify_refresh_activation(*, request: ManagementRefreshInstallRequest, api: ManagementRefreshInstallAPI,
+                               state_dir: Path) -> bool:
+    """Read-only activation callback; caller holds the installation/parent locks.
+
+    A completed Job or recorded receipt alone cannot authorize startup. Recheck
+    the exact parent contract, child hashes, live resources, probe execution and
+    backup object. Never stage anything or reopen an uncertain child write here.
+    The switch separately enforces its original/target identity and native drain.
+    """
+    try:
+        state = state_dir.absolute()
+        if state != state.resolve():
+            raise ValueError
+        _uuid(str(request.resources.switch.operation_id))
+        history = _history(request)
+        identity = _identity(request, state, history)
+        record = json.loads(private_state._private_read(state / 'refresh.json', limit=1024**2))
+        if (set(record) != {*identity, 'phases', 'switch_started', 'activation_started', 'completion_sha256'}
+                or any(record[key] != value for key, value in identity.items())
+                or record['switch_started'] is not True or record['activation_started'] is not True
+                or set(record['phases']) != set(_PHASES)):
+            raise ValueError
+        _hash(state / 'switch/cutover.json')
+        if record['completion_sha256'] is not None and _hash(state / 'completion.json') != record['completion_sha256']:
+            raise ValueError
+        for phase in _PHASES:
+            item = record['phases'][phase]
+            if set(item) != {'sha256', 'proof'} or _hash(state / phase / 'stage.json') != item['sha256']:
+                raise ValueError
+            with api.resources(request.resources, phase) as connected:
+                if not refresh_resources_ready(request=request.resources, phase=phase, api=connected, state_dir=state / phase):
+                    return False
+            proof = None
+            if phase.endswith('probe'):
+                proof = api.verify_probe(request, phase, state / phase)
+                if proof is None:
+                    return False
+            elif phase == 'backup':
+                proof = api.verify_backup(request, state / phase)
+            if phase.endswith('probe') or phase == 'backup':
+                _proof(request, phase, state, proof)
+            if proof != item['proof']:
+                raise ValueError
+        if _history(request) != history:
+            raise ValueError
+        return True
+    except Exception:
+        raise ManagementRefreshInstallError('activation') from None
+
+
 def refresh_management(*, request: ManagementRefreshInstallRequest, api: ManagementRefreshInstallAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Never restart a lost child journal or activate before all runtime barriers."""
@@ -140,9 +196,7 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
         assert shared is not None
         with private_state._locked_state(request.installation_anchor), private_state._locked_state(anchor):
             history = _history(request)
-            identity = {'schema': 'loom.nebius-management-refresh-install.v1', 'state_dir': str(state),
-                'operation_id': str(switch.operation_id), 'binding': asdict(resources.binding),
-                'input_digest': digest({'history': history, **refresh_contract(request)})}
+            identity = _identity(request, state, history)
             marker, journal = anchor / (str(switch.operation_id) + '.json'), state / 'refresh.json'
             if marker.exists() or marker.is_symlink():
                 if json.loads(private_state._private_read(marker)) != identity:
