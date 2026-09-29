@@ -199,6 +199,9 @@ func runPlan(
 				continue
 			}
 			result.Status = classifyFailure(ctx, evidence)
+			if result.Status == "task_error" && sandboxCleanupTimeout(workspace, evidence.Role) {
+				result.Status = "runtime_error"
+			}
 			if errors.Is(context.Cause(ctx), errSandboxLost) {
 				result.FailureReason = "sandbox_lost"
 				err = context.Cause(ctx)
@@ -337,6 +340,26 @@ func runPhase(
 		}
 	}
 	return evidence, err
+}
+
+func sandboxCleanupTimeout(workspace, role string) bool {
+	if role != "agent" && role != "verifier" {
+		return false
+	}
+	path := filepath.Join(workspace, ".loom", role, "exception.json")
+	payload, err := os.ReadFile(path)
+	if err != nil || len(payload) > 4096 {
+		return false
+	}
+	var recorded struct {
+		ExceptionType    string `json:"exception_type"`
+		ExceptionMessage string `json:"exception_message"`
+	}
+	if err := json.Unmarshal(payload, &recorded); err != nil {
+		return false
+	}
+	return recorded.ExceptionType == "SandboxRPCError" &&
+		recorded.ExceptionMessage == "sandbox stop_processes failed (HTTP 409; cleanup_timeout)"
 }
 
 func classifyFailure(ctx context.Context, evidence phaseEvidence) string {
