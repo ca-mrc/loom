@@ -4,14 +4,15 @@ from __future__ import annotations
 import copy
 import json
 import ssl
-from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
 import pytest
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
-from tests.ops.test_nebius_management_refresh_resources import resources_request as resources_request
+from tests.ops.test_nebius_management_refresh_resources import (
+    resources_request as resources_request,
+)
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
