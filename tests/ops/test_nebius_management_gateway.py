@@ -83,6 +83,23 @@ def test_refresh_authority_binds_operation_uuid_layout_and_closed_results(tmp_pa
             gateway.safe_report(json.dumps(report).encode(), metadata)
 
 
+@pytest.mark.parametrize('stage', [
+    'refresh_recovery', 'refresh_cluster_identity', 'refresh_resource_inventory',
+    'refresh_persistent_storage', 'refresh_prerequisites', 'refresh_foundation',
+    'refresh_shared_material', 'refresh_platform_capacity', 'refresh_publication',
+    'refresh_cloud_identity', 'refresh_public_route',
+])
+def test_refresh_preserves_closed_retained_preflight_diagnostics(tmp_path, stage):
+    gateway = module()
+    metadata = refresh_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage=stage, private='private-provider-payload')
+    safe = gateway.safe_report(json.dumps(report).encode(), metadata)
+    assert safe == {key: value for key, value in report.items() if key != 'private'}
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report | {'stage': 'refresh_private-provider-payload'}).encode(), metadata)
+
+
 @pytest.mark.parametrize('damage', ['nil_uuid', 'other_uuid_path', 'old_state', 'source_mismatch', 'extra_field'])
 def test_refresh_metadata_cannot_borrow_or_reset_another_operation(tmp_path, damage):
     gateway = module()

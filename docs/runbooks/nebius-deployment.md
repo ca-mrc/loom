@@ -1164,6 +1164,12 @@ installation lock, stages only fixed operation resources, and proceeds through:
    verify the actual current Pod/controller plus authenticated public HTTPS and
    application-provisioner readiness.
 
+When retained preflight fails, the closed `stage` field preserves the failed check,
+such as `refresh_resource_inventory`, `refresh_persistent_storage`,
+`refresh_shared_material`, `refresh_publication` or `refresh_cloud_identity`.
+Unknown details retain a coarse stage. These codes expose no resource contents or
+provider messages and do not authorize retrying a blocked installation.
+
 The operation retains Deployment and credential identities, storage, routes,
 permissions and budgets. It does not migrate the shared business database, create
 IAM/RBAC/network grants, or admit arbitrary manifests or commands. A candidate

@@ -11,6 +11,7 @@ from typing import Any
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_application_setup import _PATHS, HTTPSApplicationSetupAPI
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_gateway import REFRESH_RETAINED_PREFLIGHT_STAGES
 from scripts.ops.nebius_management_live import backup_client
 from scripts.ops.nebius_management_proofs import ManagementPublicProbe
 from scripts.ops.nebius_management_refresh import render_refresh
@@ -39,6 +40,7 @@ from scripts.ops.nebius_management_refresh_switch import (
 )
 from scripts.ops.nebius_management_stage import ManagementStageError
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_management_upgrade import ManagementUpgradeError
 from scripts.ops.nebius_management_upgrade_live import (
     HTTPSManagementUpgradeAPI,
     ManagementUpgradePrerequisites,
@@ -124,7 +126,19 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
                 raise ValueError
             self.diagnostic_stage = 'retained_installation'
             with self._retained() as retained:
-                retained.preflight(self.upgrade)
+                try:
+                    retained.preflight(self.upgrade)
+                except ManagementUpgradeError as error:
+                    # Preserve the existing check's closed stage, not its raw
+                    # exception or provider payload. Unknown details stay coarse.
+                    stage = error.stage
+                    if stage == 'prerequisites':
+                        detail = getattr(self.checks, 'diagnostic_stage', None)
+                        if isinstance(detail, str) and detail in REFRESH_RETAINED_PREFLIGHT_STAGES:
+                            stage = detail
+                    if isinstance(stage, str) and stage in REFRESH_RETAINED_PREFLIGHT_STAGES:
+                        self.diagnostic_stage = stage
+                    raise
             self.diagnostic_stage = 'retained_application'
             self._retained_setup()
             self.diagnostic_stage = 'manager'
