@@ -198,13 +198,21 @@ def test_changed_original_state_prevents_any_diagnostic_mutation(live, capsys):
 
 def test_diagnostic_readback_rejects_ambiguous_foreign_or_changed_pod_and_private_logs(live, capsys):
     assert invoke(live, capsys, "install")[1]["status"] == "pending"
-    for change in ("duplicate", "owner", "command", "restart", "sidecar", "raw_log", "oversized", "wrong_operation", "replaced_after_log"):
+    for change in ("duplicate", "owner", "missing_policy_label", "changed_policy_label", "extra_policy_label",
+                   "command", "restart", "sidecar", "raw_log", "oversized", "wrong_operation", "replaced_after_log"):
         complete(live)
         live.pod_readback = None
         if change == "duplicate":
             live.pods.append(copy.deepcopy(live.pods[0]))
         elif change == "owner":
             live.pods[0]["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+        elif change == "missing_policy_label":
+            del live.pods[0]["metadata"]["labels"]["loom.nebius/retirement"]
+        elif change == "changed_policy_label":
+            live.pods[0]["metadata"]["labels"]["loom.nebius/retirement"] = "other-retirement"
+        elif change == "extra_policy_label":
+            # Additive policy rules can grant broader access too.
+            live.pods[0]["metadata"]["labels"]["app"] = "loom-service"
         elif change == "command":
             live.pods[0]["spec"]["containers"][0]["command"] = ["private-command"]
         elif change == "restart":
