@@ -12,7 +12,13 @@ import pytest
 from loom_cli.__main__ import main
 from loom_cli.config import LoomConfig, config_path, load_config, save_config
 from loom_cli.contexts import selected_context
-from tests.loom_cli.test_application_cmd import APPLICATION, OPERATION, RELEASE, operation, registration
+from tests.loom_cli.test_application_cmd import (
+    APPLICATION,
+    OPERATION,
+    RELEASE,
+    operation,
+    registration,
+)
 
 CONTEXT = "app-alice-" + UUID(APPLICATION).hex
 ORIGIN = "https://alice.example.com"
@@ -44,19 +50,21 @@ def application_login_http(monkeypatch, tmp_xdg_home):
 
     def handle(request):
         requests.append(request)
+        row = state["status"]["registration"]
         if request.url.host == "manage.example.com":
             assert request.headers["authorization"] == "Bearer management-secret"
             if request.method == "GET":
-                assert request.url.path == f"/api/v1/applications/{APPLICATION}"
+                assert request.url.path == f"/api/v1/applications/{row['application_id']}"
                 return httpx.Response(200, json=copy.deepcopy(state["status"]))
-            assert request.url.path == f"/api/v1/applications/{APPLICATION}/login"
+            assert request.url.path == f"/api/v1/applications/{row['application_id']}/login"
             proof = copy.deepcopy(state["proof"])
             if sum(r.method == "POST" and r.url.host == "manage.example.com" for r in requests) > 1:
-                proof["login_token"] = PROOF[:-43] + "b" * 43
+                proof["login_token"] = proof["login_token"][:-43] + "b" * 43
             return httpx.Response(200, json=proof)
-        assert str(request.url) == ORIGIN + "/api/v1/auth/login/complete"
+        assert str(request.url) == "https://" + row["public_host"] + "/api/v1/auth/login/complete"
         assert not any(key in request.headers for key in ("authorization", "cookie", "x-loom-csrf"))
-        assert json.loads(request.content)["token"] in (PROOF, PROOF[:-43] + "b" * 43)
+        token = state["proof"]["login_token"]
+        assert json.loads(request.content)["token"] in (token, token[:-43] + "b" * 43)
         return httpx.Response(state["child_status"], json=state["session"], headers={
             "set-cookie": state["cookie"], "location": "https://foreign.example.com",
         })
@@ -188,6 +196,51 @@ def test_existing_unbound_context_is_not_replaced(application_login_http):
     assert len(requests) == 1
     with selected_context(CONTEXT):
         assert config_path().read_bytes() == original
+
+
+def test_two_owner_logins_keep_distinct_contexts(application_login_http):
+    state, _ = application_login_http
+    assert main(["dev", "app", "login", APPLICATION]) == 0
+    with selected_context(CONTEXT):
+        alice_bytes = config_path().read_bytes()
+    row = state["status"]["registration"]
+    row.update(application_id=RELEASE, incarnation=APPLICATION, owner_user_id=RELEASE,
+               owner_team_id=RELEASE, slug="bob", application_namespace="loom-dev-bob", public_host="bob.example.com")
+    state["status"]["operation"]["application_id"] = RELEASE
+    state["proof"].update(application_id=RELEASE, incarnation=APPLICATION, owner_user_id=RELEASE,
+                          owner_team_id=RELEASE, origin="https://bob.example.com",
+                          login_token="loom_app_login_" + UUID(RELEASE).hex + "_" + "a" * 43)
+    state["session"]["user"]["id"] = RELEASE
+    state["session"]["current_team"]["id"] = RELEASE
+    state["cookie"] = state["cookie"].replace("child-session", "bob-session")
+    assert main(["dev", "app", "login", RELEASE]) == 0
+    with selected_context("app-bob-" + UUID(RELEASE).hex):
+        cfg = load_config()
+        assert cfg.auth_session_cookie == "bob-session" and cfg.server_url == "https://bob.example.com"
+        assert cfg.managed_application.application_id == RELEASE
+    with selected_context(CONTEXT):
+        assert config_path().read_bytes() == alice_bytes
+    assert load_config().auth_token == "management-secret"
+
+
+def test_failed_login_save_keeps_existing_credentials_and_redacts_error(application_login_http, monkeypatch, capsys):
+    from loom_cli import application_login
+
+    assert main(["dev", "app", "login", APPLICATION]) == 0
+    original_management = config_path().read_bytes()
+    with selected_context(CONTEXT):
+        original_child = config_path().read_bytes()
+
+    def fail_save(cfg):
+        raise OSError("private-error-" + PROOF)
+
+    monkeypatch.setattr(application_login, "save_config", fail_save)
+    assert main(["dev", "app", "login", APPLICATION]) == 1
+    assert config_path().read_bytes() == original_management
+    with selected_context(CONTEXT):
+        assert config_path().read_bytes() == original_child
+    output = capsys.readouterr()
+    assert "private-error" not in output.out + output.err and PROOF not in output.out + output.err
 
 
 @pytest.mark.parametrize("opened", [True, False])

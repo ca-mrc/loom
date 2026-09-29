@@ -784,10 +784,29 @@ required. The existing `/auth/managed` browser route accepts the proof through i
 scrubbed fragment and requires an explicit sign-in click. Management login responses
 use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
 
-Protected live installation, application CLI wiring and arbitrary-source publication
-remain unfinished. The existing legacy `loom dev` client does not invoke these
-application APIs. This source capability does not enable the installed management
-service or prove an owner can use a deployed personal application.
+`loom dev app` invokes the application API for create, list, status, update,
+suspend, resume, retained destroy, operation retry/wait and login. Create/update
+require a qualified application `--release` UUID, not a legacy candidate ID or a
+local source path. Generation-fenced mutations print their exact retry command,
+including the selected management context, before submission. A timeout never
+cancels or automatically retries an operation; blocked and superseded operations
+are not reported as completed.
+
+Application login validates identity, origin and both deployment/access generations
+against completed active status. It consumes the one-use proof with a fresh HTTPS
+client, without management credentials, redirects or proxy-environment inheritance.
+The returned session must identify the expected ordinary user and current shared
+team; owner, member and viewer roles remain valid. The CLI saves child credentials
+in an `app-SLUG-APPLICATION_ID_HEX` context with an immutable application/incarnation
+and management/child-origin binding. Login refresh preserves explicitly configured
+child provider settings without copying management settings. Browser login obtains
+a separate proof in the URL fragment, never a query parameter or CLI output.
+
+The legacy `loom dev create --candidate` and environment lifecycle commands remain
+distinct for retained full-environment management/recovery; they do not silently
+switch to application APIs. See the [owner workflow](../runbooks/nebius-deployment.md#personal-application-owner-workflow).
+Arbitrary-source publication and installed multi-owner acceptance remain separate
+requirements. CLI/source coverage does not prove deployed personal readiness.
 
 ### Stopped application completion
 

@@ -65,6 +65,21 @@ def _run(args: argparse.Namespace) -> int:
             elif command == "status":
                 assert identity is not None
                 print(client.status(identity).model_dump_json())
+            elif command == "login":
+                from loom_cli.application_login import login_application, open_application_browser
+
+                assert identity is not None
+                context = login_application(client, identity)
+                print(f"Application login saved separately. Use: loom --context {context} auth whoami")
+                if args.browser:
+                    try:
+                        opened = open_application_browser(client, identity)
+                    except (ValueError, OSError, httpx.RequestError, HttpStatusError):
+                        opened = False
+                    if not opened:
+                        print("CLI login is saved, but browser login could not open. Retry --browser on a desktop.", file=sys.stderr)
+                        return 1
+                    print("Browser login opened; confirm sign-in before the short-lived proof expires.")
             elif command == "retry":
                 print(client.retry(UUID(args.operation_id)).model_dump_json())
             elif command == "wait":
@@ -81,6 +96,8 @@ def _run(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
         print(f"Management request failed ({type(exc).__name__}); no automatic retry. Reuse the printed retry command.", file=sys.stderr)
+    except OSError:
+        print("Could not securely save personal credentials; management login is unchanged.", file=sys.stderr)
     except (ValueError, KeyError, TypeError):
         print("Invalid application arguments or response; no local deployment was attempted.", file=sys.stderr)
     return 1
@@ -96,6 +113,9 @@ def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # 
     sub.add_parser("list", help="List your personal applications")
     status = sub.add_parser("status", help="Read desired state and current application operation")
     status.add_argument("application_id")
+    login = sub.add_parser("login", help="Sign into a ready application without replacing management credentials")
+    login.add_argument("application_id")
+    login.add_argument("--browser", action="store_true", help="Also open a separate short-lived browser sign-in")
     for action in ("update", "suspend", "resume", "destroy"):
         child = sub.add_parser(action, help=("Stop the application, retaining shared data and identity" if action == "destroy"
                                              else f"Request application {action}"))
