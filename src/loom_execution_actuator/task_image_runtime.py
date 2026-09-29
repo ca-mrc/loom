@@ -489,7 +489,7 @@ def _supports_conditional_cache_write(client: Any, bucket: str) -> bool:
         try:
             client.put_object(Bucket=bucket, Key=key, Body=b"probe", IfNoneMatch="*")
         except ClientError as error:
-            if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412"}:
+            if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412", "KeyAlreadyExists"}:
                 return True
             raise
         return False
@@ -512,7 +512,7 @@ def _cache_mutation(client: Any, bucket: str) -> Iterator[bool | None]:
         client.put_object(Bucket=bucket, Key=_CACHE_MUTATION_LOCK,
                           Body=str(uuid4()).encode(), IfNoneMatch="*")
     except ClientError as error:
-        if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412", "ConditionalRequestConflict", "409"}:
+        if error.response.get("Error", {}).get("Code") in {"PreconditionFailed", "412", "KeyAlreadyExists", "ConditionalRequestConflict", "409"}:
             emit_stage("cache_gc", "deferred", reason="cache_mutation_busy")
             yield False
             return

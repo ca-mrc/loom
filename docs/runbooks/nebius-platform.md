@@ -1108,7 +1108,9 @@ errors never mark a materialization ready.
 
 Publishers and GC serialize cache mutations using a conditional S3 lock object
 at `task-build-cache/.mutation-lock`. Each mutation first probes the endpoint's
-actual conditional-write behavior on its own disposable object. Servers that
+actual conditional-write behavior on its own disposable object. Nebius
+`KeyAlreadyExists` is recognized as the conditional conflict equivalent of
+S3 `PreconditionFailed`. Servers that
 ignore the condition (including the older integration MinIO) use append-only
 publication with GC disabled and `reason=conditional_write_unsupported`; their
 cache budget requires operator attention. A busy lock skips that cache export.
