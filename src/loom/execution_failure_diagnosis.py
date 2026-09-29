@@ -89,5 +89,72 @@ def execution_failure_diagnosis(
             "evidence_source": "kubernetes_container_termination",
             "evidence_ordinal": ordinal, "message": message,
             "sampled_peak_status": "not_authoritative_for_termination",
+            "logs": _observation_logs(observations, ordinal),
+        }
+    chosen = _original_termination(terminations, original_start)
+    if chosen is not None:
+        ordinal, name, incarnation, termination = chosen
+        reason = termination.get("reason") or "Unknown"
+        code = termination.get("exit_code")
+        return {
+            "reason": "container_terminated", "container_role": name,
+            "termination_reason": reason,
+            "stage": {"execution": "controller" if plan.controller_resources else "execution", "task-sandbox": "agent",
+                      "verifier-sandbox": "verifier"}.get(name, "fixture"),
+            "container_incarnation": incarnation, "started_at": termination.get("started_at"),
+            "terminated_at": termination.get("finished_at"),
+            "exit_code": code, "signal": termination.get("signal"),
+            "memory_limit_mib": None, "limits": None,
+            "evidence_source": "kubernetes_container_termination",
+            "evidence_ordinal": ordinal,
+            "message": f"The {name} container terminated ({reason}, exit code {code}).",
+            "sampled_peak_status": "not_authoritative_for_termination",
+            "logs": _observation_logs(observations, ordinal),
+        }
+    failed = next((
+        event for event in observations
+        if event["payload"].get("normalized_state") == "failed"
+        and event["payload"].get("reason") in {None, "PodFailed"}
+    ), None)
+    if failed is not None and not terminations:
+        return {
+            "reason": "pod_failed", "container_role": None,
+            "stage": None, "container_incarnation": None,
+            "started_at": None, "terminated_at": None,
+            "exit_code": None, "signal": None,
+            "memory_limit_mib": None, "limits": None,
+            "evidence_source": "kubernetes_pod_phase",
+            "evidence_ordinal": failed["ordinal"],
+            "message": "The pod failed and no container termination was recorded.",
+            "sampled_peak_status": "not_authoritative_for_termination",
+            "logs": _observation_logs(observations, failed["ordinal"]),
         }
     return None
+
+
+def _original_termination(
+    terminations: list[tuple[int, str, int, dict[str, Any]]],
+    original_start: datetime | None,
+) -> tuple[int, str, int, dict[str, Any]] | None:
+    if original_start is None:
+        return terminations[0] if terminations else None
+    for item in terminations:
+        started = item[3].get("started_at")
+        if started is not None and datetime.fromisoformat(started) == original_start:
+            if item[3].get("reason") != "OOMKilled":
+                return item
+    return next((item for item in terminations if item[3].get("reason") != "OOMKilled"), None)
+
+
+def _observation_logs(observations: list[dict[str, Any]], ordinal: int) -> list[dict[str, str]]:
+    payload = next(event["payload"] for event in observations if event["ordinal"] == ordinal)
+    logs = []
+    for item in payload.get("container_logs") or []:
+        if not isinstance(item, dict):
+            continue
+        name, text = item.get("name"), item.get("text")
+        if isinstance(name, str) and isinstance(text, str) and text:
+            logs.append({"name": name, "text": text[:4096]})
+        if len(logs) == 4:
+            break
+    return logs

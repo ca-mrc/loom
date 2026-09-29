@@ -25,7 +25,10 @@ def _diagnose(events):
 
 def test_late_oom_enriches_original_incarnation_without_trusting_exit_137():
     first = _event(1)
-    assert _diagnose([first]) is None
+    alone = _diagnose([first])
+    assert alone["reason"] == "container_terminated"
+    assert alone["exit_code"] == 137
+    assert "OOMKilled" not in alone["message"]
     later = _event(3, reason="OOMKilled")
     cleanup = _event(4, reason="Error", restarts=2)
     events = [cleanup, later, first]
@@ -49,7 +52,10 @@ def test_oom_of_another_identity_cannot_reclassify_original_failure(mutation):
         later["payload"]["container_diagnostics"][0]["restart_count"] = 2
     else:
         later["payload"]["container_diagnostics"][0]["previous_termination"]["started_at"] = "2026-09-23T21:20:00Z"
-    assert _diagnose([first, later]) is None
+    result = _diagnose([first, later])
+    assert result["reason"] == "container_terminated"
+    assert result["exit_code"] == 137
+    assert "OOMKilled" not in result["message"]
 
 
 @pytest.mark.parametrize("replacement_terminated", [False, True])
@@ -101,7 +107,9 @@ def test_delayed_original_oom_corrects_replacement_timestamp_in_first_observatio
         "reason": "ContainerStatusUnknown", "exit_code": 137,
         "started_at": None, "finished_at": None,
     }
-    assert _diagnose([first, unknown]) is None
+    early = _diagnose([first, unknown])
+    assert early["reason"] == "container_terminated"
+    assert early["exit_code"] == 1
     oom = _event(8, reason="OOMKilled", restarts=int(previous), previous=previous)
     oom["payload"].update(normalized_state="oom_killed",
                           reason="SandboxRestarted" if previous else "SandboxTerminated")
@@ -131,5 +139,47 @@ def test_delayed_original_oom_corrects_replacement_timestamp_in_first_observatio
 def test_late_original_non_oom_prevents_misattributing_first_observed_replacement_oom():
     replacement = _event(1, reason="OOMKilled", started="2026-09-23T21:20:00Z")
     original = _event(2, reason="Error", restarts=0, previous=False)
-    # Resolve identity over all available evidence before selecting an OOM.
-    assert _diagnose([replacement, original]) is None
+    result = _diagnose([replacement, original])
+    assert result["reason"] == "container_terminated"
+    assert result["exit_code"] == 137
+    assert "OOMKilled" not in result["message"]
+
+
+def test_error_exit_is_shown_and_log_survives_without_the_pod():
+    event = _event(1, reason="Error", restarts=0, previous=False)
+    ending = event["payload"]["container_diagnostics"][0]["current_termination"]
+    ending["exit_code"] = 2
+    ending["signal"] = None
+    event["payload"]["container_logs"] = [{
+        "name": "task-sandbox",
+        "text": "token=secret-value\nprocess exited",
+    }]
+    result = _diagnose([event])
+    assert result["reason"] == "container_terminated"
+    assert result["container_role"] == "task-sandbox"
+    assert result["termination_reason"] == "Error"
+    assert result["exit_code"] == 2
+    assert result["logs"] == [{"name": "task-sandbox", "text": "token=secret-value\nprocess exited"}]
+    assert "exit code 2" in result["message"]
+
+
+def test_failed_pod_without_container_termination_is_unattributed():
+    event = {"ordinal": 1, "payload": {
+        "job_uid": "job", "pod_uid": "pod", "reason": "PodFailed",
+        "normalized_state": "failed", "container_diagnostics": [],
+        "container_logs": [{"name": "execution", "text": "controller exited"}],
+    }}
+    result = _diagnose([event])
+    assert result["reason"] == "pod_failed"
+    assert result["exit_code"] is None
+    assert result["container_role"] is None
+    assert "no container termination" in result["message"]
+    assert result["logs"][0]["name"] == "execution"
+
+
+def test_later_cleanup_error_does_not_replace_oom():
+    oom = _event(1, reason="OOMKilled")
+    cleanup = _event(2, reason="Error", restarts=2)
+    result = _diagnose([cleanup, oom])
+    assert result["reason"] == "oom_killed"
+    assert result["evidence_ordinal"] == 1

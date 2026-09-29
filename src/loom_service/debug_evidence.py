@@ -703,7 +703,11 @@ def build_trial_debug_evidence(
         trial,
         llm_calls_count=len(llm_calls),
     )
-    if execution_failure is not None and trial.state == "failed":
+    if (
+        execution_failure is not None
+        and trial.state == "failed"
+        and execution_failure.get("reason") == "oom_killed"
+    ):
         failure = classify_trial_outcome(SimpleNamespace(
             state=trial.state, result=trial.result, failure_reason="oom_killed",
             failure_message=execution_failure["message"],
