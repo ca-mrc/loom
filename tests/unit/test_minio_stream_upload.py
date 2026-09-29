@@ -25,6 +25,9 @@ class StreamS3:
         self.finished = threading.Event()
         self.late_body = None
         self.uploads = 0
+        self.active_uploads = set()
+        self.block_create = False
+        self.aborted = threading.Event()
 
     def close(self):
         pass
@@ -52,7 +55,11 @@ class StreamS3:
         return {}
 
     def create_multipart_upload(self, **kwargs):
+        if self.block_create:
+            self.entered.set()
+            assert self.release.wait(5)
         self.uploads += 1
+        self.active_uploads.add(str(self.uploads))
         return {"UploadId": str(self.uploads)}
 
     def upload_part(self, *, UploadId, PartNumber, Body, **kwargs):  # noqa: N803
@@ -66,10 +73,13 @@ class StreamS3:
         assert [r["PartNumber"] for r in rows] == list(range(1, len(rows) + 1))
         assert all(len(self.parts[UploadId, r["PartNumber"]]) >= 5 * 1024**2 for r in rows[:-1])
         self.objects[Bucket, Key] = b"".join(self.parts.pop((UploadId, r["PartNumber"])) for r in rows)
+        self.active_uploads.remove(UploadId)
         return {}
 
     def abort_multipart_upload(self, *, UploadId, **kwargs):  # noqa: N803
         self.parts = {k: v for k, v in self.parts.items() if k[0] != UploadId}
+        self.active_uploads.discard(UploadId)
+        self.aborted.set()
 
 
 def make_store(monkeypatch, client):
@@ -157,3 +167,24 @@ async def test_stream_rejects_non_bytes_after_started_upload_and_aborts(monkeypa
     with pytest.raises(TypeError, match="bytes-like"):
         await store.put_object_stream(bucket="b", key="k", body=chunks(b"x" * (9 * 1024**2), "bad"))
     assert not client.objects and not client.parts
+
+
+@pytest.mark.parametrize("cancel", [True, False], ids=["cancelled", "timed-out"])
+async def test_stream_reclaims_upload_created_after_initiation_was_abandoned(monkeypatch, cancel):
+    client = StreamS3()
+    client.block_create = True
+    store = make_store(monkeypatch, client)
+    store._operation_timeout = 0.1
+    task = asyncio.create_task(store.put_object_stream(
+        bucket="b", key="k", body=chunks(b"x" * (9 * 1024**2)),
+    ))
+    try:
+        assert await asyncio.to_thread(client.entered.wait, 5)
+        if cancel:
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else TimeoutError):
+            await task
+    finally:
+        client.release.set()
+    assert await asyncio.to_thread(client.aborted.wait, 5)
+    assert not client.objects and not client.active_uploads
