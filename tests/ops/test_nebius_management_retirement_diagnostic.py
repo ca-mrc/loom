@@ -94,7 +94,10 @@ def test_diagnostic_evidence_loss_or_replacement_never_retries(staging, damage):
 
 
 def test_foreign_diagnostic_name_is_not_adopted_or_replaced(staging):
-    from scripts.ops.nebius_management_retirement_diagnostic import diagnostic_documents, stage_diagnostic
+    from scripts.ops.nebius_management_retirement_diagnostic import (
+        diagnostic_documents,
+        stage_diagnostic,
+    )
     from scripts.ops.nebius_management_stage import ManagementStageError
 
     api = staging["api"]
