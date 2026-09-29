@@ -6,6 +6,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import replace
+from uuid import UUID, uuid4
 
 import pytest
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
@@ -205,3 +206,47 @@ def test_public_pending_resumes_without_retiring_new_manager(install):
     api.public_ready = True
     assert run(install)['status'] == 'management_refreshed'
     assert api.switch.calls == ['retire', 'activate']
+
+
+@pytest.mark.parametrize('damage', ['probe_job', 'probe_revision', 'probe_shape', 'backup_job', 'backup_shape'])
+def test_parent_cannot_accept_an_unbound_connected_receipt(install, damage):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    _, api, _, _ = install
+    if damage.startswith('probe'):
+        original = api.verify_probe
+        def altered(*args):
+            result = original(*args)
+            if damage == 'probe_job':
+                result['job_uid'] = str(uuid4())
+            elif damage == 'probe_revision':
+                result['probe']['revision'] = '0000'
+            else:
+                result['probe']['private'] = 'must-not-be-saved'
+            return result
+        api.verify_probe = altered
+    else:
+        original = api.verify_backup
+        def altered(*args):
+            result = original(*args)
+            if damage == 'backup_job':
+                result['job_uid'] = str(uuid4())
+            else:
+                result['bytes'] = True
+            return result
+        api.verify_backup = altered
+    with pytest.raises(ManagementRefreshInstallError):
+        run(install)
+    assert 'migration' not in api.stages and api.switch.calls == ['retire']
+
+
+def test_invalid_operation_is_rejected_before_private_markers_or_preflight(install):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    request, api, state, anchor = install
+    request = replace(request, resources=replace(request.resources,
+        switch=replace(request.resources.switch, operation_id=UUID(int=0))))
+    api.preflight = lambda _request: api.events.append('preflight')
+    with pytest.raises(ManagementRefreshInstallError):
+        run((request, api, state, anchor))
+    assert not api.events and not state.exists()
