@@ -75,12 +75,14 @@ async def qualify_application_cloud(*, sdk: Any, scope: ApplicationCloudScope, c
             memberships = await _pages(api['memberships'].list_member_of, v1.ListMemberOfRequest, subject_id=subject.sub)
             _require({row['metadata']['id'] for row in memberships} == {scope.provisioning_group_id, scope.membership_group_id})
             expected_groups = {
-                scope.provisioning_group_id: (scope.provisioning_project_id, {scope.provisioning_project_id}),
-                scope.membership_group_id: (scope.tenant_id, {scope.data_group_id, scope.source_group_id}),
-                scope.data_group_id: (scope.shared_project_id, set()),
-                scope.source_group_id: (scope.shared_project_id, set())}
-            for identity, (parent, resources) in expected_groups.items():
+                scope.provisioning_group_id: ({scope.provisioning_project_id}, {scope.provisioning_project_id}),
+                scope.membership_group_id: ({scope.tenant_id}, {scope.data_group_id, scope.source_group_id}),
+                scope.data_group_id: ({scope.shared_project_id, scope.tenant_id}, set()),
+                scope.source_group_id: ({scope.shared_project_id, scope.tenant_id}, set())}
+            for identity, (parents, resources) in expected_groups.items():
                 group = await _read(api['groups'].get, v1.GetGroupRequest(id=identity))
+                parent = group['metadata']['parent_id']
+                _require(parent in parents)
                 _resource(group, identity, parent)
                 for membership in memberships:
                     if membership['metadata']['id'] == identity:

@@ -829,7 +829,8 @@ Nebius provisioning-project admin alone cannot manage shared groups in another
 project. The application provisioner must have exactly its dedicated
 provisioning-project admin group and a tenant-owned membership-controller group
 with admin permits on the two selected shared groups only. The shared data/source
-groups have object-policy access only to the bound development buckets. Qualify
+groups may belong to that same tenant or the shared project; their exact IDs must
+have no IAM permits and object-policy access only to the bound development buckets. Qualify
 these existing grants read-only; the upgrade does not create cloud grants or
 request more bucket policies. It must not receive shared-project or tenant admin.
 

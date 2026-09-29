@@ -79,7 +79,7 @@ async def test_shared_object_groups_may_belong_to_the_same_tenant(application_cl
 
 
 @pytest.mark.parametrize('mutation', ['missing_membership', 'foundation_admin', 'tenant_admin', 'wrong_group_scope',
-    'extra_membership', 'wrong_key', 'inactive', 'foreign_group', 'group_project_permit', 'missing_bucket',
+    'extra_membership', 'wrong_key', 'inactive', 'foreign_group', 'foreign_tenant', 'group_project_permit', 'missing_bucket',
     'extra_bucket', 'wrong_bucket_parent', 'public_bucket', 'wrong_policy', 'missing_group_permit'])
 async def test_unqualified_shared_authority_fails_without_provider_or_secret_diagnostics(application_cloud, mutation):
     from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
@@ -100,6 +100,8 @@ async def test_unqualified_shared_authority_fails_without_provider_or_secret_dia
         cloud.rows['serviceaccount-manager'][1]['status']['active'] = False
     elif mutation == 'foreign_group':
         cloud.rows['group-data'][1]['metadata']['parent_id'] = 'project-other'
+    elif mutation == 'foreign_tenant':
+        cloud.rows['group-data'][1]['metadata']['parent_id'] = 'tenant-other'
     elif mutation == 'group_project_permit':
         cloud.permits['group-data'] = [copy.deepcopy(cloud.permits['group-manager'][0])]
     elif mutation == 'missing_bucket':
