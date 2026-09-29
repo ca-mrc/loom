@@ -9,9 +9,13 @@ from uuid import uuid4
 import pytest
 from tests.unit.test_nebius_management_render import (
     ROOT,
-    application_management_inputs as application_management_inputs,
-    management_inputs as management_inputs,
     render,
+)
+from tests.unit.test_nebius_management_render import (
+    application_management_inputs as application_management_inputs,
+)
+from tests.unit.test_nebius_management_render import (
+    management_inputs as management_inputs,
 )
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -29,6 +33,7 @@ def refresh_request(application_management_inputs):
     active['metadata'].setdefault('annotations', {})['loom.nebius/management-upgrade-id'] = str(uuid4())
     active['status'] = {'observedGeneration': 3, 'replicas': 1, 'availableReplicas': 1}
     candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '9' * 64
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
     return ManagementRefreshRenderRequest(ManagementDeployment.model_validate(before),
         ManagementDeployment.model_validate(before), active, candidate, profile, ROOT)
 
@@ -53,6 +58,9 @@ def test_refresh_changes_only_image_config_and_revision(refresh_request):
     assert result.deployment['metadata'] == _snapshot(request.active)['metadata']
     assert changed['spec']['containers'][0]['image'] == request.candidate['images']['service']['image_ref']
     changed['spec']['containers'][0]['image'] = original['spec']['containers'][0]['image']
+    for container, old in zip(changed['spec']['initContainers'], original['spec']['initContainers'], strict=True):
+        assert container['image'] == request.candidate['images']['service']['image_ref']
+        container['image'] = old['image']
     assert changed['metadata']['annotations']['loom.nebius/configuration-revision'] == result.revision
     changed['metadata']['annotations']['loom.nebius/configuration-revision'] = original['metadata']['annotations']['loom.nebius/configuration-revision']
     for volume, old in zip(changed['spec']['volumes'], original['spec']['volumes'], strict=True):
@@ -72,16 +80,12 @@ def test_refresh_changes_only_image_config_and_revision(refresh_request):
     (('installation', 'platform_budget', 'cpu_millis'), 3000),
     (('installation', 'applications', 'runtime', 'poll_seconds'), 6),
     (('installation', 'applications', 'storage', 'data_group_id'), 'group-other'),
-    (('installation', 'keyring'), {'schema_version': 1, 'keys': []}),
+    (('installation', 'registry_prefix'), 'cr.eu-north1.nebius.cloud/other'),
 ])
 def test_refresh_rejects_non_release_configuration_changes(refresh_request, path, value):
     from loom_service.environment_management.deployment import ManagementDeployment
 
     raw = refresh_request.after.model_dump(mode='json')
-    # An equal keyring is valid; give the before side an independently valid
-    # different value using an existing scalar boundary instead of fake key bytes.
-    if path == ('installation', 'keyring'):
-        path, value = ('installation', 'registry_prefix'), 'cr.eu-north1.nebius.cloud/other'
     node = raw
     for key in path[:-1]:
         node = node[key]
@@ -91,7 +95,7 @@ def test_refresh_rejects_non_release_configuration_changes(refresh_request, path
 
 
 @pytest.mark.parametrize('damage', ['nil_uid', 'legacy', 'namespace', 'installation', 'replicas',
-                                  'owner', 'deleting', 'container', 'privilege', 'secret', 'missing_config'])
+                                  'owner', 'deleting', 'container', 'privilege', 'secret', 'missing_config', 'init_image'])
 def test_refresh_rejects_invalid_or_incompatible_retained_runtime(refresh_request, damage):
     active = copy.deepcopy(refresh_request.active)
     pod = active['spec']['template']['spec']
@@ -115,6 +119,8 @@ def test_refresh_rejects_invalid_or_incompatible_retained_runtime(refresh_reques
         pod['containers'][0]['securityContext']['privileged'] = True
     elif damage == 'secret':
         next(row for row in pod['volumes'] if row['name'] == 'management-cloud')['secret']['secretName'] = 'unrelated-secret'
+    elif damage == 'init_image':
+        pod['initContainers'][0]['image'] = pod['initContainers'][0]['image'].split('@')[0] + '@sha256:' + 'f' * 64
     else:
         pod['volumes'] = [row for row in pod['volumes'] if row['name'] != 'management-config']
     with pytest.raises(ValueError, match='refresh'):
@@ -162,3 +168,33 @@ def test_refresh_cannot_remove_or_rebind_prior_publications(refresh_request):
     raw['installation']['publications'][0]['artifact_id'] = 21
     with pytest.raises(ValueError, match='refresh'):
         build(replace(request, after=ManagementDeployment.model_validate(raw)))
+
+
+def test_successive_refreshes_keep_the_original_material_names(refresh_request):
+    first = build(refresh_request)
+    active = copy.deepcopy(first.deployment)
+    active['metadata'].update(uid=refresh_request.active['metadata']['uid'], resourceVersion='27', generation=5)
+    candidate, profile = copy.deepcopy(refresh_request.candidate), copy.deepcopy(refresh_request.profile)
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '8' * 64
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    second = build(replace(refresh_request, before=refresh_request.after, active=active, candidate=candidate, profile=profile))
+    assert first.config['metadata']['name'] != second.config['metadata']['name']
+    def secrets(doc):
+        return [row for row in doc['spec']['template']['spec']['volumes'] if 'secret' in row]
+    assert secrets(second.deployment) == secrets(first.deployment) == secrets(refresh_request.active)
+
+
+def test_candidate_runtime_contract_change_requires_a_wider_operation(refresh_request, monkeypatch):
+    from scripts.ops import nebius_management_refresh as module
+
+    renderer = module.render_management
+
+    def altered(*args, **kwargs):
+        rendered = renderer(*args, **kwargs)
+        deployment = next(doc for doc in rendered.files['40-services.yaml'] if doc['kind'] == 'Deployment')
+        deployment['spec']['template']['spec']['containers'][0]['env'].append({'name': 'NEW_RUNTIME_SETTING', 'value': 'needed'})
+        return rendered
+
+    monkeypatch.setattr(module, 'render_management', altered)
+    with pytest.raises(ValueError, match='refresh'):
+        build(refresh_request)
