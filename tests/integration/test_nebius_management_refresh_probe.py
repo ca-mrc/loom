@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, select, text
@@ -150,6 +151,35 @@ async def test_cleanup_retains_old_schema_plans_while_new_release_advances(appli
     async with factory() as session:
         row = await session.get(NebiusApplicationOperation, stopped.operation_id)
         assert row.plan_json == plan and row.phase == 'pending' and row.runner_epoch == 0
+
+
+@pytest.mark.parametrize('fault', ['historical_version', 'missing_source', 'source_generation'])
+async def test_refresh_qualifies_historical_plans_needed_by_active_cleanup(applications, fault):
+    from loom.nebius_management_refresh_probe import database_snapshot
+
+    registry, factory, (alice, _), prepare, _, _ = applications
+    prepared = prepare()
+    first = await registry.create(principal=alice, idempotency_key='historical-version', **prepared)
+    stopped = await registry.transition(first.application_id, principal=alice, idempotency_key='historical-stop',
+        action='suspend', expected_generation=1)
+    async with factory.begin() as session:
+        identity = first.operation_id if fault == 'historical_version' else stopped.operation_id
+        row = await session.get(NebiusApplicationOperation, identity)
+        plan = copy.deepcopy(row.plan_json)
+        if fault == 'historical_version':
+            plan['schema_version'] = 'loom.nebius-application-plan.v99'
+        elif fault == 'missing_source':
+            plan['source_operation_id'] = str(uuid4())
+        else:
+            # Consistent current row/plan counters, but no longer an immediate
+            # successor to the source from which cleanup inherited its effects.
+            row.access_generation = 3
+            plan['registration']['access_generation'] = 3
+        row.plan_json = plan
+    with pytest.raises(ValueError, match='refresh_probe_unqualified'):
+        await database_snapshot(factory.kw['bind'].url, settings(prepared))
+    async with factory() as session:
+        assert (await session.get(NebiusApplicationOperation, stopped.operation_id)).phase == 'pending'
 
 
 async def test_probe_fails_when_read_only_enforcement_is_disabled(applications, monkeypatch):
