@@ -271,6 +271,17 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
         _run(container, "kubectl", "wait", "node/" + node_name, "--for=condition=Ready", "--timeout=60s")
         _run(container, "mkdir", "-p", "/tmp/loom-ingress-qualification")
         subprocess.run(["docker", "cp", str(tools) + "/.", ident + ":/tmp/loom-ingress-qualification/"], check=True, timeout=60)
+        # Reproduce the observed mirror quota failure, but fetch and execute the
+        # original pinned image from its real upstream through the fallback.
+        real_run = _run
+        limited_image = TRAEFIK.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+
+        def registry_quota(container, *args, **kwargs):
+            if args[:3] == ("ctr", "images", "pull") and args[-1] == limited_image:
+                raise AssertionError("429 Too Many Requests: Data limit exceeded")
+            return real_run(container, *args, **kwargs)
+
+        monkeypatch.setitem(globals(), "_run", registry_quota)
         for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON):
             # Classic Docker save archives omit the registry manifest. Import
             # reconstructs different bytes/digests, so they cannot supply pinned
