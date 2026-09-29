@@ -131,6 +131,12 @@ class HTTPSRetirementDiagnosticAPI(HTTPSRetirementStageAPI):
             stage = "diagnostic_pod_labels"
             labels = {**job["spec"]["template"]["metadata"].get("labels", {}),
                 "batch.kubernetes.io/controller-uid": uid}
+            # Nebius runtime Pods can gain this topology label after Job creation.
+            # Qualify only that addition against protected configuration; never
+            # replace a recorded label or accept arbitrary extra policy selectors.
+            region_label = "topology.kubernetes.io/region"
+            if isinstance(meta.get("labels"), dict) and region_label not in labels and region_label in meta["labels"]:
+                labels[region_label] = self.context.request.deployment.installation.foundation.platform_config["region"]
             if meta.get("labels") != labels:
                 raise ValueError
             expected, actual = job["spec"]["template"]["spec"], pod["spec"]

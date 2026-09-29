@@ -1004,6 +1004,10 @@ It is diagnostic history, not acceptance or recovery authority. Existing evidenc
 is not overwritten, and every current label, template, security, termination and
 final readback check still applies. This capture adds no Kubernetes requests and
 does not rerun or replace either Job.
+The reader qualifies one observed Nebius runtime addition:
+`topology.kubernetes.io/region`, only when absent from the recorded Job labels
+and exactly equal to the frozen foundation's configured region. Recorded labels
+cannot be replaced; missing, changed or other additional policy labels still fail.
 
 ## Before the first application
 
