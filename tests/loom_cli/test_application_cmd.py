@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 import httpx
 import pytest
@@ -152,3 +153,20 @@ def test_foreign_operation_response_cannot_satisfy_wait(application_http):
     })
     assert main(["dev", "app", "wait", OPERATION]) == 1
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("command", ["create", "suspend"])
+def test_printed_retry_command_round_trips_leading_hyphen_key(application_http, capsys, command):
+    responses, requests = application_http
+    if command == "create":
+        responses["POST", "/api/v1/applications"] = httpx.Response(202, json=operation())
+        args = ["create", "alice", "--release", RELEASE]
+    else:
+        responses["POST", f"/api/v1/applications/{APPLICATION}/operations"] = httpx.Response(202, json=operation(action="suspend"))
+        args = ["suspend", APPLICATION, "--expected-generation", "1"]
+    assert main(["dev", "app", *args, "--idempotency-key=-retry"]) == 0
+    printed = capsys.readouterr().err.split("Retry: ", 1)[1].splitlines()[0]
+    assert main(shlex.split(printed)[1:]) == 0
+    assert len(requests) == 2
+    assert requests[0].content == requests[1].content
+    assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"] == "-retry"
