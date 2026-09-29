@@ -121,6 +121,10 @@ async def test_long_readiness_cannot_outlive_phase_or_cancellation(tmp_path, mon
     (tmp_path / "instruction.md").write_text("Use the prepared service")
     started = asyncio.Event()
     stopped = []
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: clock() + clock_offset)
 
     class WaitingSandbox(Sandbox):
         async def run_healthcheck(self, hc=None):
@@ -137,7 +141,7 @@ async def test_long_readiness_cannot_outlive_phase_or_cancellation(tmp_path, mon
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "1")
     if ending == "phase-deadline":
-        monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.2))
+        monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 60))
 
     async def identity(_):
         return uuid4(), uuid4()
@@ -149,9 +153,12 @@ async def test_long_readiness_cannot_outlive_phase_or_cancellation(tmp_path, mon
     monkeypatch.setattr(module, "run_terminus2", forbidden_agent)
     running = asyncio.create_task(module.run_agent(tmp_path, task, trial))
     try:
-        await asyncio.wait_for(started.wait(), timeout=1)
+        await asyncio.wait_for(started.wait(), timeout=5)
         if ending == "cancelled":
             running.cancel()
+        else:
+            # Expire the real asyncio phase timer only after readiness starts.
+            clock_offset += 61
         expected = TimeoutError if ending == "phase-deadline" else asyncio.CancelledError
         done, _ = await asyncio.wait({running}, timeout=2)
         assert running in done, "Runtime did not enforce its deadline or cancellation"
@@ -179,7 +186,12 @@ async def test_long_handoff_readiness_is_cut_off_by_finalization_deadline(tmp_pa
     task = TaskConfig.model_validate(raw)
     (tmp_path / "instruction.md").write_text("Use the prepared service")
     handoff_started = asyncio.Event()
+    agent_started = asyncio.Event()
     stopped = []
+    loop = asyncio.get_running_loop()
+    clock = loop.time
+    clock_offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: clock() + clock_offset)
 
     class WaitingHandoffSandbox(Sandbox):
         checks = 0
@@ -198,20 +210,24 @@ async def test_long_handoff_readiness_is_cut_off_by_finalization_deadline(tmp_pa
     monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
-    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 0.2))
-    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "0.1")
+    monkeypatch.setenv("LOOM_EXECUTION_PHASE_DEADLINE", str(time.time() + 60))
+    monkeypatch.setenv("LOOM_EXECUTION_TERMINATION_GRACE_SECONDS", "30")
 
     async def identity(_):
         return uuid4(), uuid4()
 
     async def terminus(**kwargs):
+        agent_started.set()
         await asyncio.Event().wait()
 
     monkeypatch.setattr(module, "_execution_identity", identity)
     monkeypatch.setattr(module, "run_terminus2", terminus)
     running = asyncio.create_task(module.run_agent(tmp_path, task, trial))
     try:
-        await asyncio.wait_for(handoff_started.wait(), timeout=1)
+        await asyncio.wait_for(agent_started.wait(), timeout=5)
+        clock_offset += 61
+        await asyncio.wait_for(handoff_started.wait(), timeout=5)
+        clock_offset += 30
         done, _ = await asyncio.wait({running}, timeout=2)
         assert running in done, "Handoff outlived its finalization deadline"
         with pytest.raises(TimeoutError) as caught:
