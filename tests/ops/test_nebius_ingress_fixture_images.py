@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import pytest
-
 from tests.cluster import test_nebius_ingress_operation as fixture
 
 

@@ -57,6 +57,23 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
                                 reason="requires an explicitly disposable Kubernetes API")
 
 
+def _pull_fixture_image(container, image):
+    # Docker save/import reconstructs the manifest and changes its digest. Pull
+    # original bytes; only a mirror quota error permits the same pinned upstream.
+    source = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
+    try:
+        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
+    except AssertionError as error:
+        if "429 Too Many Requests" not in str(error):
+            raise
+        source = source.replace("public.ecr.aws/docker/library/", "docker.io/library/")
+        _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", source, timeout=180)
+    rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
+    assert any(row[0] == source and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
+    if source != image:
+        _run(container, "ctr", "images", "tag", source, image)
+
+
 @pytest.fixture(autouse=True)
 def live_certificate_clock(monkeypatch):
     monkeypatch.setattr(certificate_material, "NOW", datetime.now(UTC))
@@ -283,18 +300,7 @@ def test_connected_installation_recovers_then_cuts_over_with_installed_guard(inp
 
         monkeypatch.setitem(globals(), "_run", registry_quota)
         for image in (TRAEFIK, PYTHON, POSTGRES, GUARD_PYTHON):
-            # Classic Docker save archives omit the registry manifest. Import
-            # reconstructs different bytes/digests, so they cannot supply pinned
-            # Pod images. Pull the original manifest directly from the official
-            # public mirror, then alias only its repository name (no credentials).
-            mirror = image.replace("docker.io/library/", "public.ecr.aws/docker/library/")
-            # Even with --platform, ctr fetches unused-platform manifests unless
-            # metadata is skipped. These disposable images are never re-pushed.
-            _run(container, "ctr", "images", "pull", "--platform", "linux/amd64", "--skip-metadata", mirror, timeout=180)
-            rows = [line.split() for line in _run(container, "ctr", "images", "ls").splitlines()]
-            assert any(row[0] == mirror and row[2] == image.split("@", 1)[1] for row in rows if len(row) >= 3)
-            if mirror != image:
-                _run(container, "ctr", "images", "tag", mirror, image)
+            _pull_fixture_image(container, image)
         image = "cr.eu-north1.nebius.cloud/test/loom-shared-ingress@" + TRAEFIK.split("@", 1)[1]
         _run(container, "ctr", "images", "tag", TRAEFIK, image)
         _run(container, "kubectl", "wait", "--for=create", "node/" + node_name, "--timeout=60s")
