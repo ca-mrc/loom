@@ -15,6 +15,8 @@ from tests.ops.test_nebius_management_gateway import (
     bundle,
     diagnostic_operation,
     operation,
+    recovery_operation,
+    recovery_report,
     startup_report,
     upgrade_operation,
 )
@@ -42,7 +44,7 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation])
+@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation])
 def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path, metadata_factory):
     import os
     import sys
@@ -65,6 +67,9 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     script = 'from scripts.ops.nebius_management_entry import main; raise SystemExit(main("' + str(release / 'operation.json') + '", "qualify"))'
     if metadata_factory is diagnostic_operation:
         script = 'from scripts.ops.nebius_management_retirement_diagnostic_live import HTTPSRetirementDiagnosticAPI; ' + script
+    elif metadata_factory is recovery_operation:
+        script = ('from scripts.ops.nebius_management_retirement_recovery_live import HTTPSRetirementRecoveryAPI; '
+                  'from scripts.ops.nebius_retirement_recovery_runner import run_recovery; ') + script
     result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
     assert result.returncode == 0, result.stderr
@@ -96,16 +101,19 @@ def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_p
     assert result["status"] == status and "never-transfer" not in json.dumps(result) and len(calls) == 1
 
 
-@pytest.mark.parametrize('status', ['blocked', 'management_upgraded'])
+@pytest.mark.parametrize('status', ['blocked', 'management_upgraded', 'retirement_recovered'])
 def test_rollout_records_bound_result_and_distinguishes_failure(tmp_path, monkeypatch, capsys, status):
     import sys
     target = module()
-    metadata = upgrade_operation(tmp_path) if status == 'management_upgraded' else operation(tmp_path)
+    metadata = (recovery_operation(tmp_path) if status == 'retirement_recovered'
+        else upgrade_operation(tmp_path) if status == 'management_upgraded' else operation(tmp_path))
     report = {"status": status, "stage": "storage_class",
               **{key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
-    if status == 'management_upgraded':
+    if status in {'management_upgraded', 'retirement_recovered'}:
         report.pop('stage')
         report.update(namespace_uid='52f5b18c-7dd3-4095-bd7e-49f6a6330391', revision='sha256:' + 'd' * 64)
+    if status == 'retirement_recovered':
+        report['recovery'] = recovery_report()
     monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
     monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
     monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
@@ -230,14 +238,14 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
     assert not any("SERVICE_ACCOUNT" in name for name in run["env"])
 
 
-@pytest.mark.parametrize("diagnostic", [False, True])
+@pytest.mark.parametrize("authority", ["initial", "diagnostic", "recovery"])
 @pytest.mark.parametrize("action", ["preflight", "install"])
-def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, diagnostic, action):
+def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action):
     import os
 
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/nebius-rollout.yml").read_text())
-    operation_name = "management-" + ("diagnostic-" if diagnostic else "") + action
+    operation_name = "management-" + (authority + "-" if authority != "initial" else "") + action
     choices = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]["operation"]["options"]
     assert operation_name in choices
     job = workflow["jobs"]["management"]
@@ -247,9 +255,13 @@ def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path
     runner = next(s for s in steps if s.get("name") == "Run fixed management operation")
     assert selector["env"]["NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON }}"
     assert runner["env"]["DIAGNOSTIC_SSH_KEY"] == "${{ secrets.NEBIUS_MANAGEMENT_DIAGNOSTIC_SSH_KEY }}"
+    if authority == "recovery":
+        assert selector["env"]["NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON }}"
+        assert runner["env"]["RECOVERY_SSH_KEY"] == "${{ secrets.NEBIUS_MANAGEMENT_RECOVERY_SSH_KEY }}"
     original, probe = operation(tmp_path), diagnostic_operation(tmp_path)
     probe["source_sha"] = "d" * 40
-    selected = probe if diagnostic else original
+    recovery = recovery_operation(tmp_path) | {"source_sha": "e" * 40}
+    selected = {"initial": original, "diagnostic": probe, "recovery": recovery}[authority]
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # Fake only external executables; run the actual checked-in shell/Python
@@ -268,10 +280,11 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
     uv.chmod(0o700)
     env = os.environ | {"PATH": str(bindir) + ":" + os.environ["PATH"], "MANAGEMENT_OPERATION": operation_name,
         "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(original), "NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(probe),
+        "NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON": json.dumps(recovery), "RECOVERY_SSH_KEY": "private-recovery-key",
         "DEPLOY_SSH_KEY": "private-original-key", "DIAGNOSTIC_SSH_KEY": "private-diagnostic-key",
         "DEPLOY_KNOWN_HOSTS": "fixture-host", "LOOM_DEPLOY_SSH_TARGET": "fixture-target", "RUNNER_TEMP": str(tmp_path),
         "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": selected["source_sha"], "EXPECTED_ACTION": action,
-        "EXPECTED_METADATA": json.dumps(selected), "EXPECTED_KEY": "private-diagnostic-key" if diagnostic else "private-original-key"}
+        "EXPECTED_METADATA": json.dumps(selected), "EXPECTED_KEY": "private-" + ("original" if authority == "initial" else authority) + "-key"}
     for step in (selector, runner):
         result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode == 0, result.stderr
@@ -279,14 +292,14 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
     assert (tmp_path / "outputs").read_text() == "sha=" + selected["source_sha"] + "\n"
     assert (tmp_path / "transport-invoked").read_text() == "selected"
     assert not (tmp_path / "nebius-management-key").exists()
-    if diagnostic:
+    if authority != "initial":
         (tmp_path / "transport-invoked").unlink()
         # Missing diagnostic key must fail, never use the original install key.
-        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | {"DIAGNOSTIC_SSH_KEY": ""},
+        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | {authority.upper() + "_SSH_KEY": ""},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0 and not (tmp_path / "transport-invoked").exists()
         # A diagnostic action cannot select an original retirement/install schema.
         result = subprocess.run(["bash", "-e", "-c", selector["run"]],
-            env=env | {"NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(original)},
+            env=env | {"NEBIUS_MANAGEMENT_" + authority.upper() + "_OPERATION_JSON": json.dumps(original)},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0

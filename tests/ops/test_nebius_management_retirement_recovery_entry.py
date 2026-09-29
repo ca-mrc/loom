@@ -213,3 +213,11 @@ def test_runtime_failure_is_closed_and_never_retried(recovery, capsys):
     assert result["status"] == "blocked" and result["recovery"] == report
     assert invoke(recovery, capsys, "install")[1] == result
     assert len([url for method, url in recovery.calls if method == "POST" and "dryRun=" not in url]) == 2
+
+
+def test_dns_named_container_ports_do_not_change_native_selector_authority(recovery, capsys):
+    service = recovery.rows["/api/v1/namespaces/kube-system/services/coredns"]
+    for port in service["spec"]["ports"]:
+        port["targetPort"] = "dns-" + port["protocol"].lower()
+    assert invoke(recovery, capsys, "preflight")[1]["status"] == "preflight_qualified"
+    assert not any(method == "POST" for method, _ in recovery.calls)
