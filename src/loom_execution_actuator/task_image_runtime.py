@@ -786,9 +786,11 @@ def _read_cache_manifest(client: Any, bucket: str, key: str) -> list[str]:
     response = client.get_object(Bucket=bucket, Key=key)
     body = response["Body"]
     try:
-        payload = body.read()
+        payload = body.read(4 * 1024 * 1024 + 1)
     finally:
         body.close()
+    if len(payload) > 4 * 1024 * 1024:
+        raise BuildPreparationError("cache manifest exceeds byte limit")
     return [entry["sha256"] for entry in _parse_cache_manifest(payload)]
 
 
@@ -828,7 +830,7 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None
                 continue
             for digest in _read_cache_manifest(client, bucket, root["Key"]):
                 referenced.setdefault(digest, set()).add(root["Key"])
-    except (ClientError, BuildPreparationError, OSError):
+    except (BotoCoreError, ClientError, BuildPreparationError, OSError):
         emit_stage("cache_gc", "deferred", reason="manifest_unreadable")
         return
     blobs_by_digest = {item["Key"].rsplit("/", 1)[-1]: item for item in blobs}
@@ -837,6 +839,7 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None
         + sum(item["Size"] for item in blobs)
         + incoming_bytes
     )
+    initial_total = total
     cutoff = datetime.now(UTC) - timedelta(days=7)
     deleted: set[str] = set()
     for blob in sorted(blobs, key=lambda row: row["LastModified"]):
@@ -868,6 +871,9 @@ def _trim_cache_inventory(client: Any, bucket: str, incoming_bytes: int) -> None
             total -= blob["Size"]
         for owners in referenced.values():
             owners.discard(root["Key"])
+    emit_stage("cache_gc", "inventory", reclaimed_bytes=initial_total - total,
+               remaining_bytes=total - incoming_bytes, incoming_bytes=incoming_bytes,
+               budget_bytes=_CACHE_TOTAL_BYTES)
     if total > _CACHE_TOTAL_BYTES and any(
         item["LastModified"] >= cutoff and item["Key"] not in deleted
         for item in (*roots, *blobs)

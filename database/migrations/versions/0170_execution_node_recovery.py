@@ -1,14 +1,14 @@
 """Allow evidence-bound recovery of missing nodes after execution deletion.
 
-Revision ID: 0169
-Revises: 0168
+Revision ID: 0170
+Revises: 0169
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0169"
-down_revision = "0168"
+revision = "0170"
+down_revision = "0169"
 branch_labels = None
 depends_on = None
 

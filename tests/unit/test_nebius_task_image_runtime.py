@@ -1034,6 +1034,12 @@ def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
     assert f"task-build-cache/v2/{'a' * 64}/0/manifest.json" in cache.objects
 
 
+def _cache_data_deletes(cache: FakeS3) -> list[str]:
+    # Lock/probe cleanup is not eviction of user cache data.
+    return [key for key in cache.deletes if key != "task-build-cache/.mutation-lock"
+            and not key.startswith("task-build-cache/.conditional-probe/")]
+
+
 def _digest(marker: str) -> str:
     return (marker * 64)[:64]
 
@@ -1122,7 +1128,7 @@ def test_unreadable_manifest_does_not_delete_referenced_blobs(kind, capsys) -> N
     assert _blob_key(live) in cache.objects
     assert _blob_key(orphan) in cache.objects
     assert manifest_key in cache.objects
-    assert cache.deletes == []
+    assert _cache_data_deletes(cache) == []
     if kind != "get":
         assert cache.bodies[0].closed
     cache.objects[manifest_key] = _manifest_body(live)
@@ -1174,7 +1180,7 @@ def test_orphan_is_removed_before_grace_protected_manifests(capsys) -> None:
         listing.append(_listed(_blob_key(digest), 700 * mebibyte, _cache_moment(days=10)))
     cache = FakeS3(objects, listing=listing)
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.deletes == [_blob_key(orphan)]
+    assert _cache_data_deletes(cache) == [_blob_key(orphan)]
     assert "grace_protected" not in capsys.readouterr().out
     for slot in range(1, 6):
         assert _manifest_key(str(slot)) in cache.objects
@@ -1218,7 +1224,7 @@ def test_legacy_tar_is_evicted_as_one_object() -> None:
         listing=[_listed(key, 5 * 1024 * 1024 * 1024, _cache_moment(days=10))],
     )
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.deletes == [key]
+    assert _cache_data_deletes(cache) == [key]
 
 
 def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> None:
@@ -1229,10 +1235,12 @@ def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> Non
     )
     runtime.trim_cache(cache, "cache", 0)
     assert key in cache.objects
-    assert cache.deletes == []
+    assert _cache_data_deletes(cache) == []
     logged = capsys.readouterr().out
     assert "grace_protected" in logged
     assert "InternalError" not in logged
+
+
 @pytest.mark.parametrize("orphan_mib,layer_mib,expected_roots", [(0, 900, 4), (900, 700, 5)])
 def test_trim_budget_counts_actual_reclaimable_blobs(orphan_mib, layer_mib, expected_roots):
     from datetime import UTC, datetime, timedelta
@@ -1246,7 +1254,7 @@ def test_trim_budget_counts_actual_reclaimable_blobs(orphan_mib, layer_mib, expe
         for key, value in part.items():
             blob = "/blobs/" in key
             listing.append({"Key": key, "Size": layer_mib * 1024**2 if blob else len(value),
-                            "LastModified": now - timedelta(days=10 if blob else 1, seconds=5-i)})
+                            "LastModified": now - timedelta(days=10 if blob else 8, seconds=5-i)})
     if orphan_mib:
         key = runtime._v2_blob_key("f" * 64)
         objects[key] = b"orphan"
@@ -1266,17 +1274,18 @@ def test_trim_does_not_discard_roots_when_grace_prevents_reclaim(capsys):
     cache = FakeS3(dict(objects), listing=listing)
     runtime.trim_cache(cache, "cache", 0)
     assert cache.objects == objects
-    assert "budget_temporarily_unreachable" in capsys.readouterr().out
+    assert "grace_protected" in capsys.readouterr().out
 
 
-def test_trim_expired_malformed_manifest_does_not_block_collection():
+def test_trim_old_malformed_manifest_still_defers_collection(capsys):
     from datetime import UTC, datetime, timedelta
     key = runtime._v2_manifest_key("a" * 64, 0)
     cache = FakeS3({key: b"{"}, listing=[{
         "Key": key, "Size": 1, "LastModified": datetime.now(UTC) - timedelta(days=8),
     }])
     runtime.trim_cache(cache, "cache", 0)
-    assert not cache.objects
+    assert cache.objects == {key: b"{"}
+    assert "manifest_unreadable" in capsys.readouterr().out
 
 
 def test_trim_shared_blob_survives_while_another_root_is_retained(monkeypatch):
@@ -1289,6 +1298,7 @@ def test_trim_shared_blob_survives_while_another_root_is_retained(monkeypatch):
         old if "/blobs/" in key or "/" + "a" * 64 + "/" in key else recent
     )} for key, body in objects.items()]
     cache = FakeS3(objects, listing=listing)
+    monkeypatch.setattr(runtime, "_CACHE_TOTAL_BYTES", sum(row["Size"] for row in listing) - 1)
     runtime.trim_cache(cache, "cache", 0)
     assert runtime._v2_manifest_key("a" * 64, 0) not in cache.objects
     assert runtime._v2_manifest_key("b" * 64, 0) in cache.objects
@@ -1399,7 +1409,7 @@ def test_trim_cache_defers_blob_sweep_until_retained_manifest_is_readable(failur
     assert any(
         row.get("loom_task_image_stage") == "cache_gc"
         and row.get("event") == "deferred"
-        and row.get("reason") == "retained_manifest_unreadable"
+        and row.get("reason") == "manifest_unreadable"
         for row in events
     )
     assert "private-sdk-detail" not in output

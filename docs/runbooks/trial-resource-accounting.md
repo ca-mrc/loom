@@ -47,7 +47,7 @@ billing coverage; resource reservations are not actual costs.
 
 ### Recover historical missing nodes
 
-After migration `0169`, administrators with `admin:worker_pools` can use
+After migration `0170`, administrators with `admin:worker_pools` can use
 `POST /admin/execution-leases/{lease_id}/recover-node-attribution` for an explicitly
 selected lease. Send `{}` to preview; the response reports `recoverable`, the
 candidate `node_name`, persisted Pod identity, and supporting `evidence_event_ids`.

@@ -13,13 +13,13 @@ def test_node_recovery_migration_restores_previous_guard(
         "SELECT pg_get_functiondef('validate_execution_lease_mutation()'::regprocedure)"
     )
     try:
-        command.downgrade(config, "0168")
+        command.downgrade(config, "0169")
         with engine.connect() as connection:
             before = connection.scalar(definition)
-        command.upgrade(config, "0169")
+        command.upgrade(config, "0170")
         with engine.connect() as connection:
             assert connection.scalar(definition) != before
-        command.downgrade(config, "0168")
+        command.downgrade(config, "0169")
         with engine.connect() as connection:
             assert connection.scalar(definition) == before
     finally:
