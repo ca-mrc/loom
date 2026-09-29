@@ -28,6 +28,7 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_cloud_scope", "nebius_management_prerequisites",
     "nebius_application_setup", "nebius_application_cloud_scope", "nebius_application_upgrade_prerequisites",
     "nebius_management_switch", "nebius_management_upgrade", "nebius_management_upgrade_live",
+    "nebius_management_retirement", "nebius_management_retirement_entry",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
@@ -43,7 +44,7 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "backup_job", "backup_pod_list", "backup_pod_identity", "backup_pod_template", "backup_pod_status",
     "backup_log", "backup_readback", "shared_material",
     "upgrade_config", "upgrade_admission", "upgrade_permissions", "upgrade_network", "upgrade_material",
-    "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate"})
+    "upgrade_database", "upgrade_retirement", "upgrade_migration", "upgrade_retire", "upgrade_activate", "retirement"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -57,7 +58,8 @@ def validate_operation(value: dict[str, Any]) -> None:
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
             raise ValueError()
-        if value["schema"] not in {"loom.nebius-management-operation.v1", "loom.nebius-management-upgrade-operation.v1"}:
+        if value["schema"] not in {"loom.nebius-management-operation.v1", "loom.nebius-management-upgrade-operation.v1",
+                                   "loom.nebius-management-retirement-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -73,8 +75,10 @@ def validate_operation(value: dict[str, Any]) -> None:
                 raise ValueError()
         state = Path(value["state_dir"])
         root = state.parent
-        if value["schema"] == "loom.nebius-management-upgrade-operation.v1":
-            if root.name != "upgrade":
+        separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
+                     "loom.nebius-management-retirement-operation.v1": "retirement"}
+        if value["schema"] in separated:
+            if root.name != separated[value["schema"]]:
                 raise ValueError()
             root = root.parent
         if (state.name != "state" or root.name != "nebius-management"
@@ -170,7 +174,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         value = json.loads(raw)
         status = value["status"]
         upgrade = operation["schema"] == "loom.nebius-management-upgrade-operation.v1"
-        success = "management_upgraded" if upgrade else "management_installed"
+        retirement = operation["schema"] == "loom.nebius-management-retirement-operation.v1"
+        success = "management_retired" if retirement else "management_upgraded" if upgrade else "management_installed"
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
             raise ValueError()
         result = {"status": status}
@@ -188,7 +193,7 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError()
             result.update(namespace_uid=uid, revision=revision)
         if status == "pending":
-            phases = ({"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
+            phases = {"retirement"} if retirement else ({"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
                 if upgrade else {"database", "migration", "backup", "service"})
             if value["phase"] not in phases:
                 raise ValueError()

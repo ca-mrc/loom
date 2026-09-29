@@ -32,6 +32,31 @@ def upgrade_operation(tmp_path):
         "inputs_path": str(root / "inputs.json")}
 
 
+def retirement_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement"
+    return {**metadata, "schema": "loom.nebius-management-retirement-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
+def test_retirement_authority_uses_separate_recovery_and_reports_no_bootstrap_success(tmp_path):
+    gateway = module()
+    metadata = retirement_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    for status, phase in (("pending", "retirement"), ("management_retired", None)):
+        report = {**metadata, "status": status, "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+            "revision": "sha256:" + "f" * 64, "private": "do-not-report"}
+        if phase:
+            report["phase"] = phase
+        assert "private" not in gateway.safe_report(json.dumps(report).encode(), metadata)
+    report["status"] = "management_installed"
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+    metadata["inputs_path"] = str(tmp_path / "nebius-management/upgrade/inputs.json")
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_operation(metadata)
+
+
 def bundle(tmp_path):
     files = {name: b"fixture source" for name in module().SOURCES}
     files.update({"uv": b"fixture binary", "requirements.txt": b"fixture hashed dependencies",

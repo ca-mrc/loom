@@ -864,6 +864,61 @@ the application provisioner healthy, and authenticated public HTTPS to pass.
 It does not establish a working personal deployment or multi-owner acceptance;
 create/status/login and safe suspend/resume remain required installed checks.
 
+### Retire superseded pre-execution allocations
+
+After the shared-data upgrade, blocked legacy full-stack creates may still hold
+compute reservations. Do not restart the legacy provisioner, increase the platform
+allowance to hide those reservations, or edit the database directly. The protected
+`management-preflight` and `management-install` actions also accept the fixed
+`loom.nebius-management-retirement-operation.v1` operation. It runs only explicitly
+bound retained-destroy operations in a one-shot Job, never the create queue.
+
+First refresh the ordinary owner's environment status and protected namespace
+inventory. This path supports generated personal environments whose original create
+never delivered credential material. Prepare the executor and recovery evidence
+before requesting owner `destroy_retained` with the observed generation and a stable
+idempotency key. Retain the returned operation ID; a request alone does not release
+capacity. Delivered-material environments are rejected and need a separately scoped
+retirement route, not additional credentials mounted into this Job.
+
+Keep separate `nebius-management/retirement/{inputs.json,state,anchor}` paths and
+an exact-bundle SSH grant. Never overwrite the bootstrap or upgrade inputs, journals,
+anchors or grants. Private inputs use
+`loom.nebius-management-retirement-private-inputs.v1` and contain:
+
+- The original `upgrade_operation`, SHA-256 of its completed `upgrade.json`, and
+  SHA-256 of its active `switch/switch.json`. All recorded phase hashes must match.
+- The unchanged upgraded `deployment` (only additive publication references are
+  allowed), and authenticated `candidate`, `profile` and `candidate_id`. The
+  operation's source SHA must equal this published candidate: its service image
+  must contain the retirement runtime.
+- Exact `targets`: the new `operation_id`, original `source_operation_id`, complete
+  destroyed-generation `registration`, and `namespace_uids` for all three retained
+  namespaces. Owner, incarnation, generation and resource identities are rechecked
+  against the registry before any operation is claimed.
+
+Preflight requires the exact upgraded management Deployment, no legacy-provisioner
+Pods, and unchanged policy/binding UIDs and full configuration from the retained
+upgrade fence journal. The Job uses a dedicated service account with target-namespace
+controller permissions, exact Namespace reads, projected Kubernetes identity and
+the management service database credential. It receives no cloud, administrator or
+secret-store master credentials and no PVC, Secret or Namespace deletion authority.
+
+Cleanup closes Pod admission, retains stopped/suspended controllers to fence delayed
+creates, and verifies owned workloads are idle. Existing retained-destroy completion
+releases CPU, memory and ephemeral-storage reservations while retaining storage
+charges, names, namespaces, PVCs and business data. No retained data is deleted.
+
+`pending` is not success. Reinvoke the same qualified operation and preserve its
+state; `management_retired` requires the exact recorded Job to complete. A failed
+Job, replaced resource, lost journal or uncertain write blocks automatic recovery:
+preserve the Job and both journals, inspect the exact owner operation and protected
+inventory, and repair the demonstrated cause before authorizing a replacement.
+There are no automatic Job retries or replacement creates. Finally read back each
+owner operation as completed, verify the released reservations, and retry the
+original personal-application intent. HTTPS/login and suspend/resume still require
+their own acceptance evidence.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

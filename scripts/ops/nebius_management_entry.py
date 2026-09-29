@@ -239,7 +239,16 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
-        if operation['schema'] == 'loom.nebius-management-upgrade-operation.v1':
+        if operation['schema'] == 'loom.nebius-management-retirement-operation.v1':
+            from scripts.ops.nebius_management_retirement_entry import (
+                execute_retirement,
+                load_retirement_inputs,
+            )
+
+            retirement = load_retirement_inputs(operation)
+            qualified = operation
+            result = execute_retirement(retirement, operation, action)
+        elif operation['schema'] == 'loom.nebius-management-upgrade-operation.v1':
             upgrade_inputs, upgrade_request, original_inputs, ingress = load_upgrade_inputs(operation)
             qualified = operation
             with connected_upgrade_api(upgrade_inputs, upgrade_request, original_inputs, ingress) as upgrade_api:
