@@ -49,6 +49,23 @@ launch leaves the CLI login saved and requests a fresh browser login. This requi
 the managed child protocol in the deployed candidate; login alone is not proof
 that shared task execution or installed multi-owner acceptance is enabled.
 
+## Watching hosted trials
+
+`loom eval trial show TRIAL_ID --timeline` displays the public progress stage,
+wait reason, observation freshness, and known stage durations. Missing timings
+remain unknown. A numeric verifier reward of zero remains a valid result.
+
+`loom eval trial watch TRIAL_ID` polls the authenticated trial and durable event
+API. It drains all sequence pages before exiting on terminal state, including
+when watching an already finished trial. `--after-seq N` resumes after the last
+printed event. Transport failures reconnect at the same cursor up to three
+times; authorization errors stop immediately. Ctrl-C stops observation only.
+
+`--format json` emits newline-delimited `progress`, `event`, and final `result`
+objects. Text output bounds event labels and prints artifact download commands
+at completion. `--limit` controls page size and `--poll-interval` controls polling
+(minimum 0.1 seconds). This command does not submit, retry, or cancel work.
+
 ## What the CLI actually does
 
 ```

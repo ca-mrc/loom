@@ -62,6 +62,30 @@ run "one_explicit_regional_cluster" {
   }
 }
 
+run "suspended_regional_target_is_forwarded" {
+  command = plan
+  variables {
+    regional_execution_targets = { west = {
+      target_id                             = "nebius-eu-west1-integration"
+      cluster_scope_id                      = "nebius-eu-west1-execution"
+      project_id                            = "project-e00test"
+      subnet_id                             = "vpcsubnet-e00test"
+      region                                = "eu-west1"
+      node_platform                         = "cpu-d3"
+      kubernetes_version                    = "1.33"
+      service_cidr                          = "172.27.0.0/16"
+      public_control_plane_cidrs            = ["192.0.2.1/32"]
+      node_registry_pull_service_account_id = "serviceaccount-e00test"
+      execution_max_nodes                   = 3
+      suspended                             = true
+    } }
+  }
+  assert {
+    condition     = output.regional_execution_targets["west"].suspended && length(module.regional_execution) == 1 && output.regional_execution_targets["west"].target_id == "nebius-eu-west1-integration" && output.integration_platform == null
+    error_message = "The root must preserve suspension when forwarding a regional target."
+  }
+}
+
 run "managed_regional_identities" {
   command = plan
   variables {

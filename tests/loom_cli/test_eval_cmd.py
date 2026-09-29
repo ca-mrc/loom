@@ -22,6 +22,86 @@ _BATCH_ID = "00000000-0000-0000-0000-0000000000bb"
 _TRIAL_ID = "00000000-0000-0000-0000-0000000000cc"
 
 
+@pytest.mark.parametrize("stage", ["image_preparation", "execution_wait", "starting", "running", "materializing", "succeeded"])
+def test_trial_show_progress_and_unknown_timeline(stage, mock_server, capsys):
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": stage, "aggregate_reward": 0,
+        "progress": {"stage": stage, "label": f"Phase {stage}", "wait_message": "Capacity occupied",
+                     "observation_stale": True, "observed_at": None,
+                     "timeline": [{"label": "Preparation", "seconds": None}, {"label": "Execution", "seconds": 0}]},
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID, "--timeline"]) == 0
+    out = capsys.readouterr().out
+    assert f"Phase {stage}" in out and "Capacity occupied" in out and "stale" in out
+    assert "Preparation: unknown" in out and "Execution: 0s" in out
+    assert "reward:           0" in out
+
+
+def _watch_transport(monkeypatch, handler):
+    def client(cfg, *, timeout=30.0):
+        return httpx.Client(base_url=cfg.server_url, transport=httpx.MockTransport(handler), timeout=timeout)
+    monkeypatch.setattr("loom_cli.eval_cmd.authed_client", client)
+
+
+def test_trial_watch_drains_terminal_history_and_retries_from_cursor(monkeypatch, capsys):
+    cursors = []
+    dropped = False
+    def handler(request):
+        nonlocal dropped
+        assert request.method == "GET"
+        if request.url.path.endswith("/events"):
+            cursor = int(request.url.params["after_seq"])
+            cursors.append(cursor)
+            if cursor == 1 and not dropped:
+                dropped = True
+                raise httpx.ReadError("connection closed", request=request)
+            seqs = [0, 1] if cursor == -1 else [2] if cursor == 1 else []
+            return httpx.Response(200, json={"events": [{"seq": i, "kind": "tool_result"} for i in seqs],
+                                             "next_after_seq": seqs[-1] if seqs else None})
+        return httpx.Response(200, json={"id": _TRIAL_ID, "state": "succeeded", "aggregate_reward": 0})
+    _watch_transport(monkeypatch, handler)
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+    capsys.readouterr()
+    assert main(["eval", "trial", "watch", _TRIAL_ID, "--limit", "2", "--format", "json"]) == 0
+    rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["event"]["seq"] for r in rows if r["kind"] == "event"] == [0, 1, 2]
+    assert rows[-1]["kind"] == "result" and rows[-1]["trial"]["aggregate_reward"] == 0
+    assert cursors == [-1, 1, 1, 2]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_trial_watch_http_errors_are_not_completion(status, monkeypatch, capsys):
+    _watch_transport(monkeypatch, lambda request: httpx.Response(status, json={"detail": "denied"}))
+    capsys.readouterr()
+    assert main(["eval", "trial", "watch", _TRIAL_ID]) != 0
+    assert "completed" not in capsys.readouterr().out.lower()
+
+
+def test_trial_watch_interrupt_does_not_cancel(monkeypatch, capsys):
+    requests = []
+    def handler(request):
+        requests.append(request.method)
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json={"events": [], "next_after_seq": None})
+        return httpx.Response(200, json={"id": _TRIAL_ID, "state": "running"})
+    def interrupt(_):
+        raise KeyboardInterrupt
+    _watch_transport(monkeypatch, handler)
+    monkeypatch.setattr(time, "sleep", interrupt)
+    assert main(["eval", "trial", "watch", _TRIAL_ID]) == 130
+    assert requests and set(requests) == {"GET"}
+
+
+def test_trial_watch_rejects_inconsistent_cursor(monkeypatch):
+    def handler(request):
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json={"events": [{"seq": 0}], "next_after_seq": 8})
+        return httpx.Response(200, json={"id": _TRIAL_ID, "state": "succeeded"})
+    _watch_transport(monkeypatch, handler)
+    assert main(["eval", "trial", "watch", _TRIAL_ID]) != 0
+
+
 @pytest.fixture(autouse=True)
 def _isolated_logged_in_config(
     monkeypatch: pytest.MonkeyPatch,

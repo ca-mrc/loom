@@ -166,7 +166,9 @@ func (s runtimeServer) handler() http.Handler {
 	mux.HandleFunc("POST /stop-processes", func(w http.ResponseWriter, r *http.Request) {
 		pauseMu.Lock()
 		defer pauseMu.Unlock()
-		if err := stopProcesses(r.Context()); err != nil {
+		// Once accepted, finish killing and reaping descendants even if the
+		// caller disconnects. stopProcesses retains its own five-second bound.
+		if err := stopProcesses(context.WithoutCancel(r.Context())); err != nil {
 			writeCleanupFailure(w, err)
 			return
 		}

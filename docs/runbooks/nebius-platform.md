@@ -813,8 +813,17 @@ CP, Gateway, canonical storage and web/TLS remain in the primary region.
 
 The optional Terraform `regional_execution_targets` map in the existing platform
 root composes `modules/regional-execution`. Each entry creates exactly one MK8s
-control plane with audit logging, one fixed system node and one min-zero CPU
-execution group (technical default maximum100, explicit lower values honored).
+control plane with audit logging and retained system/execution node groups.
+Active targets run one fixed system node and one min-zero CPU execution group
+(technical default maximum100, explicit lower values honored). Set a target's
+`suspended = true` in the owning Terraform inputs to fix both groups at zero
+and disable execution autoscaling; the examples start suspended. First disable
+Loom routing and finish or cancel regional work, then review/apply the saved
+plan and verify native nodes, VMs and disks after drain. Disabling routing alone
+does not stop the system-node charge. Resume only after reviewing capacity/cost
+and restoring system readiness. Retained storage and other services require
+separate billing checks. See the Terraform platform README for the input-map
+replacement caveat.
 The dedicated regional system node has no custom `NoSchedule` taint: native
 addons must schedule there before the cluster network can initialize. In the
 observed eu-west1 bootstrap, Cilium Operator did not tolerate
@@ -1097,12 +1106,31 @@ newer than 7 days stay. If those protected objects leave the bucket over the
 4 GiB target, the log emits `reason=grace_protected` and the sweep stops. Cache
 errors never mark a materialization ready.
 
+Publishers and GC serialize cache mutations using a conditional S3 lock object
+at `task-build-cache/.mutation-lock`. Each mutation first probes the endpoint's
+actual conditional-write behavior on its own disposable object. Nebius
+`KeyAlreadyExists` is recognized as the conditional conflict equivalent of
+S3 `PreconditionFailed`. Servers that
+ignore the condition (including the older integration MinIO) use append-only
+publication with GC disabled and `reason=conditional_write_unsupported`; their
+cache budget requires operator attention. A busy lock skips that cache export.
+There is no automatic lock expiry: a crashed holder leaves GC/export deferred
+with `reason=cache_mutation_busy`. Before removing a stranded lock, stop/drain
+all builder publish containers sharing that cache bucket and confirm no holder
+can resume. Then delete only that lock and resume builders. Also drain old
+builders when first rolling out this protocol: older publishers do not honor it.
+Registry materialization identities and manifest-last publication are unchanged.
+
 `oci_export_format` selects BuildKit OCI output shape for measure gates:
 
 | Value | Behavior |
 | --- | --- |
 | `archive` (default) | `type=oci,dest=oci/NNNN.tar` → skopeo `oci-archive:` (unchanged). |
-| `directory` | Job rewrites dest to `oci/NNNN` with `tar=false` → skopeo `oci:`. Opt-in for Nebius timing compares; flip the default only after Job-log evidence.
+| `directory` | Job rewrites dest to `oci/NNNN` with `tar=false` → skopeo `oci:`. Opt-in for Nebius timing compares; flip the default only after Job-log evidence. |
+
+Directory publication accepts the empty `ingest/` staging directory left by
+BuildKit's OCI exporter. Nonempty staging paths, links and special files remain
+invalid; publication still validates the local image references before Skopeo.
 
 Warm/persistent BuildKit capacity is **not** implemented here: keep
 `cpu_millis` at 1000 and existing Job quotas. Daemon pools are deferred.
@@ -1114,6 +1142,19 @@ Prepare, BuildKit, and publish containers emit one JSON object per line with
 OCI output (`--output type=oci`); `oci_export` records resulting bytes (archive
 size or directory file-byte sum). Grep Job logs for `loom_task_image_stage`
 when comparing cold builds.
+
+Blob import/export `transfer` markers report `logical_bytes` (all manifest file
+paths), `unique_digests`, `manifest_bytes`, and the successful object payload
+bytes downloaded, uploaded, or reused. Repeated digests download once per
+component and copy locally to each path. These are neither network wire bytes
+nor measured disk allocation. A failed transfer has no completed transfer marker.
+`requests` markers count SDK HTTP attempts by S3 operation, including retries and
+multipart requests; absent instrumentation is `null`, not zero. Export includes
+GC and lock-probe requests; nested GC counts are a subset and must not be added
+again. GC inventory reports actual reclaimed, remaining, and incoming bytes.
+Stage wall times also overlap: `solve` includes OCI export and `cache_export`
+includes GC. Keep raw markers when comparing cold/exact/donor builds; do not sum
+overlapping durations or present reservation estimates as measured peak disk.
 
 `cache_bucket` is optional. When absent, cache credentials and import/export are
 omitted. Source, backup and trajectory buckets cannot be used as build cache.
@@ -1445,3 +1486,12 @@ images/profile/settings, retiring the failed replacement. Normal bootstrap does
 not reactivate a retired target. Retain both reviewed renders and do not
 automatically downgrade the database. Task egress still requires separate
 installed network qualification before claiming it is supported.
+
+Verified cache downloads are reused across components during the trusted prepare
+phase of one Job. The index references at most 256 MiB of already materialized
+cache-in files; it creates no additional retained blob store. Each component
+receives independent writable copies, and the index disappears before the
+untrusted builder starts. Failed imports remove their destinations; stale index
+entries are discarded. Larger/no-sharing inputs continue through bounded normal
+downloads. This does not share cache across tasks or teams, change donor policy,
+or retain a BuildKit daemon.

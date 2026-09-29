@@ -239,6 +239,28 @@ def test_directory_accepts_same_layout_as_archive(layout, tmp_path) -> None:
     oci.validate_native_oci_directory(directory)
 
 
+def test_directory_accepts_buildkit_empty_ingest_directory(layout, tmp_path) -> None:
+    directory = _write_directory(tmp_path / "image", layout)
+    # BuildKit v0.33.0 tar=false leaves its completed content-store staging root.
+    (directory / "ingest").mkdir()
+    oci.validate_native_oci_directory(directory)
+
+
+@pytest.mark.parametrize("entry", ["file", "directory", "symlink"])
+def test_directory_rejects_nonempty_ingest_directory(layout, tmp_path, entry) -> None:
+    directory = _write_directory(tmp_path / "image", layout)
+    (directory / "ingest").mkdir()
+    child = directory / "ingest" / "pending"
+    if entry == "directory":
+        child.mkdir()
+    elif entry == "symlink":
+        child.symlink_to(directory / "index.json")
+    else:
+        child.write_bytes(b"incomplete upload")
+    with pytest.raises(oci.NativeOCIArchiveError):
+        oci.validate_native_oci_directory(directory)
+
+
 def test_directory_rejects_symlink_member(layout, tmp_path) -> None:
     directory = _write_directory(tmp_path / "image", layout)
     (directory / "blobs/sha256" / ("e" * 64)).symlink_to(directory / "index.json")

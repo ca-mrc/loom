@@ -1,5 +1,14 @@
 # Nebius service execution contract
 
+Native cancellation keeps request and observation timestamps separate. A deleted
+lease acknowledges cancellation only when every lease of the current trial
+attempt (including a separate verifier) has completed cleanup. The acknowledgement
+is durable and idempotent; it does not change the trial's result or advance a
+different attempt. A client disconnect cannot revoke an accepted sandbox cleanup.
+For historical missing acknowledgements, an authorized repeat cancellation can
+fill the timestamp from retained deletion evidence once all current-attempt
+leases are complete; it does not edit the immutable leases or resubmit work.
+
 Status: Nebius-only hosted architecture following the repository retirement
 of shared-cluster execution. The [platform contract](nebius-primary-platform.md)
 owns the deployment boundary. Repository cleanup preserves published migrations
@@ -929,6 +938,10 @@ unchanged.
 Archive validation, a complete non-following destination inventory, and checks
 for symlink destinations and conflicting private ancestors precede deletion.
 Native cleanup and extraction both run as the sandbox's declared identity.
+Once the native `/stop-processes` handler accepts cleanup, it finishes killing
+and reaping task descendants even if its HTTP caller disconnects. Cleanup keeps
+its own five-second deadline and PID-namespace/identity checks. The `/exec`
+endpoint still terminates its command process group when the caller disconnects.
 
 An ACL-dependent task additionally declares `environment.preserve_acls = true`.
 Automatic Terminus execution preflights ACL tools and a filesystem roundtrip

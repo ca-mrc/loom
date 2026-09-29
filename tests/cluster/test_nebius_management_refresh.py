@@ -16,6 +16,8 @@ from uuid import uuid4
 
 import pytest
 import yaml
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
@@ -24,6 +26,12 @@ from tests.unit.test_nebius_management_render import (
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+
+# These fixtures bootstrap the current source tree, not a historical release.
+CURRENT_REVISION = ScriptDirectory.from_config(
+    Config(str(Path(__file__).resolve().parents[2] / "database/migrations/alembic.ini"))
+).get_current_head()
+assert CURRENT_REVISION is not None
 
 pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
     reason='requires explicitly disposable Kubernetes')
@@ -190,9 +198,9 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
                       storage_class='local-path')
         foundation['platform_config_json'] = json.dumps(config)
         installation['applications']['runtime']['kubernetes']['endpoint'] = endpoint
-        installation['applications']['shared']['schema_revision'] = '0169'
+        installation['applications']['shared']['schema_revision'] = CURRENT_REVISION
         for release in installation['applications']['releases']:
-            release['schema_revision'] = '0169'
+            release['schema_revision'] = CURRENT_REVISION
         deployment = ManagementDeployment.model_validate(raw)
         rendered = render_management(deployment, candidate=candidate, profile=profile,
             repo_root=Path(__file__).resolve().parents[2])
@@ -249,7 +257,7 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
         binding = ManagementBinding(str(deployment.installation_id), namespace, identities[namespace],
             core.read_namespace('kube-system').metadata.uid)
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(request, uuid4()),
-            binding, identities[shared], '0169', '0169')
+            binding, identities[shared], CURRENT_REVISION, CURRENT_REVISION)
         for phase in ('manager-probe', 'shared-probe', 'migration', 'post-migration-probe'):
             state = tmp_path / phase
             with HTTPSManagementRefreshResourcesAPI(request=resources, phase=phase,
@@ -265,7 +273,7 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
                 assert observed is not None
                 assert observed['probe'] == {'schema': 'loom.nebius-management-refresh-probe.v1',
                     'status': 'qualified', 'mode': 'shared' if phase == 'shared-probe' else 'manager',
-                    'revision': '0169', 'operations_checked': 0}
+                    'revision': CURRENT_REVISION, 'operations_checked': 0}
         for (ns, name), uid in retained.items():
             assert core.read_namespaced_secret(name, ns).metadata.uid == uid
     finally:

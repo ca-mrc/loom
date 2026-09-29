@@ -47,6 +47,10 @@ from loom_control_plane.execution_resource_calibration import (
     fetch_execution_resource_profile_status,
     upsert_execution_resource_profile_binding,
 )
+from loom_control_plane.service_execution import (
+    ServiceExecutionConflict,
+    recover_execution_node_attribution,
+)
 from loom_control_plane.task_image_materializations import (
     TaskImageRetryConflictError,
     retry_task_image_materialization,
@@ -75,6 +79,12 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{4,64}$")
 
 
 
+
+
+class _ExecutionNodeRecoveryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    apply: bool = False
 
 
 class _ExecutionAdmissionPolicyPayload(BaseModel):
@@ -839,6 +849,36 @@ async def put_execution_budget_policy(
             }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/execution-leases/{lease_id}/recover-node-attribution")
+async def post_execution_node_recovery(
+    lease_id: UUID,
+    request: Request,
+    payload: _ExecutionNodeRecoveryPayload,
+    authorization: str | None = Header(default=None),
+) -> dict[str, object]:
+    auth = await _require_admin_scope(request, authorization, "admin:worker_pools")
+    try:
+        async with request.app.state.session_factory() as session:
+            result = await recover_execution_node_attribution(
+                session, lease_id=lease_id, apply=payload.apply
+            )
+            if result["status"] == "recovered":
+                session.add(
+                    AdminAuditEvent(
+                        actor=f"admin:{auth.type}:{auth.token_hash.hex()[:16]}",
+                        action="execution.node_attribution.recovered",
+                        target_type="execution_lease",
+                        target_id=str(lease_id),
+                        request_id=request.headers.get("x-request-id"),
+                        event_metadata=result,
+                    )
+                )
+                await session.commit()
+            return result
+    except ServiceExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/execution-node-cost-records")

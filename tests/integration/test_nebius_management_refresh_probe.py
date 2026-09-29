@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import event, select, text
 
 from loom.db.nebius_application_operation_schema import (
@@ -19,12 +22,18 @@ from tests.integration.test_nebius_environment_management import (
 from tests.integration.test_nebius_platform_bootstrap import platform_database as platform_database
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
+# These fixtures bootstrap the current source tree, not a historical release.
+CURRENT_REVISION = ScriptDirectory.from_config(
+    Config(str(Path(__file__).resolve().parents[2] / "database/migrations/alembic.ini"))
+).get_current_head()
+assert CURRENT_REVISION is not None
+
 
 def settings(prepared, *, mode='manager'):
     from loom.nebius_management_refresh_probe import RefreshProbeSettings
 
     shared = prepared['shared']
-    return RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision='0169',
+    return RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision=CURRENT_REVISION,
         shared=shared)
 
 
@@ -48,7 +57,7 @@ async def test_refresh_probe_preserves_claims_frozen_plans_and_reservations(appl
     before = await retained()
     result = await database_snapshot(factory.kw['bind'].url, settings(prepared))
     assert result == {'schema': 'loom.nebius-management-refresh-probe.v1', 'status': 'qualified', 'mode': 'manager',
-        'revision': '0169', 'operations_checked': 1}
+        'revision': CURRENT_REVISION, 'operations_checked': 1}
     assert await retained() == before
     assert str(operation.operation_id) not in str(result)
 
@@ -118,10 +127,10 @@ async def test_shared_probe_only_reads_the_expected_schema(applications):
 
     _, factory, _, prepare, _, _ = applications
     prepared = prepare()
-    prepared['shared'] = prepared['shared'].model_copy(update={'schema_revision': '0169'})
+    prepared['shared'] = prepared['shared'].model_copy(update={'schema_revision': CURRENT_REVISION})
     config = settings(prepared, mode='shared')
     result = await database_snapshot(factory.kw['bind'].url, config)
-    assert result['revision'] == '0169' and result['operations_checked'] == 0
+    assert result['revision'] == CURRENT_REVISION and result['operations_checked'] == 0
     async with factory() as session:
         assert await session.scalar(text('SHOW transaction_read_only')) == 'off'
 
@@ -145,7 +154,7 @@ async def test_cleanup_retains_old_schema_plans_while_new_release_advances(appli
     stopped = await registry.transition(first.application_id, principal=alice, idempotency_key='cleanup',
         action=action, expected_generation=1)
     config = settings(prepared)
-    config = config.model_copy(update={'shared': config.shared.model_copy(update={'schema_revision': '0169'})})
+    config = config.model_copy(update={'shared': config.shared.model_copy(update={'schema_revision': CURRENT_REVISION})})
     async with factory() as session:
         plan = copy.deepcopy((await session.get(NebiusApplicationOperation, stopped.operation_id)).plan_json)
     report = await database_snapshot(factory.kw['bind'].url, config)
@@ -237,9 +246,9 @@ def test_probe_uses_the_real_bootstrapped_nonadmin_service_role_over_tls(platfor
     monkeypatch.setenv('LOOM_DB_SERVICE_PASSWORD', password)
     bootstrap.bootstrap_management_database({'namespace': 'loom-nebius-management'})
     service = make_url(platform_database).set(drivername='postgresql+psycopg', username='loom_service', password=password)
-    shared = inputs(platform_inputs)[2].model_copy(update={'schema_revision': '0169'})
+    shared = inputs(platform_inputs)[2].model_copy(update={'schema_revision': CURRENT_REVISION})
     for mode in ('manager', 'shared'):
-        config = RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision='0169', shared=shared)
+        config = RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision=CURRENT_REVISION, shared=shared)
         assert asyncio.run(database_snapshot(service, config)) == {
             'schema': 'loom.nebius-management-refresh-probe.v1', 'status': 'qualified', 'mode': mode,
-            'revision': '0169', 'operations_checked': 0}
+            'revision': CURRENT_REVISION, 'operations_checked': 0}

@@ -128,6 +128,8 @@ class FakeS3:
         self.closed = True
 
     def put_object(self, **kwargs):
+        if kwargs.get("IfNoneMatch") == "*" and kwargs["Key"] in self.objects:
+            raise ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
         self.objects[kwargs["Key"]] = kwargs["Body"]
 
     def upload_file(self, filename: str, bucket: str, key: str) -> None:
@@ -910,6 +912,64 @@ def test_prepare_compatible_revision_hits_donor_blobs(
     )
 
 
+@pytest.mark.parametrize("reuse_limit,expected_gets", [(1024, 1), (1, 2)])
+def test_prepare_reuses_verified_blobs_across_components_with_bound(
+    source_bundle, tmp_path, monkeypatch, reuse_limit, expected_gets,
+):
+    claim, source = source_bundle
+    objects = _v2_cache_objects(claim["materialization_key"], 0, {"layer": b"shared"})
+    objects.update(_v2_cache_objects(claim["materialization_key"], 1, {"layer": b"shared"}))
+    cache = FakeS3(objects)
+    monkeypatch.setattr(runtime, "_CACHE_REUSE_BYTES", reuse_limit, raising=False)
+    monkeypatch.setattr(runtime, "derive_task_image_build_components", lambda _: (None, None))
+    monkeypatch.setattr(runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache)
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert sum("/blobs/" in key for key in cache.gets) == expected_gets
+    first, second = work / "cache-in/0/layer", work / "cache-in/1/layer"
+    assert first.read_bytes() == second.read_bytes() == b"shared"
+    first.write_bytes(b"changed")
+    assert second.read_bytes() == b"shared"
+
+
+def test_failed_component_cannot_leave_reusable_partial_files(source_bundle, tmp_path):
+    claim, _ = source_bundle
+    key = claim["materialization_key"]
+    objects = _v2_cache_objects(key, 0, {"a-good": b"shared", "z-bad": b"expected"})
+    objects.update(_v2_cache_objects(key, 1, {"a-good": b"shared"}))
+    objects[runtime._v2_blob_key(hashlib.sha256(b"expected").hexdigest())] = b"broken"
+    cache = FakeS3(objects)
+    verified = {}
+    with pytest.raises(runtime.BuildPreparationError):
+        runtime._materialize_cache_blobs(cache, claim, materialization_key=key,
+                                         index=0, destination=tmp_path / "failed", verified=verified)
+    assert not (tmp_path / "failed").exists()
+    runtime._materialize_cache_blobs(cache, claim, materialization_key=key,
+                                     index=1, destination=tmp_path / "good", verified=verified)
+    assert (tmp_path / "good/a-good").read_bytes() == b"shared"
+    shared_key = runtime._v2_blob_key(hashlib.sha256(b"shared").hexdigest())
+    assert cache.gets.count(shared_key) == 2
+
+
+def test_blob_import_downloads_a_repeated_digest_once(source_bundle, tmp_path, capsys):
+    claim, _ = source_bundle
+    objects = _v2_cache_objects(claim["materialization_key"], 0, {
+        "layer-a": b"shared", "layer-b": b"shared",
+    })
+    cache = FakeS3(objects)
+    target = tmp_path / "import"
+    runtime._materialize_cache_blobs(cache, claim, materialization_key=claim["materialization_key"],
+                                     index=0, destination=target)
+    assert (target / "layer-a").read_bytes() == (target / "layer-b").read_bytes() == b"shared"
+    assert sum("/blobs/" in key for key in cache.gets) == 1
+    metrics = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    imported = next(row for row in metrics if row.get("event") == "transfer")
+    assert imported["logical_bytes"] == 12
+    assert imported["downloaded_blob_bytes"] == 6
+    assert imported["unique_digests"] == 1
+
+
 def test_publish_blobs_skips_existing_digest(source_bundle, tmp_path, publisher) -> None:
     claim, _ = source_bundle
     cache, _calls = publisher
@@ -972,6 +1032,12 @@ def test_trim_cache_deletes_unreferenced_old_blob(tmp_path) -> None:
     assert f"task-build-cache/v2/blobs/{orphan}" not in cache.objects
     assert f"task-build-cache/v2/blobs/{live}" in cache.objects
     assert f"task-build-cache/v2/{'a' * 64}/0/manifest.json" in cache.objects
+
+
+def _cache_data_deletes(cache: FakeS3) -> list[str]:
+    # Lock/probe cleanup is not eviction of user cache data.
+    return [key for key in cache.deletes if key != "task-build-cache/.mutation-lock"
+            and not key.startswith("task-build-cache/.conditional-probe/")]
 
 
 def _digest(marker: str) -> str:
@@ -1062,7 +1128,7 @@ def test_unreadable_manifest_does_not_delete_referenced_blobs(kind, capsys) -> N
     assert _blob_key(live) in cache.objects
     assert _blob_key(orphan) in cache.objects
     assert manifest_key in cache.objects
-    assert cache.deletes == []
+    assert _cache_data_deletes(cache) == []
     if kind != "get":
         assert cache.bodies[0].closed
     cache.objects[manifest_key] = _manifest_body(live)
@@ -1114,7 +1180,7 @@ def test_orphan_is_removed_before_grace_protected_manifests(capsys) -> None:
         listing.append(_listed(_blob_key(digest), 700 * mebibyte, _cache_moment(days=10)))
     cache = FakeS3(objects, listing=listing)
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.deletes == [_blob_key(orphan)]
+    assert _cache_data_deletes(cache) == [_blob_key(orphan)]
     assert "grace_protected" not in capsys.readouterr().out
     for slot in range(1, 6):
         assert _manifest_key(str(slot)) in cache.objects
@@ -1158,7 +1224,7 @@ def test_legacy_tar_is_evicted_as_one_object() -> None:
         listing=[_listed(key, 5 * 1024 * 1024 * 1024, _cache_moment(days=10))],
     )
     runtime.trim_cache(cache, "cache", 0)
-    assert cache.deletes == [key]
+    assert _cache_data_deletes(cache) == [key]
 
 
 def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> None:
@@ -1169,10 +1235,193 @@ def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> Non
     )
     runtime.trim_cache(cache, "cache", 0)
     assert key in cache.objects
-    assert cache.deletes == []
+    assert _cache_data_deletes(cache) == []
     logged = capsys.readouterr().out
     assert "grace_protected" in logged
     assert "InternalError" not in logged
+
+
+@pytest.mark.parametrize("orphan_mib,layer_mib,expected_roots", [(0, 900, 4), (900, 700, 5)])
+def test_trim_budget_counts_actual_reclaimable_blobs(orphan_mib, layer_mib, expected_roots):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    objects = {}
+    listing = []
+    for i in range(5):
+        content = f"layer-{i}".encode()
+        part = _v2_cache_objects(f"{i:064x}", 0, {"layer": content})
+        objects.update(part)
+        for key, value in part.items():
+            blob = "/blobs/" in key
+            listing.append({"Key": key, "Size": layer_mib * 1024**2 if blob else len(value),
+                            "LastModified": now - timedelta(days=10 if blob else 8, seconds=5-i)})
+    if orphan_mib:
+        key = runtime._v2_blob_key("f" * 64)
+        objects[key] = b"orphan"
+        listing.append({"Key": key, "Size": orphan_mib * 1024**2, "LastModified": now-timedelta(days=10)})
+    cache = FakeS3(objects, listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert sum(k.endswith("manifest.json") for k in cache.objects) == expected_roots
+    assert sum("/blobs/" in k for k in cache.objects) == expected_roots
+
+
+def test_trim_does_not_discard_roots_when_grace_prevents_reclaim(capsys):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    objects = _v2_cache_objects("a" * 64, 0, {"layer": b"large"})
+    listing = [{"Key": key, "Size": 5 * 1024**3 if "/blobs/" in key else len(value),
+                "LastModified": now-timedelta(days=1)} for key,value in objects.items()]
+    cache = FakeS3(dict(objects), listing=listing)
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.objects == objects
+    assert "grace_protected" in capsys.readouterr().out
+
+
+def test_trim_old_malformed_manifest_still_defers_collection(capsys):
+    from datetime import UTC, datetime, timedelta
+    key = runtime._v2_manifest_key("a" * 64, 0)
+    cache = FakeS3({key: b"{"}, listing=[{
+        "Key": key, "Size": 1, "LastModified": datetime.now(UTC) - timedelta(days=8),
+    }])
+    runtime.trim_cache(cache, "cache", 0)
+    assert cache.objects == {key: b"{"}
+    assert "manifest_unreadable" in capsys.readouterr().out
+
+
+def test_trim_shared_blob_survives_while_another_root_is_retained(monkeypatch):
+    from datetime import UTC, datetime, timedelta
+    now = datetime.now(UTC)
+    old, recent = now - timedelta(days=8), now - timedelta(days=1)
+    objects = _v2_cache_objects("a" * 64, 0, {"layer": b"shared"})
+    objects.update(_v2_cache_objects("b" * 64, 0, {"layer": b"shared"}))
+    listing = [{"Key": key, "Size": len(body), "LastModified": (
+        old if "/blobs/" in key or "/" + "a" * 64 + "/" in key else recent
+    )} for key, body in objects.items()]
+    cache = FakeS3(objects, listing=listing)
+    monkeypatch.setattr(runtime, "_CACHE_TOTAL_BYTES", sum(row["Size"] for row in listing) - 1)
+    runtime.trim_cache(cache, "cache", 0)
+    assert runtime._v2_manifest_key("a" * 64, 0) not in cache.objects
+    assert runtime._v2_manifest_key("b" * 64, 0) in cache.objects
+    assert sum("/blobs/" in key for key in cache.objects) == 1
+
+
+@pytest.mark.parametrize("code", ["PreconditionFailed", "KeyAlreadyExists"])
+def test_conditional_cache_write_accepts_provider_conflict_codes(code):
+    class ProviderS3(FakeS3):
+        def put_object(self, **kwargs):
+            if kwargs.get("IfNoneMatch") == "*" and kwargs["Key"] in self.objects:
+                raise ClientError({"Error": {"Code": code}}, "PutObject")
+            return super().put_object(**kwargs)
+
+    cache = ProviderS3({})
+    assert runtime._supports_conditional_cache_write(cache, "cache")
+    assert not cache.objects
+    with runtime._cache_mutation(cache, "cache") as acquired:
+        assert acquired is True
+        with runtime._cache_mutation(cache, "cache") as contender:
+            assert contender is False
+        assert runtime._CACHE_MUTATION_LOCK in cache.objects
+    assert not cache.objects
+
+
+def test_cache_mutation_failure_releases_owned_lock():
+    cache = FakeS3({})
+    with pytest.raises(RuntimeError, match="failed upload"):
+        with runtime._cache_mutation(cache, "cache") as acquired:
+            assert acquired is True
+            raise RuntimeError("failed upload")
+    assert not cache.objects
+    cache.objects[runtime._CACHE_MUTATION_LOCK] = b"other publisher"
+    with runtime._cache_mutation(cache, "cache") as acquired:
+        assert acquired is False
+    assert cache.objects == {runtime._CACHE_MUTATION_LOCK: b"other publisher"}
+
+
+def test_cache_publisher_and_gc_do_not_interleave(source_bundle, tmp_path):
+    claim, _ = source_bundle
+    directory = tmp_path / "cache-out"
+    directory.mkdir()
+    (directory / "layer").write_bytes(b"layer")
+    class InterleavedS3(FakeS3):
+        def upload_file(self, filename, bucket, key):
+            before = dict(self.objects)
+            runtime.trim_cache(self, bucket, runtime._CACHE_TOTAL_BYTES)
+            assert self.objects == before
+            super().upload_file(filename,bucket,key)
+    cache = InterleavedS3(_v2_cache_objects("f" * 64, 0, {"layer": b"other-cache"}))
+    runtime._publish_cache_blobs(cache, claim, index=0, cache_dir=directory)
+    manifest = json.loads(cache.objects[runtime._v2_manifest_key(claim["materialization_key"],0)])
+    assert all(runtime._v2_blob_key(e["sha256"]) in cache.objects for e in manifest["files"])
+
+
+@pytest.mark.parametrize("failure", ["get", "read", "parse"])
+def test_trim_cache_defers_blob_sweep_until_retained_manifest_is_readable(failure, capsys) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime.now(UTC) - timedelta(days=10)
+    recent = datetime.now(UTC) - timedelta(days=1)
+    live = "e" * 64
+    live_key = f"task-build-cache/v2/blobs/{live}"
+    orphan_key = f"task-build-cache/v2/blobs/{'f' * 64}"
+    manifest_key = f"task-build-cache/v2/{'a' * 64}/0/manifest.json"
+    manifest = json.dumps(
+        {"version": 1, "files": [{"path": "index.json", "sha256": live, "size": 2}]}
+    ).encode()
+
+    class UnreadableBody(io.BytesIO):
+        def read(self, *args, **kwargs):
+            raise OSError("interrupted cache manifest read")
+
+    class RecoverableS3(FakeS3):
+        fail_manifest = True
+
+        def get_object(self, **kwargs):
+            if kwargs["Key"] == manifest_key and self.fail_manifest:
+                if failure == "get":
+                    raise ClientError(
+                        {"Error": {"Code": "InternalError", "Message": "private-sdk-detail"}},
+                        "GetObject",
+                    )
+                body = UnreadableBody(manifest) if failure == "read" else io.BytesIO(b"{")
+                self.bodies.append(body)
+                return {"Body": body}
+            return super().get_object(**kwargs)
+
+    objects = {manifest_key: manifest, live_key: b"ok", orphan_key: b"xx"}
+    listing = [
+        {
+            "Key": key,
+            "Size": len(body),
+            "LastModified": recent if key == manifest_key else old,
+        }
+        for key, body in objects.items()
+    ]
+    cache = RecoverableS3(objects, listing=listing)
+
+    runtime.trim_cache(cache, "cache", 0)
+
+    assert live_key in cache.objects, "unreadable references do not prove a blob is orphaned"
+    assert orphan_key in cache.objects, "defer the sweep until the complete root set is known"
+    assert manifest_key in cache.objects
+    assert all(body.closed for body in cache.bodies)
+    output = capsys.readouterr().out
+    events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    assert any(
+        row.get("loom_task_image_stage") == "cache_gc"
+        and row.get("event") == "deferred"
+        and row.get("reason") == "manifest_unreadable"
+        for row in events
+    )
+    assert "private-sdk-detail" not in output
+    assert "interrupted cache manifest read" not in output
+
+    cache.fail_manifest = False
+    runtime.trim_cache(cache, "cache", 0)
+
+    assert live_key in cache.objects
+    assert manifest_key in cache.objects
+    assert orphan_key not in cache.objects, "a later healthy sweep still reclaims orphaned blobs"
+    assert all(body.closed for body in cache.bodies)
 
 
 def test_publish_directory_oci_uses_skopeo_oci_transport(
