@@ -362,3 +362,23 @@ def test_preflight_plan_cli_does_not_require_login(
     assert payload["summary"]["planned_submit"] == 2
     assert payload["summary"]["blocked"] == 8
     assert payload["summary"]["skipped"] == 5
+
+
+def test_preflight_plan_skips_deferred_agents() -> None:
+    """#2054: agents the catalog marks deferred are not planned at all."""
+    snapshot = _catalog_snapshot()
+    for agent in snapshot["agents"]["items"]:
+        if agent["name"] == "gemini-cli":
+            agent["product_support"] = "deferred"
+        else:
+            agent["product_support"] = "supported"
+
+    plan = build_preflight_plan(
+        catalog_snapshot=snapshot,
+        compatibility_plan=_compatibility_plan(),
+    )
+    payload = matrix_preflight_plan_to_json_payload(plan)
+
+    agents = {cell["agent"] for cell in payload["cells"]}
+    assert "gemini-cli" not in agents
+    assert {"codex", "oracle"} <= agents
