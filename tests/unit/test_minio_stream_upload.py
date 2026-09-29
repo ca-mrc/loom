@@ -82,11 +82,12 @@ async def chunks(*values):
         yield value
 
 
-async def test_stream_retry_preserves_bytes_after_partial_read(monkeypatch):
+@pytest.mark.parametrize("payload", [b"complete payload", b"x" * (9 * 1024**2)], ids=["small", "multipart"])
+async def test_stream_retry_preserves_bytes_after_partial_read(monkeypatch, payload):
     client = StreamS3(fail_first=True)
     store = make_store(monkeypatch, client)
-    await store.put_object_stream(bucket="b", key="k", body=chunks(b"complete payload"))
-    assert client.objects["b", "k"] == b"complete payload"
+    await store.put_object_stream(bucket="b", key="k", body=chunks(payload))
+    assert client.objects["b", "k"] == payload
 
 
 async def test_stream_timeout_does_not_share_or_close_a_late_reader(monkeypatch):
@@ -129,3 +130,30 @@ async def test_stream_failure_aborts_partial_upload_and_preserves_prior_object(m
         await store.put_object_stream(bucket="b", key="k", body=source())
     assert not client.parts
     assert client.objects["b", "k"] == b"previous complete object"
+
+
+@pytest.mark.parametrize("payload", [b"abcdefgh", b"abcd" * (3 * 1024**2)], ids=["small", "multipart"])
+async def test_stream_accepts_bytes_like_chunks_without_changing_bytes(monkeypatch, payload):
+    client = StreamS3()
+    store = make_store(monkeypatch, client)
+    await store.put_object_stream(bucket="b", key="k", body=chunks(
+        bytearray(b"begin"), memoryview(payload).cast("I"), b"end",
+    ))
+    assert client.objects["b", "k"] == b"begin" + payload + b"end"
+
+
+async def test_stream_refuses_exhausted_part_inventory_and_aborts(monkeypatch):
+    client = StreamS3()
+    store = make_store(monkeypatch, client)
+    monkeypatch.setattr("loom.trajectory.storage._S3_MAX_UPLOAD_PARTS", 2)
+    with pytest.raises(ValueError, match="part limit"):
+        await store.put_object_stream(bucket="b", key="k", body=chunks(b"x" * (16 * 1024**2 + 1)))
+    assert not client.objects and not client.parts
+
+
+async def test_stream_rejects_non_bytes_after_started_upload_and_aborts(monkeypatch):
+    client = StreamS3()
+    store = make_store(monkeypatch, client)
+    with pytest.raises(TypeError, match="bytes-like"):
+        await store.put_object_stream(bucket="b", key="k", body=chunks(b"x" * (9 * 1024**2), "bad"))
+    assert not client.objects and not client.parts

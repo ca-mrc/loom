@@ -583,6 +583,12 @@ scale-to-zero may finish independently. A restart-safe Control Plane worker
 claims the persisted lease, verifies the root manifest, per-Artifact manifest,
 commit marker, file sizes, and every SHA-256, then streams every file to the
 stable `trials/<team>/<trial>/attempts/<attempt>/bundles/<artifact>/` namespace.
+Canonical S3 copies use 8 MiB multipart requests for large streams, retaining
+only a bounded part buffer. Each retry owns immutable request bytes; a timed-out
+transport thread cannot consume another attempt's file cursor. Source failure
+or cancellation aborts the incomplete multipart upload before publication.
+The existing complete-file digest and destination readback checks still gate
+canonical acknowledgement.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store

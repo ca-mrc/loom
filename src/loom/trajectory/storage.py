@@ -29,6 +29,8 @@ _DEFAULT_S3_CONNECT_TIMEOUT_SECONDS = 5.0
 _DEFAULT_S3_READ_TIMEOUT_SECONDS = 30.0
 _DEFAULT_S3_OPERATION_TIMEOUT_SECONDS = 30.0
 _DEFAULT_S3_OPERATION_ATTEMPTS = 2
+_STREAM_UPLOAD_PART_BYTES = 8 * 1024 * 1024
+_S3_MAX_UPLOAD_PARTS = 10_000
 _RETRYABLE_S3_ERROR_CODES = frozenset(
     {
         "InternalError",
@@ -970,19 +972,53 @@ class MinioObjectStore:
         key: str,
         body: AsyncIterator[bytes],
     ) -> str:
-        with tempfile.TemporaryFile() as source:
-            await self._copy_async_body_to_file(body, source)
+        # Bound each request independently of total artifact size. Immutable
+        # bytes also give SDK retries (and threads surviving a timeout) their
+        # own cursor instead of racing over a shared temporary file.
+        pending = bytearray()
+        upload: MultipartUpload | None = None
 
-            def _do(client: Any) -> None:
-                client.put_object(
-                    Bucket=bucket,
-                    Key=key,
-                    Body=source,
-                    ChecksumAlgorithm="SHA256",
-                )
+        async def send_part() -> None:
+            nonlocal upload
+            if upload is None:
+                upload = await self.create_multipart_upload(bucket=bucket, key=key)
+            part_number = len(upload.parts) + 1
+            if part_number > _S3_MAX_UPLOAD_PARTS:
+                raise ValueError("object stream exceeds the multipart part limit")
+            payload = bytes(pending)
+            pending.clear()
+            await self.upload_part(upload, part_number=part_number, body=payload)
 
-            await self._run_client_call("put_object_stream", _do)
-        return f"s3://{bucket}/{key}"
+        try:
+            async for chunk in body:
+                if not isinstance(chunk, bytes | bytearray | memoryview):
+                    raise TypeError("object stream chunks must be bytes-like")
+                view = memoryview(chunk).cast("B")
+                for offset in range(0, len(view), _STREAM_UPLOAD_PART_BYTES):
+                    piece = view[offset:offset + _STREAM_UPLOAD_PART_BYTES]
+                    available = _STREAM_UPLOAD_PART_BYTES - len(pending)
+                    pending.extend(piece[:available])
+                    if len(pending) == _STREAM_UPLOAD_PART_BYTES:
+                        await send_part()
+                    pending.extend(piece[available:])
+            if upload is None:
+                payload = bytes(pending)
+
+                def put(client: Any) -> None:
+                    client.put_object(Bucket=bucket, Key=key, Body=payload, ChecksumAlgorithm="SHA256")
+
+                await self._run_client_call("put_object_stream", put)
+                return f"s3://{bucket}/{key}"
+            if pending:
+                await send_part()
+            return await self.complete_multipart_upload(upload)
+        except BaseException:
+            if upload is not None:
+                # Preserve the original failure/cancellation if best-effort
+                # cleanup also fails. An aborted upload cannot publish a part.
+                with contextlib.suppress(Exception):
+                    await self.abort_multipart_upload(upload)
+            raise
 
     async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
         def _do(client: Any) -> ObjectReadback:
