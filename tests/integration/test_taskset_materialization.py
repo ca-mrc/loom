@@ -444,7 +444,6 @@ async def _prepare_deployment_fence_canary(
         configured_token="deployment-only-capability",
         minio_client=app.state.minio_client,
         artifacts_bucket=settings.artifacts_bucket,
-        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
         taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
         manifest_max_bytes=settings.taskset_manifest_max_bytes,
         bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
@@ -478,7 +477,7 @@ async def test_deployment_fence_canary_preparation_persists_a_candidate_bound_re
 async def test_next_preparation_retires_an_unclaimed_canary_left_by_a_dead_driver(
     materialization_setup,
 ) -> None:
-    """An interrupted prepare/run handoff cannot exhaust the system quota."""
+    """An interrupted prepare/run handoff does not accumulate active fixtures."""
     app, _tokens, _teams = materialization_setup
 
     abandoned = await _prepare_deployment_fence_canary(app)
@@ -2015,7 +2014,6 @@ async def test_deployment_fence_canary_preparation_creates_a_system_owned_one_us
         configured_token="deployment-only-capability",
         minio_client=app.state.minio_client,
         artifacts_bucket=settings.artifacts_bucket,
-        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
         taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
         manifest_max_bytes=settings.taskset_manifest_max_bytes,
         bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,
@@ -2209,7 +2207,7 @@ async def test_deployment_fence_canary_retires_a_post_stage_mismatch(
     materialization_setup,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A failed canary cannot retain an active system TaskSet quota slot."""
+    """A failed canary cannot retain an active system TaskSet."""
     from loom_cli.taskset_fence_canary import (
         TaskSetFenceCanaryRuntimeError,
         run_deployment_fence_canary,
@@ -2467,7 +2465,7 @@ async def test_deployment_fence_canary_materializes_its_bundle_without_mocks(
 async def test_deployment_fence_canary_retires_its_system_task_set_after_evidence(
     materialization_setup,
 ) -> None:
-    """A successful rollout canary cannot exhaust the active TaskSet quota."""
+    """A successful rollout canary retires its disposable TaskSet."""
     from loom_cli.taskset_fence_canary import run_deployment_fence_canary
 
     app, _tokens, _teams = materialization_setup
@@ -3580,3 +3578,39 @@ async def test_materialization_rejects_bundle_upload_unsafe_archives(
     assert body["status"] == "failed"
     assert body["status_reason"] == "bundle_extract_unsafe"
     assert body["materialization_job_state"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_limit", [None, 1])
+async def test_submission_above_former_count_limits(
+    materialization_setup, legacy_limit: int | None,
+) -> None:
+    """Many small sets must not block intake while storage still fits."""
+    from sqlalchemy import text
+
+    app, tokens, teams = materialization_setup
+    async with app.state.session_factory() as session:
+        for index in range(51):
+            slug = f"existing-{index}"
+            session.add(TaskSet(
+                id=f"ts/{teams['team_a']}/{slug}",
+                owning_team_id=teams["team_a"], slug=slug, display_name=slug,
+                status="ready", intents=["trajectory_generation"],
+                manifest_blob_uri=f"s3://{app.state.settings.artifacts_bucket}/{slug}",
+            ))
+        # Retained historical overrides must no longer affect admission.
+        await session.execute(text(
+            "UPDATE team_quotas SET taskset_max_count = :limit WHERE team_id = :team"
+        ), {"limit": legacy_limit, "team": teams["team_a"]})
+        await session.commit()
+    task_set_id = await _submit_inline_task_set(app, token=tokens["team_a"])
+    async with app.state.session_factory() as session:
+        created = await session.get(TaskSet, task_set_id)
+        assert created is not None and created.status == "materializing"
+        manifest = await session.scalar(select(TaskSetManifest).where(
+            TaskSetManifest.task_set_id == task_set_id,
+        ))
+        assert manifest is not None
+    bucket, key = created.manifest_blob_uri.removeprefix("s3://").split("/", 1)
+    stored = app.state.minio_client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    assert b"inline-tasks" in stored

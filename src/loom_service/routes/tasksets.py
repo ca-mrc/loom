@@ -183,7 +183,6 @@ async def create_task_set(
         verifier_upload=verifier,
         transform_upload=transform,
         bundle_upload=bundle,
-        taskset_quota_max_count=settings.taskset_quota_max_count_per_team,
         taskset_quota_max_storage_bytes=settings.taskset_quota_max_storage_bytes_per_team,
         manifest_max_bytes=settings.taskset_manifest_max_bytes,
         bundle_max_bytes=settings.taskset_quota_max_bundle_bytes,

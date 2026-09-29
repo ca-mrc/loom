@@ -27,6 +27,19 @@ Statuses are:
 Task filtering rechecks TaskSet ownership even when callers supply exact task
 IDs. A TaskSet must be `ready` or `partial` before its tasks can run.
 
+## Storage limits
+
+TaskSets have no per-team count limit. Both ordinary submission and deployment
+canaries continue to enforce team storage bytes (20 GiB by default) and the
+individual bundle limit (5 GiB by default). Team storage overrides still apply.
+The retired `taskset_quota_max_count_per_team` setting is no longer supported;
+historical `team_quotas.taskset_max_count` values are retained for rollback and
+have no effect on admission. Task counts remain available for display.
+
+Removing the count limit does not expire or delete existing TaskSets. Explicit
+expiry and retention remain separate lifecycle work tracked by #2230; current
+manual deletion and its GC behavior are unchanged.
+
 ## Batch purpose
 
 Batches declare a `purpose` at create time:

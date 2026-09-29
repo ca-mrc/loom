@@ -398,3 +398,40 @@ async def test_taskset_detail_preview_is_bounded_and_team_scoped(tasksets_setup)
         assert response.json()["task_preview"] == ids[:5]
         denied = await client.get(f"/api/v1/tasksets/{task_set_id}", headers={"Authorization": f"Bearer {tokens['team_b']}"})
         assert denied.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_kind", ["team_storage", "bundle"])
+async def test_byte_limits_still_reject_before_persisting(tasksets_setup, limit_kind: str) -> None:
+    """Removing count admission must retain both byte boundaries."""
+    app, tokens, teams = tasksets_setup
+    if limit_kind == "team_storage":
+        async with app.state.session_factory() as session:
+            await session.execute(text(
+                "UPDATE team_quotas SET taskset_max_storage_bytes = 1 WHERE team_id = :team"
+            ), {"team": teams["team_a"]})
+            await session.commit()
+        expected_status, expected_detail = 429, "taskset_storage_quota_exceeded"
+    else:
+        app.state.settings.taskset_quota_max_bundle_bytes = 4
+        expected_status, expected_detail = 413, "bundle_too_large"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/tasksets",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+            files={
+                "manifest": ("manifest.yaml", _BUNDLE_UPLOAD_MANIFEST, "application/x-yaml"),
+                "bundle": ("bundle.tar.gz", b"12345", "application/gzip"),
+            },
+        )
+    assert response.status_code == expected_status, response.text
+    assert response.json()["detail"] == expected_detail
+    async with app.state.session_factory() as session:
+        assert await session.scalar(text(
+            "SELECT count(*) FROM task_sets WHERE owning_team_id = :team"
+        ), {"team": teams["team_a"]}) == 0
+    objects = app.state.minio_client.list_objects_v2(
+        Bucket=app.state.settings.artifacts_bucket,
+        Prefix=f"tasksets/user/{teams['team_a']}/",
+    )
+    assert not objects.get("Contents")

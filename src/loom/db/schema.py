@@ -139,12 +139,9 @@ class TeamQuota(Base):
             "ARRAY['MIT', 'Apache-2.0', 'BSD-3-Clause', 'CC-BY-4.0']::text[]",
         ),
     )
-    # TaskSet quota columns (#242 sub-plan 7). NULL means "use global
-    # default from loom-schema.toml"; non-NULL overrides per-team.
-    taskset_max_count: Mapped[int | None] = mapped_column(
-        Integer,
-        nullable=True,
-    )
+    # Only storage quotas apply to TaskSets. Historical taskset_max_count
+    # values remain in the database for migration/rollback compatibility;
+    # runtime code neither maps nor enforces that retired column.
     taskset_max_storage_bytes: Mapped[int | None] = mapped_column(
         BigInteger,
         nullable=True,
