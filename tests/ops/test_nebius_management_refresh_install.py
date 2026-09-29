@@ -24,15 +24,22 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 @pytest.fixture
 def install(resources_request, tmp_path):
+    return install_case(resources_request, tmp_path)
+
+
+def install_case(resources_request, tmp_path, *, history=None, installation_anchor=None):
     from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallRequest
 
-    history = tmp_path / 'predecessor.json'
-    history.write_text('{"fixture":"completed predecessor qualified by entry"}')
-    history.chmod(0o600)
-    original_anchor = tmp_path / 'original-anchor'
-    original_anchor.mkdir(mode=0o700)
+    if history is None:
+        predecessor = tmp_path / 'predecessor.json'
+        predecessor.write_text('{"fixture":"completed predecessor qualified by entry"}')
+        predecessor.chmod(0o600)
+        history = {predecessor: hashlib.sha256(predecessor.read_bytes()).hexdigest()}
+    original_anchor = installation_anchor or tmp_path / 'original-anchor'
+    if installation_anchor is None:
+        original_anchor.mkdir(mode=0o700)
     request = ManagementRefreshInstallRequest(resources_request,
-        {history: hashlib.sha256(history.read_bytes()).hexdigest()}, original_anchor)
+        history, original_anchor)
 
     class API:
         def __init__(self):

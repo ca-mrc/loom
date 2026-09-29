@@ -1,6 +1,7 @@
 """Refresh history comes from a completed upgrade, never a replay/reset of it."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -72,6 +73,115 @@ def test_completed_upgrade_yields_bound_retained_runtime_without_writes(complete
     assert len(result.history) < 64
     assert {path: path.read_bytes() for path in root.rglob('*.json')} == before
     assert {value['kind'] for value in result.retained.values()} >= {'ConfigMap', 'Secret', 'Job', 'RoleBinding', 'ValidatingAdmissionPolicy'}
+
+
+def complete_refresh(root, predecessor=None):
+    """Run real journals with external cluster/proof boundaries doubled."""
+    from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
+    from scripts.ops.nebius_management_refresh_resources import ManagementRefreshResourcesRequest
+    from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
+    from tests.ops.test_nebius_management_refresh_install import install_case, run
+
+    prior = predecessor or root
+    setup = root.upgrade.setup
+    operation_id = uuid4()
+    directory = Path(root.selector.operation['inputs_path']).parent.parent / 'refresh' / str(operation_id)
+    directory.mkdir(parents=True, mode=0o700)
+    candidate, profile = copy.deepcopy(setup.candidate), copy.deepcopy(setup.profile)
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + operation_id.hex * 2
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    inputs = directory / 'inputs.json'
+    inputs.write_text(json.dumps({'fixture': 'hash-bound protected inputs', 'operation_id': str(operation_id)}))
+    inputs.chmod(0o600)
+    render = ManagementRefreshRenderRequest(prior.deployment, prior.deployment, prior.active,
+        candidate, profile, setup.repo_root)
+    resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id),
+        setup.binding, setup.shared_namespace_uid, '0168', '0168')
+    case = install_case(resources, directory, history={**prior.history, inputs: checksum(inputs)},
+        installation_anchor=root.upgrade.original_anchor)
+    case[1].switch.document['metadata'].update(resourceVersion='30', generation=5)
+    assert run(case)['status'] == 'management_refreshed'
+    selector = {'kind': 'refresh', 'operation_id': str(operation_id), 'inputs_path': str(inputs),
+        'inputs_sha256': checksum(inputs), 'state_dir': str(directory / 'state'), 'anchor_dir': str(directory / 'anchor'),
+        'completion_sha256': checksum(directory / 'state/completion.json')}
+    return selector, case
+
+
+def load_refresh(selector, root):
+    from scripts.ops.nebius_management_refresh_predecessor import (
+        RefreshPredecessorV1,
+        load_completed_refresh,
+    )
+
+    return load_completed_refresh(RefreshPredecessorV1.model_validate(selector), original=root)
+
+
+def test_successive_completed_refreshes_have_bounded_read_only_history(completed_upgrade):
+    from scripts.ops.nebius_management_refresh_switch import MARKER
+
+    root = load(completed_upgrade[0])
+    predecessor = None
+    sizes = []
+    for _ in range(3):
+        selector, case = complete_refresh(root, predecessor)
+        before = {path: path.read_bytes() for path in case[2].parent.rglob('*.json')}
+        predecessor = load_refresh(selector, root)
+        assert predecessor.deployment == root.deployment
+        assert predecessor.active['metadata']['uid'] == root.active['metadata']['uid']
+        assert predecessor.active['metadata']['annotations'][MARKER] == selector['operation_id']
+        assert predecessor.active['spec']['template']['spec']['containers'][0]['image'] == case[0].resources.switch.render.candidate['images']['service']['image_ref']
+        assert all(predecessor.history[path] == checksum for path, checksum in root.history.items())
+        assert {path: path.read_bytes() for path in before} == before
+        sizes.append(len(predecessor.history))
+    assert len(set(sizes)) == 1 and max(sizes) < 100
+
+
+@pytest.mark.parametrize('damage', ['completion_hash', 'lost_anchor', 'lost_phase', 'lost_input',
+    'changed_input', 'contract', 'pending', 'active_uid', 'active_material', 'probe_proof', 'phase_hash', 'switch_hash', 'layout'])
+def test_incomplete_or_rebound_refresh_cannot_be_a_predecessor(completed_upgrade, damage):
+    root = load(completed_upgrade[0])
+    selector, case = complete_refresh(root)
+    _, _, state, anchor = case
+    receipt_path = state / 'completion.json'
+    receipt = json.loads(receipt_path.read_text())
+    assert 'contract' in receipt, 'completion must retain its immutable input contract'
+    if damage == 'completion_hash':
+        selector['completion_sha256'] = '0' * 64
+    elif damage == 'lost_anchor':
+        (anchor / (selector['operation_id'] + '.json')).unlink()
+    elif damage == 'lost_phase':
+        (state / 'migration/stage.json').unlink()
+    elif damage == 'lost_input':
+        Path(selector['inputs_path']).unlink()
+    elif damage == 'changed_input':
+        Path(selector['inputs_path']).write_text('{}')
+    elif damage == 'layout':
+        selector['state_dir'] = str(state.parent / 'other-state')
+    else:
+        if damage == 'contract':
+            receipt['contract']['target_manager_revision'] = '0000'
+        elif damage == 'pending':
+            receipt['status'] = 'pending'
+        elif damage == 'active_uid':
+            receipt['active_uid'] = str(uuid4())
+        elif damage == 'active_material':
+            volume = next(row for row in receipt['active']['spec']['template']['spec']['volumes'] if row['name'] == 'management-cloud')
+            volume['secret']['secretName'] = 'loom-applications-cloud-' + '0' * 12
+        elif damage == 'probe_proof':
+            receipt['phases']['manager-probe']['proof']['probe']['revision'] = '0000'
+        elif damage == 'phase_hash':
+            receipt['phases']['migration']['sha256'] = '0' * 64
+        else:
+            receipt['switch_sha256'] = '0' * 64
+        receipt_path.write_text(json.dumps(receipt))
+        selector['completion_sha256'] = checksum(receipt_path)
+        # Change the parent hash too: hash checks alone are not qualification.
+        parent_path = state / 'refresh.json'
+        parent = json.loads(parent_path.read_text())
+        parent['completion_sha256'] = selector['completion_sha256']
+        parent_path.write_text(json.dumps(parent))
+    with pytest.raises(ValueError, match='refresh_predecessor_unqualified'):
+        load_refresh(selector, root)
 
 
 @pytest.mark.parametrize('damage', ['state_hash', 'switch_hash', 'lost_phase', 'changed_phase', 'lost_anchor',
