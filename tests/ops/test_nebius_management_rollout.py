@@ -17,6 +17,7 @@ from tests.ops.test_nebius_management_gateway import (
     operation,
     recovery_operation,
     recovery_report,
+    refresh_operation,
     startup_report,
     upgrade_operation,
 )
@@ -44,7 +45,7 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation])
+@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation, refresh_operation])
 def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path, metadata_factory):
     import os
     import sys
@@ -70,6 +71,9 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     elif metadata_factory is recovery_operation:
         script = ('from scripts.ops.nebius_management_retirement_recovery_live import HTTPSRetirementRecoveryAPI; '
                   'from scripts.ops.nebius_retirement_recovery_runner import run_recovery; ') + script
+    elif metadata_factory is refresh_operation:
+        script = ('from scripts.ops.nebius_management_refresh_entry import load_refresh_inputs; '
+                  'from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller; ') + script
     result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
     assert result.returncode == 0, result.stderr
@@ -101,19 +105,21 @@ def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_p
     assert result["status"] == status and "never-transfer" not in json.dumps(result) and len(calls) == 1
 
 
-@pytest.mark.parametrize('status', ['blocked', 'management_upgraded', 'retirement_recovered'])
+@pytest.mark.parametrize('status', ['blocked', 'management_upgraded', 'retirement_recovered', 'management_refreshed'])
 def test_rollout_records_bound_result_and_distinguishes_failure(tmp_path, monkeypatch, capsys, status):
     import sys
     target = module()
-    metadata = (recovery_operation(tmp_path) if status == 'retirement_recovered'
+    metadata = (refresh_operation(tmp_path) if status == 'management_refreshed' else recovery_operation(tmp_path) if status == 'retirement_recovered'
         else upgrade_operation(tmp_path) if status == 'management_upgraded' else operation(tmp_path))
     report = {"status": status, "stage": "storage_class",
               **{key: metadata[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
-    if status in {'management_upgraded', 'retirement_recovered'}:
+    if status in {'management_upgraded', 'retirement_recovered', 'management_refreshed'}:
         report.pop('stage')
         report.update(namespace_uid='52f5b18c-7dd3-4095-bd7e-49f6a6330391', revision='sha256:' + 'd' * 64)
     if status == 'retirement_recovered':
         report['recovery'] = recovery_report()
+    if status == 'management_refreshed':
+        report['operation_id'] = metadata['operation_id']
     monkeypatch.setenv("NEBIUS_MANAGEMENT_OPERATION_JSON", json.dumps(metadata))
     monkeypatch.setenv("LOOM_DEPLOY_SSH_TARGET", "codex@host")
     monkeypatch.setenv("LOOM_DEPLOY_SSH_KEY_FILE", "/private/key")
@@ -238,7 +244,7 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
     assert not any("SERVICE_ACCOUNT" in name for name in run["env"])
 
 
-@pytest.mark.parametrize("authority", ["initial", "diagnostic", "recovery"])
+@pytest.mark.parametrize("authority", ["initial", "diagnostic", "recovery", "refresh"])
 @pytest.mark.parametrize("action", ["preflight", "install"])
 def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action):
     import os
@@ -258,10 +264,14 @@ def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path
     if authority == "recovery":
         assert selector["env"]["NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON"] == "${{ vars.NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON }}"
         assert runner["env"]["RECOVERY_SSH_KEY"] == "${{ secrets.NEBIUS_MANAGEMENT_RECOVERY_SSH_KEY }}"
+    if authority == 'refresh':
+        assert selector['env']['NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON'] == '${{ vars.NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON }}'
+        assert runner['env']['REFRESH_SSH_KEY'] == '${{ secrets.NEBIUS_MANAGEMENT_REFRESH_SSH_KEY }}'
     original, probe = operation(tmp_path), diagnostic_operation(tmp_path)
     probe["source_sha"] = "d" * 40
     recovery = recovery_operation(tmp_path) | {"source_sha": "e" * 40}
-    selected = {"initial": original, "diagnostic": probe, "recovery": recovery}[authority]
+    refresh = refresh_operation(tmp_path)
+    selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh}[authority]
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # Fake only external executables; run the actual checked-in shell/Python
@@ -281,6 +291,7 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
     env = os.environ | {"PATH": str(bindir) + ":" + os.environ["PATH"], "MANAGEMENT_OPERATION": operation_name,
         "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(original), "NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(probe),
         "NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON": json.dumps(recovery), "RECOVERY_SSH_KEY": "private-recovery-key",
+        'NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON': json.dumps(refresh), 'REFRESH_SSH_KEY': 'private-refresh-key',
         "DEPLOY_SSH_KEY": "private-original-key", "DIAGNOSTIC_SSH_KEY": "private-diagnostic-key",
         "DEPLOY_KNOWN_HOSTS": "fixture-host", "LOOM_DEPLOY_SSH_TARGET": "fixture-target", "RUNNER_TEMP": str(tmp_path),
         "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": selected["source_sha"], "EXPECTED_ACTION": action,
@@ -301,5 +312,10 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
         # A diagnostic action cannot select an original retirement/install schema.
         result = subprocess.run(["bash", "-e", "-c", selector["run"]],
             env=env | {"NEBIUS_MANAGEMENT_" + authority.upper() + "_OPERATION_JSON": json.dumps(original)},
+            cwd=root, capture_output=True, text=True, timeout=20)
+        assert result.returncode != 0
+        result = subprocess.run(["bash", "-e", "-c", selector["run"]],
+            env=env | {"MANAGEMENT_OPERATION": "management-" + action,
+                       "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(selected)},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0

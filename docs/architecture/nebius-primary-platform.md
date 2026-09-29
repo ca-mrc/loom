@@ -1234,6 +1234,21 @@ live shared-material/IAM and actual-subject qualification. Running that protecte
 upgrade and proving personal-application readiness remain installed acceptance,
 not results inferred from the connection's tests.
 
+Subsequent manager software changes use a
+[protected retained-manager refresh](../runbooks/nebius-deployment.md#refresh-the-retained-application-manager),
+not a replay of that one-time upgrade. An immutable operation UUID binds the
+original installation and the immediate completed predecessor; the original
+installation lock serializes cutover. Only the qualified image, immutable
+configuration and compatible release/schema selection may change. Credential,
+storage, authority and route identities remain unchanged. Native Deployment and
+ReplicaSet generation observations plus complete Pod absence fence the old writer.
+Read-only compatibility Jobs and verified backup-object evidence precede the
+management-only migration; activation rechecks those barriers. Completion requires
+the actual current manager Pod/controller and authenticated public application
+runtime health. Uncertain writes remain readback-only, failed migration does not
+restart the old manager, and completed receipts retain bounded predecessor evidence.
+This source contract does not itself prove an installed refresh or owner acceptance.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.

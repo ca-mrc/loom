@@ -239,7 +239,16 @@ def main(operation_path: str, action: str) -> int:
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
-        if operation['schema'] == 'loom.nebius-management-retirement-recovery-operation.v1':
+        if operation['schema'] == 'loom.nebius-management-refresh-operation.v1':
+            from scripts.ops.nebius_management_refresh_entry import (
+                execute_refresh,
+                load_refresh_inputs,
+            )
+
+            refresh = load_refresh_inputs(operation)
+            qualified = operation
+            result = execute_refresh(refresh, operation, action)
+        elif operation['schema'] == 'loom.nebius-management-retirement-recovery-operation.v1':
             from scripts.ops.nebius_management_retirement_recovery_entry import (
                 execute_recovery,
                 load_recovery_inputs,
@@ -302,6 +311,8 @@ def main(operation_path: str, action: str) -> int:
                 stage = "operation"
             failure = {"status": "blocked", "stage": stage,
                        **{key: qualified[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
+            if qualified['schema'] == 'loom.nebius-management-refresh-operation.v1':
+                failure['operation_id'] = qualified['operation_id']
             print(json.dumps(safe_report(json.dumps(failure).encode(), qualified), sort_keys=True))
             # Zero here means a bound protocol response was delivered. Only the
             # outer rollout CLI decides success, and blocked always exits one.

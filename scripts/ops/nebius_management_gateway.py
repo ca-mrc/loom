@@ -33,6 +33,10 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_retirement_diagnostic_entry", "nebius_management_retirement_diagnostic_live",
     "nebius_retirement_recovery_runner", "nebius_management_retirement_recovery",
     "nebius_management_retirement_recovery_entry", "nebius_management_retirement_recovery_live",
+    "nebius_management_refresh", "nebius_management_refresh_switch", "nebius_management_refresh_live",
+    "nebius_management_refresh_resources", "nebius_management_refresh_evidence", "nebius_management_refresh_backup",
+    "nebius_management_refresh_install", "nebius_management_refresh_predecessor", "nebius_management_refresh_connected",
+    "nebius_management_refresh_entry",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
@@ -53,7 +57,12 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "diagnostic_pod_list", "diagnostic_pod_identity", "diagnostic_pod_owner", "diagnostic_pod_observation",
     "diagnostic_pod_labels", "diagnostic_pod_template", "diagnostic_pod_security", "diagnostic_pod_status",
     "diagnostic_container_status", "diagnostic_container_shape",
-    "recovery_original", "recovery_dns", "recovery_stage", "recovery_runtime"})
+    "recovery_original", "recovery_dns", "recovery_stage", "recovery_runtime",
+    "refresh_connection", "refresh_predecessor", "refresh_retained_installation", "refresh_retained_application",
+    "refresh_manager", "refresh_recovery", "refresh_prerequisites", "refresh_config", "refresh_retire",
+    "refresh_manager_probe", "refresh_shared_probe", "refresh_backup", "refresh_migration",
+    "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
+    "refresh_public_authentication", "refresh_completion"})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -65,12 +74,16 @@ def validate_operation(value: dict[str, Any]) -> None:
     try:
         fields = {"schema", "source_sha", "candidate", "installation_id", "namespace",
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
+        refresh = value.get('schema') == 'loom.nebius-management-refresh-operation.v1'
+        if refresh:
+            fields.add('operation_id')
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
             raise ValueError()
         if value["schema"] not in {"loom.nebius-management-operation.v1", "loom.nebius-management-upgrade-operation.v1",
                                    "loom.nebius-management-retirement-operation.v1",
                                    "loom.nebius-management-retirement-diagnostic-operation.v1",
-                                   "loom.nebius-management-retirement-recovery-operation.v1"}:
+                                   "loom.nebius-management-retirement-recovery-operation.v1",
+                                   "loom.nebius-management-refresh-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -86,6 +99,12 @@ def validate_operation(value: dict[str, Any]) -> None:
                 raise ValueError()
         state = Path(value["state_dir"])
         root = state.parent
+        if refresh:
+            operation_id = UUID(value['operation_id'])
+            if (not operation_id.int or str(operation_id) != value['operation_id'] or root.name != str(operation_id)
+                    or root.parent.name != 'refresh' or value['source_sha'] != value['candidate']):
+                raise ValueError()
+            root = root.parent.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
                      "loom.nebius-management-retirement-operation.v1": "retirement",
                      "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
@@ -280,8 +299,9 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         retirement = operation["schema"] == "loom.nebius-management-retirement-operation.v1"
         diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
         recovery = operation["schema"] == "loom.nebius-management-retirement-recovery-operation.v1"
+        refresh = operation['schema'] == 'loom.nebius-management-refresh-operation.v1'
         success = ("retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
-            else "management_upgraded" if upgrade else "management_installed")
+            else "management_refreshed" if refresh else "management_upgraded" if upgrade else "management_installed")
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
             raise ValueError()
         result = {"status": status}
@@ -289,6 +309,10 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if value[key] != operation[key]:
                 raise ValueError()
             result[key] = value[key]
+        if refresh:
+            if value.get('operation_id') != operation['operation_id']:
+                raise ValueError()
+            result['operation_id'] = value['operation_id']
         if status == "blocked":
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
@@ -300,6 +324,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             result.update(namespace_uid=uid, revision=revision)
         if status == "pending":
             phases = ({"retirement-recovery"} if recovery else {"retirement-diagnostic"} if diagnostic else {"retirement"} if retirement
+                else {'config', 'retire', 'manager-probe', 'shared-probe', 'backup', 'migration', 'post-migration-probe', 'activate', 'public'}
+                if refresh
                 else {"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
                 if upgrade else {"database", "migration", "backup", "service"})
             if value["phase"] not in phases:

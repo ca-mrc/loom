@@ -138,7 +138,14 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
                      "loom.nebius-management-retirement-operation.v1": "retirement",
                      "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
                      "loom.nebius-management-retirement-recovery-operation.v1": "retirement-recovery"}
-        if config["schema"] in separated:
+        if config["schema"] == "loom.nebius-management-refresh-operation.v1":
+            operation_id = UUID(config["operation_id"])
+            if (not operation_id.int or str(operation_id) != config["operation_id"]
+                    or root.name != str(operation_id) or root.parent.name != "refresh"
+                    or config["source_sha"] != config["candidate"]):
+                raise ValueError()
+            root = root.parent.parent
+        elif config["schema"] in separated:
             if root.name != separated[config["schema"]]:
                 raise ValueError()
             root = root.parent

@@ -33,6 +33,14 @@ changed-path planner controls which expensive jobs run. Candidate publication,
 live rollout, and release promotion each retain their own authorization and
 evidence checks.
 
+The same protected rollout concurrency also serializes manager installation,
+one-time upgrade, retained-operation recovery and
+[repeatable software refresh](../runbooks/nebius-deployment.md#refresh-the-retained-application-manager).
+Refresh uses dedicated protected metadata and a separate exact-bundle SSH key;
+`management-refresh-preflight` and `management-refresh-install` cannot fall back
+to another management authority. These are installed-operation entry points, not
+PR validation or evidence that the development environment is already accepted.
+
 ## Retained validation
 
 All four protected contexts remain required: `repository-checks`, `images-gate`,

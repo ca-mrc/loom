@@ -1114,6 +1114,71 @@ effects and investigate; do not reset state or automatically create another Job.
 Only proven release permits retrying the recorded first-application intent;
 personal HTTPS/login/suspend-resume remains a separate acceptance gate.
 
+## Refresh the retained application manager
+
+After the one-time application-runtime upgrade has completed, use protected
+`nebius-rollout` actions `management-refresh-preflight` and
+`management-refresh-install` to change the manager's software and compatible
+release catalog. Do not replay bootstrap or overwrite the upgrade's inputs or
+receipts. Finish any recovery pinned to the old manager before refreshing it.
+
+Each refresh uses a new canonical, nonzero operation UUID and private
+`nebius-management/refresh/<uuid>/{inputs.json,state,anchor}` paths. Preserve the
+original installation and all prior operation directories. The private input
+schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
+
+- `original_upgrade`: the completed original upgrade selector and receipt hashes.
+- `predecessor`: that same upgrade selector, or the immediately preceding completed
+  refresh selector. A refresh selector binds its operation UUID, private-input
+  digest and completion receipt digest; it does not accumulate an unbounded chain.
+- `deployment`, `candidate` and `profile`: the target manager configuration and
+  protected publication. The tooling source and candidate SHA must be identical.
+- `manager_revision` and `target_manager_revision`: the expected management DB
+  revisions before and after its migration. These are separate from the exact
+  shared-development schema in the selected application configuration.
+- `prerequisites` and `foundation_candidate`: the existing current-shared-runtime
+  prerequisite contract and its protected publication source.
+
+Prepare the exact integrated source bundle and install its dedicated forced-SSH
+grant with `install_nebius_management_entrypoint.py`, as for the original manager.
+Use a separate key and set protected `NEBIUS_MANAGEMENT_REFRESH_SSH_KEY` and
+`NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON`. The latter uses schema
+`loom.nebius-management-refresh-operation.v1`: the ordinary source, candidate,
+installation, namespace, private-input digest and path fields, plus `operation_id`.
+The workflow has no fallback to bootstrap, diagnostic or recovery credentials.
+Authority installation preserves other grants and does not create private inputs
+or reset operation state. Private credentials never pass through Actions.
+
+Preflight qualifies the completed predecessor, retained resource identities,
+publication and live shared prerequisites. Installation serializes on the original
+installation lock, stages only fixed operation resources, and proceeds through:
+
+1. Stage the immutable target configuration and scale the retained manager to zero.
+2. Observe current Deployment **and** owned ReplicaSet generations, zero replicas,
+   and complete manager Pod absence, including terminating Pods.
+3. Run bounded, read-only manager/shared DB compatibility probes using ordinary
+   namespace-local service credentials. Preserve pending plans, leases and effects.
+4. Execute and verify a manager backup, including object byte/checksum readback,
+   then run management-only migrations and the post-migration compatibility probe.
+5. Requalify the saved evidence, activate the exact new image/configuration, and
+   verify the actual current Pod/controller plus authenticated public HTTPS and
+   application-provisioner readiness.
+
+The operation retains Deployment and credential identities, storage, routes,
+permissions and budgets. It does not migrate the shared business database, create
+IAM/RBAC/network grants, or admit arbitrary manifests or commands. A candidate
+requiring an incompatible runtime setting needs a separately designed operation.
+
+`pending` means reconcile the **same** operation. `management_refreshed` is bound to
+its UUID and requires all runtime/public proofs; Job success alone is insufficient.
+Completed replay is read-only qualification. Preserve ambiguous writes and missing
+or changed evidence; never reset a journal or blindly retry a write. Only a definite
+API rejection permits its uncommitted intent to be retried. A failed migration
+leaves the manager stopped: there is no automatic rollback onto a changed schema.
+Any rollback after migration needs a qualified compatible candidate and a new
+operation. Personal HTTPS/login/lifecycle and concurrent-owner acceptance remain
+separate checks after a successful refresh.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
