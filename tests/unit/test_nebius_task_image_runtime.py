@@ -912,6 +912,24 @@ def test_prepare_compatible_revision_hits_donor_blobs(
     )
 
 
+def test_blob_import_downloads_a_repeated_digest_once(source_bundle, tmp_path, capsys):
+    claim, _ = source_bundle
+    objects = _v2_cache_objects(claim["materialization_key"], 0, {
+        "layer-a": b"shared", "layer-b": b"shared",
+    })
+    cache = FakeS3(objects)
+    target = tmp_path / "import"
+    runtime._materialize_cache_blobs(cache, claim, materialization_key=claim["materialization_key"],
+                                     index=0, destination=target)
+    assert (target / "layer-a").read_bytes() == (target / "layer-b").read_bytes() == b"shared"
+    assert sum("/blobs/" in key for key in cache.gets) == 1
+    metrics = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    imported = next(row for row in metrics if row.get("event") == "transfer")
+    assert imported["logical_bytes"] == 12
+    assert imported["downloaded_blob_bytes"] == 6
+    assert imported["unique_digests"] == 1
+
+
 def test_publish_blobs_skips_existing_digest(source_bundle, tmp_path, publisher) -> None:
     claim, _ = source_bundle
     cache, _calls = publisher
