@@ -104,6 +104,7 @@ async def test_local_validation_precedes_database_or_api(startup, monkeypatch, d
 ])
 async def test_only_exact_namespace_gets_and_sanitized_failures(startup, monkeypatch, damage, status, stage, error, code):
     from scripts.ops import nebius_retirement_startup_probe as probe
+    from scripts.ops.nebius_management_gateway import validate_startup_report
 
     settings, url = startup
     target, = settings.targets
@@ -111,7 +112,8 @@ async def test_only_exact_namespace_gets_and_sanitized_failures(startup, monkeyp
 
     async def database(selected_url, targets):
         assert selected_url.host == f"loom-postgres.{settings.namespace}.svc" and targets == settings.targets
-        return []
+        return [{"operation_id": str(target.operation_id), "phase": "pending", "runner_epoch": 0,
+            "lease_present": False, "error_present": False, "resource_count": 3, "effects_started": False}]
 
     def transport(request):
         assert request.method == "GET" and request.headers["Authorization"] == "Bearer private-token"
@@ -141,6 +143,7 @@ async def test_only_exact_namespace_gets_and_sanitized_failures(startup, monkeyp
     monkeypatch.setattr(probe, "database_snapshot", database)
     monkeypatch.setattr(probe.httpx, "AsyncClient", client)
     result = await probe.observe_startup(settings, url)
+    assert validate_startup_report(result) == result
     assert result["status"] == status and result["stage"] == stage
     assert result.get("error_type") == error and result.get("http_status") == code
     assert "private-" not in json.dumps(result)
