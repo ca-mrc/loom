@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from tests.ops.test_nebius_ingress_bootstrap import archive
 from tests.ops.test_nebius_management_gateway import (
+    diagnostic_operation,
     operation,
     retirement_operation,
     upgrade_operation,
@@ -23,14 +24,15 @@ def module():
     return importlib.import_module("scripts.ops.install_nebius_management_entrypoint")
 
 
-@pytest.fixture(params=["initial", "upgrade", "retirement"])
+@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic"])
 def inputs(tmp_path, request):
     (tmp_path / ".loom").mkdir(mode=0o700)
     (tmp_path / ".ssh").mkdir(mode=0o700)
     keys = tmp_path / ".ssh/authorized_keys"
     keys.write_bytes(b'# operator\nrestrict,command="ingress-command" ssh-ed25519 FOREIGN old\n')
     keys.chmod(0o600)
-    metadata = {"initial": operation, "upgrade": upgrade_operation, "retirement": retirement_operation}[request.param](tmp_path / ".loom")
+    metadata = {"initial": operation, "upgrade": upgrade_operation, "retirement": retirement_operation,
+        "diagnostic": diagnostic_operation}[request.param](tmp_path / ".loom")
     content = archive({"operation.json": json.dumps(metadata).encode(),
         "scripts/ops/nebius_management_gateway.py": b'def authorized_main(digest):\n    return 0\n',
         "scripts/ops/nebius_certificate_gateway.py": b"# supervisor\n"})
