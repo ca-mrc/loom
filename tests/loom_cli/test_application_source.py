@@ -72,6 +72,20 @@ def test_git_ignore_selects_untracked_only_and_dockerignore_is_authored_source(r
         assert (source.root / ".dockerignore").read_text() == "private-build-dir\n"
 
 
+def test_normal_global_git_exclusions_are_not_lost_by_capture_sanitization(repo, tmp_path, monkeypatch):
+    configuration = tmp_path / "configuration"
+    (configuration / "git").mkdir(parents=True)
+    exclusions = tmp_path / "global-excludes"
+    exclusions.write_text("private.custom\n")
+    (configuration / "git/config").write_text(f"[core]\n\texcludesFile = {exclusions}\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(configuration))
+    (repo / "app").write_text("authored")
+    (repo / "private.custom").write_text("fixture private content")
+    assert git(repo, "check-ignore", "private.custom") == "private.custom"
+    with capture(repo) as source:
+        assert [f.path for f in source.manifest.files] == ["app"]
+
+
 @pytest.mark.parametrize("name", [
     ".loom/state", ".codex/data", ".claude/data", ".worktrees/data", "worktrees/data", ".venv/data",
     "AGENTS.md", "src/MEMORY.md", "NEW_SESSION_BRIEFING.md", ".env", "deploy/.env.secret",
@@ -242,3 +256,54 @@ def test_snapshot_cleanup_on_consumer_error_and_temp_root_inside_checkout(repo, 
             raise RuntimeError("consumer")
     assert not saved.exists()
     assert (repo / "app").read_text() == "app"
+
+
+@pytest.mark.parametrize("kind", ["single-file", "aggregate", "files", "git-output", "git-time"])
+def test_capture_bounds_file_bytes_inventory_output_and_git_runtime(repo, monkeypatch, kind):
+    from loom_cli import application_source as module
+
+    if kind == "files":
+        for name in ("a", "b", "c"):
+            (repo / name).write_text("a")
+        monkeypatch.setattr(module, "MAX_SOURCE_FILES", 2)
+    elif kind == "git-output":
+        (repo / ("a" * 150)).write_text("a")
+        monkeypatch.setattr(module, "_MAX_GIT_OUTPUT", 100)
+    elif kind == "git-time":
+        (repo / "app").write_text("a")
+        monkeypatch.setattr(module, "_GIT_TIMEOUT", 0)
+    else:
+        (repo / "a").write_bytes(b"x" * (21 if kind == "single-file" else 12))
+        (repo / "b").write_bytes(b"x" * 12)
+        monkeypatch.setattr(module, "MAX_SOURCE_BYTES", 20)
+    with pytest.raises(ValueError):
+        with capture(repo):
+            pytest.fail("unbounded capture yielded")
+
+
+def test_failed_capture_removes_its_own_temporary_directory(repo, tmp_path, monkeypatch):
+    from loom_cli import application_source as module
+
+    temporary = tmp_path / "staging"
+    temporary.mkdir()
+    sentinel = temporary / "unrelated"
+    sentinel.write_text("preserve")
+    monkeypatch.setattr(module, "_temporary_parent", lambda _: temporary)
+    (repo / "app").write_text("app")
+    (repo / "bad").symlink_to("../outside")
+    with pytest.raises(ValueError):
+        with capture(repo):
+            pytest.fail("unsafe snapshot yielded")
+    assert list(temporary.iterdir()) == [sentinel]
+    assert sentinel.read_text() == "preserve"
+
+
+def test_non_utf8_git_filename_fails_without_disclosing_source_content(repo):
+    descriptor = os.open(os.fsencode(repo) + b"/bad-\xff", os.O_WRONLY | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, b"fixture private content")
+    finally:
+        os.close(descriptor)
+    with pytest.raises(ValueError, match="invalid application source worktree"):
+        with capture(repo):
+            pytest.fail("unsupported name yielded")

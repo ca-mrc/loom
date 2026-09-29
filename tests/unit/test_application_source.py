@@ -138,3 +138,36 @@ def test_verified_staged_read_rejects_changed_or_unsafe_content(tmp_path, change
             path.symlink_to(Path(__file__))
     with pytest.raises(ValueError):
         read_application_source_file(tmp_path, source.files[0])
+
+
+def test_verified_read_rejects_nonowned_directory(tmp_path, monkeypatch):
+    from loom.application_source import read_application_source_file
+
+    (tmp_path / "a").write_text("a")
+    source = manifest(entry("a", b"a"))
+    other_uid = os.getuid() + 1
+    monkeypatch.setattr(os, "getuid", lambda: other_uid)
+    with pytest.raises(ValueError):
+        read_application_source_file(tmp_path, source.files[0])
+
+
+def test_verified_read_detects_in_place_change_during_open_descriptor_read(tmp_path, monkeypatch):
+    from loom.application_source import read_application_source_file
+
+    path = tmp_path / "a"
+    path.write_bytes(b"original")
+    source = manifest(entry("a", b"original"))
+    original = os.read
+    changed = False
+
+    def race(descriptor, count):
+        nonlocal changed
+        body = original(descriptor, count)
+        if body and not changed:
+            changed = True
+            path.write_bytes(b"modified")
+        return body
+
+    monkeypatch.setattr(os, "read", race)
+    with pytest.raises(ValueError):
+        read_application_source_file(tmp_path, source.files[0])
