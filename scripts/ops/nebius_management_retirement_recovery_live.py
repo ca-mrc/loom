@@ -56,8 +56,8 @@ class HTTPSRetirementRecoveryAPI(HTTPSRetirementDiagnosticAPI):
                     or dns.get("spec", {}).get("selector") != {"k8s-app": "coredns"}
                     or dns["spec"].get("type") != "ClusterIP"
                     or not dns["spec"].get("clusterIP") or dns["spec"]["clusterIP"] == "None"
-                    or not {("TCP", 53, 53), ("UDP", 53, 53)} <= {
-                        (row.get("protocol"), row.get("port"), row.get("targetPort")) for row in dns["spec"].get("ports", [])}):
+                    or not {("TCP", 53), ("UDP", 53)} <= {
+                        (row.get("protocol"), row.get("port")) for row in dns["spec"].get("ports", [])}):
                 raise ValueError
         except Exception:
             raise RecoveryError("recovery_dns") from None

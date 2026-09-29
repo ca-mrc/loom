@@ -1009,6 +1009,47 @@ The reader qualifies one observed Nebius runtime addition:
 and exactly equal to the frozen foundation's configured region. Recorded labels
 cannot be replaced; missing, changed or other additional policy labels still fail.
 
+### Recover a qualified native-DNS retirement failure
+
+When the retained diagnostic reports `database` / `OperationalError` and the
+current `kube-system/coredns` Service uses `k8s-app=coredns`, use the separate
+`management-recovery-preflight` and `management-recovery-install` actions of
+protected `nebius-rollout`. They select only
+`NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON` and
+`NEBIUS_MANAGEMENT_RECOVERY_SSH_KEY`; neither the original installation nor the
+diagnostic key is a fallback. Preserve both old Jobs and all original grants,
+inputs, receipts and anchors. Do not resubmit owners' destroy requests.
+
+The operation schema is
+`loom.nebius-management-retirement-recovery-operation.v1`, with exact integrated
+`source_sha`, the unchanged original `candidate` and separate
+`nebius-management/retirement-recovery/{inputs.json,state,anchor}` paths. Private
+inputs use `loom.nebius-management-retirement-recovery-private-inputs.v1` and
+contain only the existing `diagnostic_operation`, its
+`diagnostic_journal_sha256`, and the current `dns_service_uid`. Qualification
+reuses the original private-input chain, failed/inactive Job, manager/fence and
+namespace identities, and the completed diagnostic's strict Pod/report readback.
+It freshly checks the DNS Service UID and native selector before writes.
+
+The exact-bundle recovery adds one DNS-only NetworkPolicy and one deterministic
+Job. Only the recovery Pod receives the added TCP/UDP 53 permission to DNS Pods
+in `kube-system`; the original rendering, image, identity, settings, mounts,
+security and scheduling remain unchanged. Before calling the existing retirement
+runtime, it reads every target and requires pending state, no previous claim,
+lease, error or effects. It never writes reservations directly or runs the create
+queue. Both objects share one intent-before-create journal; replay reads their
+recorded identities, never replaces a failed, missing or foreign Job.
+
+`pending` means to read the same operation again. `retirement_recovered` requires
+a verified completion report showing the exact original operations completed,
+leases/errors cleared, CPU/memory/ephemeral reservations released and storage
+unchanged. Job exit zero alone is not success. A `blocked` result at
+`recovery_runtime` retains the closed `recovery` report, including whether
+retirement may have started, but never raw exception text. Preserve uncertain
+effects and investigate; do not reset state or automatically create another Job.
+Only proven release permits retrying the recorded first-application intent;
+personal HTTPS/login/suspend-resume remains a separate acceptance gate.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API

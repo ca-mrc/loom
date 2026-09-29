@@ -31,6 +31,8 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_retirement", "nebius_management_retirement_entry",
     "nebius_retirement_startup_probe", "nebius_management_retirement_diagnostic",
     "nebius_management_retirement_diagnostic_entry", "nebius_management_retirement_diagnostic_live",
+    "nebius_retirement_recovery_runner", "nebius_management_retirement_recovery",
+    "nebius_management_retirement_recovery_entry", "nebius_management_retirement_recovery_live",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}

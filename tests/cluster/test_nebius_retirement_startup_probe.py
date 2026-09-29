@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import base64
 import copy
+import io
 import json
 import os
 import ssl
 import subprocess
+import sys
 import time
-from dataclasses import replace
+import zipfile
+from dataclasses import asdict, replace
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -80,6 +84,10 @@ def _native_dns_labels(cluster, core):
     _run(cluster, "kubectl", "rollout", "status", "deployment/" + name, "-n", "kube-system", "--timeout=60s")
     service = core.patch_namespaced_service("kube-dns", "kube-system", {"spec": {"selector": {"k8s-app": "coredns"}}})
     assert service.spec.selector == {"k8s-app": "coredns"}
+    native_service = core.create_namespaced_service("kube-system", {"apiVersion": "v1", "kind": "Service",
+        "metadata": {"name": "coredns"}, "spec": {"selector": {"k8s-app": "coredns"},
+            "ports": [{"name": "dns-" + protocol.lower(), "protocol": protocol, "port": 53, "targetPort": 53}
+                for protocol in ("TCP", "UDP")]}})
     discovery = client.DiscoveryV1Api(core.api_client)
     deadline = time.monotonic() + 30
     while True:
@@ -90,6 +98,47 @@ def _native_dns_labels(cluster, core):
             break
         assert time.monotonic() < deadline, "disposable native DNS endpoints did not become ready"
         time.sleep(0.25)
+    return native_service.metadata.uid
+
+
+def _bundled_recovery_documents(request, original_job_uid, tmp_path):
+    """Render from transported sources with no workspace scripts on sys.path."""
+    from scripts.ops.nebius_management_rollout import build_bundle
+
+    from tests.ops.test_nebius_management_gateway import recovery_operation
+
+    uv, requirements, wheels = tmp_path / "uv", tmp_path / "requirements", tmp_path / "wheels"
+    uv.write_bytes(b"unused fixture uv")
+    requirements.write_bytes(b"unused fixture requirements")
+    wheels.mkdir()
+    for name in ("loom-0.0.0-py3-none-any.whl", "loom_bundle_checksum-0.1.0-py3-none-any.whl"):
+        (wheels / name).write_bytes(b"unused fixture wheel")
+    bundle = build_bundle(recovery_operation(tmp_path), uv=uv, requirements=requirements, wheels=wheels)
+    root = tmp_path / "operator-bundle"
+    with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+        archive.extractall(root)
+    (root / "request.json").write_text(json.dumps({"binding": asdict(request.binding),
+        "deployment": request.deployment.model_dump(mode="json"), "candidate": request.candidate,
+        "profile": request.profile, "targets": [target.model_dump(mode="json") for target in request.targets],
+        "original_job_uid": original_job_uid}))
+    program = """
+import json
+from pathlib import Path
+from scripts.ops.nebius_management_material import ManagementBinding
+from scripts.ops.nebius_management_retirement import RetirementInstallRequest
+from scripts.ops.nebius_management_retirement_recovery import recovery_documents
+from loom_service.environment_management.deployment import ManagementDeployment
+from loom_service.environment_management.retirement import RetirementTarget
+raw = json.loads(Path('request.json').read_text())
+request = RetirementInstallRequest(ManagementBinding(**raw['binding']),
+    ManagementDeployment.model_validate(raw['deployment']), raw['candidate'], raw['profile'],
+    tuple(RetirementTarget.model_validate(row) for row in raw['targets']), Path.cwd())
+print(json.dumps(recovery_documents(request, original_job_uid=raw['original_job_uid'])))
+"""
+    result = subprocess.run([sys.executable, "-c", program], cwd=root, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src")})
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 @pytest.mark.parametrize("dns_label", ["kube-dns", "coredns"])
@@ -183,8 +232,7 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             utils.create_from_dict(core.api_client, doc)
         _run(cluster, "kubectl", "rollout", "status", "statefulset/loom-postgres", "-n", namespace, "--timeout=90s")
         _run(cluster, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s")
-        if dns_label == "coredns":
-            _native_dns_labels(cluster, core)
+        dns_uid = _native_dns_labels(cluster, core) if dns_label == "coredns" else None
         # initdb's temporary Unix-socket server can satisfy pg_isready before
         # the final TCP server starts. Wait on reads; never retry a SQL write.
         deadline = time.monotonic() + 30
@@ -276,20 +324,37 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             assert not core.list_namespaced_resource_quota(name).items
             assert not core.list_namespaced_pod(name).items
         if dns_label == "coredns":
-            from scripts.ops.nebius_management_retirement_recovery import recovery_documents
+            from scripts.ops.nebius_management_retirement_recovery import (
+                recovery_documents,
+                stage_recovery,
+            )
+            from scripts.ops.nebius_management_retirement_recovery_entry import RecoveryContext
+            from scripts.ops.nebius_management_retirement_recovery_live import (
+                HTTPSRetirementRecoveryAPI,
+            )
 
             reservations = "SELECT cpu_millis,memory_mib,storage_mib,ephemeral_storage_mib " \
                 "FROM nebius_platform_reservations WHERE environment_id='" + str(target.registration.environment_id) + "';"
             storage_before = database(reservations).strip().split("|")[2]
-            phases = recovery_documents(request, original_job_uid=original_uid)
-            for documents in phases.values():
-                for document in documents.values():
-                    utils.create_from_dict(core.api_client, document)
+            phases = _bundled_recovery_documents(request, original_uid, tmp_path)
+            assert phases == recovery_documents(request, original_job_uid=original_uid)
             recovery, = phases["job"].values()
             recovery_name = recovery["metadata"]["name"]
-            _run(cluster, "kubectl", "wait", "--for=condition=Complete", "job/" + recovery_name,
-                 "-n", namespace, "--timeout=120s")
-            report = json.loads(_run(cluster, "kubectl", "logs", "job/" + recovery_name, "-n", namespace))
+            diagnostic = DiagnosticContext(context, receipts)
+            recovery_context = RecoveryContext(diagnostic, {"state_dir": str(args["state_dir"])}, original_uid, dns_uid)
+            recovery_args = dict(request=request, original_job_uid=original_uid,
+                state_dir=tmp_path / "recovery", anchor_dir=tmp_path / "recovery-anchor")
+            with HTTPSRetirementDiagnosticAPI(context=diagnostic, ssl_context=trust, token=None) as diagnostic_api:
+                with HTTPSRetirementRecoveryAPI(context=recovery_context, diagnostic_api=diagnostic_api,
+                        ssl_context=trust, token=None) as recovery_api:
+                    staged_recovery = stage_recovery(api=recovery_api, **recovery_args)
+                    _run(cluster, "kubectl", "wait", "--for=condition=Complete", "job/" + recovery_name,
+                         "-n", namespace, "--timeout=120s")
+                    result = recovery_api.result(recovery_args["state_dir"])
+                    assert result["status"] == "retirement_recovered", result
+                    assert stage_recovery(api=recovery_api, **recovery_args) == staged_recovery
+                    assert recovery_api.result(recovery_args["state_dir"]) == result
+            report = result["recovery"]
             assert report["status"] == "completed", json.dumps(report) + database(
                 "SELECT phase,error_code FROM nebius_environment_operations WHERE operation_id='"
                 + str(target.operation_id) + "';")
