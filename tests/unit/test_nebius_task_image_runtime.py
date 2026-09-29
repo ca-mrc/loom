@@ -1255,6 +1255,25 @@ def test_trim_shared_blob_survives_while_another_root_is_retained(monkeypatch):
     assert sum("/blobs/" in key for key in cache.objects) == 1
 
 
+@pytest.mark.parametrize("code", ["PreconditionFailed", "KeyAlreadyExists"])
+def test_conditional_cache_write_accepts_provider_conflict_codes(code):
+    class ProviderS3(FakeS3):
+        def put_object(self, **kwargs):
+            if kwargs.get("IfNoneMatch") == "*" and kwargs["Key"] in self.objects:
+                raise ClientError({"Error": {"Code": code}}, "PutObject")
+            return super().put_object(**kwargs)
+
+    cache = ProviderS3({})
+    assert runtime._supports_conditional_cache_write(cache, "cache")
+    assert not cache.objects
+    with runtime._cache_mutation(cache, "cache") as acquired:
+        assert acquired is True
+        with runtime._cache_mutation(cache, "cache") as contender:
+            assert contender is False
+        assert runtime._CACHE_MUTATION_LOCK in cache.objects
+    assert not cache.objects
+
+
 def test_cache_mutation_failure_releases_owned_lock():
     cache = FakeS3({})
     with pytest.raises(RuntimeError, match="failed upload"):
