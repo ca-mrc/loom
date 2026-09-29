@@ -115,6 +115,90 @@ def test_connected_cutover_requires_exact_drain_and_activation_evidence(refresh,
     assert not any(row.method not in {'GET', 'PATCH'} for row in state['calls'])
 
 
+@pytest.fixture
+def running(refresh, connected):
+    request, _ = refresh
+    api, state, fake = connected
+    fake.document = fake.desired('activate')
+    fake.document['status'] = {'observedGeneration': fake.document['metadata']['generation'],
+        'replicas': 1, 'updatedReplicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}
+    replica = copy.deepcopy(state['sets']['items'][0])
+    replica['metadata']['uid'] = str(uuid4())
+    replica['metadata']['name'] = 'loom-service-1234567890'
+    replica['metadata']['labels']['pod-template-hash'] = '1234567890'
+    replica['spec'] = {'replicas': 1, 'template': copy.deepcopy(fake.document['spec']['template']),
+        'selector': {'matchLabels': {'app': 'loom-service', 'pod-template-hash': '1234567890'}}}
+    replica['spec']['template']['metadata']['labels']['pod-template-hash'] = '1234567890'
+    replica['status'] = {'observedGeneration': replica['metadata']['generation'], 'replicas': 1,
+        'readyReplicas': 1, 'availableReplicas': 1, 'fullyLabeledReplicas': 1}
+    template = replica['spec']['template']
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {**copy.deepcopy(template['metadata']),
+        'namespace': request.render.after.namespace, 'name': replica['metadata']['name'] + '-abc', 'uid': str(uuid4()),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+            'uid': replica['metadata']['uid'], 'controller': True, 'blockOwnerDeletion': True}]},
+        'spec': copy.deepcopy(template['spec']), 'status': {'phase': 'Running',
+            'conditions': [{'type': 'Ready', 'status': 'True'}],
+            'containerStatuses': [{'name': 'loom-service', 'ready': True, 'restartCount': 0,
+                'state': {'running': {'startedAt': '2026-09-29T22:00:00Z'}}}],
+            'initContainerStatuses': [{'name': container['name'], 'ready': True, 'restartCount': 0,
+                'state': {'terminated': {'exitCode': 0}}} for container in template['spec'].get('initContainers', [])]}}
+    state['sets']['items'] = [replica]
+    state['pods']['items'] = [pod]
+    return api, state, fake, replica, pod
+
+
+def test_ready_refresh_requires_actual_current_owned_pod_and_final_deployment_readback(running):
+    api, state, _, _, _ = running
+    assert api.workload_ready() is True
+    assert state['deployment_reads'] == 2
+    assert all(message.method == 'GET' for message in state['calls'])
+
+
+@pytest.mark.parametrize('damage', ['stale_deployment', 'stale_replicaset', 'pending_pod', 'extra_pod',
+    'terminating_pod', 'foreign_owner', 'foreign_image', 'privileged', 'failed_init', 'partial_list', 'final_drift'])
+def test_public_refresh_readiness_rejects_stale_or_foreign_runtime(running, damage):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state, fake, replica, pod = running
+    pending = damage in {'stale_deployment', 'stale_replicaset', 'pending_pod', 'extra_pod', 'terminating_pod'}
+    if damage == 'stale_deployment':
+        fake.document['status']['observedGeneration'] -= 1
+    elif damage == 'stale_replicaset':
+        replica['status']['observedGeneration'] -= 1
+    elif damage == 'pending_pod':
+        pod['status']['containerStatuses'][0]['ready'] = False
+    elif damage == 'extra_pod':
+        state['pods']['items'].append(copy.deepcopy(pod))
+    elif damage == 'terminating_pod':
+        pod['metadata']['deletionTimestamp'] = '2026-09-29T22:00:01Z'
+    elif damage == 'foreign_owner':
+        pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'foreign_image':
+        pod['spec']['containers'][0]['image'] = 'foreign:latest'
+    elif damage == 'privileged':
+        pod['spec']['containers'][0]['securityContext']['privileged'] = True
+    elif damage == 'failed_init':
+        pod['status']['initContainerStatuses'][0]['state']['terminated']['exitCode'] = 1
+    elif damage == 'partial_list':
+        state['pods']['metadata']['continue'] = 'next'
+    else:
+        # Existing response hook changes replicas to1; changing desired replicas
+        # cannot expose drift here, so drift the returned live generation instead.
+        original_read = api.read
+        def changed():
+            value = original_read()
+            if state['deployment_reads'] > 1:
+                value['metadata']['generation'] += 1
+            return value
+        api.read = changed
+    if pending:
+        assert api.workload_ready() is False
+    else:
+        with pytest.raises(ManagementStageError):
+            api.workload_ready()
+    assert all(message.method == 'GET' for message in state['calls'])
+
+
 @pytest.mark.parametrize('status,reason', [(409, 'Conflict'), (422, 'Invalid')])
 def test_only_definite_kubernetes_rejection_clears_intent(refresh, connected, tmp_path, status, reason):
     from scripts.ops.nebius_management_refresh_switch import switch_refresh
