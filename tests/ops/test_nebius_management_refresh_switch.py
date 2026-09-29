@@ -192,6 +192,15 @@ def test_exact_current_controller_generations_and_no_pods_prove_drain(refresh, d
     assert drain(refresh, drained_observation) is True
 
 
+def test_typed_kubernetes_list_items_may_omit_typemeta(refresh, drained_observation):
+    # The API's verified ReplicaSetList supplies TypeMeta for its items. Native
+    # serializers omit these two fields; explicit conflicting values still fail.
+    for row in drained_observation[1]['items']:
+        row.pop('kind')
+        row.pop('apiVersion')
+    assert drain(refresh, drained_observation) is True
+
+
 @pytest.mark.parametrize('pending', ['deployment_generation', 'replica_set_generation', 'replica_set_unobserved',
                                    'deployment_replicas', 'replica_set_replicas', 'terminating_pod'])
 def test_zero_replica_spec_without_full_observation_is_not_drain(refresh, drained_observation, pending):
