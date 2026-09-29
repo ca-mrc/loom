@@ -69,6 +69,15 @@ async def test_application_scope_qualifies_cross_project_group_authority_without
     assert all(call[0] in {'get', 'member_of', 'permits'} for call in cloud.calls)
 
 
+@pytest.mark.parametrize('groups', [('data',), ('source',), ('data', 'source')])
+async def test_shared_object_groups_may_belong_to_the_same_tenant(application_cloud, groups):
+    cloud, _, _ = application_cloud
+    for group in groups:
+        cloud.rows['group-' + group][1]['metadata']['parent_id'] = 'tenant-test'
+    await qualify(application_cloud)
+    assert all(call[0] in {'get', 'member_of', 'permits'} for call in cloud.calls)
+
+
 @pytest.mark.parametrize('mutation', ['missing_membership', 'foundation_admin', 'tenant_admin', 'wrong_group_scope',
     'extra_membership', 'wrong_key', 'inactive', 'foreign_group', 'group_project_permit', 'missing_bucket',
     'extra_bucket', 'wrong_bucket_parent', 'public_bucket', 'wrong_policy', 'missing_group_permit'])
