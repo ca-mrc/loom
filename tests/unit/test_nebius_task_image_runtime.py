@@ -912,6 +912,27 @@ def test_prepare_compatible_revision_hits_donor_blobs(
     )
 
 
+@pytest.mark.parametrize("reuse_limit,expected_gets", [(1024, 1), (1, 2)])
+def test_prepare_reuses_verified_blobs_across_components_with_bound(
+    source_bundle, tmp_path, monkeypatch, reuse_limit, expected_gets,
+):
+    claim, source = source_bundle
+    objects = _v2_cache_objects(claim["materialization_key"], 0, {"layer": b"shared"})
+    objects.update(_v2_cache_objects(claim["materialization_key"], 1, {"layer": b"shared"}))
+    cache = FakeS3(objects)
+    monkeypatch.setattr(runtime, "_CACHE_REUSE_BYTES", reuse_limit, raising=False)
+    monkeypatch.setattr(runtime, "derive_task_image_build_components", lambda _: (None, None))
+    monkeypatch.setattr(runtime, "_client", lambda _claim, secret: source if secret.name == "source" else cache)
+    (tmp_path / "secrets/cache").mkdir(parents=True)
+    work = tmp_path / "work"
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert sum("/blobs/" in key for key in cache.gets) == expected_gets
+    first, second = work / "cache-in/0/layer", work / "cache-in/1/layer"
+    assert first.read_bytes() == second.read_bytes() == b"shared"
+    first.write_bytes(b"changed")
+    assert second.read_bytes() == b"shared"
+
+
 def test_blob_import_downloads_a_repeated_digest_once(source_bundle, tmp_path, capsys):
     claim, _ = source_bundle
     objects = _v2_cache_objects(claim["materialization_key"], 0, {
