@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import os
 import ssl
@@ -37,6 +38,7 @@ from tests.integration.test_nebius_application_credentials import setup as crede
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
 from tests.integration.test_nebius_application_effects import started
 from tests.integration.test_nebius_application_material import management_key as management_key
+from tests.integration.test_nebius_application_material import material as fixture_material
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_application_runtime import runtime_inputs
 from tests.integration.test_nebius_environment_management import (
@@ -83,28 +85,38 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
             await kubernetes.create(lease, "namespace", named(rendered, "Namespace", "loom-dev-alice"))
             await kubernetes.create(lease, "account", named(rendered, "ServiceAccount", "loom-platform"))
             deadline = time.monotonic() + 30
-            while not running:
+            while True:
                 try:
                     await runtime.close_admission(lease)
                     break
                 except ProviderWaitingError:
                     assert time.monotonic() < deadline
                     await asyncio.sleep(0.1)
-            # Default images never run. The second case starts harmless imported
-            # fixtures before the gate, proving real controller-owned Pod exit.
-            for docs in rendered.files.values():
-                for doc in docs:
-                    if doc["kind"] in {"Deployment", "Service", "Ingress"}:
-                        await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
+            # Default images never run. The second case opens admission and
+            # starts harmless imported fixtures through the active lifecycle.
             if running:
+                await runtime.open_admission(lease)
                 deadline = time.monotonic() + 60
                 while True:
-                    pods = (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items
-                    if len(pods) == 2 and all(pod.status.phase == "Running" for pod in pods):
-                        assert all(pod.metadata.owner_references[0].kind == "ReplicaSet" for pod in pods)
+                    try:
+                        ready = await runtime.start_workloads(lease)
                         break
-                    assert time.monotonic() < deadline, "fixture Deployment Pods did not start"
-                    await asyncio.sleep(0.2)
+                    except ProviderWaitingError:
+                        assert time.monotonic() < deadline, "current fixture backends did not become ready"
+                        await asyncio.sleep(0.2)
+                assert {item.name for item in ready.deployments} == {'loom-service', 'loom-web'}
+                assert all(item.replicas == 1 and item.observed_generation >= item.generation for item in ready.deployments)
+                pods = (await asyncio.to_thread(core.list_namespaced_pod, "loom-dev-alice")).items
+                assert len(pods) == 2 and all(pod.status.phase == "Running" for pod in pods)
+                assert all(pod.metadata.owner_references[0].kind == "ReplicaSet" for pod in pods)
+                before = list(requests)
+                await runtime.read_ready(lease)
+                assert all(method == 'GET' for method, _ in requests[len(before):])
+            else:
+                for docs in rendered.files.values():
+                    for doc in docs:
+                        if doc["kind"] in {"Deployment", "Service", "Ingress"}:
+                            await kubernetes.create(lease, doc["kind"] + ":" + doc["metadata"]["name"], doc)
             stopped = await registry.transition(lease.application_id, principal=alice,
                 idempotency_key="stop", action="suspend", expected_generation=1)
             current = await registry.claim(stopped.operation_id)
@@ -134,16 +146,20 @@ async def test_runtime_retires_routes_and_waits_for_real_deployment_controllers(
 
 
 @pytest.mark.timeout(180)
-async def test_early_stop_bootstraps_using_only_protected_manager_authority(applications, platform_inputs):
+@pytest.mark.parametrize("active", [False, True])
+async def test_application_preparation_and_stop_use_only_protected_manager_authority(applications, platform_inputs, active):
     from kubernetes import client, utils
 
     from loom.nebius_application_authority import render_application_authority
     from loom_service.application_management.runtime import ApplicationRuntimeProvider
 
     registry, authority, lease, alice, _ = await runtime_inputs(applications, platform_inputs)
-    stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
-        idempotency_key='early-stop', expected_generation=1)
-    lease = await registry.claim(stopped.operation_id, lease_seconds=300)
+    if not active:
+        stopped = await registry.transition(lease.application_id, principal=alice, action='suspend',
+            idempotency_key='early-stop', expected_generation=1)
+        lease = await registry.claim(stopped.operation_id, lease_seconds=300)
+    else:
+        await registry.renew(lease, lease_seconds=300)
     container = await asyncio.to_thread(_start_k3s)
     try:
         _, core, _ = await asyncio.to_thread(_load_client, container)
@@ -188,19 +204,80 @@ async def test_early_stop_bootstraps_using_only_protected_manager_authority(appl
             deadline = time.monotonic() + 30
             while True:
                 try:
-                    proof = await provider.stop_workloads(lease)
+                    if active:
+                        await provider.prepare_static(lease)
+                    else:
+                        proof = await provider.stop_workloads(lease)
+                        assert proof.deployments == ()
                     break
                 except ProviderWaitingError:
-                    assert time.monotonic() < deadline, 'protected early stop did not converge'
+                    assert time.monotonic() < deadline, 'protected preparation/early stop did not converge'
                     await asyncio.sleep(0.1)
-            assert proof.deployments == ()
             assert await allowed('resourcequotas')
             effects = await registry.effect_history(lease)
-            assert [(item.intent.kind, item.intent.action) for item in effects] == [
+            expected = [
                 ('Namespace', 'create'), ('RoleBinding', 'create'), ('ResourceQuota', 'create')]
+            if active:
+                expected += [('ServiceAccount', 'create'), *[('NetworkPolicy', 'create')] * 4]
+                await provider.prepare_static(lease)
+            assert [(item.intent.kind, item.intent.action) for item in effects] == expected
             assert all(item.phase == 'observed' for item in effects)
+            assert (await asyncio.to_thread(core.list_namespaced_pod, 'loom-dev-alice')).items == []
+            assert (await http.get('/apis/apps/v1/namespaces/loom-dev-alice/deployments/loom-service')).status_code == 404
+            assert (await http.get('/apis/networking.k8s.io/v1/namespaces/loom-dev-alice/ingresses/loom-web')).status_code == 404
             assert (await http.get('/api/v1/namespaces/loom-dev/services')).status_code == 403
             assert (await http.delete('/api/v1/namespaces/loom-dev-alice')).status_code == 403
+            if active:
+                from loom.nebius_application_authority import render_application_shared_observer
+                from loom.nebius_application_network import application_shared_network_policies
+
+                shared_ns = authority.shared_namespace
+                await asyncio.to_thread(core.create_namespace, {'metadata': {'name': shared_ns}})
+                shared_policies = application_shared_network_policies(authority)
+                observer = render_application_shared_observer(authority)
+                network_path = f'/apis/networking.k8s.io/v1/namespaces/{shared_ns}/networkpolicies'
+                first_path = network_path + '/' + shared_policies[0]['metadata']['name']
+                assert (await http.get(first_path)).status_code == 403
+                for doc in observer:
+                    collection = 'roles' if doc['kind'] == 'Role' else 'rolebindings'
+                    denied = await http.post(f'/apis/rbac.authorization.k8s.io/v1/namespaces/{shared_ns}/{collection}', json=doc)
+                    assert denied.status_code == 403, (collection, denied.text)  # No Secret/request credential content.
+                    if doc['kind'] == 'Role':
+                        # A binding to a missing Role returns404 during RBAC
+                        # escalation checking, before admission can reject it.
+                        # Install just the Role to test the actual binding denial.
+                        await asyncio.to_thread(utils.create_from_dict, core.api_client, doc)
+                for doc in [*shared_policies, observer[1]]:
+                    await asyncio.to_thread(utils.create_from_dict, core.api_client, doc)
+                deadline = time.monotonic() + 20
+                while (await http.get(first_path)).status_code != 200:
+                    assert time.monotonic() < deadline, 'named shared observation did not become available'
+                    await asyncio.sleep(0.1)
+                shared_proof = await provider.read_shared_network(lease)
+                assert {item.name for item in shared_proof} == {doc['metadata']['name'] for doc in shared_policies}
+                assert all(item.uid and item.resource_version for item in shared_proof)
+                for path in (network_path, network_path + '/arbitrary',
+                             '/apis/networking.k8s.io/v1/namespaces/loom-dev-foreign/networkpolicies/' + shared_proof[0].name,
+                             f'/api/v1/namespaces/{shared_ns}/secrets/private'):
+                    assert (await http.get(path)).status_code == 403
+                assert (await http.post(network_path, json=shared_policies[0])).status_code == 403
+                assert (await http.patch(first_path, json={'spec': {'ingress': [{}]}},
+                    headers={'Content-Type': 'application/merge-patch+json'})).status_code == 403
+                assert (await http.delete(first_path)).status_code == 403
+                bundles = await registry.ensure_material(lease, fixture_material)
+                for index, (name, values) in enumerate(bundles.items()):
+                    await provider.kubernetes.create(lease, f'credential:{index}', {
+                        'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'immutable': True,
+                        'metadata': {'name': name, 'namespace': 'loom-dev-alice'},
+                        'data': {key: base64.b64encode(value.encode()).decode() for key, value in values.items()}})
+                prepared = await provider.read_prepared(lease)
+                assert len(prepared.resources) == 8
+                assert set(bundles) <= {item.name for item in prepared.resources}
+                assert (await asyncio.to_thread(core.list_namespaced_pod, 'loom-dev-alice')).items == []
+                opening = await provider.open_admission(lease)
+                assert opening.phase == 'observed'
+                assert await provider.open_admission(lease) == opening
+                assert (await http.get('/api/v1/namespaces/loom-dev-alice/resourcequotas/loom-application-retired')).status_code == 404
     finally:
         await asyncio.to_thread(container.stop)
 

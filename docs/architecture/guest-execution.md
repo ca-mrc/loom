@@ -68,6 +68,13 @@ an incomplete environment. Kubernetes ownership and cleanup reconciliation
 remain authoritative; local process tests do not establish controller-restart
 or hosted cleanup qualification.
 
+Startup is bounded separately from task commands. Disk preparation has 30 seconds;
+the subsequent guest boot has 90 seconds, including up to 60 seconds for Docker
+to expose its private readiness API. The Kubernetes startup probe allows 150
+seconds so it does not interrupt these stages. A healthy Docker daemon on a
+one-vCPU TCG guest can take longer than 30 seconds to initialize. Daemon exit,
+deadline expiry and cancellation still retire the incarnation without reuse.
+
 ## Resources, networking and artifacts
 
 Minimum declared resources are 1000 CPU millicores, 512 MiB RAM and 160 MiB
@@ -105,6 +112,31 @@ across attempts, and cancellation or Pod deletion removes the cache with its
 owned state.
 
 ## Packaging and qualification
+
+An independent, single-primary Nebius platform declares one guest sibling with
+`guest_execution_target: {"target_id": "<distinct guest target>"}` alongside its
+existing `private-root-v1` task identity policy. The guest catalog binds the
+immutable `capacity_owner_target_id` to the ordinary target. Both classes share
+one collector, namespace quota, node inventory and native builder; registration
+invalidates old capacity observations until the collector captures the current
+target membership. See [capacity ownership](nebius-service-execution.md).
+
+The renderer creates a separate guest actuator and health identity. The extended
+namespace policy permits only its exact guest launcher, probes, bounded state
+volumes, read-only runtime/root and `DAC_OVERRIDE` capability. Native private
+sidecars retain their existing shape. Bootstrap registers and prices the guest
+through the control-plane API, using the owner's immutable price snapshot;
+it leaves a new guest disabled and preserves existing guest intent on repeat.
+Each actuator reconciles only its own leases, ignores declared sibling inventory
+in the shared namespace, and reports unknown target annotations as drift.
+
+Guest readiness in the published profile requires explicit protected workflow
+configuration and storage/artifact budgets. This does not activate the target.
+Hosted qualification and a fresh capacity observation precede explicit operator
+activation through the existing target-health API. A platform rollout cannot
+remove or rename an installed guest, or replace its ordinary owner: those
+operations require a separately designed retirement protocol. Disabling/draining
+the guest retains its capacity accounting and cleanup authority.
 
 [The guest payload build](../../deploy/guest-runtime/README.md) locks kernel,
 QEMU, Docker, Buildx and dependency versions/checksums. The execution-runtime

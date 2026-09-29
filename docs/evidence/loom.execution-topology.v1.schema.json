@@ -4,6 +4,19 @@
       "additionalProperties": false,
       "description": "Environment binding onto one provider-bound physical cluster scope.",
       "properties": {
+        "capacity_owner_target_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9-]{0,79}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Capacity Owner Target Id"
+        },
         "cluster_scope_id": {
           "anyOf": [
             {

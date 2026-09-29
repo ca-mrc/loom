@@ -310,7 +310,10 @@ def test_renderer_keeps_guest_state_private_bounded_and_host_unprivileged(capabi
             "sizeLimit": f"{plan.task_resources.ephemeral_storage_mib}Mi"}
         assert container["startupProbe"]["exec"]["command"] == [
             "/loom/bin/loom-sandbox-runtime", "--check-socket", f"/loom/sandboxes/{role}/sandbox.sock"]
-        assert container["startupProbe"]["failureThreshold"] == 60
+        # Disk preparation (30s) plus boot (90s) must finish before kubelet's
+        # own bounded startup deadline, including on allocated guest plans.
+        startup = container["startupProbe"]
+        assert 120 < startup["periodSeconds"] * startup["failureThreshold"] <= 180
         mounted = {item["name"] for item in container["volumeMounts"]}
         assert mounted == {"runtime", f"{role}-socket", f"{role}-guest-state"}
     assert all("guest-state" not in mount["name"] for container in [

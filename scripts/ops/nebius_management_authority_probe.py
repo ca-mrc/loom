@@ -15,13 +15,17 @@ from uuid import UUID, uuid4
 from scripts.ops.nebius_management_stage import ManagementStageError
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
+from loom.nebius_application_authority import (
+    ApplicationNamespaceAuthorityV1,
+    application_namespace_binding,
+)
 from loom.nebius_management_authority import ManagementNamespaceAuthority, namespace_binding
 
 
 class HTTPSManagementAuthorityProbe(ManagementKubernetesTransport):
     error_type = ManagementStageError
 
-    def __init__(self, *, authority: ManagementNamespaceAuthority, service_account_uid: str,
+    def __init__(self, *, authority: ManagementNamespaceAuthority | ApplicationNamespaceAuthorityV1, service_account_uid: str,
                  api_server: str, ssl_context: ssl.SSLContext, token: str):
         if str(UUID(service_account_uid)) != service_account_uid or UUID(service_account_uid).int == 0 or not token:
             raise ManagementStageError("invalid management authority probe identity")
@@ -46,10 +50,13 @@ class HTTPSManagementAuthorityProbe(ManagementKubernetesTransport):
         except Exception:
             raise ManagementStageError("management authority probe unavailable") from None
 
-    def _access(self, *, group: str, resource: str, verb: str, name: str | None = None) -> bool:
+    def _access(self, *, group: str, resource: str, verb: str, name: str | None = None,
+                namespace: str | None = None) -> bool:
         attributes = {"group": group, "resource": resource, "verb": verb}
         if name is not None:
             attributes["name"] = name
+        if namespace is not None:
+            attributes['namespace'] = namespace
         code, result = self._post("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", {
             "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
             "spec": {"resourceAttributes": attributes},
@@ -73,11 +80,13 @@ class HTTPSManagementAuthorityProbe(ManagementKubernetesTransport):
         """False means admission propagation pending; unexpected authority raises."""
         try:
             authority = self.authority
+            application = isinstance(authority, ApplicationNamespaceAuthorityV1)
+            account = 'loom-application-provisioner' if application else 'loom-management-provisioner'
             code, result = self._post("/apis/authentication.k8s.io/v1/selfsubjectreviews", {
                 "apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview",
             })
             user = result.get("status", {}).get("userInfo", {})
-            if (code not in {200, 201} or user.get("username") != "system:serviceaccount:" + authority.namespace + ":loom-management-provisioner"
+            if (code not in {200, 201} or user.get("username") != "system:serviceaccount:" + authority.namespace + ':' + account
                     or user.get("uid") != self.service_account_uid
                     or set(user.get("groups", [])) != {"system:serviceaccounts", "system:serviceaccounts:" + authority.namespace,
                                                       "system:authenticated"}):
@@ -97,6 +106,20 @@ class HTTPSManagementAuthorityProbe(ManagementKubernetesTransport):
             ):
                 if self._access(group=group, resource=resource, verb=verb):
                     raise ManagementStageError("management authority has unqualified global privileges")
+            if isinstance(authority, ApplicationNamespaceAuthorityV1):
+                for namespace in (authority.namespace, authority.shared_namespace):
+                    for group, resource, verb in (
+                        ('', 'secrets', 'get'), ('', 'secrets', 'create'), ('', 'serviceaccounts/token', 'create'),
+                        ('', 'persistentvolumeclaims', 'create'), ('', 'persistentvolumeclaims', 'delete'),
+                        ('apps', 'deployments', 'patch'), ('apps', 'deployments', 'delete'),
+                        ('networking.k8s.io', 'networkpolicies', 'list'), ('networking.k8s.io', 'networkpolicies', 'patch'),
+                    ):
+                        if self._access(group=group, resource=resource, verb=verb, namespace=namespace):
+                            raise ManagementStageError('application authority has unqualified shared or management privileges')
+                for purpose in ('postgres', 'control-plane', 'gateway'):
+                    if not self._access(group='networking.k8s.io', resource='networkpolicies', verb='get',
+                            name=authority.name + '-' + purpose, namespace=authority.shared_namespace):
+                        return False
             probe_id = uuid4()
             document: dict[str, Any] = {"apiVersion": "v1", "kind": "Namespace", "metadata": {
                 "name": "loom-dev-probe-" + probe_id.hex, "labels": {
@@ -105,13 +128,37 @@ class HTTPSManagementAuthorityProbe(ManagementKubernetesTransport):
                     "pod-security.kubernetes.io/enforce": "restricted",
                 },
             }}
+            if isinstance(authority, ApplicationNamespaceAuthorityV1):
+                labels = document['metadata']['labels']
+                labels.pop('loom.nebius/namespace-installation')
+                labels.pop('loom.nebius/environment-id')
+                labels.update({'loom.nebius/application-installation': str(authority.installation_id),
+                    'loom.nebius/application-id': str(probe_id), 'loom.nebius/data-environment-id': str(authority.data_environment_id)})
             code, result = self._post("/api/v1/namespaces?dryRun=All", document)
             if code not in {200, 201} or result.get("metadata", {}).get("name") != document["metadata"]["name"]:
                 raise ManagementStageError("management authority cannot admit an owned namespace")
             invalid = copy.deepcopy(document)
             invalid["metadata"]["name"] = "foreign-probe-" + probe_id.hex
-            if not self._denied("/api/v1/namespaces", invalid, "namespaces", "management namespace boundary"):
+            message = 'application namespaces boundary' if application else 'management namespace boundary'
+            if not self._denied("/api/v1/namespaces", invalid, "namespaces", message):
                 return False
+            if isinstance(authority, ApplicationNamespaceAuthorityV1):
+                shared = copy.deepcopy(document)
+                shared['metadata']['name'] = authority.shared_namespace
+                legacy = copy.deepcopy(document)
+                labels = legacy['metadata']['labels']
+                labels.pop('loom.nebius/application-installation')
+                labels.update({'loom.nebius/namespace-installation': str(authority.installation_id),
+                    'loom.nebius/environment-id': str(probe_id)})
+                for forbidden in (shared, legacy):
+                    if not self._denied('/api/v1/namespaces', forbidden, 'namespaces', message):
+                        return False
+                for namespace in (authority.namespace, authority.shared_namespace):
+                    path = '/apis/rbac.authorization.k8s.io/v1/namespaces/' + namespace + '/rolebindings'
+                    if not self._denied(path, application_namespace_binding(authority, namespace),
+                                       'bindings', 'application bindings boundary'):
+                        return False
+                return True
             # The management namespace is deliberately not a child namespace.
             # The bootstrap RoleBinding permission must not let the manager give
             # itself or other subjects resources in that (or any foreign) scope.

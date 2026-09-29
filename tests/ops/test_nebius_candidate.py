@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +18,42 @@ from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
 
 from loom.nebius_platform_render import build_platform
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+
+@pytest.fixture
+def source_checkout(tmp_path, monkeypatch):
+    root = tmp_path / 'checkout'
+    root.mkdir()
+    def git(*args):
+        return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True).stdout
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'Source fixture')
+    (root / 'source.txt').write_text('actual source bytes\n')
+    git('add', 'source.txt')
+    git('commit', '-qm', 'source fixture')
+    revision = git('rev-parse', 'HEAD').decode().strip()
+    archive = git('archive', '--format=tar', revision)
+    monkeypatch.setattr(candidate, 'ROOT', root)
+    return root, revision, archive
+
+
+def test_published_source_digest_measures_archive_bytes_not_git_identity(source_checkout):
+    _, revision, archive = source_checkout
+    result = candidate.source_archive_digest(revision)
+    assert result == 'sha256:' + hashlib.sha256(archive).hexdigest()
+    assert result != 'sha256:' + hashlib.sha256(revision.encode()).hexdigest()
+
+
+@pytest.mark.parametrize('change', ['tracked', 'untracked', 'wrong_revision'])
+def test_source_proof_rejects_checkout_that_cannot_describe_published_images(source_checkout, change):
+    root, revision, _ = source_checkout
+    if change == 'wrong_revision':
+        revision = '0' * 40
+    else:
+        (root / ('source.txt' if change == 'tracked' else 'untracked.txt')).write_text('not committed\n')
+    with pytest.raises(ValueError):
+        candidate.source_archive_digest(revision)
 
 
 def test_tooling_step_ignores_unrelated_apt_sources() -> None:
@@ -73,6 +110,8 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         env={**os.environ, "PUBLICATION_MODE": "platform", "AGENT_VERSION": "",
              "NEBIUS_TASK_WEB_EGRESS_READY": ready, "NEBIUS_SERVICE_LIFECYCLE_READY": ready,
              "NEBIUS_TASK_IDENTITY_READY": ready, "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_GUEST_RUNTIME_READY": "false", "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": "",
+             "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": "",
              "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
              "work": "/unused", "RUNNER_TEMP": "/unused"},
     )
@@ -82,6 +121,43 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
         assert result.returncode == 0, result.stderr
         for flag in ("--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"):
             assert (flag in result.stdout.splitlines()) is (ready == "true")
+
+
+@pytest.mark.parametrize("ready,volume,artifact,mode,valid", [
+    ("false", "", "", "platform", True),
+    ("true", "1024", "10737418240", "platform", True),
+    ("true", "", "10737418240", "platform", False),
+    ("true", "1024", "", "platform", False),
+    ("invalid", "1024", "10737418240", "platform", False),
+    ("false", "1024", "10737418240", "platform", False),
+    ("true", "1024", "10737418240", "harness", True),
+])
+def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, artifact, mode, valid):
+    workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
+    step = next(step for step in workflow["jobs"]["publish"]["steps"]
+                if step.get("name") == "Build and publish the fixed candidate")
+    script = step["run"].split('publication_args=(--mode "$PUBLICATION_MODE")', 1)[1]
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c",
+         'uv() { printf "%s\\n" "$@"; }\npublication_args=(--mode "$PUBLICATION_MODE")' + script],
+        capture_output=True, text=True,
+        env={**os.environ, "PUBLICATION_MODE": mode, "AGENT_VERSION": "",
+             "NEBIUS_TASK_WEB_EGRESS_READY": "true", "NEBIUS_SERVICE_LIFECYCLE_READY": "true",
+             "NEBIUS_TASK_IDENTITY_READY": "true", "NEBIUS_REGISTRY_PREFIX": "fixture",
+             "NEBIUS_GUEST_RUNTIME_READY": ready, "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": volume,
+             "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": artifact,
+             "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
+             "work": "/unused", "RUNNER_TEMP": "/unused"},
+    )
+    assert (result.returncode == 0) is valid, result.stderr
+    arguments = result.stdout.splitlines()
+    if valid and ready == "true" and mode == "platform":
+        for flag, value in (("--guest-runtime", "qemu-tcg-v1"),
+                            ("--guest-runtime-volume-mib", volume),
+                            ("--guest-max-artifact-bytes", artifact)):
+            assert arguments[arguments.index(flag) + 1] == value
+    else:
+        assert not any(argument.startswith("--guest-") for argument in arguments)
 
 
 def inputs(tmp_path: Path) -> tuple[dict, Path, str]:
@@ -194,6 +270,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert "tb90_task" not in manifest["images"]
     config, _, _ = request.getfixturevalue("platform_inputs")
     if enabled:
+        config["guest_execution_target"] = {"target_id": "nebius-guest-fixture"}
         config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
         config["task_identity_policy"] = {
             "mode": "private-root-v1", "target_id": config["target_id"],
@@ -209,6 +286,10 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert catalog["execution_class"].get("supports_task_web_egress", False) is enabled
     assert catalog["topology"]["execution_class_id"] == expected
     assert all(row["execution_class_id"] == expected for row in catalog["topology"]["targets"])
+    if enabled:
+        guest_target, = json.loads(data["guest-catalog.json"])["topology"]["targets"]
+        assert guest_target["target_id"] == "nebius-guest-fixture"
+        assert guest_target["capacity_owner_target_id"] == config["target_id"]
     manifest["images"]["web"]["image_ref"] = "image:mutable"
     (output / "candidate.json").write_text(json.dumps(manifest))
     result = subprocess.run(verify, capture_output=True, text=True, env=environment)
@@ -429,6 +510,10 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         return ""
 
     monkeypatch.setattr(candidate, "_run", run)
+    def source_digest(revision):
+        assert revision == 'a' * 40
+        return 'sha256:' + 'f' * 64
+    monkeypatch.setattr(candidate, 'source_archive_digest', source_digest, raising=False)
     def copy_image(archive, tag, *, timeout_seconds):
         assert timeout_seconds == 1200
         run("skopeo", "copy", "--preserve-digests", f"oci-archive:{archive}", f"docker://{tag}")
@@ -462,6 +547,7 @@ def test_publication_builds_selected_images_and_reuses_platform_admission(
         assert not (output / "runtime-profile.json").exists()
     else:
         manifest = json.loads((output / "candidate.json").read_text())
+        assert manifest['source_archive_sha256'] == 'sha256:' + 'f' * 64
         profile = json.loads((output / "runtime-profile.json").read_text())
         assert profile["execution_class_id"] == (
             "linux-amd64-cpu-web-pod-v1" if enabled else "linux-amd64-cpu-pod-v1"

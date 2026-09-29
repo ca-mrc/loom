@@ -68,7 +68,9 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None,
             process = subprocess.Popen(command, stdout=log, stderr=log)
             client = httpx.Client(transport=httpx.HTTPTransport(uds=str(socket)), timeout=40)
             try:
-                deadline = time.monotonic() + 65
+                # Cover the runtime's 30s disk + 90s boot limits before the
+                # harness declares failure; healthy slow Docker boot is valid.
+                deadline = time.monotonic() + 125
                 while wait_ready:
                     try:
                         response = client.get("http://sandbox/health")
@@ -351,7 +353,7 @@ def container_guest(*, memory_mib: int = 1024, storage_mib: int = 160,
                 with httpx.Client(
                     transport=httpx.HTTPTransport(uds=str(rpc / "sandbox.sock")), timeout=35
                 ) as client:
-                    deadline = time.monotonic() + 65
+                    deadline = time.monotonic() + 125
                     while True:
                         try:
                             if client.get("http://sandbox/health").is_success:

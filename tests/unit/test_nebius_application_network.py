@@ -63,3 +63,26 @@ def test_shared_access_rejects_mismatched_or_non_development_bindings(platform_i
         })
     with pytest.raises(ValueError):
         render_application_shared_access(authority, shared, foundation)
+
+
+def test_shared_observer_has_only_three_named_policy_reads_in_the_bound_namespace(platform_inputs):
+    from loom.nebius_application_authority import render_application_shared_observer
+
+    authority = authority_for(inputs(platform_inputs)[2])
+    docs = render_application_shared_observer(authority)
+    role, binding = docs
+    assert role["kind"] == "Role" and role["metadata"]["namespace"] == authority.shared_namespace
+    assert role["rules"] == [{"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"],
+        "verbs": ["get"], "resourceNames": [authority.name + "-" + purpose
+            for purpose in ("postgres", "control-plane", "gateway")]}]
+    assert binding["kind"] == "RoleBinding" and binding["metadata"]["namespace"] == authority.shared_namespace
+    assert binding["roleRef"] == {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": role["metadata"]["name"]}
+    assert binding["subjects"] == [{"kind": "ServiceAccount", "name": "loom-application-provisioner", "namespace": authority.namespace}]
+
+
+def test_shared_observer_revalidates_unchecked_authority(platform_inputs):
+    from loom.nebius_application_authority import render_application_shared_observer
+
+    authority = authority_for(inputs(platform_inputs)[2]).model_copy(update={"namespace": "kube-system"})
+    with pytest.raises(ValueError):
+        render_application_shared_observer(authority)

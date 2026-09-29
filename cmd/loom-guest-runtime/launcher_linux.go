@@ -148,7 +148,9 @@ func runGuest(parent context.Context, c guestConfig) (failure error) {
 		_ = qemu.Process.Kill()
 		<-stopped
 	}()
-	bootCtx, stopBoot := context.WithTimeout(ctx, 60*time.Second)
+	// Includes kernel/bootstrap work and the guest's 60-second Docker budget.
+	// Together with disk preparation this fits the 150-second startup probe.
+	bootCtx, stopBoot := context.WithTimeout(ctx, 90*time.Second)
 	channel, err := connectGuest(bootCtx, filepath.Join(c.State, "channel.sock"))
 	stopBoot()
 	if err != nil {

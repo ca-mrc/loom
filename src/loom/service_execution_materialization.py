@@ -832,7 +832,9 @@ def _compile_terminus_plan(
     for role in ("task-sandbox", "verifier-sandbox"):
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
-        startup_probe = (probe.model_copy(update={"failure_threshold": 60})
+        # Guest disk preparation (30s) and boot (90s) need room to complete
+        # before Kubernetes treats a healthy slow sandbox as failed.
+        startup_probe = (probe.model_copy(update={"failure_threshold": 75})
                          if guest_execution is not None else probe)
         user = (task.verifier.user if role == "verifier-sandbox" and task.verifier.user is not None
                 else env.user)

@@ -396,6 +396,16 @@ def configure_platform(
     ]
     if sorted(observed["target_ids"]) != sorted(expected_targets):
         raise ValueError("catalog readback mismatch")
+    guest_id = config.get("guest_execution_target", {}).get("target_id")
+    if guest_id is not None:
+        guest_catalog = json.loads((config_dir / "guest-catalog.json").read_text())
+        guest_targets = guest_catalog.get("topology", {}).get("targets", [])
+        if (len(guest_targets) != 1 or guest_targets[0].get("target_id") != guest_id
+                or guest_targets[0].get("capacity_owner_target_id") != config["target_id"]):
+            raise ValueError("guest catalog is not bound to the declared physical owner")
+        observed_guest = request("POST", "/admin/service-execution/catalog", guest_catalog)
+        if observed_guest.get("target_ids") != [guest_id]:
+            raise ValueError("guest catalog readback mismatch")
     retained_policies = {}
     for target_config in [config, *config.get("regional_execution_targets", [])]:
         price = request(
@@ -421,6 +431,14 @@ def configure_platform(
             or binding.get("enabled") is not True
         ):
             raise ValueError("execution price target binding readback mismatch")
+        if guest_id is not None and target_config["target_id"] == config["target_id"]:
+            guest_binding = request("PUT", "/admin/execution-target-price-bindings/" + guest_id, {
+                "price_snapshot_id": price["id"], "enabled": True,
+                "reason": "Guest sibling uses its ordinary physical owner's immutable price snapshot",
+            })
+            if (guest_binding.get("price_snapshot_id") != price["id"]
+                    or guest_binding.get("target_id") != guest_id or guest_binding.get("enabled") is not True):
+                raise ValueError("guest execution price binding readback mismatch")
         capacity_status = request("GET", "/admin/execution-capacity/status")
         existing_policy = next(
             (
@@ -505,6 +523,9 @@ def configure_platform(
     )
     # Operator intent is distinct from actuator-observed readiness: no healthy
     # claim is synthesized by deployment. The actuator refreshes actual health.
+    # Guest siblings are deliberately excluded from legacy bootstrap activation.
+    # Their existing intent is preserved; new guests stay disabled until an
+    # explicit API activation after current-scope capacity and qualification.
     with psycopg.connect(
         database_url(os.environ["LOOM_DB_URL"], config["namespace"])
     ) as connection:

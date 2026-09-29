@@ -247,3 +247,148 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         assert "private-root-v1" in rejected.value.body
     finally:
         container.stop()
+
+
+def _guest_pod(namespace: str) -> dict:
+    from loom.execution_contract import workload_requirements_from_task
+    from loom.pipeline.keys import canonical_digest
+    from tests.unit.test_guest_execution_materialization import _compile, _guest_inputs
+
+    task, trial, profile = _guest_inputs()
+    plan = _compile(task, trial, profile)
+    lease = _lease(namespace)
+    lease.target_id = "disposable-guest"
+    lease.execution_class_id = plan.execution_class_id
+    lease.runtime_contract_json = plan.canonical_payload()
+    lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
+    lease.workload_requirements_json = workload_requirements_from_task(task).model_dump(mode="json")
+    lease.workload_requirements_sha256 = canonical_digest(lease.workload_requirements_json)
+    template = render_execution_job(lease, target=ExecutionTargetRuntime(
+        target_id=lease.target_id, namespace=namespace,
+    ))["spec"]["template"]
+    return {"apiVersion": "v1", "kind": "Pod", "metadata": {
+        **template["metadata"], "name": "guest-admission", "namespace": namespace,
+    }, "spec": template["spec"]}
+
+
+@pytest.mark.timeout(240)
+def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path):
+    import json
+    import os
+    import subprocess
+    import time
+
+    if os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1":
+        pytest.skip("set LOOM_RUN_DISPOSABLE_K3S=1 for actual isolated admission checks")
+    namespace = "loom-guest-policy-test"
+    policies = identity_policy_documents(namespace, "disposable-k3s", guest_target_id="disposable-guest")
+    container = _start_k3s()
+    _load_client(container)
+
+    def apply(documents, *, dry_run=False):
+        path = tmp_path / "guest-policy.yaml"
+        path.write_text(yaml.safe_dump_all(documents))
+        subprocess.run(["docker", "cp", str(path), container.get_wrapped_container().id + ":/tmp/guest-policy.yaml"],
+                       check=True, capture_output=True)
+        return container.exec(["kubectl", "apply", "-f", "/tmp/guest-policy.yaml", *(["--dry-run=server"] if dry_run else [])])
+
+    try:
+        result = apply([
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": namespace, "labels": identity_namespace_labels(),
+            }},
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {
+                "name": "loom-execution-attempt", "namespace": namespace,
+            }, "automountServiceAccountToken": False},
+            *policies,
+        ])
+        assert result.exit_code == 0, result.output.decode()
+        # Admission can evaluate a new policy before its asynchronous static
+        # type-checking status is published. Deployment requires that status.
+        deadline = time.monotonic() + 30
+        while True:
+            observed = container.exec([
+                "kubectl", "get", "validatingadmissionpolicy",
+                policies[0]["metadata"]["name"], "-o", "json",
+            ])
+            assert observed.exit_code == 0, observed.output.decode()
+            policy = json.loads(observed.output)
+            status = policy.get("status", {})
+            if (status.get("observedGeneration") == policy["metadata"]["generation"]
+                    and status.get("observedGeneration", 0) > 0):
+                break
+            assert time.monotonic() < deadline, "policy type checking did not finish"
+            time.sleep(0.2)
+        assert not status.get("typeChecking", {}).get("expressionWarnings"), status
+        guest = _guest_pod(namespace)
+        for _ in range(60):
+            result = apply([guest], dry_run=True)
+            if result.exit_code == 0:
+                break
+            time.sleep(0.2)
+        assert result.exit_code == 0, result.output.decode()
+        assert apply([_pod(namespace)], dry_run=True).exit_code == 0
+        for damage in ("owner-target", "foreign-target", "host-cap", "writable-root", "foreign-state", "host-volume", "unbounded-state", "memory-state", "shell", "probe", "host-sysctl"):
+            changed = deepcopy(guest)
+            sidecar = next(c for c in changed["spec"]["initContainers"] if c["name"] == "task-sandbox")
+            if damage.endswith("target"):
+                changed["metadata"]["annotations"]["loom.openai.com/target-id"] = (
+                    "disposable-k3s" if damage == "owner-target" else "foreign")
+            elif damage == "host-cap":
+                sidecar["securityContext"]["capabilities"]["add"].append("SYS_ADMIN")
+            elif damage == "writable-root":
+                sidecar["securityContext"]["readOnlyRootFilesystem"] = False
+            elif damage == "foreign-state":
+                sidecar["volumeMounts"][-1]["name"] = "verifier-sandbox-guest-state"
+            elif damage == "host-volume":
+                volume = next(v for v in changed["spec"]["volumes"] if v["name"] == "task-sandbox-guest-state")
+                volume.pop("emptyDir")
+                volume["hostPath"] = {"path": "/"}
+            elif damage in {"unbounded-state", "memory-state"}:
+                volume = next(v for v in changed["spec"]["volumes"] if v["name"] == "task-sandbox-guest-state")
+                if damage == "unbounded-state":
+                    volume["emptyDir"].pop("sizeLimit")
+                else:
+                    volume["emptyDir"]["medium"] = "Memory"
+            elif damage == "shell":
+                sidecar["command"] = ["/bin/sh", "-c", "sleep 1000"]
+            elif damage == "probe":
+                sidecar["startupProbe"]["exec"]["command"] = ["/bin/sh", "-c", "true"]
+            else:
+                changed["spec"]["securityContext"]["sysctls"] = [{"name": "kernel.core_pattern", "value": "x"}]
+            result = apply([changed], dry_run=True)
+            assert result.exit_code != 0, damage
+        # A warning followed by a clean update can omit the now-empty
+        # typeChecking parent from the server-side-applied status. Exercise
+        # actual recovery through the same gate used by protected rollout.
+        broken = deepcopy(policies)
+        broken[0]["spec"]["validations"].append({
+            "expression": "has(object.spec.undefinedField)",
+            "message": "Deliberate type-checking failure for recovery qualification.",
+        })
+        assert apply(broken).exit_code == 0
+        deadline = time.monotonic() + 30
+        while True:
+            observed = container.exec([
+                "kubectl", "get", "validatingadmissionpolicy",
+                policies[0]["metadata"]["name"], "-o", "json",
+            ])
+            policy = json.loads(observed.output)
+            status = policy.get("status", {})
+            if status.get("observedGeneration") == policy["metadata"]["generation"]:
+                assert status.get("typeChecking", {}).get("expressionWarnings")
+                break
+            assert time.monotonic() < deadline, "deliberate warning was not observed"
+            time.sleep(0.2)
+        from scripts.ops.deploy_nebius_platform import Kubectl, install_task_identity_policy
+
+        kubeconfig = tmp_path / "kubeconfig"
+        kubeconfig.write_text(container.exec(["cat", "/etc/rancher/k3s/k3s.yaml"]).output.decode().replace(
+            "https://127.0.0.1:6443", f"https://127.0.0.1:{container.get_exposed_port(6443)}",
+        ))
+        subprocess.run(["kubectl", "--kubeconfig", str(kubeconfig), "config", "rename-context", "default", "loom-rollout"],
+                       check=True, capture_output=True)
+        (tmp_path / "00-task-identity-policy.yaml").write_text(yaml.safe_dump_all(policies))
+        install_task_identity_policy(Kubectl(kubeconfig), {"execution_namespace": namespace}, tmp_path)
+    finally:
+        container.stop()

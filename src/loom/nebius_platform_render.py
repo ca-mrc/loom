@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from datetime import datetime
 from decimal import ROUND_CEILING, Decimal
 from ipaddress import IPv4Address, ip_address, ip_network
@@ -21,11 +22,13 @@ import yaml  # type: ignore[import-untyped]
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
     nebius_cpu_execution_class,
+    nebius_guest_execution_class,
 )
 from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     TaskExecutionResourceRequestsV1,
 )
+from loom.nebius_guest_target import guest_target_id
 from loom.nebius_task_identity_policy import (
     identity_namespace_labels,
     identity_policy_documents,
@@ -108,11 +111,13 @@ def validate_environment(config: dict[str, Any]) -> None:
             "default_task_resource_requests",
             "task_egress",
             "task_identity_policy",
+            "guest_execution_target",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     try:
+        guest_target_id(config)
         validate_identity_policy(config)
     except ValueError as exc:
         raise NebiusPlatformError(str(exc)) from exc
@@ -1183,6 +1188,28 @@ def _execution_documents(
             doc["spec"]["hard"] = _execution_quota(config, execution_docs)
     if builder is not None:
         execution_docs.extend(_task_image_builder_documents(config, builder))
+    guest_id = guest_target_id(config)
+    if guest_id is not None:
+        # Reuse namespace RBAC and network policy, with independent controller
+        # health/lease identity. The physical collector and native builder stay
+        # on the ordinary owner; cloning either would duplicate its authority.
+        guest = deepcopy(next(doc for doc in execution_docs if doc["kind"] == "Deployment"
+                              and doc["metadata"]["name"] == "loom-execution-actuator"))
+        guest_name = guest_id + "-actuator"
+        guest["metadata"]["name"] = guest_name
+        guest["metadata"]["labels"]["app.kubernetes.io/name"] = guest_name
+        guest["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] = guest_name
+        guest["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/name"] = guest_name
+        pod = guest["spec"]["template"]["spec"]
+        if "affinity" in pod:
+            pod["affinity"] = _replace_tree(pod["affinity"], {"loom-execution-actuator": guest_name})
+        for container in pod["containers"]:
+            container["env"] = [entry for entry in container["env"]
+                                if entry["name"] != "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]
+            for entry in container["env"]:
+                if entry["name"] == "LOOM_EXECUTION_ACTUATOR_TARGET_ID":
+                    entry["value"] = guest_id
+        execution_docs.append(guest)
     return execution_docs
 
 
@@ -1366,6 +1393,13 @@ def _build_platform(
     if not execution_enabled and ("task_identity_policy" in config or config.get("regional_execution_targets")):
         raise NebiusPlatformError("non-executing templates cannot inherit execution authority")
     validate_environment(config)
+    guest_id = guest_target_id(config)
+    if profile.get("guest_runtime") not in (None, "qemu-tcg-v1"):
+        raise NebiusPlatformError("unsupported guest runtime")
+    if profile.get("guest_runtime") is not None and guest_id is None:
+        raise NebiusPlatformError("guest runtime readiness requires a distinct guest execution target")
+    if guest_id is not None and (not execution_enabled or not validate_identity_policy(config)):
+        raise NebiusPlatformError("guest execution requires the constrained private-root namespace policy")
     for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
         if type(profile.get(capability, False)) is not bool:
             raise NebiusPlatformError(f"runtime profile {capability} must be a boolean")
@@ -1425,7 +1459,7 @@ def _build_platform(
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
     if validate_identity_policy(config):
         files["00-namespaces.yaml"][1]["metadata"]["labels"].update(identity_namespace_labels())
-        files["00-task-identity-policy.yaml"] = identity_policy_documents(ex, config["target_id"])
+        files["00-task-identity-policy.yaml"] = identity_policy_documents(ex, config["target_id"], guest_target_id=guest_id)
     db_host = f"loom-postgres.{ns}.svc"
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     target = {
@@ -1477,6 +1511,17 @@ def _build_platform(
         "catalog.json": canonical(catalog).decode(),
         "public-tls.json": canonical(public_tls_config(config)).decode(),
     }
+    if guest_id is not None:
+        guest_class = nebius_guest_execution_class(
+            supports_task_web_egress=profile.get("supports_task_web_egress", False),
+        )
+        guest_target = dict(target, target_id=guest_id, execution_class_id=guest_class.class_id,
+                            capacity_owner_target_id=config["target_id"], health_check_id=guest_id)
+        cm["data"]["guest-catalog.json"] = canonical({
+            "execution_class": guest_class.model_dump(mode="json"),
+            "topology": {**catalog["topology"], "execution_class_id": guest_class.class_id,
+                         "targets": [guest_target]},
+        }).decode()
     if "task_egress" in config:
         cm["data"]["task-egress.json"] = canonical(config["task_egress"]).decode()
     private_ingress = [
@@ -1902,7 +1947,7 @@ def _build_platform(
     for document in execution_docs:
         if document["kind"] == "ResourceQuota" and document["metadata"].get("namespace") == ex:
             document["spec"]["hard"] = _execution_quota(config, execution_docs)
-    if config.get("regional_execution_targets"):
+    if config.get("regional_execution_targets") or guest_id is not None:
         database_policy = next(
             doc
             for doc in files["10-config-network.yaml"]
@@ -1918,9 +1963,14 @@ def _build_platform(
                         }
                     },
                 }
-                for regional in config["regional_execution_targets"]
+                for regional in config.get("regional_execution_targets", [])
             ]
         )
+        if guest_id is not None:
+            database_policy["spec"]["ingress"][0]["from"].append({
+                "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ex}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": guest_id + "-actuator"}},
+            })
     files["00-namespaces.yaml"].extend(doc for doc in execution_docs if doc["kind"] == "Namespace")
     files["60-execution.yaml"] = [doc for doc in execution_docs if doc["kind"] != "Namespace"]
     public = _service("loom-web", ns, 443, 8443)

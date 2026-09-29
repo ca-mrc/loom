@@ -6,10 +6,13 @@ import argparse
 import json
 import os
 import re
+import shlex
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[2]
 if __package__ in {None, ""}:
@@ -104,6 +107,200 @@ def _failed_bootstrap_jobs(kube: Kubectl, pods: list[dict[str, Any]], namespace:
     return result
 
 
+def _retirement_diagnostic(raw: str) -> dict[str, str]:
+    for line in reversed(raw[-16_384:].splitlines()[-50:]):
+        try:
+            value = json.loads(line)
+        except (ValueError, RecursionError):
+            # Import failures occur before the CLI's sanitized exception handler.
+            error = line.partition(":")[0]
+            if error in {"ImportError", "ModuleNotFoundError", "SyntaxError", "IndentationError"}:
+                return {"error_type": error}
+            continue
+        if isinstance(value, dict) and value.get("status") in ("retirement_blocked", "retirement_completed"):
+            return {"status": value["status"]}
+    return {"status": "unavailable"}
+
+
+def _retirement_journal_bound(job: dict[str, Any], cm: dict[str, Any], namespace_uids: dict[str, str]) -> bool:
+    """Compare live identities with private create receipts without exporting them."""
+    from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+    from scripts.ops.nebius_management_gateway import validate_operation
+
+    from loom.nebius_platform_render import digest
+
+    operation = json.loads(os.environ["NEBIUS_MANAGEMENT_OPERATION_JSON"])
+    validate_operation(operation)
+    namespace = job["metadata"]["namespace"]
+    installation = job["metadata"]["labels"]["loom.nebius/management-installation"]
+    if (operation["schema"] != "loom.nebius-management-retirement-operation.v1"
+            or (operation["namespace"], operation["installation_id"]) != (namespace, installation)):
+        raise ValueError
+    expected = {"binding": {"installation_id": installation, "namespace": namespace,
+        "namespace_uid": namespace_uids[namespace], "kube_system_uid": namespace_uids["kube-system"]},
+        "resources": {_key(doc): {"uid": _uid(doc), "snapshot": digest(_snapshot(doc))} for doc in (job, cm)}}
+    target = os.environ["LOOM_DEPLOY_SSH_TARGET"]
+    if re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target) is None:
+        raise ValueError
+    arguments = ["python3", "-", operation["state_dir"], json.dumps(expected)]
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
+        "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+        "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
+        "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target, shlex.join(arguments)]
+    result = subprocess.run(command, input=Path(__file__).with_name("nebius_retirement_journal_probe.py").read_text(),
+        capture_output=True, text=True, timeout=40, check=False)
+    return result.returncode == 0 and len(result.stdout) <= 256 and json.loads(result.stdout) == {"status": "matched"}
+
+
+def _retirement_registry_probe(kube: Kubectl, pods: list[dict[str, Any]], job: dict[str, Any], namespace: str,
+                               namespace_uids: dict[str, str]) -> dict[str, Any]:
+    """Fixed protected exec reads only the failed Job's bound registry records."""
+    from scripts.ops.nebius_retirement_registry_probe import CHECKS, ERRORS
+
+    from loom_service.environment_management.retirement import RetirementSettings
+
+    stage = "configuration_identity"
+    try:
+        name = job["metadata"]["name"]
+        installation = job["metadata"]["labels"]["loom.nebius/management-installation"]
+        if str(UUID(installation)) != installation or not UUID(installation).int:
+            raise ValueError
+        cm = kube.get("configmap", name, namespace)
+        if (cm.get("immutable") is not True or cm["metadata"]["labels"].get("loom.nebius/retirement") != name
+                or cm["metadata"]["labels"].get("loom.nebius/management-installation") != installation):
+            raise ValueError
+        if os.environ.get("NEBIUS_MANAGEMENT_OPERATION_JSON"):
+            # Exact UID/snapshot receipts also work when server timestamps tie.
+            # A selected but mismatched journal must never fall back to a guess.
+            stage = "configuration_journal"
+            if not _retirement_journal_bound(job, cm, namespace_uids):
+                raise ValueError
+        else:
+            # Without protected journal metadata retain the conservative check.
+            stage = "configuration_lineage"
+            config_created = datetime.fromisoformat(cm["metadata"]["creationTimestamp"])
+            job_created = datetime.fromisoformat(job["metadata"]["creationTimestamp"])
+            if config_created.tzinfo is None or job_created.tzinfo is None or config_created >= job_created:
+                raise ValueError
+        stage = "settings"
+        settings = RetirementSettings.model_validate_json(cm["data"]["retirement.json"])
+        if (settings.namespace != namespace or not any(volume.get("name") == "retirement"
+                and volume.get("configMap", {}).get("name") == name for volume in job["spec"]["template"]["spec"]["volumes"])):
+            raise ValueError
+        stage = "manager_selection"
+        managers = [pod for pod in pods if pod["metadata"].get("namespace") == namespace
+            and pod["metadata"].get("labels", {}).get("loom.nebius/management-installation") == installation
+            and pod["metadata"].get("labels", {}).get("app") == "loom-service"
+            and pod.get("spec", {}).get("serviceAccountName") == "loom-application-provisioner"
+            and not pod["metadata"].get("deletionTimestamp") and pod.get("status", {}).get("phase") == "Running"
+            and any(row.get("name") == "loom-service" and row.get("ready") is True
+                    for row in pod.get("status", {}).get("containerStatuses", []))]
+        if len(managers) != 1:
+            raise ValueError
+        manager = managers[0]
+
+        def same_manager(current: dict[str, Any]) -> bool:
+            return (all(current["metadata"].get(key) == manager["metadata"].get(key)
+                        for key in ("name", "namespace", "uid", "labels", "deletionTimestamp"))
+                    and current.get("spec") == manager["spec"]
+                    and current.get("status", {}).get("phase") == "Running"
+                    and any(row.get("name") == "loom-service" and row.get("ready") is True
+                            for row in current.get("status", {}).get("containerStatuses", [])))
+
+        stage = "manager_before"
+        before = kube.get("pod", manager["metadata"]["name"], namespace)
+        if not same_manager(before):
+            raise ValueError
+        stage = "payload"
+        targets = [target.model_dump(mode="json") for target in settings.targets]
+        payload = json.dumps(targets)
+        if len(payload.encode()) > 65536:
+            raise ValueError
+        source = Path(__file__).with_name("nebius_retirement_registry_probe.py").read_text()
+        stage = "exec"
+        raw = kube.run("exec", manager["metadata"]["name"], "-n", namespace, "-c", "loom-service", "--",
+                       "python", "-c", source, namespace, payload, timeout=90)
+        stage = "output"
+        if len(raw.encode()) > 16384:
+            raise ValueError
+        stage = "manager_after"
+        if not same_manager(kube.get("pod", manager["metadata"]["name"], namespace)):
+            raise ValueError
+        stage = "output"
+        value = json.loads(raw)
+        if value.get("status") == "unavailable":
+            return {"status": "unavailable", "stage": value["stage"] if value.get("stage") in ("inputs", "database", "registry") else "unknown",
+                "error_type": value["error_type"] if value.get("error_type") in ERRORS else "OtherError"}
+        if value.get("status") != "observed" or value.get("read_only") is not True or len(value["targets"]) != len(targets):
+            raise ValueError
+        rows = []
+        for expected, row in zip(targets, value["targets"], strict=True):
+            if row["operation_id"] != expected["operation_id"] or any(type(row["checks"].get(key)) is not bool for key in CHECKS):
+                raise ValueError
+            rows.append({"operation_id": expected["operation_id"], "checks": {key: row["checks"][key] for key in CHECKS}})
+        return {"status": "observed", "read_only": True, "manager_pod_uid": manager["metadata"]["uid"], "targets": rows}
+    except Exception as error:
+        kind = type(error).__name__
+        result = {"status": "unavailable", "stage": stage, "error_type": kind if kind in {
+            *ERRORS, "DeploymentError", "JSONDecodeError", "TypeError", "TimeoutExpired", "FileNotFoundError",
+        } else "OtherError"}
+        # Kubectl already sanitizes API failures. Project only known reason
+        # codes; never return its message or an arbitrary exception's payload.
+        if isinstance(error, DeploymentError):
+            reason = str(error).rpartition(": ")[2]
+            if reason in {"Forbidden", "Unauthorized", "NotFound", "BadRequest", "CommandFailed", "DeadlineExceeded"}:
+                result["api_reason"] = reason
+        return result
+
+
+def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]], namespace_uids: dict[str, str]) -> list[dict[str, Any]]:
+    """Read-only failed-Job evidence; never export log text or termination messages."""
+    result: list[dict[str, Any]] = []
+    inspected = 0
+    for pod in sorted(pods, key=lambda p: p["metadata"].get("creationTimestamp", ""), reverse=True):
+        metadata = pod["metadata"]
+        namespace = metadata.get("namespace", "")
+        if (not re.fullmatch(r"loom-nebius-management(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?", namespace)
+                or pod.get("status", {}).get("phase") != "Failed"):
+            continue
+        owner = next((row for row in metadata.get("ownerReferences", [])
+                      if row.get("kind") == "Job" and row.get("controller") is True
+                      and re.fullmatch(r"loom-retirement-[0-9a-f]{12}", row.get("name", ""))), None)
+        if (owner is None or not isinstance(owner.get("uid"), str) or not owner["uid"]
+                or metadata.get("labels", {}).get("loom.nebius/retirement") != owner["name"]):
+            continue
+        container = next((row for row in pod.get("spec", {}).get("containers", []) if row.get("command") == [
+            "python", "-m", "loom_service.environment_management.retirement"]), None)
+        if container is None:
+            continue
+        if inspected == 3:
+            break
+        inspected += 1
+        job = kube.get("job", owner["name"], namespace)
+        if job.get("metadata", {}).get("uid") != owner["uid"] or not job_failed(job):
+            continue
+        status: dict[str, Any] = next((row for row in pod.get("status", {}).get("containerStatuses", [])
+                       if row.get("name") == container["name"]), {})
+        terminated = status.get("state", {}).get("terminated", {})
+        termination = {key: terminated[field] for key, field in (("exit_code", "exitCode"), ("signal", "signal"))
+                       if type(terminated.get(field)) is int and 0 <= terminated[field] <= 255}
+        if "reason" in terminated:
+            reason = terminated["reason"]
+            termination["reason"] = reason if reason in ("Error", "OOMKilled", "Completed", "ContainerCannotRun") else "Other"
+        try:
+            raw = kube.run("logs", metadata["name"], "-n", namespace, "-c", container["name"],
+                           "--tail=50", "--limit-bytes=16384", timeout=40)
+            diagnostic = _retirement_diagnostic(raw)
+        except Exception:
+            diagnostic = {"status": "unavailable"}
+        result.append({"namespace": namespace, "job": owner["name"], "job_uid": owner["uid"],
+                       "pod": metadata["name"], "pod_uid": metadata["uid"], "container": container["name"],
+                       "termination": termination, "diagnostic": diagnostic})
+        if diagnostic.get("status") == "retirement_blocked":
+            result[-1]["registry_probe"] = _retirement_registry_probe(kube, pods, job, namespace, namespace_uids)
+    return result
+
+
 def _fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: value[key] for key in keys if key in value}
 
@@ -170,6 +367,8 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
+        "failed_retirement_jobs": _failed_retirement_jobs(kube, pods,
+            {row["metadata"]["name"]: row["metadata"]["uid"] for row in namespaces}),
         "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
                                              namespace=namespace, expected_cluster_id=expected_cluster_id),
         "public_host": config["public_host"],
@@ -215,9 +414,13 @@ def main() -> int:
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--namespace", default="loom-nebius-platform")
     parser.add_argument("--evidence-dir", type=Path, required=True)
+    parser.add_argument('--prepare-shared-inputs', action='store_true',
+        help='Retain required shared inputs privately on the gateway; no cluster changes')
     args = parser.parse_args()
     try:
         result = inspect(Kubectl(args.kubeconfig), namespace=args.namespace, expected_cluster_id=args.expected_cluster_id)
+        if args.prepare_shared_inputs:
+            result['shared_input_observation'] = prepare_shared_inputs(result, kubeconfig=args.kubeconfig)
     except Exception as exc:
         # Never print raw config, kubeconfig, API errors or exception messages.
         result = {"schema_version": "loom.nebius-management-preflight.v1", "status": "blocked",
@@ -226,6 +429,31 @@ def main() -> int:
     (args.evidence_dir / "management-preflight.json").write_text(json.dumps(result, sort_keys=True) + "\n")
     print(json.dumps({"status": result["status"]}))
     return 0 if result["status"] == "observed" else 1
+
+
+def prepare_shared_inputs(report: dict[str, Any], *, kubeconfig: Path) -> dict[str, str]:
+    """Run the fixed collector remotely so no Secret payload enters Actions."""
+    target = os.environ['LOOM_DEPLOY_SSH_TARGET']
+    if not re.fullmatch(r'[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+', target):
+        raise DeploymentError('invalid observation SSH target')
+    identities = {row['name']: row['uid'] for row in report['namespaces']}
+    arguments = ['python3', '-', '--kubeconfig', str(kubeconfig), '--cluster-id', report['cluster_id'],
+        '--namespace', report['namespace'], '--namespace-uid', identities[report['namespace']],
+        '--kube-system-uid', identities['kube-system']]
+    command = ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
+        '-o', 'UserKnownHostsFile=' + os.environ['LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE'],
+        '-i', os.environ['LOOM_DEPLOY_SSH_KEY_FILE'], target, shlex.join(arguments)]
+    result = subprocess.run(command, input=Path(__file__).with_name('nebius_application_snapshot.py').read_text(),
+        capture_output=True, text=True, timeout=240, check=False)
+    if result.returncode or len(result.stdout) > 4096:
+        raise DeploymentError('shared input observation unavailable')
+    value = json.loads(result.stdout)
+    if (not isinstance(value, dict) or set(value) != {'status', 'observation_id', 'candidate_sha'}
+            or value['status'] != 'shared_inputs_observed' or str(UUID(value['observation_id'])) != value['observation_id']
+            or not UUID(value['observation_id']).int or not re.fullmatch(r'[0-9a-f]{40}', value['candidate_sha'])):
+        raise DeploymentError('shared input observation unqualified')
+    return {key: str(value[key]) for key in ('status', 'observation_id', 'candidate_sha')}
 
 
 if __name__ == "__main__":

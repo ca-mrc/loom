@@ -19,6 +19,78 @@ from tests.unit.test_nebius_platform_render import platform_inputs, regional_inp
 from loom.nebius_platform_render import build_platform, write_platform
 
 
+@pytest.mark.parametrize("status,accepted", [
+    ({"observedGeneration": 6}, True),
+    ({"observedGeneration": 6, "typeChecking": {}}, True),
+    ({"observedGeneration": 5}, False),
+    ({"observedGeneration": 6, "typeChecking": {
+        "expressionWarnings": [{"warning": "undefined field"}],
+    }}, False),
+])
+def test_policy_observation_requires_current_generation_without_warnings(tmp_path, monkeypatch, status, accepted):
+    """A clean warning-recovery readback may omit empty typeChecking."""
+    probes = []
+
+    class PolicyKube:
+        def get(self, kind, name, namespace):
+            assert kind == "validatingadmissionpolicy"
+            return {"metadata": {"generation": 6}, "status": status}
+
+        def run(self, *command):
+            assert command[0] == "apply"
+            if "--dry-run=server" in command:
+                pod = yaml.safe_load(Path(command[command.index("-f") + 1]).read_text())
+                capabilities = pod["spec"]["containers"][0]["securityContext"]["capabilities"]
+                probes.append(capabilities.get("add", []))
+                if probes[-1]:
+                    raise deploy.TaskIdentityPolicyDeniedError("execution-private-root-v1")
+            return ""
+
+    ticks = iter(range(0, 1000, 31))
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: next(ticks))
+    if accepted:
+        deploy.install_task_identity_policy(PolicyKube(), {"execution_namespace": "execution"}, tmp_path)
+        assert probes == [[], ["NET_BIND_SERVICE"]]
+    else:
+        with pytest.raises(deploy.DeploymentError, match=r"not observed|type-checking warnings"):
+            deploy.install_task_identity_policy(PolicyKube(), {"execution_namespace": "execution"}, tmp_path)
+        assert probes == []
+
+
+@pytest.mark.parametrize("failure", ["converges", "permanent", "foreign-policy", "transport"])
+def test_positive_admission_probe_waits_only_for_own_policy_convergence(tmp_path, monkeypatch, failure):
+    """Type-check status can advance before the admission evaluator's cache."""
+    probes = []
+
+    class PolicyKube:
+        def get(self, kind, name, namespace):
+            return {"metadata": {"generation": 6}, "status": {"observedGeneration": 6}}
+
+        def run(self, *command):
+            if "--dry-run=server" not in command:
+                return ""
+            pod = yaml.safe_load(Path(command[command.index("-f") + 1]).read_text())
+            extra = pod["spec"]["containers"][0]["securityContext"]["capabilities"].get("add", [])
+            probes.append(extra)
+            if extra or failure == "permanent" or len(probes) == 1:
+                if failure == "transport":
+                    raise deploy.DeploymentError("kubectl apply failed: Forbidden")
+                policy = "foreign-private-root-v1" if failure == "foreign-policy" else "execution-private-root-v1"
+                raise deploy.TaskIdentityPolicyDeniedError(policy)
+            return ""
+
+    ticks = iter([0, 1, 31])
+    monkeypatch.setattr(deploy.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(deploy.time, "sleep", lambda _: None)
+    if failure == "converges":
+        deploy.install_task_identity_policy(PolicyKube(), {"execution_namespace": "execution"}, tmp_path)
+        assert probes == [[], [], ["NET_BIND_SERVICE"]]
+    else:
+        with pytest.raises(deploy.DeploymentError):
+            deploy.install_task_identity_policy(PolicyKube(), {"execution_namespace": "execution"}, tmp_path)
+        assert probes == ([[], []] if failure == "permanent" else [[]])
+
+
 @pytest.mark.parametrize("enabled,selector", [
     (True, None), (True, {"app": "loom-web"}), (False, {"app": "loom-shared-ingress"}),
 ])
@@ -383,6 +455,34 @@ def test_retirement_cannot_name_the_destination_or_fresh_install(rendered, monke
     with pytest.raises(deploy.DeploymentError, match="target"):
         deploy.deploy(args, kube=kube)
     assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+@pytest.mark.parametrize("change", ["remove-guest", "rename-guest", "replace-owner"])
+def test_guest_target_replacement_requires_separate_retirement_protocol(rendered, change):
+    _, config, _, _ = rendered
+    previous = {**config, "guest_execution_target": {"target_id": "guest-original"}}
+    proposed = {**previous}
+    retire = None
+    if change == "remove-guest":
+        proposed.pop("guest_execution_target")
+    elif change == "rename-guest":
+        proposed["guest_execution_target"] = {"target_id": "guest-replacement"}
+    else:
+        proposed["target_id"] = "owner-replacement"
+        retire = previous["target_id"]
+    with pytest.raises(deploy.DeploymentError, match="guest"):
+        deploy.validate_target_replacement(
+            {"data": {"environment.json": json.dumps(previous)}}, proposed, retire,
+        )
+
+
+def test_guest_target_can_be_added_and_retained_without_replacing_owner(rendered):
+    _, config, _, _ = rendered
+    proposed = {**config, "guest_execution_target": {"target_id": "guest-original"}}
+    for previous in (config, proposed):
+        deploy.validate_target_replacement(
+            {"data": {"environment.json": json.dumps(previous)}}, proposed, None,
+        )
 
 
 @pytest.mark.parametrize("changed", ["target_id", "execution_namespace", "region"])

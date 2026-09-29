@@ -41,7 +41,48 @@ def identity_namespace_labels() -> dict[str, str]:
     }
 
 
-def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, Any]]:
+def _guest_private_expression() -> str:
+    return (
+        "has(c.restartPolicy) && c.restartPolicy == 'Always' && "
+        "size(c.command) in [19,20] && "
+        "c.command[0] == '/loom/runtime/guest/bin/loom-guest-runtime' && "
+        "c.command[1] == '--payload' && c.command[2] == '/loom/runtime/guest' && "
+        "c.command[3] == '--root' && c.command[4] == '/' && "
+        "c.command[5] == '--state' && c.command[6] == '/loom/guest-state/incarnation' && "
+        "c.command[7] == '--socket' && c.command[8] == '/loom/sandboxes/' + c.name + '/sandbox.sock' && "
+        "c.command[9] == '--memory-mib' && c.command[11] == '--storage-mib' && "
+        "c.command[13] == '--cpu-millis' && c.command[15] == '--max-transfer-bytes' && "
+        "c.command[17] == '--exec-timeout-seconds' && "
+        "[10,12,14,16,18].all(i, c.command[i].matches('^[1-9][0-9]*$')) && "
+        "int(c.command[10]) >= 512 && int(c.command[10]) <= 1048576 && "
+        "int(c.command[12]) >= 128 && int(c.command[12]) <= 1048576 && "
+        "int(c.command[14]) >= 1000 && int(c.command[14]) <= 128000 && "
+        "int(c.command[16]) <= 10737418240 && int(c.command[18]) <= 86400 && "
+        "(size(c.command) == 19 || c.command[19] == '--nested-docker') && "
+        "(!has(c.args) || size(c.args) == 0) && !has(c.lifecycle) && "
+        "(!has(c.envFrom) || size(c.envFrom) == 0) && (!has(c.env) || c.env.all(e, !has(e.valueFrom))) && "
+        "has(c.startupProbe) && has(c.startupProbe.exec) && has(c.readinessProbe) && has(c.readinessProbe.exec) && "
+        "c.startupProbe.exec.command == ['/loom/bin/loom-sandbox-runtime','--check-socket','/loom/sandboxes/' + c.name + '/sandbox.sock'] && "
+        "c.readinessProbe.exec.command == c.startupProbe.exec.command && "
+        "has(c.securityContext.readOnlyRootFilesystem) && c.securityContext.readOnlyRootFilesystem && "
+        "has(c.securityContext.runAsNonRoot) && !c.securityContext.runAsNonRoot && "
+        "has(c.securityContext.runAsUser) && c.securityContext.runAsUser == 0 && "
+        "has(c.securityContext.runAsGroup) && c.securityContext.runAsGroup == 0 && "
+        "has(c.securityContext.capabilities.add) && c.securityContext.capabilities.add == ['DAC_OVERRIDE'] && "
+        "size(c.volumeMounts) == 6 && c.volumeMounts.all(m, "
+        "!has(m.subPathExpr) && !has(m.mountPropagation) && "
+        "((m.name == c.name + '-socket' && m.mountPath == '/loom/sandboxes/' + c.name && !has(m.subPath)) || "
+        "(m.name == c.name + '-guest-state' && m.mountPath == '/loom/guest-state' && !has(m.subPath)) || "
+        "(m.name == 'runtime' && m.mountPath == '/loom/runtime' && !has(m.subPath) && has(m.readOnly) && m.readOnly) || "
+        "(m.name == 'runtime' && m.mountPath == '/loom/bin/loom-sandbox-runtime' && "
+        "has(m.subPath) && m.subPath == 'loom-sandbox-runtime' && has(m.readOnly) && m.readOnly) || "
+        "(m.name == c.name + '-socket' && has(m.subPath) && "
+        "((m.mountPath == '/etc/hosts' && m.subPath == 'network/hosts') || "
+        "(m.mountPath == '/etc/resolv.conf' && m.subPath == 'network/resolv.conf')))))"
+    )
+
+
+def identity_policy_documents(namespace: str, target_id: str, *, guest_target_id: str | None = None) -> list[dict[str, Any]]:
     name = namespace + "-private-root-v1"
     # Pod defaults below explicitly constrain the inherited identity. A
     # container may inherit runAsNonRoot, but cannot override it to false.
@@ -104,6 +145,10 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         "has(c.resources.requests) && has(c.resources.limits) && "
         "['cpu','memory','ephemeral-storage'].all(k, k in c.resources.requests && k in c.resources.limits)"
     )
+    if guest_target_id is not None:
+        private = f"(variables.isGuest ? ({_guest_private_expression()}) : ({private}))"
+    target_condition = (" == " + json.dumps(target_id) if guest_target_id is None
+                        else " in " + json.dumps([target_id, guest_target_id]))
     validations = [
         ("!has(object.spec.hostNetwork) || !object.spec.hostNetwork", "Host networking is forbidden."),
         ("!has(object.spec.hostPID) || !object.spec.hostPID", "Host PID is forbidden."),
@@ -134,12 +179,12 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
         ("variables.regular.all(c, !(c.name in ['task-sandbox','verifier-sandbox']))", "Private sandboxes must be native init sidecars."),
         ("size(variables.private) == 0 || (object.spec.serviceAccountName == 'loom-execution-attempt' && "
          "has(object.spec.automountServiceAccountToken) && !object.spec.automountServiceAccountToken && "
-         "has(object.metadata.annotations) && object.metadata.annotations['loom.openai.com/target-id'] == "
-         + json.dumps(target_id) + " && object.spec.volumes.filter(v, "
+         "has(object.metadata.annotations) && object.metadata.annotations['loom.openai.com/target-id']"
+         + target_condition + " && object.spec.volumes.filter(v, "
          "v.name in ['runtime','task-sandbox-socket','verifier-sandbox-socket']).all(v, has(v.emptyDir)) && "
          "!has(object.spec.resourceClaims))", "Private sandboxes require the target-bound execution Pod shape."),
     ]
-    policy = {
+    policy: dict[str, Any] = {
         "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicy",
         "metadata": {"name": name},
         "spec": {
@@ -160,6 +205,21 @@ def identity_policy_documents(namespace: str, target_id: str) -> list[dict[str, 
             "validations": [{"expression": expression, "message": message} for expression, message in validations],
         },
     }
+    if guest_target_id is not None:
+        policy["spec"]["variables"].append({
+            "name": "isGuest", "expression": "has(object.metadata.annotations) && "
+            "'loom.openai.com/target-id' in object.metadata.annotations && "
+            "object.metadata.annotations['loom.openai.com/target-id'] == " + json.dumps(guest_target_id),
+        })
+        policy["spec"]["validations"].append({
+            # The built-in OpenAPI quantity reference is absent from CEL's
+            # inferred EmptyDir type. Dynamic selection preserves the runtime
+            # presence check without a static undefined-field warning.
+            "expression": "!variables.isGuest || (size(variables.private) == 2 && size(variables.fixtures) == 0 && "
+            "object.spec.volumes.filter(v, v.name in ['task-sandbox-guest-state','verifier-sandbox-guest-state']).all(v, "
+            "has(v.emptyDir) && has(dyn(v.emptyDir).sizeLimit) && (!has(v.emptyDir.medium) || v.emptyDir.medium == '')))",
+            "message": "Guest targets require two private guests with bounded disk state.",
+        })
     binding = {
         "apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding",
         "metadata": {"name": name},

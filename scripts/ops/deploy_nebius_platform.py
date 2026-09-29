@@ -74,7 +74,8 @@ def load_render(
             policy_docs = list(yaml.safe_load_all(policy_file.read_text()))
         except OSError as exc:
             raise DeploymentError("task identity policy artifact is missing") from exc
-        if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"]):
+        if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"],
+                guest_target_id=config.get("guest_execution_target", {}).get("target_id")):
             raise DeploymentError("task identity policy differs from the target-bound contract")
         files[policy_file.name] = policy_docs
     elif policy_file.exists():
@@ -256,8 +257,11 @@ def install_task_identity_policy(
         policy = kube.get("validatingadmissionpolicy", name, namespace)
         status = policy.get("status", {})
         if (status.get("observedGeneration") == policy.get("metadata", {}).get("generation")
-                and status.get("observedGeneration", 0) > 0 and "typeChecking" in status):
-            if status["typeChecking"].get("expressionWarnings"):
+                and status.get("observedGeneration", 0) > 0):
+            # The status controller publishes the generation only after type
+            # checking. Clearing warnings through server-side apply can omit
+            # the empty typeChecking parent from an otherwise current status.
+            if status.get("typeChecking", {}).get("expressionWarnings"):
                 raise DeploymentError("task identity admission policy has type-checking warnings")
             break
         if time.monotonic() >= deadline:
@@ -283,7 +287,19 @@ def install_task_identity_policy(
     }}
     probe = snapshot_root / "identity-policy-probe.yaml"
     probe.write_text(yaml.safe_dump(pod))
-    kube.run("apply", "-f", str(probe), "--dry-run=server")
+    while True:
+        try:
+            kube.run("apply", "-f", str(probe), "--dry-run=server")
+            break
+        except TaskIdentityPolicyDeniedError as exc:
+            if exc.policy_name != name:
+                raise DeploymentError("another policy rejected the identity probe") from exc
+            # Admission evaluation has its own informer/cache. A corrected
+            # policy's type-check status can arrive before it stops rejecting
+            # this safe Pod. PSS stays restricted throughout both probes.
+            if time.monotonic() >= deadline:
+                raise DeploymentError("task identity admission policy did not accept the positive probe") from exc
+        time.sleep(0.2)
     pod["spec"]["containers"][0]["securityContext"]["capabilities"]["add"] = ["NET_BIND_SERVICE"]
     probe.write_text(yaml.safe_dump(pod))
     while True:
@@ -483,6 +499,12 @@ def validate_target_replacement(
     """Require an exact operator decision before replacing an immutable target."""
     data = current.get("data", {})
     previous = json.loads(data["environment.json"]) if "environment.json" in data else None
+    previous_guest = previous.get("guest_execution_target") if previous else None
+    proposed_guest = config.get("guest_execution_target")
+    if previous_guest is not None and previous_guest != proposed_guest:
+        raise DeploymentError("installed guest target cannot be removed or renamed by platform rollout")
+    if retire_target is not None and (previous_guest is not None or proposed_guest is not None):
+        raise DeploymentError("primary replacement with a guest sibling requires a separate retirement protocol")
     if retire_target is None:
         if previous and previous["target_id"] != config["target_id"]:
             raise DeploymentError("changed primary target requires --retire-target naming the installed target")

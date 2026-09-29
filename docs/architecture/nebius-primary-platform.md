@@ -583,14 +583,220 @@ with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
 
+Before startup, credential `qualify` requires retained material and the four
+already-observed current IAM grants. It reconciles their live identities without
+new cloud mutations, validates the protected CA/keyring and original object key,
+and requalifies schema, SQL login and actual shared membership under the current
+source/lease checks. Positive catalog checks require every individual runtime
+table/sequence privilege; missing grants are never repaired here. Qualification
+reuses bounded grant/enrollment replay, not a new administrative SQL interface.
+Its returned evidence contains identities and an access-key hash, not credentials.
+
+### Closed-admission application preparation
+
+The runtime recovers the current operation's interrupted ServiceAccount,
+NetworkPolicy and immutable Secret requests from frozen plans/encrypted material.
+Prepared requests retain their original key and UID/resourceVersion; dispatched
+requests only reconcile. Historical prepared requests never dispatch. This path
+does not create workloads or routes, and stopped operations cannot invoke it.
+
+`prepare_static` establishes protected namespace/resource authority and observes
+the zero-Pod quota before installing the frozen ServiceAccount/network policies.
+It retains the account's original observed identity and updates a prior owned
+NetworkPolicy only through an exact preconditioned patch. Live disappearance,
+replacement, spec drift or termination blocks preparation rather than recreating
+or repairing unqualified resources. Historical write success is not readiness.
+
+`read_prepared` separately observes current network resources and the three exact
+immutable generation Secrets, including complete data equality, without writes
+or material generation. The retained ServiceAccount keeps its original UID;
+network/Secret observations must belong to the current operation. It works before
+and after unfencing and returns only lease-bound resource references, so readiness
+can refresh evidence without closing admission or exposing credential contents.
+
+An exact current-operation quota DELETE intent is the durable activation boundary,
+including when that request is rejected or awaiting observation. Under the journal
+lock, this phase prevents new retirement, quota-closing and static/Secret writes
+in the same operation. The single unresolved-effect slot prevents an earlier
+prepared request crossing that boundary. A stopped successor can still close its
+own generation's admission. New `start:` workload intents require an observed
+opening under the same journal lock; preparation success alone cannot admit them.
+
+The protected shared installer may separately grant the provisioner a namespaced
+Role allowing GET of only the three installation-specific PostgreSQL, Control
+Plane and Gateway ingress policies. It grants no policy list/write or shared
+Secret access; the provisioner cannot install its own shared Role/RoleBinding.
+`read_shared_network` verifies those exact live policy specifications against the
+frozen development binding, rejects absence/drift/termination, and returns only
+name/UID/resourceVersion observations under the current lease. This read authority
+is not part of bootstrap and is not yet activated by a live installer.
+
+`ApplicationLifecycleCoordinator.prepare` composes these concrete adapters: resume
+current preparation, stop prior personal processes, retire prior SQL/object access,
+prepare static resources, verify shared ingress, enroll/deliver and qualify current
+credentials, then refresh live resource/network/process evidence. Missing
+prerequisites keep admission closed. It returns internal typed preparation evidence
+without starting Deployments/routes, completing the operation, or releasing its
+reservation. The active coordinator below consumes these prerequisites; an installed
+worker and owner-facing deployment flow remain separate unfinished steps.
+
+### Active application startup and completion
+
+`ApplicationLifecycleCoordinator.activate` invokes preparation only before the
+first activation intent. Recovery refreshes shared access, immutable resources and
+shared ingress rules without re-entering retirement/static writes. The runtime's
+`read_retired` is observation-only: current zero-Pod admission, observed zero-replica
+controllers, absent routes and a complete empty PodList must still hold before an
+unsent quota deletion. Prepared deletion retains its original UID/resourceVersion;
+only definitive409/422 rejection permits a fresh precondition key. Dispatched
+deletion only reconciles, and observed deletion requires actual quota absence. A
+replacement quota is a conflict, never permission for another deletion.
+
+`start_workloads` installs the frozen current Deployments and Services, preserving
+retained Deployment UIDs through exact preconditioned patches from zero replicas.
+Routes may be recreated only after their recorded prior identities retired.
+Interrupted current requests recover the original frozen document and preconditions;
+uncertain requests never resend. A current template/image match and controller
+observed generation are required. Execution fields must match after normalizing
+known Kubernetes API defaults; unplanned commands, lifecycle hooks, init containers
+or scheduling changes cannot qualify as the frozen version. Updated/ready/available/total replicas all
+equal to desired and no unavailable or terminating replicas. Only then is the
+Ingress created. `read_ready` repeats live checks without resource writes.
+
+`ApplicationLifecycleCoordinator.start` composes activation, workloads, refreshed
+access/static/network/retirement observations, and durable ready completion.
+`complete_ready` takes budget, application and operation locks in that order,
+requires a current unexpired lease, settled journals, current activation and exact
+workload/static references, schema/owner/access-key evidence, and prior access
+retirement. Its secret-free immutable receipt completes the operation and clears
+the lease. The current frozen CPU/memory/ephemeral reservation stays charged;
+only excess held for an old/new transition is released. Shared storage stays0.
+Exact receipt replay changes neither timestamp nor reservation.
+
+This is internal lifecycle implementation, not installed acceptance. It does not
+by itself enable a polling worker or live installer. Protected installation,
+four distinct versions/fifth-owner onboarding, real execution provenance,
+authorization, recovery/teardown isolation and scale-to-zero still need live proof.
+
+### Personal application control
+
+The management-only `/api/v1/applications` API accepts a personal slug and release
+ID for creation. Owner-scoped detail/list and operation status expose registration
+and progress, never frozen plans, credentials or completion evidence. The
+`/applications/{id}/operations` endpoint accepts `update`, `suspend`, `resume` or
+`destroy_retained` with an expected generation; only update supplies a release ID.
+Mutation requests use idempotency keys. Exact replay returns the same operation's
+current status, including when a peer commits it during request planning.
+`/application-operations/{id}/retry` retries a blocked current operation.
+
+`ApplicationManager` uses protected installation-pinned release records, foundation,
+shared-development binding and namespace authority. Owners cannot supply images,
+provider authority, storage ownership or readiness assertions through these APIs.
+Update/resume preserve identity and derive the next deployment/access generation;
+the transactional registry rechecks generation, ownership, state and capacity.
+Stop and replay do not require the release to remain in the catalog. These routes
+reuse existing authentication/CSRF checks and close the auth transaction before
+independent registry work. Unconfigured application management returns 503.
+
+`ApplicationWorker` polls only current nonpurged operations with absent/expired
+DB-time leases. One successful claim drives one concrete start/stop coroutine;
+different owners have independent bounded concurrency. Lease heartbeats, readiness
+deadlines and retry limits prevent unbounded execution. Lease loss, shutdown and
+database outages cancel/drain work while preserving durable effects and charges.
+Worker database calls, including polling, renewal and failure reporting, have a
+five-second maximum further limited to one-sixth of the lease duration. Together
+with the one-third-lease heartbeat interval this reserves time for response latency
+and cancellation before expiry. A database deadline is an infrastructure failure,
+not a provider retry: uncertain operation state remains retained for reconciliation.
+Failure reporting happens after cancellation; only concrete coordinator evidence
+can complete an operation. Poll health becomes false on DB failure or shutdown.
+
+Protected management configuration may include `applications`, binding the shared
+development environment, namespace authority, immutable release catalog and storage
+access groups to explicit runtime inputs. It cannot activate the legacy environment
+provisioner at the same time. `ApplicationServiceRuntime` composes the existing
+cloud, SQL, Kubernetes and object-access adapters with one supervised worker.
+Kubernetes authentication uses a projected ServiceAccount; cloud authentication
+uses an explicit protected credentials file, with no ambient fallback. Shared
+verify-full SQL credentials and CA/keyring material come from bounded private
+files, not owner requests. Invalid startup material exposes no application manager.
+Shutdown removes owner admission and drains the worker before closing its clients.
+Management readiness includes actual application-worker poll health when configured.
+
+The management renderer accepts this application runtime instead of the legacy
+environment provisioner. It uses `loom-application-provisioner`, projected cluster
+credentials, and separate application cloud/shared-material Secret references.
+Application installation configuration is an immutable revision-named ConfigMap;
+the management database and admin/master-key references remain unchanged. This
+renderer creates no credentials and does not upgrade an existing installation:
+the initial installer remains create-only and legacy-runtime-only. Protected
+upgrade, old-process retirement and first-owner installed qualification remain
+required before enabling this configuration live.
+
+The fixed shared SQL setup command, `loom.nebius_application_database_install`,
+accepts only protected namespace/data/schema configuration and Secret-provided
+credentials. It qualifies the namespace-local TLS database route, coordinates
+with the existing schema lock, creates a missing ordinary manager login and
+installs the existing access routines. Retries authenticate the retained password
+and preserve the role identity; mismatches or a lost bound role fail rather than
+rotating or adopting credentials. It preserves business records and runs no
+business-schema migration. Personal APIs must never invoke this administrator
+command.
+
+The fixed protected setup adapter uses the existing create-only recovery journal
+for application admission, shared observer permissions, shared network access and
+the SQL setup Job. Management-to-shared PostgreSQL ingress is separate from the
+personal application policies. It binds both namespace identities, exposes the
+admission type-checking barrier that must precede bootstrap permissions, and never
+retries an uncertain Job creation. A failed Job requires explicit recovery.
+The material phase delivers only three immutable revision-named Secrets: the
+retained SQL manager password for the setup Job, and the application's management
+cloud and shared SQL/CA/keyring bundles. It never generates new shared master keys,
+rotates existing credentials or overwrites bootstrap Secrets. Protected caller
+qualification of material provenance and actual cloud permissions remains required.
+The management cutover is a fixed UID/resource-version-conditioned update of the
+existing `loom-service` Deployment. It retains the original template, records each
+update intent before sending it, and reconciles uncertain replies without repeating
+the write. A narrowly scoped CREATE admission policy prevents delayed controller
+requests from starting `loom-management-provisioner` Pods in the management
+namespace. Retirement requires that actual denial, current zero controller
+replicas, and no remaining Pods, including terminating ones. The database and new
+application manager are not fenced. The new template is previewed and checked
+before activation; no automatic recovery restarts the legacy provisioner.
+The protected entry connects these adapters, but source/test coverage is not an
+installed upgrade: the first personal HTTPS login still needs installed proof.
+
+`POST /applications/{id}/login` exchanges the owning management **user session**
+for a 90-second one-use proof, never a shared password or database credential.
+Delegable bearer tokens cannot request a full browser session, which could otherwise
+widen their team-limited authority. The internal bridge requires the current active,
+completed generation and uses its existing SQL role, with the management-mounted
+shared CA. It rechecks the generation before returning the proof and uses bounded
+connections without retaining a pool. Retiring old processes/SQL access remains
+the lifecycle fence; this exchange is not a cross-database atomic operation.
+
+The proof is hashed with application ID, origin and access generation. Its starting
+team is included in the hashed token, so `/auth/login/complete` selects that exact
+current shared membership rather than the first alphabetical team. Disabled or
+missing identities/memberships and platform-admin promotion fail closed; ordinary
+shared role changes are honored. No email, password copy or new login table is
+required. The existing `/auth/managed` browser route accepts the proof through its
+scrubbed fragment and requires an explicit sign-in click. Management login responses
+use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
+
+Protected live installation, application CLI wiring and arbitrary-source publication
+remain unfinished. The existing legacy `loom dev` client does not invoke these
+application APIs. This source capability does not enable the installed management
+service or prove an owner can use a deployed personal application.
+
 ### Stopped application completion
 
 `ApplicationLifecycleCoordinator.stop` composes the concrete retirement adapters:
 close Pod admission and stop personal workloads, revoke/drain SQL access, retire
 exact IAM identities and probe retained keys, then refresh the live workload and
 admission observations. Only this internal path supplies completion attestations;
-owner requests cannot submit evidence or a success flag. Active startup and a
-polling worker are not enabled by this coordinator.
+owner requests cannot submit evidence or a success flag. No polling worker or
+owner-facing deployment flow is enabled by the coordinator itself.
 
 The adapters return immutable, secret-free evidence bound to the application,
 incarnation, shared data environment, operation/generations and lease epoch/token
@@ -957,6 +1163,22 @@ operator or runtime credentials through Actions. Installed restoration, credenti
 renewal and multi-owner acceptance must still be completed before this source-level
 installer can be described as an operational environment.
 
+The fixed application-runtime upgrade composes the existing setup stages and
+management Deployment switch without replaying bootstrap. It validates the
+original input digest, completed phase journals, namespace UID and retained
+Deployment snapshot. Separate upgrade state preserves the original configuration,
+database, credentials and journals. The publication catalog may add a qualified
+candidate but cannot remove or rewrite retained entries. New application
+configuration/account and shared-access setup precede retirement; the fixed
+management migration waits for the old process to stop. Only then may the new
+template activate. A resumed operation never retires the new process or
+automatically restarts the legacy worker. Public verification explicitly requires
+`application_provisioner` readiness and authenticated management routes; legacy or
+absent worker health is insufficient. The protected entry connects the upgrade to
+live shared-material/IAM and actual-subject qualification. Running that protected
+upgrade and proving personal-application readiness remain installed acceptance,
+not results inferred from the connection's tests.
+
 The returned `platform_envelope` includes database PVC, rollout/migration overhead
 and backup scratch equal to the management database size. It is fixed overhead,
 not part of the installation's child allowance or permission to resize a node.
@@ -1256,6 +1478,14 @@ disabled until the shared ledger, local claim protocol and protected Job-write
 gateway are integrated and qualified together.
 
 ## Native task-image capacity fairness
+
+An explicitly registered guest capacity alias shares its ordinary target's
+physical admission family. The ordinary collector captures both target IDs from
+the control plane's catalog scope; it also retains the owner's build namespace.
+This same-environment family is separate from the protected managed-environment
+`capture_pool` registry above. See the
+[target binding contract](nebius-service-execution.md#provider-neutral-contracts)
+for independent health/intent and observation membership fencing.
 
 Native build and trial admission share the existing capacity transaction lock,
 placement model and provider quota identities. A lock alone does not prevent a

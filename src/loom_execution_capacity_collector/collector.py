@@ -119,12 +119,18 @@ async def collect_capacity_observation(
             target_id=settings.target_id,
             pool_id=settings.pool_id,
         )
+        if policy.target_scope is not None and (
+            policy.target_scope.owner_target_id != settings.target_id
+            or policy.target_scope.namespace_name != settings.namespace
+        ):
+            raise CapacityCollectionError("capacity collector target scope does not match settings")
         provider_snapshot, kubernetes_snapshot = await asyncio.gather(
             provider.capture(policy),
             kubernetes.capture(
                 namespace=settings.namespace,
                 target_id=settings.target_id,
                 node_label_selector=settings.node_label_selector,
+                target_scope=policy.target_scope,
             ),
         )
         # Nebius quota usage can lag node-group inventory while autoscaling. Use
@@ -204,6 +210,7 @@ async def collect_capacity_observation(
             provisioned_storage = active_nodes * raw_node.storage_mib
             placement = CapacityPlacement(
                 build_concurrency_limit=settings.build_concurrency_limit,
+                target_scope=policy.target_scope,
                 quota_resources=provider_snapshot.quota_resources,
                 node_group=provider_snapshot.node_group,
                 nodes=kubernetes_snapshot.nodes,
@@ -219,6 +226,8 @@ async def collect_capacity_observation(
             "kubernetes": kubernetes_snapshot.source_versions,
             "observed_at": observed_at.isoformat(),
         }
+        if policy.target_scope is not None:
+            identity["target_scope"] = policy.target_scope.model_dump(mode="json")
         observation = CapacityObservationV1(
             target_id=settings.target_id,
             source=settings.source,

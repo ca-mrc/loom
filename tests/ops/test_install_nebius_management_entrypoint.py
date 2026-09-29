@@ -12,21 +12,27 @@ from pathlib import Path
 
 import pytest
 from tests.ops.test_nebius_ingress_bootstrap import archive
-from tests.ops.test_nebius_management_gateway import operation
+from tests.ops.test_nebius_management_gateway import (
+    diagnostic_operation,
+    operation,
+    retirement_operation,
+    upgrade_operation,
+)
 
 
 def module():
     return importlib.import_module("scripts.ops.install_nebius_management_entrypoint")
 
 
-@pytest.fixture
-def inputs(tmp_path):
+@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic"])
+def inputs(tmp_path, request):
     (tmp_path / ".loom").mkdir(mode=0o700)
     (tmp_path / ".ssh").mkdir(mode=0o700)
     keys = tmp_path / ".ssh/authorized_keys"
     keys.write_bytes(b'# operator\nrestrict,command="ingress-command" ssh-ed25519 FOREIGN old\n')
     keys.chmod(0o600)
-    metadata = operation(tmp_path / ".loom")
+    metadata = {"initial": operation, "upgrade": upgrade_operation, "retirement": retirement_operation,
+        "diagnostic": diagnostic_operation}[request.param](tmp_path / ".loom")
     content = archive({"operation.json": json.dumps(metadata).encode(),
         "scripts/ops/nebius_management_gateway.py": b'def authorized_main(digest):\n    return 0\n',
         "scripts/ops/nebius_certificate_gateway.py": b"# supervisor\n"})
@@ -60,6 +66,50 @@ def test_grant_is_exact_fixed_command_preserves_existing_keys_and_checks_sources
     result = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
         env={"SSH_ORIGINAL_COMMAND": "loom-nebius-management-install-v1"}, timeout=10)
     assert result.returncode == 126 and b"modified" not in result.stdout
+
+
+def test_upgrade_grant_preserves_bootstrap_and_does_not_stage_private_inputs(inputs):
+    root, keys, key, content, digest = inputs
+    root.mkdir(mode=0o700)
+    originals = {"inputs.json": b"retained bootstrap inputs", "state/phase.json": b"retained state",
+                 "anchor/installation.json": b"retained anchor"}
+    for name, value in originals.items():
+        path = root / name
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        path.write_bytes(value)
+    before = keys.read_bytes()
+    assert module().install(content, expected_sha256=digest, public_key=key, apply=True)["status"] == "installed"
+    assert keys.read_bytes().startswith(before)
+    assert all((root / name).read_bytes() == value for name, value in originals.items())
+    assert (root / "authority" / digest / "entrypoint.py").is_file()
+    assert not (root / "upgrade").exists()
+
+
+@pytest.mark.parametrize("case", ["unknown_schema", "bootstrap_path", "initial_schema", "other_directory",
+                                 "mixed_anchor", "mixed_inputs"])
+def test_upgrade_grant_rejects_mixed_operation_paths_before_writes(inputs, case):
+    root, keys, key, _, _ = inputs
+    metadata = upgrade_operation(root.parent)
+    if case == "unknown_schema":
+        metadata["schema"] = "loom.nebius-management-unknown.v1"
+    elif case == "bootstrap_path":
+        for field, name in (("state_dir", "state"), ("anchor_dir", "anchor"), ("inputs_path", "inputs.json")):
+            metadata[field] = str(root / name)
+    elif case == "initial_schema":
+        metadata["schema"] = "loom.nebius-management-operation.v1"
+    elif case == "other_directory":
+        metadata["state_dir"] = str(root / "other/state")
+    elif case == "mixed_anchor":
+        metadata["anchor_dir"] = str(root / "anchor")
+    else:
+        metadata["inputs_path"] = str(root / "inputs.json")
+    content = archive({"operation.json": json.dumps(metadata).encode(),
+        "scripts/ops/nebius_management_gateway.py": b"# fixed gateway\n",
+        "scripts/ops/nebius_certificate_gateway.py": b"# fixed supervisor\n"})
+    before = keys.read_bytes()
+    with pytest.raises(module().InstallError):
+        module().install(content, expected_sha256=hashlib.sha256(content).hexdigest(), public_key=key, apply=True)
+    assert keys.read_bytes() == before and not root.exists()
 
 
 @pytest.mark.parametrize("case", ["digest", "options", "other_grant", "public_keys", "symlink"])

@@ -32,7 +32,8 @@ async def readiness(request: Request, response: Response) -> dict[str, str]:
     except Exception:
         pass
     runtime = getattr(request.app.state, "environment_runtime", None)
-    runtime_ready = runtime is None or runtime.ready
+    application = getattr(request.app.state, "application_runtime", None)
+    runtime_ready = (runtime is None or runtime.ready) and (application is None or application.ready)
     if not ready or not runtime_ready:
         response.status_code = 503
     result = {
@@ -41,5 +42,7 @@ async def readiness(request: Request, response: Response) -> dict[str, str]:
         "postgres": "ready" if ready else "not-ready",
     }
     if runtime is not None:
-        result["provisioner"] = "ready" if runtime_ready else "not-ready"
+        result["provisioner"] = "ready" if runtime.ready else "not-ready"
+    if application is not None:
+        result["application_provisioner"] = "ready" if application.ready else "not-ready"
     return result

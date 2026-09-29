@@ -221,6 +221,14 @@ by this specific policy. Only then may the deployment apply the namespace mode.
 Probe Pods declare bounded CPU and memory requests so the execution namespace
 quota can admit them. They are dry runs: they create no workloads or image pulls.
 Failure leaves restricted PSS and the deployment guard in place.
+After a policy correction clears type warnings, Kubernetes may omit the empty
+`typeChecking` status field. The deployer still requires a positive, current
+`observedGeneration`, no expression warnings, and both admission probes before
+restoring the namespace mode. A stale generation never establishes readiness.
+Admission evaluation can lag behind the type-check status. During the bounded
+probe interval, a rejection from this policy retries the positive dry run until
+the corrected policy accepts it. Persistent rejection, another policy's denial,
+or a transport error still blocks deployment; restricted PSS remains in place.
 
 Prepare this policy with identity readiness disabled. Qualify the installed
 Kubernetes version, the intended root and non-root container shapes, actual
@@ -231,6 +239,48 @@ live Nebius target. For rollback, disable identity readiness, drain active work
 through the rollout guard, and remove this configuration in a fresh render to
 restore restricted PSS. The stronger namespace policy may retain the old VAP
 until separately reviewed removal; never remove it while baseline PSS remains.
+
+### Guest kernel target
+
+The [guest runtime](../architecture/guest-execution.md) requires an explicit
+`guest_execution_target` object containing only a distinct `target_id` (a DNS
+label, at most 54 characters, excluding the reserved `loom-execution`). Keep the existing ordinary `target_id` and
+`task_identity_policy` unchanged. Managed/regional deployments are not supported
+by this configuration. The renderer creates a guest catalog and actuator, extends
+the single namespace admission policy, and retains one physical collector, quota
+and native builder. Bootstrap registers the ordinary owner before its guest and
+binds both to the same immutable price snapshot. A newly registered guest stays
+disabled; a repeated bootstrap preserves its operator intent.
+
+Configure the protected `nebius-candidate` workflow explicitly:
+
+- `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_GUEST_RUNTIME_VOLUME_MIB` supplies 1024–4096 MiB for the runtime payload.
+- `NEBIUS_GUEST_MAX_ARTIFACT_BYTES` supplies the guest transfer/output limit,
+  at most 10 GiB. The 4000 MiB Singularity workflow needs a limit above its full
+  image size and sufficient task storage for build and export copies.
+- Existing task identity, lifecycle and optional web-egress readiness still apply.
+
+Without guest readiness, both guest budget variables must be empty. Harness-only
+publication ignores these platform settings. Guest budgets affect only guest
+plans; ordinary plan budgets remain unchanged. Preserve the settings on later
+publications while the installation uses this runtime.
+
+Deploy the matching candidate/profile and declared target through the normal
+idle guard. Before activating it, require a fresh owner capacity observation
+whose `placement.target_scope` contains both IDs, observed guest actuator health,
+and installed capability/lifecycle qualification. Use the existing authenticated
+`POST /admin/service-execution/targets/{target_id}/health` API to change guest
+intent; preserve the current observed health fields rather than inventing a
+healthy result. Never activate a guest with a database write. Record the candidate,
+input identities, capacity scope, qualifier results and owned-resource cleanup.
+
+For a guest rollback, disable or drain the guest through that API and retain its
+declaration, actuator and capacity membership until all owned cleanup completes.
+Ordinary rollout rejects guest removal/renaming and primary-owner replacement
+when a guest is declared; it does not implement guest retirement. Removing the
+namespace root policy also requires that no guest declaration remains, so do not
+use the ordinary identity-policy removal procedure to retire a guest target.
 
 The example execution price records the September 8, 2026 cpu-e2 eu-north1
 [official rates](https://docs.nebius.com/compute/resources/pricing): 12,000 micro-USD/vCPU-hour,
@@ -607,6 +657,14 @@ fix. The resulting binary is scanned as part of the existing web-image policy.
 See [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https),
 [the upstream selector](https://github.com/caddyserver/certmagic/blob/v0.25.3/handshake.go),
 and [Nebius CSI storage](https://docs.nebius.com/kubernetes/storage/disk-over-csi).
+
+The static nginx origin enables `gzip_proxied any`: Caddy adds a `Via` request
+header, which otherwise disables nginx gzip under its default proxy policy.
+Verify a current hashed JS asset through public HTTPS with `Accept-Encoding:
+gzip`: it must return `Content-Encoding: gzip` and `Vary: Accept-Encoding`, while
+an identity request returns the same decompressed content. Build-time gzip size
+alone does not verify compression on the deployed proxy path. API and streaming
+responses use their separate service proxy and are unaffected by this setting.
 
 Developer verification uses an explicitly built web image and a disposable
 Pebble CA; it exercises the two-pass bootstrap transition, real TLS-ALPN issuance and renewal,

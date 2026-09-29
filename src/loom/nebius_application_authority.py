@@ -78,6 +78,24 @@ def application_namespace_binding(binding: ApplicationNamespaceAuthorityV1, name
                    "name": binding.name + "-resources"}, "subjects": [_subject(binding)]}
 
 
+def render_application_shared_observer(binding: ApplicationNamespaceAuthorityV1) -> list[dict[str, Any]]:
+    """Protected opt-in: three named policy reads, no shared writes or list.
+
+    This is not part of the manager's bootstrap path. Only the protected shared
+    installer can grant it; the manager cannot create this shared Role/Binding.
+    """
+    binding = ApplicationNamespaceAuthorityV1.model_validate(binding.model_dump())
+    metadata = {"name": binding.name + "-observe", "namespace": binding.shared_namespace,
+                "labels": {APPLICATION_INSTALLATION_LABEL: str(binding.installation_id)}}
+    return [{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": metadata,
+             "rules": [{"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"],
+                        "verbs": ["get"], "resourceNames": [binding.name + "-" + purpose
+                            for purpose in ("postgres", "control-plane", "gateway")]}]},
+            {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": metadata,
+             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": metadata["name"]},
+             "subjects": [_subject(binding)]}]
+
+
 def _owned_namespace(binding: ApplicationNamespaceAuthorityV1, obj: str) -> str:
     labels = obj + ".metadata.labels"
     name = obj + ".metadata.name"

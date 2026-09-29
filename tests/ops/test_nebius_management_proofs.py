@@ -1,10 +1,11 @@
 """Installed proof needs authenticated management and actual off-node dump bytes."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -60,6 +61,60 @@ def test_public_probe_rejects_wrong_service_auth_bypass_or_redirect(failure):
         with pytest.raises(ManagementInstallError):
             probe.verify(admin_token="private-admin")
     assert not any(sent_admin)
+
+
+@pytest.mark.parametrize('worker', ['application_provisioner', 'provisioner', 'missing', 'not-ready'])
+def test_application_upgrade_requires_new_worker_health_and_protected_application_routes(worker):
+    from fastapi import FastAPI, HTTPException
+    from scripts.ops.nebius_management_install import ManagementInstallError
+    from scripts.ops.nebius_management_proofs import ManagementPublicProbe
+
+    from loom_service.routes.applications import router
+    from loom_service.routes.environments import management_principal
+
+    requests = []
+    app = FastAPI()
+    app.include_router(router, prefix='/api/v1')
+
+    async def unauthenticated():
+        raise HTTPException(status_code=401)
+
+    app.dependency_overrides[management_principal] = unauthenticated
+
+    async def application_request(path):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
+            return await client.get(path)
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path.endswith('/health/ready'):
+            health = {'status': 'ready', 'mode': 'management', 'postgres': 'ready'}
+            if worker != 'missing':
+                health['application_provisioner' if worker == 'not-ready' else worker] = (
+                    'not-ready' if worker == 'not-ready' else 'ready')
+            return httpx.Response(200, json=health)
+        if request.url.path == '/api/v1/tasks':
+            return httpx.Response(404)
+        if request.url.path.startswith(('/api/v1/applications', '/api/v1/application-operations')):
+            response = asyncio.run(application_request(request.url.path))
+            return httpx.Response(response.status_code, content=response.content)
+        if request.headers.get('authorization') == 'Bearer private-admin':
+            return httpx.Response(200, json={'items': []})
+        return httpx.Response(401)
+
+    with ManagementPublicProbe(host='manage.example.com', runtime='applications') as probe:
+        probe.client.close()
+        probe.client = httpx.Client(transport=httpx.MockTransport(handle))
+        if worker == 'application_provisioner':
+            probe.verify(admin_token='private-admin')
+            assert any(request.url.path == '/api/v1/applications' and 'authorization' not in request.headers
+                for request in requests)
+            operation, = [request for request in requests if request.url.path.startswith('/api/v1/application-operations/')]
+            assert UUID(operation.url.path.rsplit('/', 1)[1]).int and 'authorization' not in operation.headers
+        else:
+            with pytest.raises(ManagementInstallError):
+                probe.verify(admin_token='private-admin')
+            assert not any('authorization' in request.headers for request in requests)
 
 
 class Objects:

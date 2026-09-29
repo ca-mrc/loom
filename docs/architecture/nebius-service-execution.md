@@ -87,6 +87,34 @@ cluster scope, region, and failure domain, with unique namespaces and health
 identities. Another cluster or region requires a separately accepted SLO and
 owner decision.
 
+Guest targets may bind an immutable `capacity_owner_target_id` to their ordinary
+CPU sibling (or the ordinary web CPU sibling for a guest web class). The catalog
+requires the same environment, namespace, pool, provider, explicit cluster scope,
+region, failure domain and residency; self-reference and chains are rejected.
+The field is omitted on ordinary targets, preserving their canonical records.
+Guest targets are registered separately and retain their own class, health check,
+operator intent, price binding and lease identity. Registration starts disabled
+with unknown health and never inherits the owner's actuator health.
+
+One owner policy, collector and immutable observation history describe the shared
+physical inventory. The collector policy endpoint supplies an authoritative
+`target_scope` containing the owner, namespace and sorted target membership;
+the collector captures this scope with the placement snapshot. Catalog membership
+changes make older snapshots unusable for every member until a complete new
+owner observation arrives. Tasks cannot choose or expand this scope. Only the
+owner may publish capacity policy or observations; a guest target cannot create
+another capacity allowance. A family contains at most 64 targets.
+
+Under the existing global capacity transaction lock, placement, native builds,
+builder waits, pending limits and create rates include every family member.
+Disabling or draining a guest does not erase its reservations or observed Pods.
+Disabling or draining the owner stops physical admission for the family. Observed
+lease/generation identities discount their durable reservation once, while
+unobserved reservations remain charged. Undeclared target overlap is still
+rejected, and independent physical owners sharing provider quotas are each
+charged once. Resource allocation keeps the selected logical target identity;
+calibration and price bindings remain specific to that target.
+
 Admission compares the immutable requirement record with the selected class
 and returns all structured rejection codes. It runs before a batch is persisted
 or fanned out. Conversion tooling may produce a new immutable workload
@@ -555,6 +583,14 @@ scale-to-zero may finish independently. A restart-safe Control Plane worker
 claims the persisted lease, verifies the root manifest, per-Artifact manifest,
 commit marker, file sizes, and every SHA-256, then streams every file to the
 stable `trials/<team>/<trial>/attempts/<attempt>/bundles/<artifact>/` namespace.
+Canonical S3 copies use 8 MiB multipart requests for large streams, retaining
+only a bounded part buffer. Each retry owns immutable request bytes; a timed-out
+transport thread cannot consume another attempt's file cursor. Initiation uses
+one SDK attempt; a late successful initiation is reclaimed after cancellation
+or timeout. Source failure or cancellation attempts to abort the incomplete
+multipart upload; network failure can still require bucket lifecycle cleanup.
+The existing complete-file digest and destination readback checks still gate
+canonical acknowledgement.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
