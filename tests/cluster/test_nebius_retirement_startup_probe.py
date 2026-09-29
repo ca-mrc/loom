@@ -66,9 +66,36 @@ def _database_dump(url):
     return result.stdout
 
 
+def _native_dns_labels(cluster, core):
+    """Use the native Nebius DNS selector without changing the frozen Loom policy."""
+    from kubernetes import client
+
+    apps = client.AppsV1Api(core.api_client)
+    spec = core.api_client.sanitize_for_serialization(apps.read_namespaced_deployment("coredns", "kube-system"))["spec"]
+    spec["selector"] = {"matchLabels": {"k8s-app": "coredns"}}
+    spec["template"]["metadata"]["labels"] = {"k8s-app": "coredns"}
+    name = "coredns-native-fixture"
+    apps.create_namespaced_deployment("kube-system", {"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name}, "spec": spec})
+    _run(cluster, "kubectl", "rollout", "status", "deployment/" + name, "-n", "kube-system", "--timeout=60s")
+    service = core.patch_namespaced_service("kube-dns", "kube-system", {"spec": {"selector": {"k8s-app": "coredns"}}})
+    assert service.spec.selector == {"k8s-app": "coredns"}
+    discovery = client.DiscoveryV1Api(core.api_client)
+    deadline = time.monotonic() + 30
+    while True:
+        endpoints = [endpoint for row in discovery.list_namespaced_endpoint_slice(
+            "kube-system", label_selector="kubernetes.io/service-name=kube-dns").items
+            for endpoint in row.endpoints if endpoint.conditions.ready]
+        if endpoints and all(endpoint.target_ref and endpoint.target_ref.name.startswith(name + "-") for endpoint in endpoints):
+            break
+        assert time.monotonic() < deadline, "disposable native DNS endpoints did not become ready"
+        time.sleep(0.25)
+
+
+@pytest.mark.parametrize("dns_label", ["kube-dns", "coredns"])
 @pytest.mark.timeout(600)
 async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
-    retirement_request, environment_registry, isolated_migration_postgres_url, tmp_path,
+    retirement_request, environment_registry, isolated_migration_postgres_url, tmp_path, dns_label,
 ):
     from kubernetes import client, utils
     from scripts.ops.nebius_management_material import ManagementBinding
@@ -140,6 +167,8 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
             utils.create_from_dict(core.api_client, doc)
         _run(cluster, "kubectl", "rollout", "status", "statefulset/loom-postgres", "-n", namespace, "--timeout=90s")
         _run(cluster, "kubectl", "rollout", "status", "deployment/coredns", "-n", "kube-system", "--timeout=60s")
+        if dns_label == "coredns":
+            _native_dns_labels(cluster, core)
         # initdb's temporary Unix-socket server can satisfy pg_isready before
         # the final TCP server starts. Wait on reads; never retry a SQL write.
         deadline = time.monotonic() + 30
@@ -199,12 +228,21 @@ async def test_rendered_diagnostic_reads_without_retiring_or_replacing(
                 assert time.monotonic() < deadline, "diagnostic did not complete"
                 time.sleep(0.5)
             assert result["status"] == "retirement_diagnostic_observed"
-            assert result["probe"] == {"schema": "loom.nebius-retirement-startup-probe.v1",
+            expected_probe = {"schema": "loom.nebius-retirement-startup-probe.v1",
                 "status": "observed", "stage": "complete", "checks": ["database_binding", "kubernetes_ca",
                     "kubernetes_token", "database", "kubernetes"], "operations": [{
                         "operation_id": str(target.operation_id), "phase": "pending", "runner_epoch": 0,
                         "lease_present": False, "error_present": False, "resource_count": resource_count,
                         "effects_started": False}]}
+            if dns_label == "coredns":
+                # Characterize the installed failure before adding explicit
+                # recovery authority. Do not silently change the original
+                # renderer: its policies and journal are frozen evidence.
+                expected_probe = {"schema": "loom.nebius-retirement-startup-probe.v1",
+                    "status": "unavailable", "stage": "database", "checks": ["database_binding",
+                        "kubernetes_ca", "kubernetes_token"], "operations": [],
+                    "error_type": "OperationalError", "http_status": None}
+            assert result["probe"] == expected_probe
             assert stage_diagnostic(api=api, **args) == staged
             assert api.result(args["state_dir"]) == result
         assert database(snapshot) == before
