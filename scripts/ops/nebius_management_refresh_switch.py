@@ -56,6 +56,67 @@ def refresh_target(request: ManagementRefreshSwitchRequest, action: Literal['ret
     return target
 
 
+def qualify_refresh_drain(request: ManagementRefreshSwitchRequest, *, deployment: dict[str, Any],
+                          replicasets: dict[str, Any], pods: dict[str, Any]) -> bool:
+    """Qualify bounded, complete current observations; never infer missing status.
+
+    The connected caller reads these collections consistently, then re-reads the
+    same stopped Deployment before its activation CAS. Terminating Pods still run
+    code and therefore never count as drained. This function performs no I/O.
+    """
+    try:
+        uid, namespace = _uid(request.render.active), request.render.before.namespace
+        if not _matches(deployment, refresh_target(request, 'retire'), uid):
+            raise ValueError
+
+        def collection(page: dict[str, Any], kind: str, version: str) -> list[dict[str, Any]]:
+            rows, metadata = page['items'], page['metadata']
+            revision = metadata['resourceVersion']
+            if (page['kind'] != kind + 'List' or page['apiVersion'] != version
+                    or not isinstance(revision, str) or not 0 < len(revision) <= 128
+                    or metadata.get('continue') or not isinstance(rows, list) or len(rows) > 100
+                    or any(row['kind'] != kind or row['apiVersion'] != version
+                        or row['metadata']['namespace'] != namespace for row in rows)):
+                raise ValueError
+            return list(rows)
+
+        sets = collection(replicasets, 'ReplicaSet', 'apps/v1')
+        current_pods = collection(pods, 'Pod', 'v1')
+
+        def observed_zero(controller: dict[str, Any]) -> bool:
+            generation = controller['metadata']['generation']
+            status = controller.get('status', {})
+            observed = status.get('observedGeneration', 0)
+            counters = [controller['spec'].get('replicas', 1)] + [status.get(field, 0) for field in (
+                'replicas', 'readyReplicas', 'availableReplicas', 'updatedReplicas',
+                'unavailableReplicas', 'fullyLabeledReplicas', 'terminatingReplicas')]
+            if (type(generation) is not int or generation <= 0 or type(observed) is not int or observed < 0
+                    or any(type(value) is not int or value < 0 for value in counters)):
+                raise ValueError
+            return observed >= generation and all(value == 0 for value in counters)
+
+        complete = observed_zero(deployment)
+        seen = set()
+        for replica_set in sets:
+            metadata = replica_set['metadata']
+            identity = _uid(replica_set)
+            owners = metadata['ownerReferences']
+            if (identity in seen or metadata.get('labels', {}).get('app') != 'loom-service'
+                    or len(owners) != 1 or owners[0].get('controller') is not True):
+                raise ValueError
+            seen.add(identity)
+            owner = dict(owners[0])
+            blocking = owner.pop('blockOwnerDeletion', False)
+            if type(blocking) is not bool or owner != {'apiVersion': 'apps/v1', 'kind': 'Deployment',
+                    'name': 'loom-service', 'uid': uid, 'controller': True}:
+                raise ValueError
+            ready = observed_zero(replica_set)
+            complete = complete and ready and not metadata.get('deletionTimestamp')
+        return bool(complete and not current_pods)
+    except Exception:
+        raise ValueError('management refresh drain observation unqualified') from None
+
+
 def switch_refresh(*, request: ManagementRefreshSwitchRequest, api: ManagementRefreshSwitchAPI,
                    state_dir: Path, activate: bool) -> bool:
     """Stop/drain or activate exactly once; an unresolved write stays unresolved."""
