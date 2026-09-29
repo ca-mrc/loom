@@ -750,6 +750,20 @@ class ServiceExecutionMaterializer:
             readback.checksum_sha256 is not None and readback.checksum_sha256 != expected
         ):
             raise MaterializationIntegrityError("canonical_object_readback_mismatch")
+        if readback.checksum_sha256 is None:
+            # Multipart checksums can be composite rather than full-object
+            # SHA256. Length alone cannot acknowledge canonical integrity.
+            digest = hashlib.sha256()
+            readback_size = 0
+            async for chunk in self._canonical_store.stream_object(
+                bucket=self._artifacts_bucket, key=destination_key, chunk_size=8 * 1024 * 1024
+            ):
+                readback_size += len(chunk)
+                if not chunk or readback_size > size:
+                    raise MaterializationIntegrityError("canonical_object_readback_mismatch")
+                digest.update(chunk)
+            if readback_size != size or "sha256:" + digest.hexdigest() != expected:
+                raise MaterializationIntegrityError("canonical_object_readback_mismatch")
 
     async def _load_and_materialize(self, claim: MaterializationClaim) -> MaterializationResult:
         async with self._session_factory() as session:
