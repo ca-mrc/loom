@@ -6,9 +6,14 @@ import copy
 import pytest
 from sqlalchemy import event, select, text
 
-from loom.db.nebius_application_operation_schema import NebiusApplicationOperation, NebiusApplicationReservation
+from loom.db.nebius_application_operation_schema import (
+    NebiusApplicationOperation,
+    NebiusApplicationReservation,
+)
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
