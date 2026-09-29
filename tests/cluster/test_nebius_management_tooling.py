@@ -72,6 +72,8 @@ from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_retirement import RetirementInstallRequest
 from scripts.ops.nebius_management_retirement_diagnostic import diagnostic_documents
 from scripts.ops.nebius_management_retirement_diagnostic_live import HTTPSRetirementDiagnosticAPI
+from scripts.ops.nebius_management_retirement_recovery import recovery_documents
+from scripts.ops.nebius_management_retirement_recovery_live import HTTPSRetirementRecoveryAPI
 from loom_service.environment_management.deployment import ManagementDeployment
 from loom_service.environment_management.retirement import RetirementTarget
 raw = json.loads(Path(sys.argv[2]).read_bytes())
@@ -82,11 +84,18 @@ job, = diagnostic_documents(request).values()
 command = job['spec']['template']['spec']['containers'][0]['command']
 probe = {'__name__': 'qualified_probe_import'}
 exec(command[2], probe)
+recovery_job, = recovery_documents(request, original_job_uid='18718d96-d389-40b3-a79b-11489924d0d9')['job'].values()
+recovery = {'__name__': 'qualified_recovery_import'}
+exec(recovery_job['spec']['template']['spec']['containers'][0]['command'][2], recovery)
 print(json.dumps({'command': command[:2], 'schema': probe['SCHEMA'],
-    'settings_path': str(probe['SETTINGS_PATH']), 'adapter': HTTPSRetirementDiagnosticAPI.__name__}))
+    'settings_path': str(probe['SETTINGS_PATH']), 'adapter': HTTPSRetirementDiagnosticAPI.__name__,
+    'recovery_schema': recovery['SCHEMA'], 'recovery_adapter': HTTPSRetirementRecoveryAPI.__name__,
+    'embedded_startup_schema': recovery['_startup'].SCHEMA}))
 """
     result = json.loads(run_private([str(release / "venv/bin/python"), "-I", "-c", code,
                                     str(release), str(fixture)], timeout=30))
     assert result == {"command": ["python", "-c"], "schema": "loom.nebius-retirement-startup-probe.v1",
-        "settings_path": "/var/run/loom-retirement/retirement.json", "adapter": "HTTPSRetirementDiagnosticAPI"}
+        "settings_path": "/var/run/loom-retirement/retirement.json", "adapter": "HTTPSRetirementDiagnosticAPI",
+        "recovery_schema": "loom.nebius-retirement-recovery-report.v1", "recovery_adapter": "HTTPSRetirementRecoveryAPI",
+        "embedded_startup_schema": "loom.nebius-retirement-startup-probe.v1"}
     assert prepare_release(content) == release

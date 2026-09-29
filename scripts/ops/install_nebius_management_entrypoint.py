@@ -136,7 +136,8 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
         root = state.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
                      "loom.nebius-management-retirement-operation.v1": "retirement",
-                     "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic"}
+                     "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
+                     "loom.nebius-management-retirement-recovery-operation.v1": "retirement-recovery"}
         if config["schema"] in separated:
             if root.name != separated[config["schema"]]:
                 raise ValueError()

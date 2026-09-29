@@ -46,11 +46,73 @@ def diagnostic_operation(tmp_path):
         "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
 
 
+def recovery_operation(tmp_path):
+    metadata = operation(tmp_path)
+    root = tmp_path / "nebius-management/retirement-recovery"
+    return {**metadata, "schema": "loom.nebius-management-retirement-recovery-operation.v1",
+        "state_dir": str(root / "state"), "anchor_dir": str(root / "anchor"), "inputs_path": str(root / "inputs.json")}
+
+
 def startup_report():
     return {"schema": "loom.nebius-retirement-startup-probe.v1", "status": "observed", "stage": "complete",
         "checks": ["database_binding", "kubernetes_ca", "kubernetes_token", "database", "kubernetes"],
         "operations": [{"operation_id": "18718d96-d389-40b3-a79b-11489924d0d6", "phase": "pending",
             "runner_epoch": 0, "lease_present": False, "error_present": False, "resource_count": 3, "effects_started": False}]}
+
+
+def recovery_report():
+    return {"schema": "loom.nebius-retirement-recovery-report.v1", "status": "completed", "stage": "complete",
+        "retirement_started": True, "error_type": None, "startup": startup_report(), "operations": [{
+            "operation_id": "18718d96-d389-40b3-a79b-11489924d0d6", "phase": "completed",
+            "non_storage_released": True, "storage_preserved": True}]}
+
+
+def test_recovery_authority_reports_only_qualified_completion_or_closed_failure(tmp_path):
+    gateway = module()
+    metadata = recovery_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    report = {**metadata, "status": "retirement_recovered", "namespace_uid": "18718d96-d389-40b3-a79b-11489924d0d5",
+        "revision": "sha256:" + "f" * 64, "recovery": recovery_report()}
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["recovery"] == recovery_report()
+    blocked = recovery_report() | {"status": "blocked", "stage": "retirement", "error_type": "ManagementError", "operations": []}
+    report.update(status="blocked", stage="recovery_runtime", recovery=blocked)
+    assert gateway.safe_report(json.dumps(report).encode(), metadata)["recovery"] == blocked
+    report["status"] = "retirement_recovered"
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+    for field in ("inputs_path", "state_dir", "anchor_dir"):
+        wrong = metadata | {field: diagnostic_operation(tmp_path)[field]}
+        with pytest.raises(gateway.GatewayError):
+            gateway.validate_operation(wrong)
+
+
+@pytest.mark.parametrize("change", ["raw_message", "missing_storage", "not_released", "foreign_operation",
+    "duplicate", "startup_unavailable", "prior_attempt", "not_started", "boolean_proof", "error"])
+def test_recovery_report_cannot_invent_release_or_leak_raw_failures(change):
+    gateway = module()
+    report = recovery_report()
+    if change == "raw_message":
+        report["message"] = "private-provider-error"
+    elif change == "missing_storage":
+        del report["operations"][0]["storage_preserved"]
+    elif change == "not_released":
+        report["operations"][0]["non_storage_released"] = False
+    elif change == "foreign_operation":
+        report["operations"][0]["operation_id"] = "18718d96-d389-40b3-a79b-11489924d0d7"
+    elif change == "duplicate":
+        report["operations"].append(dict(report["operations"][0]))
+    elif change == "startup_unavailable":
+        report["startup"] = None
+    elif change == "prior_attempt":
+        report["startup"]["operations"][0]["runner_epoch"] = 1
+    elif change == "not_started":
+        report["retirement_started"] = False
+    elif change == "boolean_proof":
+        report["operations"][0]["storage_preserved"] = 1
+    else:
+        report["error_type"] = "private-exception"
+    with pytest.raises(gateway.GatewayError):
+        gateway.validate_recovery_report(report)
 
 
 def test_diagnostic_metadata_and_bounded_result_are_separate_from_retirement(tmp_path):

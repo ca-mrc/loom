@@ -114,6 +114,7 @@ def live(private_diagnostic, monkeypatch):
         return httpx.Response(200, json=rows[path]) if path in rows else httpx.Response(404)
 
     monkeypatch.setattr(httpx, "HTTPTransport", lambda **kwargs: httpx.MockTransport(http))
+    state.http = http
 
     async def operator(connection):
         assert connection == original.original_inputs.operator_connection
