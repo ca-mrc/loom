@@ -156,8 +156,6 @@ spec:
           value: /tmp/loom-taskset-upstream
         - name: LOOM_SVC_TASKSET_QUOTA_MAX_BUNDLE_BYTES
           value: '5368709120'
-        - name: LOOM_SVC_TASKSET_QUOTA_MAX_COUNT_PER_TEAM
-          value: '50'
         - name: LOOM_SVC_TASKSET_QUOTA_MAX_STORAGE_BYTES_PER_TEAM
           value: '21474836480'
         - name: LOOM_SVC_TEAM_QUOTA_MAX_ATTEMPTS_CEILING_DEFAULT

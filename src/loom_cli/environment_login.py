@@ -2,22 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 from uuid import UUID
-
-import httpx
 
 from loom.nebius_environment_contract import EnvironmentRegistrationV1
 from loom_cli.config import LoomConfig, config_path, load_config, save_config
 from loom_cli.contexts import ManagedEnvironmentBinding, https_origin, selected_context
 from loom_cli.environment_client import EnvironmentClient
-from loom_cli.server_client import response_session_cookie
-
-
-def child_http_client(origin: str) -> httpx.Client:
-    return httpx.Client(base_url=https_origin(origin), trust_env=False, follow_redirects=False, timeout=30)
+from loom_cli.managed_login import child_http_client, consume_personal_session
 
 
 def _verify_proof(row: EnvironmentRegistrationV1, proof: dict[str, Any]) -> str:
@@ -34,29 +27,10 @@ def _verify_proof(row: EnvironmentRegistrationV1, proof: dict[str, Any]) -> str:
 
 
 def _consume(row: EnvironmentRegistrationV1, token: str) -> tuple[str, str, str]:
-    with child_http_client("https://" + row.public_host) as http, http.stream(
-        "POST", "/api/v1/auth/login/complete", json={"token": token}, follow_redirects=False,
-    ) as response:
-        if response.status_code != 200:
-            raise ValueError("personal login rejected; request a fresh proof")
-        content = bytearray()
-        for chunk in response.iter_bytes():
-            content.extend(chunk)
-            if len(content) > 16384:
-                raise ValueError("invalid personal login response")
-        cookie = response_session_cookie(response, current_name="__Host-loom_session")
-        try:
-            data = json.loads(content)
-            csrf = data["csrf_token"]
-            if (cookie is None or not isinstance(csrf, str) or not csrf or len(csrf) > 4096
-                    or data["user"]["id"] != str(row.owner_user_id)
-                    or data["current_team"]["id"] != str(row.owner_team_id)
-                    or data["role"] != "owner" or data["is_platform_admin"] is not False
-                    or data["user"]["is_platform_admin"] is not False):
-                raise ValueError
-        except (ValueError, KeyError, TypeError):
-            raise ValueError("invalid personal login response") from None
-        return cookie[0], cookie[1], csrf
+    if row.owner_user_id is None:
+        raise ValueError("personal environment requires an owner")
+    return consume_personal_session(child_http_client("https://" + row.public_host), token,
+                                    user_id=row.owner_user_id, team_id=row.owner_team_id, required_role="owner")
 
 
 def login_environment(client: EnvironmentClient, environment_id: UUID) -> str:
