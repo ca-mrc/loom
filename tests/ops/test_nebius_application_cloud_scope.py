@@ -78,6 +78,31 @@ async def test_shared_object_groups_may_belong_to_the_same_tenant(application_cl
     assert all(call[0] in {'get', 'member_of', 'permits'} for call in cloud.calls)
 
 
+@pytest.mark.parametrize('wrong_parent', [False, True])
+async def test_membership_list_can_omit_get_status_but_not_change_group_identity(application_cloud, wrong_parent):
+    from scripts.ops.nebius_management_cloud_scope import ManagementCloudScopeError
+
+    cloud, _, _ = application_cloud
+    get = cloud.clients['groups'].get
+    async def with_status(request, **kwargs):
+        row = json.loads((await get(request, **kwargs)).to_json(preserving_proto_field_name=True))
+        row['status'] = {'state': 'ACTIVE', 'members_count': 1, 'service_accounts_count': 1}
+        return v1.Group.from_json(json.dumps(row))
+    cloud.clients['groups'].get = with_status
+    listing = cloud.clients['memberships'].list_member_of
+    async def listed(request, **kwargs):
+        row = json.loads((await listing(request, **kwargs)).to_json(preserving_proto_field_name=True))
+        if wrong_parent:
+            row['items'][0]['metadata']['parent_id'] = 'project-foreign'
+        return v1.ListMemberOfResponse.from_json(json.dumps(row))
+    cloud.clients['memberships'].list_member_of = listed
+    if wrong_parent:
+        with pytest.raises(ManagementCloudScopeError):
+            await qualify(application_cloud)
+    else:
+        await qualify(application_cloud)
+
+
 @pytest.mark.parametrize('mutation', ['missing_membership', 'foundation_admin', 'tenant_admin', 'wrong_group_scope',
     'extra_membership', 'wrong_key', 'inactive', 'foreign_group', 'foreign_tenant', 'group_project_permit', 'missing_bucket',
     'extra_bucket', 'wrong_bucket_parent', 'public_bucket', 'wrong_policy', 'missing_group_permit'])
