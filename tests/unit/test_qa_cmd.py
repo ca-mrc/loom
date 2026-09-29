@@ -486,52 +486,34 @@ def test_provider_compatibility_matrix_records_status_dimensions() -> None:
     assert codex_yibu["redaction"] == "supported"
     assert codex_yibu["live_smoke"] is None
 
-    gemini_yibu = cells[("gemini-cli", "yibuapi-gemini-native")]
-    assert gemini_yibu["status"] == "supported"
-    assert gemini_yibu["protocol_surface"] == "gemini"
-    assert gemini_yibu["usage"] == "pending_live_smoke"
-    assert "supported_providers" in gemini_yibu["support_reason"]
-
     oracle_openai = cells[("oracle", "user-hosted-openai-compatible")]
     assert oracle_openai["status"] == "skipped"
     assert "no-model" in oracle_openai["skip_reason"]
 
+    # #2054: this phase supports OpenAI-compatible endpoints only.
+    assert {e["id"] for e in payload["provider_endpoint_types"]} == {
+        "yibuapi-openai-compatible",
+        "user-hosted-openai-compatible",
+    }
     assert payload["summary"]["supported"] > 0
-    assert payload["summary"]["blocked"] > 0
+    assert payload["summary"].get("blocked", 0) == 0
     assert payload["summary"]["skipped"] == len(payload["provider_endpoint_types"])
     assert sum(payload["summary"].values()) == len(payload["cells"])
 
 
-def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> None:
+def test_provider_compatibility_matrix_covers_supported_product_entries() -> None:
+    """#2054: the matrix covers exactly the supported product entries."""
     from loom_service import agent_catalog
 
     matrix = qa_cmd._build_provider_compatibility_matrix()
     payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
 
-    repo_known_ready_agents = {
-        "oracle",
-        "direct-completion",
-        *(
-            name for name, ready in agent_catalog._ADAPTER_RUNTIME_READY.items()
-            if ready
-            and (
-                (
-                    entry := agent_catalog.get_agent(
-                        name,
-                        include_internal=True,
-                    )
-                )
-                is None
-                or entry.catalog_visibility == "displayed"
-            )
-        ),
+    expected_agents = {
+        agent.name
+        for agent in agent_catalog.list_agents()
+        if agent.service_mode_ready and agent.product_support == "supported"
     }
-    live_catalog_ready_agents = {
-        agent.name for agent in agent_catalog.list_agents()
-        if agent.service_mode_ready
-    }
-    expected_agents = repo_known_ready_agents | live_catalog_ready_agents
-    assert "hello" not in expected_agents
+    assert expected_agents == set(agent_catalog._SUPPORTED_PRODUCT_ENTRIES)
     endpoint_types = {
         endpoint["id"] for endpoint in payload["provider_endpoint_types"]
     }
@@ -541,10 +523,9 @@ def test_provider_compatibility_matrix_covers_default_ready_agent_catalog() -> N
             cell["provider_endpoint_type"],
         )
 
-    assert expected_agents.issubset(emitted_by_agent)
+    assert set(emitted_by_agent) == expected_agents
     for agent_name in expected_agents:
         assert emitted_by_agent[agent_name] == endpoint_types
-    assert "hello" not in emitted_by_agent
 
 
 def test_provider_compatibility_matrix_includes_generic_agents_per_agent() -> None:
@@ -555,29 +536,23 @@ def test_provider_compatibility_matrix_includes_generic_agents_per_agent() -> No
         for cell in payload["cells"]
     }
 
-    for agent_name in ("direct-completion", "opencode"):
+    for agent_name in ("direct-completion", "openhands-sdk", "terminus-2"):
         openai = cells[(agent_name, "user-hosted-openai-compatible")]
-        anthropic = cells[(agent_name, "yibuapi-anthropic-messages")]
         assert openai["status"] == "supported"
-        assert anthropic["status"] == "supported"
         assert openai["usage"] == "pending_live_smoke"
         assert "supported_providers=['*']" in openai["support_reason"]
         assert openai["agent_group"] == "generic-provider"
 
 
-def test_provider_compatibility_matrix_blocks_provider_locked_mismatch() -> None:
+def test_provider_compatibility_matrix_excludes_deferred_agents() -> None:
+    """#2054: deferred agents (e.g. provider-locked CLIs) are not part of
+    this phase's matrix, so they emit no cells rather than blocked ones."""
     matrix = qa_cmd._build_provider_compatibility_matrix()
     payload = qa_cmd._provider_compatibility_matrix_to_json_payload(matrix)
-    cells = {
-        (cell["agent"], cell["provider_endpoint_type"]): cell
-        for cell in payload["cells"]
-    }
+    agents = {cell["agent"] for cell in payload["cells"]}
 
-    kimi_openai = cells[("kimi-cli", "user-hosted-openai-compatible")]
-    assert kimi_openai["status"] == "blocked"
-    assert "supported_providers=['moonshot']" in kimi_openai["blocked_reason"]
-    assert kimi_openai["follow_up_url"] == "https://github.com/qianyi-sun/loom/issues/114"
-
+    for deferred in ("kimi-cli", "claude-code", "gemini-cli", "opencode", "swe-agent"):
+        assert deferred not in agents
 
 def test_provider_compatibility_evidence_override_is_serialized() -> None:
     matrix = qa_cmd._build_provider_compatibility_matrix(

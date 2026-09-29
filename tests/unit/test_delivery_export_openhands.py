@@ -49,6 +49,14 @@ def test_eligibility_rejects_non_openhands_agent() -> None:
     assert exc.value.code == "incompatible_agent"
 
 
+def test_eligibility_accepts_legacy_openhands_alias_but_still_needs_evidence() -> None:
+    """#2054: `openhands` resolves to `openhands-sdk`; evidence is still required."""
+    trial = _trial(agent_name="openhands")
+    with pytest.raises(OpenHandsExportError) as exc:
+        validate_openhands_eligibility([], trial)
+    assert exc.value.code == "missing_provenance"
+
+
 def test_eligibility_requires_provenance_and_artifact_ref() -> None:
     trial = _trial()
     with pytest.raises(OpenHandsExportError) as exc:

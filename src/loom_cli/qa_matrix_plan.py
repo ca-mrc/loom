@@ -269,6 +269,9 @@ def _extract_agents(snapshot: Mapping[str, Any]) -> list[PreflightAgent]:
     agents: list[PreflightAgent] = []
     for raw in raw_agents:
         name = _required_str(raw, "name")
+        if raw.get("product_support") == "deferred":
+            # #2054: deferred agents are not part of this phase's matrix.
+            continue
         needs_model = raw.get("needs_model")
         if not isinstance(needs_model, bool):
             raise ValueError(f"agent {name!r}: needs_model must be a boolean")

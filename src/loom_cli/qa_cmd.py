@@ -70,30 +70,14 @@ _PROVIDER_ENDPOINT_TYPES: list[dict[str, str]] = [
         "description": "YibuAPI OpenAI-compatible endpoint through the Loom gateway facade.",
     },
     {
-        "id": "yibuapi-anthropic-messages",
-        "provider_family": "anthropic",
-        "protocol_surface": "messages",
-        "description": "YibuAPI Anthropic-native Messages endpoint.",
-    },
-    {
-        "id": "yibuapi-gemini-native",
-        "provider_family": "google",
-        "protocol_surface": "gemini",
-        "description": "YibuAPI Gemini-native endpoint when enabled.",
-    },
-    {
         "id": "user-hosted-openai-compatible",
         "provider_family": "openai",
         "protocol_surface": "chat",
         "description": "User-hosted OpenAI-compatible endpoint such as vLLM.",
     },
-    {
-        "id": "user-hosted-anthropic-compatible",
-        "provider_family": "anthropic",
-        "protocol_surface": "messages",
-        "description": "User-hosted Anthropic-compatible endpoint when enabled.",
-    },
 ]
+# #2054: this phase supports OpenAI-compatible Provider Connections only.
+# Native Anthropic Messages and Gemini endpoints stay deferred (#4, #5, #114).
 _SECRET_QUERY_PARAM_RE = re.compile(
     r"(?i)(?:[?&;]|^)"
     r"(?:api[-_]?key|access[-_]?token|auth[-_]?token|token|"
@@ -231,18 +215,8 @@ def _compat_cell(
 
 
 _FALLBACK_ADAPTER_ENDPOINT_DIALECTS: dict[str, str] = {
-    "aider": "openai_chat",
-    "claude-code": "anthropic_messages",
     "codex": "openai_responses",
-    "gemini-cli": "gemini",
-    "hello": "openai_chat",
-    "kimi-cli": "openai_chat",
-    "mini-swe-agent": "openai_chat",
-    "opencode": "openai_chat",
-    "openhands": "openai_chat",
     "openhands-sdk": "openai_chat",
-    "qwen-cli": "openai_chat",
-    "swe-agent": "openai_chat",
     "terminus-2": "openai_chat",
 }
 
@@ -250,9 +224,14 @@ _FALLBACK_ADAPTER_ENDPOINT_DIALECTS: dict[str, str] = {
 def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
     from loom_service import agent_catalog
 
+    # #2054: the matrix covers only this phase's supported product entries;
+    # deferred agents stay in the catalog for history but are not tested.
+    supported: frozenset[str] = getattr(
+        agent_catalog, "_SUPPORTED_PRODUCT_ENTRIES", frozenset(),
+    )
     entries: dict[str, CompatibilityAgentMetadata] = {}
     for agent in agent_catalog.list_agents():
-        if not agent.service_mode_ready:
+        if not agent.service_mode_ready or agent.product_support != "supported":
             continue
         entries[agent.name] = CompatibilityAgentMetadata(
             name=agent.name,
@@ -267,10 +246,10 @@ def _repo_known_service_mode_ready_agents() -> list[CompatibilityAgentMetadata]:
     default_adapter_support = getattr(
         agent_catalog,
         "_DEFAULT_ADAPTER_SUPPORT",
-        (("*",), ("api", "local-server", "hf")),
+        (("*",), ("api",)),
     )
     for name, ready in adapter_ready.items():
-        if not ready or name in entries:
+        if not ready or name in entries or name not in supported:
             continue
         catalog_entry = agent_catalog.get_agent(
             str(name),
