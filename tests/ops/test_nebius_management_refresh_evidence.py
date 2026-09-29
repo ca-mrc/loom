@@ -1,0 +1,168 @@
+"""A refresh probe needs its exact Job, Pod, settings and closed runtime report."""
+from __future__ import annotations
+
+import copy
+import json
+import ssl
+from dataclasses import replace
+from types import SimpleNamespace
+from uuid import uuid4
+
+import httpx
+import pytest
+from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
+from tests.ops.test_nebius_management_refresh_resources import resources_request as resources_request
+from tests.ops.test_nebius_management_stage import PhaseAPI
+from tests.unit.test_nebius_management_render import (
+    application_management_inputs as application_management_inputs,
+)
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+
+
+@pytest.fixture
+def probe_live(resources_request, tmp_path):
+    from scripts.ops.nebius_management_refresh_evidence import HTTPSManagementRefreshEvidenceAPI
+    from scripts.ops.nebius_management_refresh_resources import stage_refresh_resources
+
+    def build(phase='manager-probe'):
+        request = resources_request
+        fake = PhaseAPI(request.binding)
+        state_dir = tmp_path / phase
+        stage_refresh_resources(request=request, phase=phase, api=fake, state_dir=state_dir)
+        config = next(value for value in fake.resources.values() if value['kind'] == 'ConfigMap')
+        job = next(value for value in fake.resources.values() if value['kind'] == 'Job')
+        namespace, name, uid = (job['metadata'][key] for key in ('namespace', 'name', 'uid'))
+        job['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+            **copy.deepcopy(job['spec']['template']['metadata']), 'namespace': namespace, 'name': name + '-abc',
+            'uid': str(uuid4()), 'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job',
+                'name': name, 'uid': uid, 'controller': True, 'blockOwnerDeletion': True}]},
+            'spec': copy.deepcopy(job['spec']['template']['spec']),
+            'status': {'phase': 'Succeeded', 'containerStatuses': [{'name': job['spec']['template']['spec']['containers'][0]['name'],
+                'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}]}}
+        pod['metadata']['labels']['batch.kubernetes.io/controller-uid'] = uid
+        pod['metadata']['labels']['topology.kubernetes.io/region'] = request.switch.render.after.installation.foundation.platform_config['region']
+        settings = json.loads(config['data']['probe.json'])
+        report = {'schema': 'loom.nebius-management-refresh-probe.v1', 'status': 'qualified',
+            'mode': settings['mode'], 'revision': settings['expected_revision'], 'operations_checked': 0}
+        state = SimpleNamespace(request=request, phase=phase, state_dir=state_dir, fake=fake, job=job, pod=pod,
+            report=report, log=None, calls=[], extra_pod=False, continuation=False, final_drift=False, namespace_drift=False)
+        binding = request.binding
+        identities = {binding.namespace: binding.namespace_uid, 'kube-system': binding.kube_system_uid,
+            request.switch.render.after.installation.applications.shared.platform_namespace: request.shared_namespace_uid}
+
+        def respond(message):
+            state.calls.append(message)
+            assert message.method == 'GET'
+            path = message.url.path
+            if path in {'/api/v1/namespaces/' + value for value in identities}:
+                ns = path.rsplit('/', 1)[-1]
+                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+                    'name': ns, 'uid': str(uuid4()) if state.namespace_drift else identities[ns],
+                    'labels': {'loom.nebius/management-installation': binding.installation_id,
+                        'pod-security.kubernetes.io/enforce': 'restricted'}}})
+            if '/configmaps/' in path:
+                return httpx.Response(200, json=config)
+            if '/jobs/' in path:
+                return httpx.Response(200, json=state.job)
+            base = '/api/v1/namespaces/' + namespace + '/pods'
+            if path == base:
+                assert dict(message.url.params) == {'labelSelector': 'batch.kubernetes.io/controller-uid=' + uid, 'limit': '2'}
+                item = {key: value for key, value in state.pod.items() if key not in {'apiVersion', 'kind'}}
+                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList',
+                    'metadata': {'continue': 'next' if state.continuation else ''},
+                    'items': [item] * (2 if state.extra_pod else 1)})
+            if path.endswith('/log'):
+                assert message.url.params['limitBytes'] == '16384'
+                return httpx.Response(200, content=state.log if state.log is not None else json.dumps(state.report).encode())
+            assert path == base + '/' + state.pod['metadata']['name']
+            value = copy.deepcopy(state.pod)
+            if state.final_drift:
+                value['metadata']['uid'] = str(uuid4())
+            return httpx.Response(200, json=value)
+
+        endpoint = request.switch.render.after.installation.applications.runtime.kubernetes.endpoint
+        api = HTTPSManagementRefreshEvidenceAPI(request=request, phase=phase, api_server=endpoint,
+            ssl_context=ssl.create_default_context())
+        api.client.close()
+        api.client = httpx.Client(base_url=endpoint, transport=httpx.MockTransport(respond))
+        return api, state
+
+    return build
+
+
+@pytest.mark.parametrize('phase', ['manager-probe', 'shared-probe', 'post-migration-probe'])
+def test_exact_runtime_report_is_bound_to_recorded_config_job_and_pod(probe_live, phase):
+    api, state = probe_live(phase)
+    with api:
+        result = api.probe_report(state.state_dir)
+        assert result == {'job_uid': state.job['metadata']['uid'], 'pod_uid': state.pod['metadata']['uid'],
+            'probe': state.report}
+        assert api.probe_report(state.state_dir) == result
+    assert all(message.method == 'GET' for message in state.calls)
+
+
+@pytest.mark.parametrize('damage', ['pending', 'failed', 'recreated_job', 'extra_pod', 'continuation', 'owner',
+    'namespace', 'image', 'write_role', 'privileged', 'restart', 'nonzero', 'report', 'wrong_revision',
+    'count_bool', 'log_secret', 'log_oversize', 'trailer', 'final_drift', 'lost_state'])
+def test_incomplete_or_foreign_evidence_never_qualifies(probe_live, damage):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = probe_live()
+    if damage == 'pending':
+        state.job['status'] = {}
+    elif damage == 'failed':
+        state.job['status']['conditions'] = [{'type': 'Failed', 'status': 'True'}]
+    elif damage == 'recreated_job':
+        state.job['metadata']['uid'] = str(uuid4())
+    elif damage in {'extra_pod', 'continuation', 'final_drift'}:
+        setattr(state, damage, True)
+    elif damage == 'namespace':
+        state.namespace_drift = True
+    elif damage == 'owner':
+        state.pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage in {'image', 'write_role', 'privileged'}:
+        container = state.pod['spec']['containers'][0]
+        if damage == 'image':
+            container['image'] = 'foreign:latest'
+        elif damage == 'write_role':
+            container['env'][0]['valueFrom']['secretKeyRef']['key'] = 'admin-url'
+        else:
+            container['securityContext']['privileged'] = True
+    elif damage in {'restart', 'nonzero'}:
+        status = state.pod['status']['containerStatuses'][0]
+        if damage == 'restart':
+            status['restartCount'] = 1
+        else:
+            status['state']['terminated']['exitCode'] = 1
+    elif damage == 'report':
+        state.report['private_plan'] = 'private-marker'
+    elif damage == 'wrong_revision':
+        state.report['revision'] = '0000'
+    elif damage == 'count_bool':
+        state.report['operations_checked'] = True
+    elif damage == 'log_secret':
+        state.log = b'private-marker'
+    elif damage == 'log_oversize':
+        state.log = b' ' * 16385
+    elif damage == 'trailer':
+        state.log = json.dumps(state.report).encode() + b'\nprivate-marker'
+    elif damage == 'lost_state':
+        (state.state_dir / 'stage.json').unlink()
+    with api:
+        if damage == 'pending':
+            assert api.probe_report(state.state_dir) is None
+        else:
+            with pytest.raises(ManagementStageError) as error:
+                api.probe_report(state.state_dir)
+            assert 'private-marker' not in str(error.value)
+
+
+def test_completed_shared_probe_cannot_claim_management_operation_inspection(probe_live):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = probe_live('shared-probe')
+    state.report['operations_checked'] = 1
+    with api, pytest.raises(ManagementStageError):
+        api.probe_report(state.state_dir)
