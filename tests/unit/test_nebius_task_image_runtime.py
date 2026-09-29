@@ -1173,6 +1173,74 @@ def test_recent_orphan_blob_is_kept_and_reported_when_over_budget(capsys) -> Non
     logged = capsys.readouterr().out
     assert "grace_protected" in logged
     assert "InternalError" not in logged
+@pytest.mark.parametrize("failure", ["get", "read", "parse"])
+def test_trim_cache_defers_blob_sweep_until_retained_manifest_is_readable(failure, capsys) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    old = datetime.now(UTC) - timedelta(days=10)
+    recent = datetime.now(UTC) - timedelta(days=1)
+    live = "e" * 64
+    live_key = f"task-build-cache/v2/blobs/{live}"
+    orphan_key = f"task-build-cache/v2/blobs/{'f' * 64}"
+    manifest_key = f"task-build-cache/v2/{'a' * 64}/0/manifest.json"
+    manifest = json.dumps(
+        {"version": 1, "files": [{"path": "index.json", "sha256": live, "size": 2}]}
+    ).encode()
+
+    class UnreadableBody(io.BytesIO):
+        def read(self, *args, **kwargs):
+            raise OSError("interrupted cache manifest read")
+
+    class RecoverableS3(FakeS3):
+        fail_manifest = True
+
+        def get_object(self, **kwargs):
+            if kwargs["Key"] == manifest_key and self.fail_manifest:
+                if failure == "get":
+                    raise ClientError(
+                        {"Error": {"Code": "InternalError", "Message": "private-sdk-detail"}},
+                        "GetObject",
+                    )
+                body = UnreadableBody(manifest) if failure == "read" else io.BytesIO(b"{")
+                self.bodies.append(body)
+                return {"Body": body}
+            return super().get_object(**kwargs)
+
+    objects = {manifest_key: manifest, live_key: b"ok", orphan_key: b"xx"}
+    listing = [
+        {
+            "Key": key,
+            "Size": len(body),
+            "LastModified": recent if key == manifest_key else old,
+        }
+        for key, body in objects.items()
+    ]
+    cache = RecoverableS3(objects, listing=listing)
+
+    runtime.trim_cache(cache, "cache", 0)
+
+    assert live_key in cache.objects, "unreadable references do not prove a blob is orphaned"
+    assert orphan_key in cache.objects, "defer the sweep until the complete root set is known"
+    assert manifest_key in cache.objects
+    assert all(body.closed for body in cache.bodies)
+    output = capsys.readouterr().out
+    events = [json.loads(line) for line in output.splitlines() if line.startswith("{")]
+    assert any(
+        row.get("loom_task_image_stage") == "cache_gc"
+        and row.get("event") == "deferred"
+        and row.get("reason") == "retained_manifest_unreadable"
+        for row in events
+    )
+    assert "private-sdk-detail" not in output
+    assert "interrupted cache manifest read" not in output
+
+    cache.fail_manifest = False
+    runtime.trim_cache(cache, "cache", 0)
+
+    assert live_key in cache.objects
+    assert manifest_key in cache.objects
+    assert orphan_key not in cache.objects, "a later healthy sweep still reclaims orphaned blobs"
+    assert all(body.closed for body in cache.bodies)
 
 
 def test_publish_directory_oci_uses_skopeo_oci_transport(
