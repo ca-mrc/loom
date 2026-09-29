@@ -59,7 +59,8 @@ def validate_operation(value: dict[str, Any]) -> None:
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
             raise ValueError()
         if value["schema"] not in {"loom.nebius-management-operation.v1", "loom.nebius-management-upgrade-operation.v1",
-                                   "loom.nebius-management-retirement-operation.v1"}:
+                                   "loom.nebius-management-retirement-operation.v1",
+                                   "loom.nebius-management-retirement-diagnostic-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -76,7 +77,8 @@ def validate_operation(value: dict[str, Any]) -> None:
         state = Path(value["state_dir"])
         root = state.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
-                     "loom.nebius-management-retirement-operation.v1": "retirement"}
+                     "loom.nebius-management-retirement-operation.v1": "retirement",
+                     "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic"}
         if value["schema"] in separated:
             if root.name != separated[value["schema"]]:
                 raise ValueError()
@@ -166,6 +168,49 @@ def prepare_release(content: bytes) -> Path:
         raise GatewayError("management tooling incomplete; retain private state") from None
 
 
+def validate_startup_report(value: dict[str, Any]) -> dict[str, Any]:
+    """Closed payload contract; no raw rows, provider messages or credential data."""
+    try:
+        fields = {"schema", "status", "stage", "checks", "operations"}
+        success = value["status"] == "observed"
+        steps = ["database_binding", "kubernetes_ca", "kubernetes_token", "database", "kubernetes"]
+        completed = {"settings": 0, "database_binding": 0, "kubernetes_ca": 1, "kubernetes_token": 2,
+                     "database": 3, "kubernetes_get": 4, "kubernetes_identity": 4, "complete": 5}
+        if (set(value) != fields | (set() if success else {"error_type", "http_status"})
+                or value["schema"] != "loom.nebius-retirement-startup-probe.v1"
+                or value["status"] not in {"observed", "unavailable"}
+                or success != (value["stage"] == "complete")
+                or value["checks"] != steps[:completed[value["stage"]]]):
+            raise ValueError
+        operations = value["operations"]
+        if (not isinstance(operations, list) or len(operations) > 16
+                or bool(operations) != ("database" in value["checks"])):
+            raise ValueError
+        seen = set()
+        for row in operations:
+            if (set(row) != {"operation_id", "phase", "runner_epoch", "lease_present", "error_present", "resource_count", "effects_started"}
+                    or str(UUID(row["operation_id"])) != row["operation_id"] or not UUID(row["operation_id"]).int
+                    or row["operation_id"] in seen or row["phase"] not in {"pending", "running", "blocked", "completed"}
+                    or any(type(row[key]) is not bool for key in ("lease_present", "error_present", "effects_started"))
+                    or any(type(row[key]) is not int or not 0 <= row[key] < 2**63 for key in ("runner_epoch", "resource_count"))):
+                raise ValueError
+            seen.add(row["operation_id"])
+        if not success:
+            errors = {"ValueError", "KeyError", "ValidationError", "FileNotFoundError", "PermissionError", "SSLError",
+                "TimeoutError", "OperationalError", "ProgrammingError", "InternalError", "StatementError",
+                "HTTPStatusError", "ConnectError", "ConnectTimeout", "ReadTimeout", "RemoteProtocolError",
+                "ProviderBlockedError", "ProviderRetryError", "OtherError"}
+            if value["error_type"] not in errors:
+                raise ValueError
+            code = value["http_status"]
+            if ((code is not None and (type(code) is not int or not 100 <= code <= 599))
+                    or (code is not None) != (value["error_type"] == "HTTPStatusError")):
+                raise ValueError
+        return value
+    except Exception:
+        raise GatewayError("invalid retirement startup observation") from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -175,7 +220,9 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         status = value["status"]
         upgrade = operation["schema"] == "loom.nebius-management-upgrade-operation.v1"
         retirement = operation["schema"] == "loom.nebius-management-retirement-operation.v1"
-        success = "management_retired" if retirement else "management_upgraded" if upgrade else "management_installed"
+        diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
+        success = ("retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
+            else "management_upgraded" if upgrade else "management_installed")
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
             raise ValueError()
         result = {"status": status}
@@ -193,11 +240,14 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError()
             result.update(namespace_uid=uid, revision=revision)
         if status == "pending":
-            phases = {"retirement"} if retirement else ({"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
+            phases = ({"retirement-diagnostic"} if diagnostic else {"retirement"} if retirement
+                else {"admission", "authority", "database", "retirement", "retire", "migration", "activate", "service"}
                 if upgrade else {"database", "migration", "backup", "service"})
             if value["phase"] not in phases:
                 raise ValueError()
             result["phase"] = value["phase"]
+        if status == "retirement_diagnostic_observed":
+            result["probe"] = validate_startup_report(value["probe"])
         if status == "management_installed":
             backup = value["backup"]
             uid, checksum, size, key = (backup[name] for name in ("job_uid", "sha256", "bytes", "key"))
