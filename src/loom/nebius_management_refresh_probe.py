@@ -67,7 +67,7 @@ def _qualify_plan(operation: NebiusApplicationOperation, settings: RefreshProbeS
             or row.data_environment_id != shared.data_environment_id or row.cluster_id != shared.cluster_id
             or release.schema_revision != shared.schema_revision
             or any(getattr(shared, key) != getattr(settings.shared, key) for key in _IDENTITY_FIELDS)
-            or (active and shared.schema_revision != settings.shared.schema_revision)):
+            or (active and operation.phase in _ACTIVE_PHASES and shared.schema_revision != settings.shared.schema_revision)):
         raise ValueError
     envelope = plan["platform_envelope"]
     if (not isinstance(envelope, dict)
@@ -107,19 +107,36 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
                     raise ValueError
                 checked = 0
                 if settings.mode == "manager":
+                    # Cloud retirement reads earlier generations' frozen plans.
+                    # Qualify their contract too, without requiring old cleanup
+                    # versions to match the new shared schema or rerendering them.
+                    active_applications = select(NebiusApplicationOperation.application_id).where(
+                        NebiusApplicationOperation.phase.in_(_ACTIVE_PHASES))
+                    relevant = NebiusApplicationOperation.application_id.in_(active_applications)
                     size = func.octet_length(cast(NebiusApplicationOperation.plan_json, Text))
                     count, total, largest = (await session.execute(select(
                         func.count(), func.coalesce(func.sum(size), 0), func.coalesce(func.max(size), 0),
-                    ).where(NebiusApplicationOperation.phase.in_(_ACTIVE_PHASES)))).one()
+                    ).where(relevant))).one()
                     if count > _MAX_OPERATIONS or total > _MAX_TOTAL_BYTES or largest > _MAX_PLAN_BYTES:
                         raise ValueError
                     operations = (await session.scalars(select(NebiusApplicationOperation)
-                        .where(NebiusApplicationOperation.phase.in_(_ACTIVE_PHASES)))).all()
+                        .where(relevant))).all()
                     if len(operations) != count:
                         raise ValueError
+                    indexed = {operation.operation_id: operation for operation in operations}
                     for operation in operations:
                         _qualify_plan(operation, settings)
-                    checked = len(operations)
+                        if operation.action == "create":
+                            if operation.deployment_generation != 1 or operation.access_generation != 1:
+                                raise ValueError
+                        else:
+                            source = indexed.get(UUID(operation.plan_json["source_operation_id"]))
+                            if (source is None or source.application_id != operation.application_id
+                                    or source.owner_user_id != operation.owner_user_id
+                                    or source.deployment_generation != operation.deployment_generation - 1
+                                    or source.access_generation != operation.access_generation - 1):
+                                raise ValueError
+                    checked = sum(operation.phase in _ACTIVE_PHASES for operation in operations)
                 return {"schema": SCHEMA, "status": "qualified", "mode": settings.mode,
                     "revision": settings.expected_revision, "operations_checked": checked}
     except Exception:
