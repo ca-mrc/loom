@@ -16,6 +16,7 @@ from typing import Any, Protocol
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_material import _uuid
 from scripts.ops.nebius_management_refresh import render_refresh
 from scripts.ops.nebius_management_refresh_resources import (
     ManagementRefreshResourcesRequest,
@@ -29,6 +30,7 @@ from scripts.ops.nebius_management_refresh_switch import (
 )
 from scripts.ops.nebius_management_stage import ManagementStageAPI
 
+from loom.nebius_management_refresh_probe import SCHEMA, RefreshProbeSettings
 from loom.nebius_platform_render import digest
 
 _PHASES = ('config', 'manager-probe', 'shared-probe', 'backup', 'migration', 'post-migration-probe')
@@ -80,6 +82,35 @@ def _history(request: ManagementRefreshInstallRequest) -> dict[str, str]:
     return result
 
 
+def _proof(request: ManagementRefreshInstallRequest, phase: str, state: Path, proof: Any) -> None:
+    """Connected evidence must still bind this phase's recorded Job and settings."""
+    record = json.loads(private_state._private_read(state / phase / 'stage.json', limit=4 * 1024**2))
+    job, = (item for item in record['resources'].values() if item['desired']['kind'] == 'Job')
+    if not isinstance(proof, dict) or proof.get('job_uid') != job['uid']:
+        raise ValueError
+    _uuid(proof['job_uid'])
+    if phase == 'backup':
+        if (set(proof) != {'job_uid', 'key', 'sha256', 'bytes'} or type(proof['bytes']) is not int
+                or not 0 < proof['bytes'] <= request.resources.switch.render.after.postgres_storage_gi * 1024**3
+                or not isinstance(proof['key'], str) or not 0 < len(proof['key']) <= 1024
+                or not isinstance(proof['sha256'], str) or not re.fullmatch(r'[0-9a-f]{64}', proof['sha256'])):
+            raise ValueError
+    else:
+        if set(proof) != {'job_uid', 'pod_uid', 'probe'}:
+            raise ValueError
+        _uuid(proof['pod_uid'])
+        config, = (item for item in record['resources'].values() if item['desired']['kind'] == 'ConfigMap')
+        settings = RefreshProbeSettings.model_validate_json(config['desired']['data']['probe.json'])
+        report = proof['probe']
+        if (not isinstance(report, dict)
+                or set(report) != {'schema', 'status', 'mode', 'revision', 'operations_checked'}
+                or report['schema'] != SCHEMA or report['status'] != 'qualified' or report['mode'] != settings.mode
+                or report['revision'] != settings.expected_revision or type(report['operations_checked']) is not int
+                or not 0 <= report['operations_checked'] <= 4096
+                or (settings.mode == 'shared' and report['operations_checked'] != 0)):
+            raise ValueError
+
+
 def refresh_management(*, request: ManagementRefreshInstallRequest, api: ManagementRefreshInstallAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Never restart a lost child journal or activate before all runtime barriers."""
@@ -93,6 +124,7 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
             raise ValueError
         resources = request.resources
         switch = resources.switch
+        _uuid(str(switch.operation_id))
         rendered = render_refresh(switch.render)
         shared = switch.render.after.installation.applications
         assert shared is not None
@@ -173,8 +205,8 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
                             return False
                     elif phase == 'backup':
                         proof = api.verify_backup(request, state / phase)
-                        if not isinstance(proof, dict) or set(proof) != {'job_uid', 'key', 'sha256', 'bytes'}:
-                            raise ValueError
+                    if phase.endswith('probe') or phase == 'backup':
+                        _proof(request, phase, state, proof)
                     if item['proof'] is not None and item['proof'] != proof:
                         raise ValueError
                     item['proof'] = proof
