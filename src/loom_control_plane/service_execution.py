@@ -1034,6 +1034,36 @@ async def enqueue_execution_transition(
     return command
 
 
+async def _acknowledge_native_cancellation(
+    session: AsyncSession, *, trial_id: UUID, attempt: int | None = None,
+) -> None:
+    trial = await session.get(Trial, trial_id, with_for_update=True)
+    if (
+        trial is None
+        or (attempt is not None and trial.attempt_count != attempt)
+        or trial.state not in {"claimed", "running", "cancelled"}
+        or trial.cancellation_requested_at is None
+        or trial.cancellation_observed_at is not None
+    ):
+        return
+    leases = (await session.scalars(select(ServiceExecutionLease).where(
+        ServiceExecutionLease.trial_id == trial.id,
+        ServiceExecutionLease.attempt == trial.attempt_count,
+    ))).all()
+    if not leases or any(
+        lease.team_id != trial.team_id or lease.cleanup_state != "complete" or lease.deleted_at is None
+        for lease in leases
+    ):
+        return
+    # Keep the request separate from durable cleanup of the whole attempt,
+    # including a separate verifier. Replay also repairs historical nulls from
+    # already retained deletion evidence without reopening an execution lease.
+    trial.cancellation_observed_at = max(
+        trial.cancellation_requested_at,
+        max(lease.deleted_at for lease in leases if lease.deleted_at is not None),
+    )
+
+
 async def request_trial_execution_cancellation(
     session: AsyncSession,
     *,
@@ -1055,6 +1085,7 @@ async def request_trial_execution_cancellation(
         )
     ).scalar_one_or_none()
     if lease is None:
+        await _acknowledge_native_cancellation(session, trial_id=trial_id)
         return None
     if lease.desired_state in {"create", "start"}:
         desired_state = "cancel"
@@ -1339,6 +1370,77 @@ async def verify_trial_execution_fence(
     )
 
 
+async def recover_execution_node_attribution(
+    session: AsyncSession,
+    *,
+    lease_id: UUID,
+    apply: bool = False,
+) -> dict[str, object]:
+    """Recover only missing placement from unambiguous, lease-bound Pod evidence."""
+    lease = (
+        await session.execute(
+            select(ServiceExecutionLease)
+            .where(ServiceExecutionLease.id == lease_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if lease is None:
+        raise ServiceExecutionConflict("execution lease not found")
+    result: dict[str, object] = {
+        "lease_id": str(lease.id),
+        "target_id": lease.target_id,
+        "resource_generation": lease.resource_generation,
+        "pod_uid": lease.pod_uid,
+        "node_name": lease.node_name,
+        "status": "unchanged",
+        "evidence_event_ids": [],
+    }
+    if lease.node_name is not None:
+        return result
+    if not lease.pod_uid:
+        raise ServiceExecutionConflict("node recovery requires a persisted Pod UID")
+    events = (
+        await session.scalars(
+            select(ServiceExecutionEvent)
+            .where(
+                ServiceExecutionEvent.lease_id == lease.id,
+                ServiceExecutionEvent.event_kind == "kubernetes_observed",
+                ServiceExecutionEvent.generation.between(
+                    lease.resource_generation, lease.generation
+                ),
+            )
+            .order_by(ServiceExecutionEvent.generation, ServiceExecutionEvent.ordinal)
+        )
+    ).all()
+    nodes: set[str] = set()
+    evidence: list[str] = []
+    for event in events:
+        payload = event.payload_json
+        node = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
+        if node is None or payload.get("pod_uid") is None:
+            continue
+        if payload["pod_uid"] != lease.pod_uid or (
+            payload.get("job_uid") is not None and payload["job_uid"] != lease.job_uid
+        ):
+            raise ServiceExecutionConflict("node recovery evidence conflicts with Pod/Job identity")
+        nodes.add(node)
+        evidence.append(str(event.id))
+    if len(nodes) != 1:
+        raise ServiceExecutionConflict("node recovery requires exactly one evidenced node")
+    node = next(iter(nodes))
+    if apply:
+        lease.node_name = node
+        lease.updated_at = datetime.now(UTC)
+        await session.flush()
+    result.update(
+        node_name=node,
+        status="recovered" if apply else "recoverable",
+        evidence_event_ids=evidence,
+    )
+    return result
+
+
 async def record_execution_event(
     session: AsyncSession,
     *,
@@ -1604,7 +1706,11 @@ async def record_execution_event(
         lease.kubernetes_resource_version = _bounded_optional_text(
             payload.get("resource_version"), 128, "resource_version"
         )
-        lease.node_name = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
+        incoming_node_name = _bounded_optional_text(payload.get("node_name"), 253, "node_name")
+        if incoming_node_name is not None:
+            if lease.node_name is not None and lease.node_name != incoming_node_name:
+                raise ServiceExecutionConflict("Kubernetes node_name changed")
+            lease.node_name = incoming_node_name
         incoming_scheduled_at = _optional_datetime(payload.get("scheduled_at"), "scheduled_at")
         incoming_started_at = _optional_datetime(payload.get("started_at"), "started_at")
         incoming_terminated_at = _optional_datetime(payload.get("terminated_at"), "terminated_at")
@@ -1803,6 +1909,8 @@ async def record_execution_event(
                     and diagnosed_trial.attempt_count == lease.attempt):
                 diagnosed_trial.failure_reason = "oom_killed"
                 diagnosed_trial.failure_message = diagnosis["message"]
+    if advances_projection and lease.cleanup_state == "complete" and lease.deleted_at is not None:
+        await _acknowledge_native_cancellation(session, trial_id=lease.trial_id, attempt=lease.attempt)
     lease.updated_at = datetime.now(UTC)
     await session.flush()
     return event, False
@@ -2383,6 +2491,7 @@ __all__ = [
     "record_execution_event",
     "record_kubernetes_observation",
     "recover_deleted_committed_trial",
+    "recover_execution_node_attribution",
     "refresh_service_execution_metrics",
     "request_trial_execution_cancellation",
     "reserve_trial_execution",

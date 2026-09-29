@@ -16,6 +16,7 @@ variable "regional_execution_targets" {
       collector_viewer_group_id = string
       registry_pull_group_id    = string
     }))
+    suspended           = optional(bool, false)
     execution_max_nodes = optional(number, 100)
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")

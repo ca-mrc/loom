@@ -69,6 +69,18 @@ run "lower_limit" {
     error_message = "Do not widen an explicit operator ceiling."
   }
 }
+run "suspended_region_has_no_paid_nodes" {
+  command = plan
+  variables { target = merge(var.target, { suspended = true, execution_max_nodes = 3 }) }
+  assert {
+    condition     = alltrue([for node in nebius_mk8s_v1_node_group.regional : node.fixed_node_count == 0 && node.autoscaling == null])
+    error_message = "Suspending a region must stop the system node and disable execution autoscaling."
+  }
+  assert {
+    condition     = length(nebius_mk8s_v1_node_group.regional) == 2 && nebius_mk8s_v1_cluster.regional.name == "nebius-eu-west1-integration-cluster"
+    error_message = "Suspension retains the cluster and node-group identities for later recovery."
+  }
+}
 run "reject_invalid_api_cidr" {
   command = plan
   variables { target = merge(var.target, { public_control_plane_cidrs = ["not-a-cidr"] }) }

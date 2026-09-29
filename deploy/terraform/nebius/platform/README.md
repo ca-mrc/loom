@@ -113,3 +113,19 @@ execution presets; the original EU-north integration remains `cpu-e2`. Terraform
 validates CPU-only intent but cannot prove native inventory or Kubernetes
 version compatibility. Confirm those through the read-only native catalog
 before reviewing an activation plan, and use the matching regional price SKU.
+
+Set `suspended = true` in a regional target to keep both node groups at fixed
+zero nodes with autoscaling disabled. The cluster, node-group identities, IAM
+and network configuration remain available for recovery. The default is `false`
+for compatibility; the EU-west examples explicitly start suspended. Disabling
+Loom execution routing alone does not suspend cloud nodes.
+
+Before suspension, disable the target in Loom, finish or cancel its work, and
+check for retained workloads and storage. Change the **owning state inputs**,
+review the plan, and apply through the existing operator path. Do not replace a
+whole `regional_execution_targets` map with a partial override: Terraform does
+not merge maps across variable files. Verify native node counts, autoscaling,
+VMs and attached disks after drain, then check subsequent provider usage. Zero
+nodes does not prove that separately retained volumes, IPs or services are free.
+To resume, set `suspended = false`, review the system-node cost and execution
+ceiling, apply, and verify system readiness before enabling Loom routing.

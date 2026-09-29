@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -227,6 +228,60 @@ func TestStopProcessesPreservesRPCAndRejectsHostProcess(t *testing.T) {
 	status, result = runExec(t, c, execRequest{Argv: []string{"/bin/sh", "-c", "printf snapshot-ready"}})
 	if status != 200 || string(result.Stdout) != "snapshot-ready" {
 		t.Fatal("cleanup stopped RPC server")
+	}
+}
+
+func TestStopProcessesFinishesAfterRequestCancellation(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Getpid() != 1 {
+		t.Skip("cleanup requires an isolated Linux PID namespace with the runtime as PID 1")
+	}
+	handler := (runtimeServer{1024, 3 * time.Second}).handler()
+	execute := func(command string) execResult {
+		t.Helper()
+		data, _ := json.Marshal(execRequest{Argv: []string{"/bin/sh", "-c", command}})
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("POST", "/exec", bytes.NewReader(data)))
+		var result execResult
+		if response.Code != http.StatusOK {
+			t.Fatalf("exec failed: %d %s", response.Code, response.Body.String())
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.Code != 0 {
+			t.Fatalf("exec failed: %#v %v", result, err)
+		}
+		return result
+	}
+	// The shell exits, leaving a live descendant adopted by this PID 1.
+	result := execute("sleep 30 </dev/null >/dev/null 2>&1 & printf '%s' $!")
+	pid, err := strconv.Atoi(string(result.Stdout))
+	if err != nil || pid <= 1 {
+		t.Fatalf("invalid detached child PID: %q", result.Stdout)
+	}
+	t.Cleanup(func() {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest("POST", "/stop-processes", nil))
+	})
+	processPath := filepath.Join("/proc", strconv.Itoa(pid))
+	status, err := os.ReadFile(filepath.Join(processPath, "status"))
+	if err != nil {
+		t.Fatalf("child must still be alive before cancellation: %v", err)
+	}
+	if !strings.Contains(string(status), "PPid:\t1\n") || strings.Contains(string(status), "State:\tZ") {
+		t.Fatalf("child was not a live adopted descendant: %s", status)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest("POST", "/stop-processes", nil).WithContext(ctx)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("accepted cleanup was interrupted by request cancellation: status=%d reason=%s",
+			response.Code, response.Header().Get("X-Loom-Sandbox-Error"))
+	}
+	if _, err := os.Stat(processPath); !os.IsNotExist(err) {
+		t.Fatalf("cleanup returned before the descendant was reaped: %v", err)
+	}
+	if result := execute("printf cleanup-complete"); string(result.Stdout) != "cleanup-complete" {
+		t.Fatal("cleanup stopped the runtime execution endpoint")
 	}
 }
 

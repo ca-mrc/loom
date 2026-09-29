@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import PurePosixPath
+import os
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import docker
 import httpx
@@ -15,6 +17,45 @@ from loom.trial.mutable_snapshot import export_mutable_paths, import_mutable_pat
 from tests.integration.test_task_identity_installation_docker import native_binary  # noqa: F401
 
 pytestmark = [pytest.mark.docker, pytest.mark.timeout(180)]
+
+
+@pytest.fixture(scope="module")
+def native_runtime_tests(native_binary):  # noqa: F811
+    """Reuse the native fixture's downloaded modules for an offline test build."""
+    directory = native_binary.parent
+    repository = Path(__file__).resolve().parents[2]
+    subprocess.run([
+        "docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{repository}:/src:ro", "-v", f"{directory}:/output", "-w", "/src",
+        "-e", "GOCACHE=/tmp/go-cache", "-e", "GOMODCACHE=/output/modules",
+        "-e", "CGO_ENABLED=0", "-e", "GOPROXY=off", "golang:1.26-alpine3.23",
+        "go", "test", "-c", "-o", "/output/loom-sandbox-runtime.test", "./cmd/loom-sandbox-runtime",
+    ], check=True, timeout=120, capture_output=True)
+    return directory / "loom-sandbox-runtime.test"
+
+
+@pytest.mark.parametrize("uid", [0, 65532], ids=["root", "nonroot"])
+def test_native_cleanup_request_cancellation_as_pid1(native_runtime_tests, uid):
+    """Run real process cleanup regressions that ordinary Go tests skip outside PID 1."""
+    client = docker.from_env()
+    container = None
+    try:
+        container = client.containers.run(
+            "python:3.11-slim",
+            ["-test.run", "^(TestStopProcesses|TestDeadlineAndDisconnect)", "-test.v", "-test.timeout", "20s"],
+            entrypoint="/loom-sandbox-runtime.test", detach=True, user=f"{uid}:{uid}",
+            network_mode="none", cap_drop=["ALL"], security_opt=["no-new-privileges"],
+            volumes={str(native_runtime_tests): {"bind": "/loom-sandbox-runtime.test", "mode": "ro"}},
+        )
+        result = container.wait(timeout=30)
+        output = container.logs().decode("utf-8", errors="replace")
+        assert result["StatusCode"] == 0, output
+        assert "--- PASS: TestStopProcessesFinishesAfterRequestCancellation" in output, output
+        assert "--- PASS: TestDeadlineAndDisconnectKillChildren" in output, output
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        client.close()
 
 
 @pytest.fixture

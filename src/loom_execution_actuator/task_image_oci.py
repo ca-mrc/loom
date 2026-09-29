@@ -206,7 +206,9 @@ def validate_native_oci_directory(path: Path) -> None:
                     or relative in members):
                 raise NativeOCIArchiveError("OCI directory contains an unsafe or duplicate path")
             if stat.S_ISDIR(mode):
-                if relative not in {"blobs", "blobs/sha256"}:
+                # BuildKit tar=false leaves an empty content-store staging root.
+                # Its children remain forbidden by the path rules below.
+                if relative not in {"blobs", "blobs/sha256", "ingest"}:
                     raise NativeOCIArchiveError("OCI directory contains an unexpected directory")
                 continue
             if not stat.S_ISREG(mode):
