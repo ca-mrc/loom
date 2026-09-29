@@ -11,7 +11,8 @@
       "public_control_plane_cidrs": [],
       "node_registry_pull_service_account_id": "serviceaccount-REPLACE-PULL",
       "execution_max_nodes": 100,
-      "node_platform": "cpu-d3"
+      "node_platform": "cpu-d3",
+      "suspended": true
     }
   }
 }

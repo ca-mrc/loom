@@ -18,6 +18,7 @@ variable "target" {
       collector_viewer_group_id = string
       registry_pull_group_id    = string
     }))
+    suspended           = optional(bool, false)
     execution_max_nodes = optional(number, 100)
     node_platform       = string
     system_preset       = optional(string, "4vcpu-16gb")
@@ -111,8 +112,8 @@ resource "nebius_mk8s_v1_node_group" "regional" {
   labels           = local.labels
   version          = var.target.kubernetes_version
   auto_repair      = {}
-  fixed_node_count = each.key == "system" ? 1 : null
-  autoscaling      = each.key == "system" ? null : { min_node_count = 0, max_node_count = var.target.execution_max_nodes }
+  fixed_node_count = var.target.suspended ? 0 : (each.key == "system" ? 1 : null)
+  autoscaling      = var.target.suspended || each.key == "system" ? null : { min_node_count = 0, max_node_count = var.target.execution_max_nodes }
   strategy         = { drain_timeout = "20m", max_surge = { count = 0 }, max_unavailable = { count = 1 } }
   template = {
     service_account_id = local.node_pull_identity
@@ -136,6 +137,7 @@ resource "nebius_mk8s_v1_node_group" "regional" {
 }
 output "execution" {
   value = {
+    suspended                             = var.target.suspended
     target_id                             = var.target.target_id
     region                                = var.target.region
     cluster_scope_id                      = var.target.cluster_scope_id

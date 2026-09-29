@@ -17,7 +17,8 @@
         "gateway_public_key": "REPLACE_WITH_GATEWAY_SPKI_PUBLIC_KEY_PEM",
         "collector_viewer_group_id": "group-REPLACE-OBSERVER-VIEWER",
         "registry_pull_group_id": "group-REPLACE-REGISTRY-VIEWER"
-      }
+      },
+      "suspended": true
     }
   }
 }
