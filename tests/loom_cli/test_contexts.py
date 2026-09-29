@@ -154,3 +154,65 @@ def test_competing_first_managed_context_writes_keep_exactly_one_binding(tmp_xdg
     with selected_context("same-name"):
         cfg = load_config()
         assert cfg.auth_token == cfg.managed_environment.environment_id
+
+
+def test_application_binding_cannot_change_origin_identity_or_binding_kind(tmp_xdg_home):
+    from dataclasses import replace
+
+    from loom_cli.contexts import ManagedApplicationBinding, selected_context
+    from loom_cli.server_client import authed_client
+
+    legacy = managed_binding()
+    binding = ManagedApplicationBinding(application_id=legacy.environment_id, incarnation=legacy.incarnation,
+                                        management_origin=legacy.management_origin, child_origin=legacy.child_origin)
+    with pytest.raises(ValueError, match="named context"):
+        save_config(LoomConfig(server_url=binding.child_origin, managed_application=binding))
+    with selected_context("application"):
+        save_config(LoomConfig(server_url=binding.child_origin, auth_token="child", managed_application=binding))
+        original = config_path().read_bytes()
+        for changes in ({"server_url": "https://foreign.example.com"}, {"managed_application": None},
+                        {"managed_application": replace(binding, application_id="20000000-0000-4000-8000-000000000002")},
+                        {"managed_application": None, "managed_environment": legacy}, {"managed_environment": legacy}):
+            cfg = load_config()
+            for field, value in changes.items():
+                setattr(cfg, field, value)
+            with pytest.raises(ValueError, match="binding"):
+                save_config(cfg)
+            assert config_path().read_bytes() == original
+        cfg = load_config()
+        cfg.server_url = "https://foreign.example.com"
+        with pytest.raises(ValueError, match="binding"):
+            authed_client(cfg)
+
+
+def test_competing_application_and_environment_context_writes_keep_one_binding(tmp_xdg_home):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from loom_cli.contexts import ManagedApplicationBinding, selected_context
+
+    barrier = Barrier(2)
+    legacy = managed_binding()
+    application = ManagedApplicationBinding(application_id=legacy.environment_id, incarnation=legacy.incarnation,
+                                            management_origin=legacy.management_origin, child_origin=legacy.child_origin)
+
+    def create(kind):
+        with selected_context("same-name"):
+            cfg = LoomConfig(server_url=legacy.child_origin, auth_token=kind, **{
+                "managed_environment" if kind == "environment" else "managed_application":
+                    legacy if kind == "environment" else application,
+            })
+            barrier.wait()
+            try:
+                save_config(cfg)
+                return "saved"
+            except ValueError:
+                return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(create, ["environment", "application"]))
+    assert sorted(results) == ["conflict", "saved"]
+    with selected_context("same-name"):
+        cfg = load_config()
+        assert (cfg.managed_application is not None) == (cfg.auth_token == "application")
+        assert (cfg.managed_environment is not None) == (cfg.auth_token == "environment")
