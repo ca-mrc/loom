@@ -32,6 +32,7 @@ from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
     resolve_prepared_task,
 )
+from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import reserve_trial_execution
@@ -52,6 +53,7 @@ SELECT t.id,
        task_definition.checksum AS task_checksum,
        task_definition.config AS task_config,
        task_definition.source_provenance AS task_source_provenance,
+       task_definition.legacy_separate_verifier_checksum,
        t.config AS trial_config,
        b.service_execution_runtime_profile AS batch_runtime_profile
   FROM trials t
@@ -275,6 +277,20 @@ async def _reserve_service_candidate(
         if runtime_profile.logical_pool_id != pool_id:
             raise ValueError("queued service-execution runtime profile pool drift")
         trial_config = TrialConfig.model_validate(row["trial_config"])
+        effective_trial = apply_legacy_verifier_default(
+            task, trial_config, task_checksum=task_revision,
+            legacy_separate_verifier_checksum=row.get("legacy_separate_verifier_checksum"),
+            source_provenance=source_provenance,
+        )
+        if effective_trial is not trial_config:
+            # An old CP can still submit while the schema-first rollout is
+            # paused. Freeze its missing default under the Trial lock before
+            # compiling/reserving, using the pinned image revision above.
+            await session.execute(update(Trial).where(Trial.id == row["id"]).values(
+                config={**row["trial_config"],
+                        "verifier_env_mode": effective_trial.verifier_env_mode},
+            ))
+            trial_config = effective_trial
         runtime_plan = compile_service_execution_plan(
             task_id=row["task_id"],
             task=task,

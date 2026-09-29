@@ -272,12 +272,31 @@ inspect it without re-running.
 
 ## Verifier environment mode
 
-General Loom tasks run the verifier in the agent sandbox, so the sandbox image
-must contain dependencies such as `pytest`. `TrialConfig` accepts
-`verifier_env_mode`, but general trial execution does not use it to select a
-second driver. The Terminal-Bench 2.1 revision-6 profile is the dedicated
-exception: its private-path staging policy runs agent execution and verification
-through separate drivers.
+`TrialConfig.verifier_env_mode` overrides the task's `verifier.env_mode`.
+The default is `separate`: native Terminus execution archives the workspace,
+cleans up the agent Pod, and admits a separate verifier. Explicit `shared`
+verification runs in the live task sandbox after the agent returns. The selected
+sandbox must contain dependencies such as `pytest`.
+
+Historical Nebius tasks stored `shared` while actually using a second sandbox.
+Migration 0167 changed their catalog configuration to `separate`, which conflicted
+with existing frozen image snapshots. Migration 0169 repairs only that exact
+legacy discrepancy, restoring the catalog configuration and recording the affected
+checksum in `tasks.legacy_separate_verifier_checksum`. Image snapshots, source
+identity and historical execution grants remain unchanged. Admission and Trial
+submission use the marker to freeze `verifier_env_mode=separate` into new Trials
+unless the user explicitly overrides it. Scheduler admission also freezes the
+default for queued Trials created by an old submitter during schema-first rollout,
+using the pinned image revision. Resource reservation checks the same effective
+Trial configuration. Rebuilding the identical legacy TaskSet revision preserves
+the marker; a changed checksum/configuration or a manifest-backed publication
+cannot inherit this compatibility default.
+
+An unrelated image/config snapshot conflict remains an error. Trial submission
+returns HTTP 409 with `reason=task_image_snapshot_conflict`; Batch fanout records
+the failure instead of indefinitely retrying a generic HTTP 500. Operators should
+inspect the task revision and its frozen snapshot rather than overwrite the
+snapshot, change the checksum independently of the bundle, or bypass the check.
 
 ## Adding a new verifier
 

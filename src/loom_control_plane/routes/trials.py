@@ -42,7 +42,11 @@ from loom.service_execution_materialization import (
     runtime_profile_rejections,
 )
 from loom.submission_identity import require_submitting_user
-from loom.task_image_materialization import ensure_task_image_materializations
+from loom.task_image_materialization import (
+    TaskImageSnapshotConflictError,
+    ensure_task_image_materializations,
+)
+from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_control_plane.request_auth import RequestPrincipal
 from loom_control_plane.scheduler.requires_caps import derive_requires_caps
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
@@ -115,10 +119,20 @@ async def _ensure_trial_task_image_links(
         .limit(1)
     ) is not None:
         return
-    materializations = await ensure_task_image_materializations(
-        session,
-        task_row=task_row,
-    )
+    try:
+        materializations = await ensure_task_image_materializations(
+            session,
+            task_row=task_row,
+        )
+    except TaskImageSnapshotConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "task_image_snapshot_conflict",
+                "task_id": task_row.id,
+                "message": str(exc),
+            },
+        ) from exc
     if not materializations:
         return
     await session.execute(
@@ -322,6 +336,13 @@ async def submit_trial(
             status_code=400,
             detail=f"invalid trial config: {exc}",
         ) from exc
+    trial_config = apply_legacy_verifier_default(
+        task_config,
+        trial_config,
+        task_checksum=task_row.checksum,
+        legacy_separate_verifier_checksum=task_row.legacy_separate_verifier_checksum,
+        source_provenance=task_row.source_provenance or {},
+    )
     if trial_config.multi_model is not None and trial_config.multi_model.enabled:
         from loom.models.trial import (
             MultiModelSwitchSpec,

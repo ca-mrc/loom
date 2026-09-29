@@ -2400,6 +2400,11 @@ class Task(Base):
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     checksum: Mapped[str] = mapped_column(String, nullable=False)
+    # Revision-bound compatibility for legacy image snapshots repaired after
+    # 0167. Runtime defaults live outside the immutable source/task config.
+    legacy_separate_verifier_checksum: Mapped[str | None] = mapped_column(
+        String(64), nullable=True,
+    )
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     # Per-task SPDX license tag (Plan 13). NULL on hand-authored tasks;

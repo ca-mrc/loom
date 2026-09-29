@@ -33,6 +33,7 @@ from loom.service_execution_materialization import (
     runtime_profile_rejections,
     validate_task_resource_requests,
 )
+from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_service.metrics import SUBMISSION_REJECTS_TOTAL
 from loom_service.worker_backends import (
     get_active_backends,
@@ -117,13 +118,16 @@ async def freeze_task_resource_requests(
     if not selected_ids:
         return profile.model_copy(update={"task_resource_requests": {}})
     rows = (await session.execute(
-        select(Task.id, Task.checksum, Task.config).where(Task.id.in_(list(selected_ids))),
+        select(
+            Task.id, Task.checksum, Task.config, Task.source_provenance,
+            Task.legacy_separate_verifier_checksum,
+        ).where(Task.id.in_(list(selected_ids))),
     )).all()
     if {str(row[0]) for row in rows} != selected_ids:
         raise HTTPException(status_code=400, detail="task_resource_requests task is missing")
     try:
         trials = [TrialConfig.model_validate(item) for item in selections]
-        for task_id, checksum, raw_task in rows:
+        for task_id, checksum, raw_task, provenance, legacy_checksum in rows:
             task = TaskConfig.model_validate(raw_task)
             if task.service_execution is not None:
                 if str(task_id) in requests:
@@ -138,7 +142,13 @@ async def freeze_task_resource_requests(
             for trial in trials:
                 try:
                     validate_task_resource_requests(
-                        task=task, trial=trial, profile=profile,
+                        task=task,
+                        trial=apply_legacy_verifier_default(
+                            task, trial, task_checksum=checksum,
+                            legacy_separate_verifier_checksum=legacy_checksum,
+                            source_provenance=provenance or {},
+                        ),
+                        profile=profile,
                         task_revision_sha256=revision,
                         override=requests[str(task_id)],
                     )
@@ -175,12 +185,18 @@ async def admit_execution_backend(
         raise HTTPException(status_code=400, detail="agent_version requires the native Nebius backend")
     task_rows = (
         await session.execute(
-            select(Task.id, Task.config, Task.source_provenance).where(Task.id.in_(list(task_ids))),
+            select(
+                Task.id, Task.config, Task.source_provenance, Task.checksum,
+                Task.legacy_separate_verifier_checksum,
+            ).where(Task.id.in_(list(task_ids))),
         )
     ).all()
     configs_by_id = {
-        str(task_id): (TaskConfig.model_validate(config), dict(source_provenance or {}))
-        for task_id, config, source_provenance in task_rows
+        str(task_id): (
+            TaskConfig.model_validate(config), dict(source_provenance or {}),
+            checksum, legacy_checksum,
+        )
+        for task_id, config, source_provenance, checksum, legacy_checksum in task_rows
     }
     if backend == NEBIUS_BACKEND:
         parsed_trials: tuple[TrialConfig, ...] | None = None
@@ -241,10 +257,19 @@ async def admit_execution_backend(
                 if parsed_trial_error:
                     reasons = ("automatic_trial_config_invalid",)
                 else:
+                    assert task_entry is not None
+                    effective_trials = tuple(
+                        apply_legacy_verifier_default(
+                            task_config, parsed_trial, task_checksum=task_entry[2],
+                            legacy_separate_verifier_checksum=task_entry[3],
+                            source_provenance=provenance,
+                        )
+                        for parsed_trial in parsed_trials
+                    )
                     reasons = tuple(
                         dict.fromkeys(
                             reason
-                            for parsed_trial in parsed_trials
+                            for parsed_trial in effective_trials
                             for reason in automatic_service_execution_rejections(
                                 task_config,
                                 parsed_trial,
@@ -259,7 +284,7 @@ async def admit_execution_backend(
                     reasons = (*reasons, "runtime_profile_unavailable")
                 elif parsed_trials:
                     reasons = (*reasons, *(
-                        reason for parsed_trial in parsed_trials
+                        reason for parsed_trial in effective_trials
                         for reason in runtime_profile_rejections(
                             task_config, parsed_trial, profile,
                             allow_task_image_preparation=True,

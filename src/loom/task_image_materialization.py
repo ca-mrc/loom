@@ -47,6 +47,10 @@ _TASK_IMAGE_COMPONENT_RE = re.compile(r"[^\s]{1,256}")
 MAX_TASK_IMAGE_COMPONENTS = 128
 
 
+class TaskImageSnapshotConflictError(RuntimeError):
+    """The persisted image identity conflicts with the submitted task snapshot."""
+
+
 class TaskImageExecutionGrantV1(BaseModel):
     """Immutable build evidence carried from scheduling into execution."""
 
@@ -281,7 +285,7 @@ async def _lock_task_image_materializations(
     task_checksum = canonical_task_checksum(task_row.checksum)
     manifest_digest = task_bundle_content_manifest_digest(task_row.source_provenance)
     if manifest_digest and task.task.id != task_row.id:
-        raise ValueError("frozen task snapshot identity differs from the materialization")
+        raise TaskImageSnapshotConflictError("frozen task snapshot identity differs from the materialization")
     if manifest_digest:
         from loom.task_bundle_source_journal import require_task_bundle_transaction
 
@@ -328,7 +332,7 @@ async def _lock_task_image_materializations(
     )
     by_arch = {row.cpu_arch: row for row in rows}
     if set(by_arch) != set(architectures):
-        raise RuntimeError("task image materialization identity conflict")
+        raise TaskImageSnapshotConflictError("task image materialization identity conflict")
     if manifest_digest and any(
         row.bundle_content_manifest_sha256 != manifest_digest
         or row.task_id != task_row.id
@@ -338,10 +342,10 @@ async def _lock_task_image_materializations(
         or row.task_source_provenance != task_row.source_provenance
         for row in rows
     ):
-        raise ValueError("frozen content-manifest snapshot conflicts with existing materialization")
+        raise TaskImageSnapshotConflictError("frozen content-manifest snapshot conflicts with existing materialization")
     for row in rows:
         if row.task_config != task_row.config:
-            raise RuntimeError("task image materialization snapshot conflicts with task checksum")
+            raise TaskImageSnapshotConflictError("task image materialization snapshot conflicts with task checksum")
         if row.state == "retired" and not manifest_digest:
             # Legacy caches may need current upload objects after retention GC.
             # Manifest-bearing sources retain the exact admitted journal identity.

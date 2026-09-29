@@ -562,7 +562,7 @@ async def _seed_ready_trial(
                 id=trial_id,
                 team_id=team_id,
                 task_id=task_id,
-                config={"agent": {"name": "test"}},
+                config={"agent_name": "test", "agent_model": None},
                 requires_caps={"os": "linux", "cpu_arch": "x86_64"},
                 state="queued",
                 attempt_count=0,
