@@ -183,6 +183,46 @@ async def test_normal_cancel_replay_repairs_queued_cancel_with_deleted_lease(
         await engine.dispose()
 
 
+async def test_native_cleanup_acknowledges_cancel_without_client_replay(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await fixtures._seed_ready_trial(session, now=now)
+            await fixtures._configure_scheduler_trial(session, trial_id=trial_id, now=now)
+            lease = await fixtures._reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        await cancel_trial_under_authority(
+            session_factory=sessions, trial_id=trial_id, team_id=lease.team_id,
+        )
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.cancellation_requested_at is not None
+            assert trial.cancellation_observed_at is None
+            requested_at = trial.cancellation_requested_at
+        actuator = ExecutionActuator(
+            sessions=sessions, kubernetes=fixtures._FakeKubernetesJobApi(),
+            target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+            controller_id="cancel-ack-test",
+        )
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=5))
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            current = await session.get(ServiceExecutionLease, lease.id)
+            assert current is not None and current.cleanup_state == "complete"
+            assert trial is not None and trial.cancellation_requested_at == requested_at
+            assert trial.cancellation_observed_at == current.deleted_at
+            assert trial.cancellation_observed_at is not None
+            acknowledged_at = trial.cancellation_observed_at
+        await actuator.reconcile_full_once(now=now + timedelta(seconds=8))
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.cancellation_observed_at == acknowledged_at
+    finally:
+        await engine.dispose()
+
+
 async def test_service_scheduler_skips_cancel_requested_queue(postgres_url: str) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
