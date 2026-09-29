@@ -57,7 +57,7 @@ def test_alembic_refuses_changes_until_personal_access_is_drained(migration_acce
         elif change == "stamp":
             command.stamp(config, "0165")
         elif change == "multi_stamp":
-            command.stamp(config, "0165")
+            command.stamp(config, [_HEAD, "0165"])
         else:
             command.stamp(config, "head", purge=True)
 

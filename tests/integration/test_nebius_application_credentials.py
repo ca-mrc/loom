@@ -84,6 +84,8 @@ async def setup(applications, platform_inputs, database_access, shared_ca, *, sl
     row = row.model_copy(update={"owner_user_id": alice.user_id, "owner_team_id": alice.team_id,
                                  "data_environment_id": data_id})
     shared = shared.model_copy(update={"data_environment_id": data_id})
+    # These fixtures migrate to repository head; bind the candidate to that
+    # version independently of the live DB so schema-drift checks stay effective.
     release = release.model_copy(update={"schema_revision": service_schema_head()})
     shared = shared.model_copy(update={"schema_revision": service_schema_head()})
     prepared = render_application(row, release, shared, foundation, authority=authority)

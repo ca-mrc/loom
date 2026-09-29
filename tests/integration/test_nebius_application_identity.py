@@ -32,7 +32,7 @@ def enroll(access, app, incarnation, owner, *, generation=1, schema=None):
     from loom.nebius_application_identity import ApplicationDatabaseIdentity
 
     return ApplicationDatabaseIdentity(access).enroll(
-        app, incarnation, generation, schema_revision=schema or service_schema_head(), principal=owner)
+        app, incarnation, generation, schema_revision=service_schema_head() if schema is None else schema, principal=owner)
 
 
 def granted(access):
