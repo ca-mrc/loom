@@ -66,3 +66,28 @@ func TestDockerReadinessRetainsExitAndDeadline(t *testing.T) {
 		})
 	}
 }
+
+// The deployed one-vCPU TCG guest needed 38.8 seconds to initialize Docker.
+// Exercise a healthy API that appears after the old 30-second cutoff without
+// relying on host CPU speed or requiring a real daemon for this regression.
+func TestDockerStartupAcceptsHealthyDaemonAfterOldCutoff(t *testing.T) {
+	t.Parallel()
+	socket := filepath.Join(t.TempDir(), "docker.sock")
+	readyAt := time.Now().Add(31 * time.Second)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if time.Now().Before(readyAt) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})}
+	go server.Serve(listener)
+	t.Cleanup(func() { server.Close() })
+	if err := waitDockerStartup(make(chan error), socket); err != nil {
+		t.Fatalf("healthy slow daemon rejected: %v", err)
+	}
+}

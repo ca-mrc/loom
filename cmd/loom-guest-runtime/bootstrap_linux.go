@@ -260,9 +260,13 @@ func startDocker(environment []string) error {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- daemon.Wait() }()
+	return waitDockerStartup(exited, "/var/run/docker.sock")
+}
+
+func waitDockerStartup(exited <-chan error, socket string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return waitDocker(ctx, exited, "/var/run/docker.sock")
+	return waitDocker(ctx, exited, socket)
 }
 
 func waitDocker(ctx context.Context, exited <-chan error, socket string) error {
