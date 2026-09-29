@@ -111,12 +111,21 @@ development-data access, not malicious-code isolation.
 Personal NetworkPolicies deny ingress/egress by default, admit API/web ingress
 only from the configured ingress controller, and permit API egress to the shared
 database/CP/Gateway, cluster DNS and public IPv4 HTTPS (excluding private,
-loopback and link-local destinations). This is not a hostname-level HTTPS
+loopback and link-local destinations). DNS is limited to TCP/UDP port 53 on
+`kube-system` Pods labelled `k8s-app=kube-dns` or `k8s-app=coredns`, covering
+disposable Kubernetes and native Nebius resolvers. This is not a hostname-level HTTPS
 allowlist. The renderer never changes the shared namespace's policies: a protected
 shared-side admission update is required for these connections to work. It also
 does not rename/recreate the existing shared foundation.
 
-No management route or provisioner invokes this renderer yet. Legacy frozen
+Operations keep their frozen rendered policies; upgrading the management source
+does not rewrite old plans. New create/update/resume plans use the current
+renderer. Disposable CNI coverage installs both the personal egress policies and
+shared ingress policies, verifies service-name access with both DNS labels, and
+retains rejection checks for foreign namespaces, frontend Pods and unrelated
+shared services. This does not establish installed personal-application readiness.
+
+Rendering alone does not admit or provision an application. Legacy frozen
 full-stack operations retain their original meaning. Credential provisioning,
 active registration/lifecycle fencing, schema coordination, shared network
 admission and source qualification remain prerequisites for activating the new

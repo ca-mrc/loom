@@ -98,7 +98,8 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
             clients = {}
             client_policies = {}
             for slug, change in (("alice", None), ("bob", None), ("eve", None),
-                                 ("foreign", "installation"), ("other-data", "data"), ("unlabeled", "none")):
+                                 ("foreign", "installation"), ("other-data", "data"), ("unlabeled", "none"),
+                                 ("ingress-only", "egress-control")):
                 app_values = inputs(platform_inputs, slug)
                 rendered = render_application(*app_values, authority=authority)
                 namespace = named(rendered, "Namespace", "loom-dev-" + slug)
@@ -113,17 +114,22 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                 await asyncio.to_thread(core.create_namespace, namespace)
                 await asyncio.to_thread(core.create_namespaced_service_account, ns,
                     {"metadata": {"name": "network-fixture"}, "automountServiceAccountToken": False})
-                for doc in rendered.files["10-network.yaml"]:
-                    if doc["kind"] == "NetworkPolicy":
-                        await asyncio.to_thread(utils.create_from_dict, api, doc)
+                if change != "egress-control":
+                    for doc in rendered.files["10-network.yaml"]:
+                        if doc["kind"] == "NetworkPolicy":
+                            await asyncio.to_thread(utils.create_from_dict, api, doc)
                 await asyncio.to_thread(core.create_namespaced_pod, ns, pod("api", ns, "loom-service", ["idle"]))
                 api_pod = await asyncio.to_thread(_wait_for_pod, core, ns, "api")
-                client_policies[slug] = (api_pod.status.pod_ip, ("default-deny", "public-api", "application-egress"))
+                if change != "egress-control":
+                    client_policies[slug] = (api_pod.status.pod_ip, ("default-deny", "public-api", "application-egress"))
                 clients[slug] = (ns, "api")
-            await asyncio.to_thread(core.create_namespaced_pod, "loom-dev-alice", pod("web", "loom-dev-alice", "loom-web", ["idle"]))
-            web_pod = await asyncio.to_thread(_wait_for_pod, core, "loom-dev-alice", "web")
-            client_policies["web"] = (web_pod.status.pod_ip, ("default-deny", "public-web"))
-            clients["web"] = ("loom-dev-alice", "web")
+            for slug in ("alice", "ingress-only"):
+                ns = "loom-dev-" + slug
+                await asyncio.to_thread(core.create_namespaced_pod, ns, pod("web", ns, "loom-web", ["idle"]))
+                web_pod = await asyncio.to_thread(_wait_for_pod, core, ns, "web")
+                if slug == "alice":
+                    client_policies["web"] = (web_pod.status.pod_ip, ("default-deny", "public-web"))
+                clients["web-" + slug] = (ns, "web")
 
             await _wait_for_policy_programming(container, {
                 name: (servers[name].status.pod_ip, ("shared-deny", policy_names[app]) if app in policy_names else ("shared-deny",))
@@ -139,7 +145,9 @@ async def test_shared_data_accepts_managed_apis_but_not_other_namespaces_or_web(
                 # independently of the personal API's egress policy.
                 await _wait_for_allowed_peer(core, data_ns, name, service_url)
                 for slug, (ns, client_name) in clients.items():
-                    if slug in {"alice", "bob", "eve"} and name != "unrelated":
+                    # The ingress-only API/web have no egress restriction:
+                    # their denials must come from the shared-side policy.
+                    if slug in {"alice", "bob", "eve", "ingress-only"} and name != "unrelated":
                         await _wait_for_allowed_peer(core, ns, client_name, url)
                         await _wait_for_allowed_peer(core, ns, client_name, service_url)
                     else:
