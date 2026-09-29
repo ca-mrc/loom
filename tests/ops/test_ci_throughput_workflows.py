@@ -404,9 +404,19 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert "CI_PYTEST_MARKERS" in scripts
     assert "validate_environment_isolation.py" not in scripts
     assert "loom cluster render" not in scripts
-    # Serial native fixture execution and admission now share this job with
-    # the existing ingress qualification. Keep the expanded budget bounded.
-    assert 0 < contract["timeout-minutes"] <= 25
+
+
+def test_cluster_smoke_budget_covers_observed_serial_runtime() -> None:
+    contract = _workflow(".github/workflows/cluster-smoke.yml")["jobs"]["cluster-contract"]
+    # PR2251 attempt2 passed all 64 tests in 1481.61s, then the job deadline
+    # cancelled its result. Account for setup/cleanup and hosted-runner variance
+    # without removing the finite overall budget or changing per-test deadlines.
+    observed_tests_seconds = 1482
+    setup_cleanup_seconds = 180
+    runner_variance_seconds = 300
+    budget_seconds = contract["timeout-minutes"] * 60
+    assert observed_tests_seconds + setup_cleanup_seconds + runner_variance_seconds <= budget_seconds
+    assert budget_seconds <= 35 * 60
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
