@@ -7,7 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from loom.db.schema import Task, Team, Trial, TrialTaskImageMaterialization
 from loom.task_bundle_registration import prepare_task_bundle_registration
 from loom.task_bundle_source import TaskBundleSourceSpecV1
-from loom.task_image_materialization import ensure_task_image_materializations
+from loom.task_image_materialization import (
+    TaskImageSnapshotConflictError,
+    ensure_task_image_materializations,
+)
 from loom_control_plane.task_image_materializations import _durable_reference_exists
 from tests.integration.test_task_bundle_source_journal import _publish, _receipts, _upload
 from tests.unit.test_task_bundle_registration import _bundle
@@ -132,7 +135,7 @@ async def test_strong_ensure_rejects_different_frozen_snapshot(
                 task.source = "s3://another-bucket/another-prefix/"
             else:
                 task.source_provenance = {**task.source_provenance, "extra": "changed"}
-            with pytest.raises(ValueError, match=r"frozen.*snapshot"):
+            with pytest.raises(TaskImageSnapshotConflictError, match=r"frozen.*snapshot"):
                 await ensure_task_image_materializations(session, task_row=task)
             assert all(row.task_config["task"]["name"] == "Source task" for row in original)
     finally:

@@ -367,11 +367,43 @@ async def publish_if_current(
         values=job_values,
     )
     if has_publishable_rows:
+        # A rebuild replaces catalog rows and relocates legacy source objects.
+        # Keep the repaired default only for the exact same task revision; it
+        # must not leak into changed configs/checksums or manifest-backed input.
+        previous_legacy = {
+            row.id: row
+            for row in (await session.execute(
+                select(
+                    Task.id, Task.checksum, Task.config, Task.source_provenance,
+                    Task.legacy_separate_verifier_checksum,
+                )
+                .where(
+                    Task.task_set_id == task_set_id,
+                    Task.legacy_separate_verifier_checksum.is_not(None),
+                )
+                .order_by(Task.id)
+                .with_for_update(),
+            )).all()
+        }
+        legacy_defaults: dict[str, str] = {}
+        for draft in output.task_rows:
+            previous = previous_legacy.get(draft.id)
+            if (
+                previous is not None
+                and previous.legacy_separate_verifier_checksum
+                == previous.checksum.removeprefix("sha256:")
+                == draft.checksum.removeprefix("sha256:")
+                and previous.config == draft.config
+                and "bundle_content_manifest_sha256" not in (previous.source_provenance or {})
+                and "bundle_content_manifest_sha256" not in draft.source_provenance
+            ):
+                legacy_defaults[draft.id] = previous.legacy_separate_verifier_checksum
         await session.execute(delete(Task).where(Task.task_set_id == task_set_id))
         published_tasks = [
             Task(
                 id=row.id,
                 checksum=row.checksum,
+                legacy_separate_verifier_checksum=legacy_defaults.get(row.id),
                 config=row.config,
                 source=row.source,
                 source_provenance=row.source_provenance,

@@ -326,7 +326,7 @@ async def test_service_admission_uses_deployment_opt_in(monkeypatch, ready):
     if not ready:
         profile = profile.model_copy(update={"guest_runtime": None})
     result = Mock()
-    result.all.return_value = [("guest", task.model_dump(mode="json"), _provenance())]
+    result.all.return_value = [("guest", task.model_dump(mode="json"), _provenance(), "a" * 64, None)]
     session = SimpleNamespace(execute=AsyncMock(return_value=result))
     monkeypatch.setattr("loom_service.execution_admission.get_service_execution_backend_pools",
         AsyncMock(return_value=[SimpleNamespace(pool_name="nebius-cpu")]))

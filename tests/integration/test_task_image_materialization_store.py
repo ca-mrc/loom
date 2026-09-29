@@ -18,6 +18,7 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.task_image_materialization import (
+    TaskImageSnapshotConflictError,
     ensure_task_image_materializations,
     get_trial_task_image_execution_grant,
 )
@@ -361,7 +362,7 @@ async def test_same_checksum_cannot_rebind_frozen_task_snapshot(
         await session.commit()
         original_source = rows[0].task_source
         task.config = {**task.config, "agent": {"name": "different-agent"}}
-        with pytest.raises(RuntimeError, match="snapshot conflicts"):
+        with pytest.raises(TaskImageSnapshotConflictError, match="snapshot conflicts"):
             await ensure_task_image_materializations(session, task_row=task)
         await session.rollback()
         stored = await session.scalar(select(TaskImageMaterialization).where(

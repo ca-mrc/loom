@@ -49,6 +49,7 @@ from loom.execution_runtime_contract import (
     validate_runtime_plan_requirements,
 )
 from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
@@ -712,7 +713,9 @@ async def reserve_trial_execution(
             )
         except ValueError as exc:
             raise ServiceExecutionConflict(str(exc)) from exc
-        if requirements != workload_requirements_from_task(prepared_task):
+        effective_trial = (TrialConfig.model_validate(trial.config)
+                           if prepared_task.service_execution is None else None)
+        if requirements != workload_requirements_from_task(prepared_task, effective_trial):
             raise ServiceExecutionConflict("requirements do not match the prepared task")
     elif runtime_contract.task_image_materialization_id is not None:
         raise ServiceExecutionConflict("prepared image is not associated with this trial")
