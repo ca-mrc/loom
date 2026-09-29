@@ -94,3 +94,38 @@ def test_retirement_diagnostics_export_only_allowlisted_values(raw, reason, exit
     assert failure["diagnostic"] == diagnostic
     assert failure["termination"] == termination
     assert "private-" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_retirement_inspection_bounds_both_job_and_log_requests(stale):
+    cluster = RetirementCluster()
+    cluster.lists["pods"].extend(copy.deepcopy(cluster.pod) for _ in range(8))
+    if stale:
+        cluster.job["metadata"]["uid"] = "replacement"
+    result = inspect(cluster)
+    assert len([call for call in cluster.calls if call[:2] == ("get", "job")]) == 3
+    assert len([call for call in cluster.calls if call[0] == "logs"]) == (0 if stale else 3)
+    assert len(result["failed_retirement_jobs"]) == (0 if stale else 3)
+
+
+def test_unavailable_retirement_logs_preserve_safe_termination_evidence():
+    class Unreadable(RetirementCluster):
+        def run(self, *args, **kwargs):
+            if args[0] == "logs":
+                raise RuntimeError("private-transport-secret")
+            return super().run(*args, **kwargs)
+
+    result = inspect(Unreadable())
+    assert result["status"] == "observed"
+    failure, = result["failed_retirement_jobs"]
+    assert failure["diagnostic"] == {"status": "unavailable"}
+    assert failure["termination"]["exit_code"] == 1
+    assert "private-" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("raw", ['[]', '{"status":[]}', '[' * 4000 + ']' * 4000,
+    '{"status":"retirement_blocked"}\n' + 'x' * 16384])
+def test_malformed_or_outside_bounded_tail_is_not_retirement_evidence(raw):
+    cluster = RetirementCluster()
+    cluster.raw = raw
+    assert inspect(cluster)["failed_retirement_jobs"][0]["diagnostic"] == {"status": "unavailable"}

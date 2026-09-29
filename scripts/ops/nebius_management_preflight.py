@@ -107,6 +107,67 @@ def _failed_bootstrap_jobs(kube: Kubectl, pods: list[dict[str, Any]], namespace:
     return result
 
 
+def _retirement_diagnostic(raw: str) -> dict[str, str]:
+    for line in reversed(raw[-16_384:].splitlines()[-50:]):
+        try:
+            value = json.loads(line)
+        except (ValueError, RecursionError):
+            # Import failures occur before the CLI's sanitized exception handler.
+            error = line.partition(":")[0]
+            if error in {"ImportError", "ModuleNotFoundError", "SyntaxError", "IndentationError"}:
+                return {"error_type": error}
+            continue
+        if isinstance(value, dict) and value.get("status") in ("retirement_blocked", "retirement_completed"):
+            return {"status": value["status"]}
+    return {"status": "unavailable"}
+
+
+def _failed_retirement_jobs(kube: Kubectl, pods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Read-only failed-Job evidence; never export log text or termination messages."""
+    result: list[dict[str, Any]] = []
+    inspected = 0
+    for pod in sorted(pods, key=lambda p: p["metadata"].get("creationTimestamp", ""), reverse=True):
+        metadata = pod["metadata"]
+        namespace = metadata.get("namespace", "")
+        if (not re.fullmatch(r"loom-nebius-management(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?", namespace)
+                or pod.get("status", {}).get("phase") != "Failed"):
+            continue
+        owner = next((row for row in metadata.get("ownerReferences", [])
+                      if row.get("kind") == "Job" and row.get("controller") is True
+                      and re.fullmatch(r"loom-retirement-[0-9a-f]{12}", row.get("name", ""))), None)
+        if (owner is None or not isinstance(owner.get("uid"), str) or not owner["uid"]
+                or metadata.get("labels", {}).get("loom.nebius/retirement") != owner["name"]):
+            continue
+        container = next((row for row in pod.get("spec", {}).get("containers", []) if row.get("command") == [
+            "python", "-m", "loom_service.environment_management.retirement"]), None)
+        if container is None:
+            continue
+        if inspected == 3:
+            break
+        inspected += 1
+        job = kube.get("job", owner["name"], namespace)
+        if job.get("metadata", {}).get("uid") != owner["uid"] or not job_failed(job):
+            continue
+        status: dict[str, Any] = next((row for row in pod.get("status", {}).get("containerStatuses", [])
+                       if row.get("name") == container["name"]), {})
+        terminated = status.get("state", {}).get("terminated", {})
+        termination = {key: terminated[field] for key, field in (("exit_code", "exitCode"), ("signal", "signal"))
+                       if type(terminated.get(field)) is int and 0 <= terminated[field] <= 255}
+        if "reason" in terminated:
+            reason = terminated["reason"]
+            termination["reason"] = reason if reason in ("Error", "OOMKilled", "Completed", "ContainerCannotRun") else "Other"
+        try:
+            raw = kube.run("logs", metadata["name"], "-n", namespace, "-c", container["name"],
+                           "--tail=50", "--limit-bytes=16384", timeout=40)
+            diagnostic = _retirement_diagnostic(raw)
+        except Exception:
+            diagnostic = {"status": "unavailable"}
+        result.append({"namespace": namespace, "job": owner["name"], "job_uid": owner["uid"],
+                       "pod": metadata["name"], "pod_uid": metadata["uid"], "container": container["name"],
+                       "termination": termination, "diagnostic": diagnostic})
+    return result
+
+
 def _fields(value: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: value[key] for key in keys if key in value}
 
@@ -173,6 +234,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
+        "failed_retirement_jobs": _failed_retirement_jobs(kube, pods),
         "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
                                              namespace=namespace, expected_cluster_id=expected_cluster_id),
         "public_host": config["public_host"],
