@@ -230,3 +230,25 @@ async def test_claim_pins_selected_source_before_local_reservation_begins(sessio
     monkeypatch.setattr(module, "reserve_trial_execution", reserve_with_contender)
     attached = await journal.accept_grant(proposed.request.key, grant(proposed))
     assert attached.phase == "attached"
+
+
+async def test_global_lease_cannot_commit_without_its_atomic_outbox_attachment(sessions):
+    from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
+    from loom_control_plane.service_execution import reserve_trial_execution
+
+    journal, trial_id, target = await setup(sessions)
+    proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
+    request, receipt = proposed.request, grant(proposed)
+    with pytest.raises(DBAPIError, match="global execution attachment is incomplete"):
+        async with sessions.begin() as session:
+            row = await session.get(NebiusPoolExecutionOutbox, request.key.local_work_id, with_for_update=True)
+            row.phase, row.reservation_id = "grant_pending", receipt.reservation_id
+            row.receipt_json = receipt.model_dump(mode="json")
+            await session.flush()
+            await reserve_trial_execution(session, request_id=row.lease_id, trial_id=trial_id,
+                target_id=target.target_id, execution_class_id=request.execution.runtime.execution_class_id,
+                runtime_contract=request.execution.runtime, requirements=request.execution.requirements,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, deadline_at=request.deadline_at,
+                pool_handoff_id=row.lease_id)
+            # Simulate a caller missing the final durable attachment write.
+    await assert_unclaimed(sessions, trial_id)
