@@ -93,7 +93,7 @@ class Guards:
         return {"status": "held" if self.held else "open"}
 
 
-@pytest.mark.parametrize("failure", [None, "before", "after", "conflict", "namespace", "guard"])
+@pytest.mark.parametrize("failure", [None, "before", "after", "conflict", "unqualified_conflict", "namespace", "guard"])
 def test_https_patch_has_fixed_scope_uid_rv_preconditions_and_no_uncertain_retry(retirement_inputs, tmp_path, failure):
     from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
 
@@ -124,7 +124,9 @@ def test_https_patch_has_fixed_scope_uid_rv_preconditions_and_no_uncertain_retry
                 if failure == "before":
                     raise httpx.ReadError("private-marker")
                 if failure == "conflict":
-                    return httpx.Response(409, json={"kind": "Status", "code": 409})
+                    return httpx.Response(409, json={"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "Conflict", "code": 409})
+                if failure == "unqualified_conflict":
+                    return httpx.Response(409, json={"message": "proxy conflict"})
                 body = json.loads(message.content)
                 assert body[:3] == [{"op": "test", "path": "/metadata/uid", "value": current["metadata"]["uid"]},
                     {"op": "test", "path": "/metadata/resourceVersion", "value": current["metadata"]["resourceVersion"]},
@@ -151,10 +153,10 @@ def test_https_patch_has_fixed_scope_uid_rv_preconditions_and_no_uncertain_retry
     api.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond))
     with api:
         for _ in range(2):
-            if failure in {"before", "namespace", "guard"}:
+            if failure in {"before", "unqualified_conflict", "namespace", "guard"}:
                 with pytest.raises(ValueError):
                     retire(request, api, tmp_path)
             else:
                 result = retire(request, api, tmp_path)
                 assert result["status"] == ("pending_retirement" if failure == "conflict" else "old_pool_workloads_retired")
-        assert len(patches) == {None: 9, "before": 1, "after": 9, "conflict": 2, "namespace": 0, "guard": 0}[failure]
+        assert len(patches) == {None: 9, "before": 1, "after": 9, "conflict": 2, "unqualified_conflict": 1, "namespace": 0, "guard": 0}[failure]
