@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, select, text, update
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
@@ -22,7 +22,7 @@ from loom.execution_contract import nebius_cpu_execution_class
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
-from loom_execution_capacity_collector.contracts import CapacityPlacement
+from loom_execution_capacity_collector.contracts import CapacityPlacement, ManagedPodPlacement, ResourceTotals
 from loom_service.pool_management.auth import resolve_pool_machine
 from loom_service.pool_management.render import PoolExecutionProfile
 from tests.execution_placement_fixtures import placement_fixture
@@ -55,7 +55,8 @@ async def machine(sessions, pool_id, participant_id=None):
 
 
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
-                parent_id=None, quota_nodes=None, environment_classes=("development", "development")):
+                parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
+                pinned=True):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
@@ -65,7 +66,10 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
     policy = {"observation_max_age_seconds": 60, "max_create_per_minute": 10,
               "max_pending_jobs": 10, "max_unschedulable_jobs": 0,
               "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2}
-    binding = {"node_selector": {"loom.nebius/role": "execution"}, "admission": policy,
+    selector = {"loom.nebius/role": "execution"}
+    if pinned:
+        selector["nebius.com/node-group-id"] = group_id
+    binding = {"node_selector": selector, "admission": policy,
                "quota_identities": {name: [quota.parent_id, quota.region, quota.service, quota.name, quota.unit]
                                     for name, quota in placement.quota_resources.items()}}
     async with sessions.begin() as session:
@@ -266,3 +270,83 @@ async def test_replay_does_not_rerender_an_existing_grant_or_renew_its_lifetime(
     assert first == replay
     assert (before.created_at, before.renewed_at, before.granted_at, before.deadline_at) == (
         after.created_at, after.renewed_at, after.granted_at, after.deadline_at)
+
+
+async def test_a_generic_execution_label_is_not_a_physical_node_group_binding(sessions):
+    from loom_service.pool_management.registry import PoolAdmissionError
+
+    _, principals, requests, profiles, _ = await setup(sessions, pinned=False)
+    with pytest.raises(PoolAdmissionError):
+        await prepare(sessions, principals[0], requests[0], profiles)
+
+
+async def test_admission_rejects_a_transaction_that_cannot_see_committed_peer_grants(sessions):
+    from loom_service.pool_management.registry import PoolAdmissionError, prepare_execution
+
+    _, principals, requests, profiles, _ = await setup(sessions)
+    async with sessions.begin() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+        with pytest.raises(PoolAdmissionError):
+            await prepare_execution(session, principals[0], requests[0], profiles=profiles)
+
+
+async def test_prepare_never_commits_the_callers_transaction(sessions):
+    from loom_service.pool_management.registry import prepare_execution
+
+    _, principals, requests, profiles, _ = await setup(sessions)
+    async with sessions() as session:
+        assert (await prepare_execution(session, principals[0], requests[0], profiles=profiles)).phase == "reserved"
+        await session.rollback()
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 0
+
+
+async def test_observed_exact_receipt_is_counted_once_but_later_grants_still_charge(sessions):
+    from loom_service.pool_management.render import prepare_pool_execution
+
+    participants, principals, requests, profiles, observer = await setup(sessions)
+    first = await prepare(sessions, principals[0], requests[0], profiles)
+    prepared = prepare_pool_execution(requests[0], participant=participants[0],
+        profile=profiles[participants[0].targets[0].profile_id], reservation_id=first.reservation_id, now=datetime.now(UTC))
+    plan = {"job": prepared.job}
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == first.reservation_id).values(
+            phase="create_intent", plan_json=plan, plan_sha256=canonical_digest(plan).removeprefix("sha256:")))
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == first.reservation_id).values(
+            phase="observed", job_uid=uuid4()))
+    payload = placement_fixture(target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
+                                requested_cpu=1500, requested_memory=2048, requested_storage=4096, quota_nodes=1)
+    payload["nodes"][0]["used_pod_slots"] = 1
+    payload["nodes"][0]["managed_pods"] = [{"uid": "pod-1", "lease_id": f"reservation:{first.reservation_id}",
+        "generation": 1, "requests": {"cpu_millis": 1500, "memory_mib": 2048, "storage_mib": 4096}}]
+    await publish_placement(sessions, observer, CapacityPlacement.model_validate(payload))
+    assert (await prepare(sessions, principals[1], requests[1], profiles)).phase == "reserved"
+    third = requests[0].model_copy(update={"key": requests[0].key.model_copy(update={"local_work_id": uuid4()})})
+    assert (await prepare(sessions, principals[0], third, profiles)).phase == "waiting"
+    # No new scope after the second grant. Cleanup intent on the first remains
+    # charged as observed occupancy, never as automatically released capacity.
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == first.reservation_id).values(phase="cleanup_intent"))
+    assert (await prepare(sessions, principals[0], third, profiles)).phase == "waiting"
+
+
+async def test_foreign_pending_pod_cannot_be_discarded_to_make_a_grant_fit(sessions):
+    _, principals, requests, profiles, observer = await setup(sessions)
+    payload = placement_fixture(target_id="pool-test", node_cpu=3000, node_memory=8192,
+                                node_storage=32768, quota_nodes=1, requested_cpu=1500)
+    placement = CapacityPlacement.model_validate(payload).model_copy(update={"pending_pods": [ManagedPodPlacement(
+        uid="foreign-1", lease_id="foreign-pod:foreign-1", generation=1,
+        requests=ResourceTotals(cpu_millis=1500, memory_mib=2048, storage_mib=4096))]})
+    await publish_placement(sessions, observer, placement)
+    assert (await prepare(sessions, principals[0], requests[0], profiles)).phase == "waiting"
+
+
+async def test_impossible_earlier_wait_does_not_starve_a_fitting_request(sessions):
+    _, principals, requests, profiles, _ = await setup(sessions)
+    larger = requests[0].model_copy(update={"execution": requests[0].execution.model_copy(update={
+        "requirements": requests[0].execution.requirements.model_copy(update={"cpu_millis": 4000}),
+        "runtime": requests[0].execution.runtime.model_copy(update={
+            "task_resources": requests[0].execution.runtime.task_resources.model_copy(update={"cpu_millis": 4000})}),
+    })})
+    assert (await prepare(sessions, principals[0], larger, profiles)).phase == "waiting"
+    assert (await prepare(sessions, principals[1], requests[1], profiles)).phase == "reserved"
