@@ -25,7 +25,10 @@ from loom.db.schema import (
 from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
-from tests.integration.test_service_execution_leases import _configure_scheduler_trial, _seed_ready_trial
+from tests.integration.test_service_execution_leases import (
+    _configure_scheduler_trial,
+    _seed_ready_trial,
+)
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
 
@@ -188,3 +191,42 @@ async def test_failed_outbox_attach_rolls_back_claim_cost_and_admission_together
         await journal.accept_grant(proposed.request.key, grant(proposed))
     assert await journal.get(proposed.request.key) == proposed
     await assert_unclaimed(sessions, trial_id)
+
+
+async def test_proposal_pins_target_before_compiler_locks_task_image(sessions, monkeypatch):
+    from loom_execution_actuator import pool_execution_outbox as module
+
+    journal, trial_id, target = await setup(sessions)
+    compile_candidate = module._compile_service_candidate
+
+    async def compile_with_contender(*args, **kwargs):
+        # A concurrent target writer must already be fenced before the image
+        # lock. Otherwise prepare and post-grant claim take reversed locks.
+        with pytest.raises(DBAPIError, match="could not obtain lock"):
+            async with sessions.begin() as other:
+                await other.get(ServiceExecutionTarget, target.target_id, with_for_update={"nowait": True})
+        return await compile_candidate(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_compile_service_candidate", compile_with_contender)
+    proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
+    assert proposed.phase == "selected"
+
+
+async def test_claim_pins_selected_source_before_local_reservation_begins(sessions, monkeypatch):
+    from loom_execution_actuator import pool_execution_outbox as module
+
+    journal, trial_id, target = await setup(sessions)
+    proposed = await journal.propose(trial_id=trial_id, target_id=target.target_id)
+    async with sessions() as session:
+        task_id = (await session.get(Trial, trial_id)).task_id
+    reserve = module.reserve_trial_execution
+
+    async def reserve_with_contender(*args, **kwargs):
+        with pytest.raises(DBAPIError, match="could not obtain lock"):
+            async with sessions.begin() as other:
+                await other.get(Task, task_id, with_for_update={"nowait": True})
+        return await reserve(*args, **kwargs)
+
+    monkeypatch.setattr(module, "reserve_trial_execution", reserve_with_contender)
+    attached = await journal.accept_grant(proposed.request.key, grant(proposed))
+    assert attached.phase == "attached"
