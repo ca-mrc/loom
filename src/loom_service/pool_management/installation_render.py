@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from loom.nebius_platform_render import _env, _mount_secret, _obj, _secret_env
 from loom_service.environment_management.kubernetes_credentials import ProjectedKubernetesConnection
@@ -16,6 +17,43 @@ def _runtime(spec: PoolInstallation, namespace: str, service_image: str) -> Pool
             or len(namespace) > 53 or re.fullmatch(r".+@sha256:[0-9a-f]{64}", service_image) is None):
         raise ValueError("unqualified pool registration runtime")
     return spec
+
+
+def mount_machine_token(pod: dict[str, Any], *, machine_id: UUID, service_image: str,
+                        default_uid: int = 1000) -> str:
+    """Copy a projected machine Secret into a private file owned by the process."""
+    container, = pod["containers"]
+    security = pod.setdefault("securityContext", {})
+    uid = container.get("securityContext", {}).get("runAsUser", security.get("runAsUser", default_uid))
+    if type(uid) is not int or uid <= 0:
+        raise ValueError("pool process must be non-root")
+    reserved = {"pool-token-source", "pool-token"}
+    if (any(row["name"] in reserved for row in pod.get("volumes", []))
+            or any(row["name"] == "prepare-pool-token" for row in pod.get("initContainers", []))
+            or any(row["name"] in reserved or row["mountPath"].startswith("/var/run/loom-pool-token")
+                for row in container.get("volumeMounts", []))):
+        raise ValueError("pool token mount already configured")
+    security.setdefault("runAsUser", uid)
+    security.setdefault("runAsGroup", uid)
+    security.setdefault("fsGroup", uid)
+    security["runAsNonRoot"] = True
+    token_path = "/var/run/loom-pool-token/token"
+    container.setdefault("volumeMounts", []).append(
+        {"name": "pool-token", "mountPath": "/var/run/loom-pool-token", "readOnly": True})
+    pod.setdefault("initContainers", []).append({"name": "prepare-pool-token", "image": service_image,
+        "command": ["python", "-c", "import sys; from pathlib import Path; "
+            "p=Path(sys.argv[2]); p.write_bytes(Path(sys.argv[1]).read_bytes()); p.chmod(0o600)",
+            "/var/run/loom-pool-token-source/token", token_path],
+        "securityContext": {"runAsUser": uid, "runAsGroup": uid, "runAsNonRoot": True,
+            "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
+        "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
+        "volumeMounts": [{"name": "pool-token-source", "mountPath": "/var/run/loom-pool-token-source", "readOnly": True},
+            {"name": "pool-token", "mountPath": "/var/run/loom-pool-token"}]})
+    pod.setdefault("volumes", []).extend([
+        {"name": "pool-token-source", "secret": {"secretName": "loom-pool-machine-" + machine_id.hex,
+            "defaultMode": 0o440, "items": [{"key": "token", "path": "token"}]}},
+        {"name": "pool-token", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}}])
+    return token_path
 
 
 def render_registration(spec: PoolInstallation, *, namespace: str, service_image: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -73,7 +111,6 @@ def render_gateway(spec: PoolInstallation, *, namespace: str, service_image: str
             "LOOM_POOL_GATEWAY_BEARER_TOKEN_FILE": token_path, "LOOM_POOL_GATEWAY_KUBERNETES": connection.model_dump_json()}),
             _secret_env("LOOM_POOL_GATEWAY_DB_URL", "loom-platform-db", "service-url")],
         "securityContext": security, "volumeMounts": [
-            {"name": "pool-token", "mountPath": "/var/run/loom-pool-token", "readOnly": True},
             {"name": "pool-kubernetes", "mountPath": "/var/run/loom-pool-kubernetes", "readOnly": True}],
         "ports": [{"name": "health", "containerPort": 9120}],
         "readinessProbe": {"httpGet": {"path": "/readyz", "port": "health"}},
@@ -82,22 +119,12 @@ def render_gateway(spec: PoolInstallation, *, namespace: str, service_image: str
     pod = {"serviceAccountName": name, "automountServiceAccountToken": False,
         "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
             "seccompProfile": {"type": "RuntimeDefault"}}, "containers": [container],
-        "initContainers": [{"name": "prepare-pool-token", "image": service_image,
-            "command": ["python", "-c", "import sys; from pathlib import Path; "
-                "p=Path(sys.argv[2]); p.write_bytes(Path(sys.argv[1]).read_bytes()); p.chmod(0o600)",
-                "/var/run/loom-pool-token-source/token", token_path],
-            "securityContext": security,
-            "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
-            "volumeMounts": [{"name": "pool-token-source", "mountPath": "/var/run/loom-pool-token-source", "readOnly": True},
-                {"name": "pool-token", "mountPath": "/var/run/loom-pool-token"}]}],
-        "volumes": [{"name": "pool-token-source", "secret": {"secretName": "loom-pool-machine-" + machine.machine_id.hex,
-            "defaultMode": 0o440, "items": [{"key": "token", "path": "token"}]}},
-            {"name": "pool-token", "emptyDir": {"medium": "Memory", "sizeLimit": "1Mi"}},
-            {"name": "pool-kubernetes", "projected": {"defaultMode": 0o440, "sources": [
+        "volumes": [{"name": "pool-kubernetes", "projected": {"defaultMode": 0o440, "sources": [
                 {"serviceAccountToken": {"path": "token", "expirationSeconds": 3600}},
                 {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}}]}}],
         "nodeSelector": {"loom.nebius/node-role": "system", "loom.nebius/platform": "integration"},
         "tolerations": [{"key": "loom.nebius/platform", "operator": "Equal", "value": "integration", "effect": "NoSchedule"}]}
+    mount_machine_token(pod, machine_id=machine.machine_id, service_image=service_image)
     _mount_secret(pod, "db-ca", "loom-platform-db", "/var/run/loom-db", ca_only=True)
     labels = {"app.kubernetes.io/name": name}
     deployment = _obj("Deployment", name, namespace, api="apps/v1")

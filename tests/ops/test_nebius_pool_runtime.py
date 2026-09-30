@@ -144,13 +144,15 @@ def test_all_participant_processes_consume_same_binding_and_preserve_data(runtim
                     credential, = [row for row in pod["volumes"] if row["name"] == "pool-token-source"]
                     machine, = [row for row in request.registration.spec.machines if row.participant_id == target.participant_id]
                     assert credential["secret"]["secretName"] == "loom-pool-machine-" + machine.machine_id.hex
-                    assert pod["securityContext"]["runAsUser"] == pod["securityContext"]["fsGroup"] == 1000
+                    uid = 65532 if key == "actuator" else 1000
+                    assert pod["securityContext"]["runAsUser"] == pod["securityContext"]["fsGroup"] == uid
                     initializer, = [row for row in pod["initContainers"] if row["name"] == "prepare-pool-token"]
                     assert initializer["image"] == request.registration.candidate["images"]["service"]["image_ref"]
             assert not any("pool-token" in row["name"] for row in result["service"]["spec"]["template"]["spec"]["volumes"])
 
 
-@pytest.mark.parametrize("damage", ["namespace", "target", "builder", "shared_api", "http", "already_global"])
+@pytest.mark.parametrize("damage", ["namespace", "target", "builder", "shared_api", "http", "already_global",
+    "duplicate_env", "env_from", "image", "credential_collision", "api_only", "pool", "class"])
 def test_runtime_wiring_refuses_unqualified_participant_inputs(runtime_inputs, damage):
     from scripts.ops.nebius_pool_runtime import wire_participant
 
@@ -172,5 +174,42 @@ def test_runtime_wiring_refuses_unqualified_participant_inputs(runtime_inputs, d
         origin = "http://manage.example.com"
     elif damage == "already_global":
         actuator["spec"]["template"]["spec"]["containers"][0]["env"].append({"name": "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL", "value": "{}"})
+    elif damage == "duplicate_env":
+        actuator["spec"]["template"]["spec"]["containers"][0]["env"].append(copy.deepcopy(env(actuator)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]))
+    elif damage == "env_from":
+        actuator["spec"]["template"]["spec"]["containers"][0]["envFrom"] = [{"secretRef": {"name": "unqualified"}}]
+    elif damage == "image":
+        request.registration.candidate["images"]["execution_actuator"]["image_ref"] = "registry.example/actuator:latest"
+    elif damage == "credential_collision":
+        actuator["spec"]["template"]["spec"]["volumes"].append({"name": "pool-token", "secret": {"secretName": "other"}})
+    elif damage == "api_only":
+        service["spec"]["template"]["spec"]["containers"][0]["env"].append({"name": "LOOM_SVC_SERVICE_MODE", "value": "api_only"})
+    elif damage == "pool":
+        env(target.controller)["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"] = "another-pool"
+    elif damage == "class":
+        env(target.controller)["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] = "development"
     with pytest.raises(ValueError):
         wire_participant(request=request, participant_id=target.participant_id, management_origin=origin, actuator=actuator, service=service)
+
+
+@pytest.mark.parametrize("damage", ["namespace", "installation", "mode", "catalog", "mount", "owner", "uid"])
+def test_manager_wiring_rejects_unqualified_original(runtime_inputs, damage):
+    from scripts.ops.nebius_pool_runtime import wire_manager
+
+    request, _, _, manager = runtime_inputs
+    if damage == "namespace":
+        manager["metadata"]["namespace"] = "foreign"
+    elif damage == "installation":
+        manager["metadata"]["labels"]["loom.nebius/management-installation"] = str(uuid4())
+    elif damage == "mode":
+        env(manager)["LOOM_SVC_SERVICE_MODE"]["value"] = "api_only"
+    elif damage == "catalog":
+        manager["spec"]["template"]["spec"]["containers"][0]["env"].append({"name": "LOOM_SVC_POOL_PROFILES_FILE", "value": "/foreign"})
+    elif damage == "mount":
+        manager["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append({"name": "other", "mountPath": "/var/run/loom-pool-profiles"})
+    elif damage == "owner":
+        manager["metadata"]["ownerReferences"] = [{"uid": str(uuid4())}]
+    else:
+        manager["metadata"]["uid"] = "not-a-uid"
+    with pytest.raises(ValueError):
+        wire_manager(request=request, original=manager)

@@ -2079,6 +2079,16 @@ identity reads, not namespace listing, Secrets or RBAC access. The protected
 migration still owns Secret delivery, old-writer fencing, manager catalog wiring,
 startup and admission activation; rendering these documents performs none of them.
 
+The protected runtime target builders preserve retained Deployment UIDs and
+database/storage Secret references while pinning the integrated candidate images.
+The manager mounts the immutable renderer catalog. Each shared control plane and
+actuator receives the same participant binding and a dedicated owner-only machine
+token; the shared API receives only its environment submission identity, never a
+machine token. Hash-qualified credential delivery is immutable and create-only,
+with exact namespace UID checks and no automatic credential rotation. All target
+Deployments have zero replicas: these builders do not perform the protected
+cutover, install RBAC or activate admission.
+
 Initial registration uses the fixed `loom_service.pool_management.installation`
 Job and a versioned `loom.pool-installation.v1` configuration. It binds physical
 pool identity, exact participant namespaces/targets, the renderer catalog and
