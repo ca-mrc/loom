@@ -15,6 +15,105 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
+CREATE TABLE nebius_pool_build_outbox (
+    outbox_id UUID PRIMARY KEY, pool_id UUID NOT NULL, participant_id UUID NOT NULL,
+    materialization_id UUID NOT NULL REFERENCES task_image_materializations(id) ON DELETE RESTRICT,
+    generation BIGINT NOT NULL, admission_epoch BIGINT NOT NULL,
+    builder_id TEXT NOT NULL, logical_pool_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL, request_json JSONB NOT NULL, selection_json JSONB NOT NULL,
+    phase TEXT NOT NULL, reservation_id UUID, receipt_json JSONB, cancelled_json JSONB,
+    attempt_id UUID, attempt_number INTEGER, lease_epoch BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT nebius_pool_build_outbox_replay_key UNIQUE (participant_id, materialization_id, generation),
+    CONSTRAINT nebius_pool_build_outbox_grant_key UNIQUE (reservation_id),
+    CONSTRAINT nebius_pool_build_outbox_claim_fk
+        FOREIGN KEY (attempt_id, materialization_id, attempt_number, lease_epoch, builder_id)
+        REFERENCES task_image_materialization_attempts(id, materialization_id, attempt_number, lease_epoch, builder_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT nebius_pool_build_outbox_identity_check CHECK (
+        generation > 0 AND admission_epoch > 0 AND
+        outbox_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        participant_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        pool_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        length(builder_id) BETWEEN 1 AND 128 AND length(logical_pool_id) BETWEEN 1 AND 80),
+    CONSTRAINT nebius_pool_build_outbox_payload_check CHECK (
+        request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object' AND
+        jsonb_typeof(selection_json) = 'object'),
+    CONSTRAINT nebius_pool_build_outbox_phase_check CHECK (
+        phase IN ('selected','attached','cancel_pending','cancelled') AND
+        (phase = 'attached') = (num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND
+        num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND
+        (phase NOT IN ('attached','cancelled') OR reservation_id IS NOT NULL) AND
+        (phase <> 'selected' OR reservation_id IS NULL) AND
+        (reservation_id IS NULL) = (receipt_json IS NULL) AND
+        (reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND
+        (receipt_json IS NULL OR jsonb_typeof(receipt_json) = 'object') AND
+        (phase = 'cancelled') = (cancelled_json IS NOT NULL) AND
+        (cancelled_json IS NULL OR jsonb_typeof(cancelled_json) = 'object'))
+);
+CREATE UNIQUE INDEX nebius_pool_build_outbox_live_key ON nebius_pool_build_outbox(materialization_id)
+    WHERE phase <> 'cancelled';
+CREATE FUNCTION validate_nebius_pool_build_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'pool local selection history is retained' USING ERRCODE = '23514';
+    END IF;
+    IF (NEW.request_json->>'pool_id' = NEW.pool_id::text AND
+        NEW.request_json->'key'->>'participant_id' = NEW.participant_id::text AND
+        NEW.request_json->'key'->>'local_work_id' = NEW.materialization_id::text AND
+        NEW.request_json->'key'->>'workload_kind' = 'task_image_build' AND
+        NEW.request_json->'key'->>'generation' = NEW.generation::text AND
+        NEW.request_json->>'admission_epoch' = NEW.admission_epoch::text) IS NOT TRUE THEN
+        RAISE EXCEPTION 'pool local selection identity differs' USING ERRCODE = '23514';
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.phase <> 'selected' THEN
+            RAISE EXCEPTION 'pool local selection must begin unclaimed' USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        IF (to_jsonb(OLD) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch'])
+           IS DISTINCT FROM
+           (to_jsonb(NEW) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch'])
+           OR (OLD.reservation_id IS NOT NULL AND (NEW.reservation_id IS DISTINCT FROM OLD.reservation_id OR
+                                                    NEW.receipt_json IS DISTINCT FROM OLD.receipt_json))
+           OR (OLD.attempt_id IS NOT NULL AND ROW(NEW.attempt_id, NEW.attempt_number, NEW.lease_epoch)
+                    IS DISTINCT FROM ROW(OLD.attempt_id, OLD.attempt_number, OLD.lease_epoch))
+           OR (OLD.cancelled_json IS NOT NULL AND NEW.cancelled_json IS DISTINCT FROM OLD.cancelled_json) THEN
+            RAISE EXCEPTION 'pool local selection evidence is immutable' USING ERRCODE = '23514';
+        END IF;
+        IF NOT (NEW.phase = OLD.phase OR (OLD.phase = 'selected' AND NEW.phase IN ('attached','cancel_pending'))
+                OR (OLD.phase = 'cancel_pending' AND NEW.phase = 'cancelled')) THEN
+            RAISE EXCEPTION 'pool local handoff transition forbidden' USING ERRCODE = '23514';
+        END IF;
+    END IF;
+    IF NEW.reservation_id IS NOT NULL AND (
+        NEW.receipt_json->>'reservation_id' = NEW.reservation_id::text AND
+        NEW.receipt_json->>'pool_id' = NEW.pool_id::text AND
+        NEW.receipt_json->>'admission_epoch' = NEW.admission_epoch::text AND
+        NEW.receipt_json->>'request_sha256' = NEW.request_sha256 AND
+        NEW.receipt_json->'request_key' = NEW.request_json->'key' AND
+        NEW.receipt_json->>'phase' IN ('reserved','cancelled_unstarted') AND
+        (NEW.phase <> 'attached' OR NEW.receipt_json->>'phase' = 'reserved')) IS NOT TRUE THEN
+        RAISE EXCEPTION 'pool local grant identity differs' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.phase = 'attached' AND NEW.lease_epoch <> (NEW.request_json->'build'->>'expected_lease_epoch')::bigint + 1 THEN
+        RAISE EXCEPTION 'pool local claim epoch differs' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.cancelled_json IS NOT NULL AND (
+        NEW.cancelled_json->>'phase' = 'cancelled_unstarted' AND
+        NEW.cancelled_json->>'reservation_id' = NEW.reservation_id::text AND
+        NEW.cancelled_json->>'pool_id' = NEW.pool_id::text AND
+        NEW.cancelled_json->>'admission_epoch' = NEW.admission_epoch::text AND
+        NEW.cancelled_json->>'request_sha256' = NEW.request_sha256 AND
+        NEW.cancelled_json->'request_key' = NEW.request_json->'key') IS NOT TRUE THEN
+        RAISE EXCEPTION 'pool local cancellation identity differs' USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER nebius_pool_build_outbox_guard BEFORE INSERT OR UPDATE OR DELETE ON nebius_pool_build_outbox
+    FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_build_outbox();
+    """)
+    op.execute("""
 CREATE TABLE nebius_pool_bindings (
 	pool_id UUID NOT NULL,
 	installation_id UUID NOT NULL,
@@ -421,12 +520,13 @@ def downgrade() -> None:
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
                    nebius_pool_cleanup_observations, nebius_pool_machines,
                    nebius_pool_machine_credentials, nebius_pool_captures,
-                   nebius_pool_observations, nebius_pool_effects IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_observations, nebius_pool_effects, nebius_pool_build_outbox IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
                OR EXISTS (SELECT 1 FROM nebius_pool_requests)
-               OR EXISTS (SELECT 1 FROM nebius_pool_cleanup_observations) THEN
+               OR EXISTS (SELECT 1 FROM nebius_pool_cleanup_observations)
+               OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox) THEN
                 RAISE EXCEPTION 'cannot remove global pool history';
             END IF;
         END $$;
@@ -446,4 +546,6 @@ def downgrade() -> None:
         DROP FUNCTION validate_nebius_pool_machine_mutation();
         DROP FUNCTION retain_nebius_pool_capture_evidence();
         DROP FUNCTION validate_nebius_pool_effect_mutation();
+        DROP TABLE nebius_pool_build_outbox;
+        DROP FUNCTION validate_nebius_pool_build_outbox();
     """)

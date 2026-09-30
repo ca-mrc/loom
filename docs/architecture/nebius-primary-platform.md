@@ -1749,6 +1749,19 @@ uploads remain authorized, then confirm durable committed/unavailable output bef
 final cleanup and release. The internal object-deletion primitive alone does not
 implement this protocol, residual-Pod deletion, or the delayed-start absolute deadline.
 
+The native-build local outbox commits an immutable typed selection before contacting
+management. It keeps selection generation separate from build lease epoch and permits
+only one live selection per materialization, including across participant changes.
+Receipt acceptance rechecks the exact source snapshot, current demand, deadline,
+rollout guard and lease epoch, then atomically commits the existing build attempt
+and global reservation link. Waiting and stale selections consume no attempt;
+obsolete grants remain recorded for cancellation. Concurrent workers and restart
+replay the same selection and grant. A newer admission epoch can recover old records
+for cancellation, but cannot use them for a new claim. SQL guards retain request,
+receipt and claim identity; local history has no foreign keys to the management
+database. This primitive does not yet implement controller activation, output drain,
+or release, and does not independently authorize an originating application.
+
 These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer
 fencing, Job/Pod/auxiliary absence and environment-owned output drain before
