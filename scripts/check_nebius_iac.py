@@ -384,18 +384,22 @@ def check_nebius_iac(
         )
 
     module = (root / "modules" / "execution-target" / "main.tf").read_text(encoding="utf-8")
-    system_node_group = module.split('resource "nebius_mk8s_v1_node_group" "system"', 1)[1].split(
-        'resource "nebius_mk8s_v1_node_group" "execution"', 1
-    )[0]
-    execution_node_group = module.split('resource "nebius_mk8s_v1_node_group" "execution"', 1)[1]
+    node_groups = re.findall(
+        r'resource "nebius_mk8s_v1_node_group" "[^"]+"(.*?)(?=\nresource |\Z)',
+        module, re.DOTALL,
+    )
+    compute_instances = re.findall(
+        r'resource "nebius_compute_v1_instance" "[^"]+"(.*?)(?=\nresource |\Z)',
+        module, re.DOTALL,
+    )
     _require(
-        "public_ip_address" not in system_node_group
-        and "public_ip_address" not in execution_node_group,
+        bool(node_groups) and all("public_ip_address" not in group for group in node_groups),
         "system and execution nodes must not assign public IP addresses",
     )
     _require(
-        module.count('policy = "FORBID"') == 3,
-        "both node groups and the deployment gateway must forbid capacity reservations",
+        bool(compute_instances) and all(re.search(r'policy\s*=\s*"FORBID"', body)
+                                       for body in (*node_groups, *compute_instances)),
+        "all node groups and compute instances must forbid capacity reservations",
     )
     _require('key    = "loom.nebius/execution"' in module, "execution node taint is required")
     _require("audit_logs        = {}" in module, "managed control-plane audit logging is required")

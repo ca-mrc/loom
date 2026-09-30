@@ -390,14 +390,17 @@ def automatic_service_execution_rejections(
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
+    from loom.task_runtime_compatibility import task_runtime_rejections
+
     task = normalize_steps(task)
+    declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
     # Checks keyed on `terminus` belong to the Harbor harness; checks keyed on
     # `controller` belong to the private-sandbox path Oracle shares with it.
     terminus = trial.agent_name == "terminus-2"
     oracle = trial.agent_name == "oracle"
     controller = trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
-    reasons: list[str] = []
+    reasons: list[str] = list(declared_rejections)
     if task.agent.continue_until_timeout and not terminus:
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(
