@@ -177,3 +177,57 @@ async def test_participant_routes_absent_from_owner_application_apis():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://owner.example") as http:
         for operation in ("prepare", "activate", "status", "cancel-unstarted"):
             assert (await http.post(f"/internal/pools/v1/{uuid4()}/{operation}", json={})).status_code == 404
+
+
+@pytest.mark.parametrize("lost_operation", ["prepare", "activate"])
+async def test_lost_committed_http_reply_recovers_the_same_grant_and_local_attempt(sessions, tmp_path, lost_operation):
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+
+    app, _, token, participants, _, _ = await setup(sessions, tmp_path)
+    _, selected, _ = await local_setup(sessions)
+    participant = participants[0]
+    request = selected.model_copy(update={"pool_id": participant.pool_id,
+        "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
+        "key": selected.key.model_copy(update={"participant_id": participant.participant_id}),
+        "origin": selected.origin.model_copy(update={"data_environment_id": participant.environment_id})})
+    journal = outbox(sessions, participant)
+    await journal.remember(request)
+    calls = []
+
+    class LostReply(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self.inner = httpx.ASGITransport(app=app)
+            self.lost = False
+
+        async def handle_async_request(self, incoming):
+            calls.append(incoming.url.path.rsplit("/", 1)[-1])
+            response = await self.inner.handle_async_request(incoming)
+            if calls[-1] == lost_operation and not self.lost:
+                self.lost = True
+                assert response.status_code == 200
+                await response.aclose()
+                raise httpx.ReadError("reply lost after management commit")
+            return response
+
+    async with httpx.AsyncClient(transport=LostReply()) as http:
+        management = client(http, token)
+        if lost_operation == "prepare":
+            with pytest.raises(PoolRequestUnconfirmedError):
+                await management.prepare(request)
+            assert calls == ["prepare"]
+            assert (await journal.get(request.key)).phase == "selected"
+            assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
+        reserved = await client(http, token).prepare(request)
+        attached = await journal.accept_grant(request.key, reserved)
+        if lost_operation == "activate":
+            with pytest.raises(PoolRequestUnconfirmedError):
+                await management.activate(attached.action)
+            assert calls == ["prepare", "activate"]
+            assert (await client(http, token).status(attached.action)).phase == "create_intent"
+        else:
+            assert (await management.activate(attached.action)).phase == "create_intent"
+        assert await outbox(sessions, participant).accept_grant(request.key, reserved) == attached
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
+        assert (await session.get(NebiusPoolRequest, reserved.reservation_id)).phase == "create_intent"
+    assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
