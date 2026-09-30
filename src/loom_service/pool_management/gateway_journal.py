@@ -48,6 +48,7 @@ class PoolGatewayEffect:
     observed_uid: UUID | None
     observed_resource_version: str | None
     rejection_status: int | None
+    requires_configmap: bool
 
 
 def _document(request: NebiusPoolRequest, effect_id: UUID, kind: CreateKind) -> dict[str, Any]:
@@ -83,7 +84,8 @@ def _view(effect: NebiusPoolEffect, request: NebiusPoolRequest) -> PoolGatewayEf
     if effect.intent_json != _intent(document) or (effect.plan_sha256, effect.namespace_uid) != (request.plan_sha256, request.namespace_uid):
         raise PoolGatewayError
     return PoolGatewayEffect(effect.effect_id, request.request_id, request.namespace_uid, effect.phase, document,
-        effect.dispatch_id, effect.observed_uid, effect.observed_resource_version, effect.rejection_status)
+        effect.dispatch_id, effect.observed_uid, effect.observed_resource_version, effect.rejection_status,
+        request.plan_json is not None and request.plan_json["configmap"] is not None)
 
 
 class PoolGatewayJournal:
