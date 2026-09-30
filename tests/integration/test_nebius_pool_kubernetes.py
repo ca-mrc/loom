@@ -22,16 +22,32 @@ class KubernetesAPI:
         self.namespace_uid = namespace_uid
         self.objects = {}
         self.writes = []
+        self.deletes = []
         self.requests = []
         self.post_status = 201
         self.lose_reply = False
         self.hide_objects = False
         self.damage = None
         self.read_status = 200
+        self.hold_deletion = False
+        self.lose_delete_reply = False
 
     def __call__(self, request):
         self.requests.append((request.method, request.url.path))
         path = request.url.path
+        if request.method == "DELETE":
+            options = json.loads(request.content)
+            self.deletes.append((path, options))
+            current = self.objects.get(path)
+            if current is None:
+                return httpx.Response(404)
+            if options["preconditions"]["uid"] != current["metadata"]["uid"]:
+                return httpx.Response(409)
+            if not self.hold_deletion:
+                del self.objects[path]
+            if self.lose_delete_reply:
+                raise httpx.ReadTimeout("SENSITIVE DELETE ERROR", request=request)
+            return httpx.Response(200, json={"apiVersion": "v1", "kind": "Status", "status": "Success"})
         if request.method == "POST":
             document = json.loads(request.content)
             self.writes.append(document)
@@ -310,3 +326,82 @@ async def test_namespace_change_between_create_and_observation_remains_charged(s
             row = await session.get(NebiusPoolRequest, receipt.reservation_id)
             assert effect.phase == "dispatched" and row.phase == "create_intent"
             assert row.job_uid is None and row.cleanup_observation_id is None
+
+
+@pytest.mark.parametrize("kind", ["Job", "ConfigMap"])
+async def test_exact_uid_delete_never_counts_as_complete_capacity_cleanup(sessions, kind):
+    from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
+
+    gateway, api, principal, receipt, http = await provider(sessions, build=kind == "ConfigMap")
+    async with http:
+        created = await gateway.create(principal, receipt.reservation_id, kind=kind)
+        await begin_cleanup(sessions, receipt.reservation_id)
+        deleted = await gateway.delete(principal, receipt.reservation_id, kind=kind)
+        assert deleted.phase == "observed"
+        assert len(api.deletes) == 1
+        assert api.deletes[0][1]["preconditions"] == {"uid": str(created.observed_uid)}
+        assert await gateway.delete(principal, receipt.reservation_id, kind=kind) == deleted
+        assert len(api.deletes) == 1
+        async with sessions() as session:
+            row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+            assert row.phase == "cleanup_intent" and row.cleanup_observation_id is None
+
+
+@pytest.mark.parametrize("uncertainty", ["lost-reply", "still-terminating"])
+async def test_delete_uncertainty_reconciles_without_a_second_write(sessions, uncertainty):
+    from loom_service.pool_management.kubernetes import PoolKubernetesWaitingError
+    from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
+
+    gateway, api, principal, receipt, http = await provider(sessions)
+    async with http:
+        await gateway.create(principal, receipt.reservation_id, kind="Job")
+        await begin_cleanup(sessions, receipt.reservation_id)
+        api.hold_deletion = uncertainty == "still-terminating"
+        api.lose_delete_reply = uncertainty == "lost-reply"
+        with pytest.raises(PoolKubernetesWaitingError):
+            await gateway.delete(principal, receipt.reservation_id, kind="Job")
+        if api.hold_deletion:
+            with pytest.raises(PoolKubernetesWaitingError):
+                await gateway.delete(principal, receipt.reservation_id, kind="Job")
+            assert len(api.deletes) == 1
+            path, _ = api.deletes[0]
+            del api.objects[path]
+        assert (await gateway.delete(principal, receipt.reservation_id, kind="Job")).phase == "observed"
+        assert len(api.deletes) == 1
+
+
+@pytest.mark.parametrize("after_dispatch", [False, True])
+async def test_replacement_is_never_deleted_or_used_as_absence_proof(sessions, after_dispatch):
+    from loom_service.pool_management.kubernetes import (
+        PoolKubernetesError,
+        PoolKubernetesWaitingError,
+    )
+    from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
+
+    gateway, api, principal, receipt, http = await provider(sessions)
+    async with http:
+        await gateway.create(principal, receipt.reservation_id, kind="Job")
+        await begin_cleanup(sessions, receipt.reservation_id)
+        if after_dispatch:
+            api.hold_deletion = True
+            with pytest.raises(PoolKubernetesWaitingError):
+                await gateway.delete(principal, receipt.reservation_id, kind="Job")
+        job, = api.objects.values()
+        job["metadata"]["uid"] = str(uuid4())
+        with pytest.raises(PoolKubernetesError):
+            await gateway.delete(principal, receipt.reservation_id, kind="Job")
+        assert len(api.deletes) == int(after_dispatch)
+
+
+async def test_missing_owned_job_requires_no_delete_but_remains_charged(sessions):
+    from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
+
+    gateway, api, principal, receipt, http = await provider(sessions)
+    async with http:
+        await gateway.create(principal, receipt.reservation_id, kind="Job")
+        api.objects.clear()  # Does not establish absence of residual Pods.
+        await begin_cleanup(sessions, receipt.reservation_id)
+        assert (await gateway.delete(principal, receipt.reservation_id, kind="Job")).phase == "observed"
+        assert not api.deletes
+        async with sessions() as session:
+            assert (await session.get(NebiusPoolRequest, receipt.reservation_id)).phase == "cleanup_intent"
