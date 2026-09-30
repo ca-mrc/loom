@@ -25,6 +25,7 @@ from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
 from loom.models.skill import SkillRef
+from loom.models.task_compatibility import TaskBundleCompatibilityIssue
 from loom.models.types import (
     OS,
     GPUVendor,
@@ -34,7 +35,6 @@ from loom.models.types import (
     RequiredCPUArch,
     VerifierEnvMode,
 )
-from loom.task_bundle_compat import TaskBundleCompatibilityIssue
 
 if TYPE_CHECKING:
     from loom.execution_runtime_contract import ExecutionRuntimePlanV1
