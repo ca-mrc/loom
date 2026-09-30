@@ -162,3 +162,12 @@ def test_at_most_three_failed_probes_are_inspected(resources_request):
     cluster.lists["pods"] = [copy.deepcopy(cluster.pod) for _ in range(8)]
     assert len(inspect(cluster)["failed_refresh_probes"]) == 3
     assert len([call for call in cluster.calls if call[0] == "logs"]) == 3
+
+
+def test_api_defaulted_configmap_mode_preserves_url_inspection(resources_request):
+    cluster = FailedRefresh(resources_request)
+    for spec in (cluster.job["spec"]["template"]["spec"], cluster.pod["spec"]):
+        volume = next(row for row in spec["volumes"] if row["name"] == "refresh-probe")
+        volume["configMap"]["defaultMode"] = 420
+    item, = inspect(cluster)["failed_refresh_probes"]
+    assert item["current_url"]["status"] == "observed_current"

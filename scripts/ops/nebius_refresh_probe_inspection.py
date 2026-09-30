@@ -61,7 +61,10 @@ def _current_url(kube: Kubectl, job: dict[str, Any], pod: dict[str, Any], phase:
                     or spec.get("serviceAccountName") != "loom-platform"):
                 raise ValueError
             config_volume, = [row for row in spec["volumes"] if row["name"] == "refresh-probe"]
-            if config_volume.get("configMap") != {"name": name, "items": [{"key": "probe.json", "path": "probe.json"}]}:
+            config_map = dict(config_volume["configMap"])
+            mode = config_map.pop("defaultMode", 420)
+            if (type(mode) is not int or mode != 420 or config_map != {
+                    "name": name, "items": [{"key": "probe.json", "path": "probe.json"}]}):
                 raise ValueError
             mount, = [row for row in container["volumeMounts"] if row["name"] == "refresh-probe"]
             if mount != {"name": "refresh-probe", "mountPath": "/var/run/loom-management-refresh", "readOnly": True}:
