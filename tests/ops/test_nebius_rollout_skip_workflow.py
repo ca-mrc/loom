@@ -171,7 +171,7 @@ def test_manual_rollout_and_recovery_use_check_dependency(workflow, operation):
 def test_retry_schedule_preserves_serialization_and_current_operator_tooling(workflow):
     assert workflow["on"]["schedule"] == [{"cron": "7-57/10 * * * *"}]
     assert workflow["concurrency"] == {
-        "group": "nebius-integration-rollout", "cancel-in-progress": "false",
+        "group": "nebius-integration-rollout", "queue": "max", "cancel-in-progress": "false",
     }
     for name in ("check", "rollout"):
         job = workflow["jobs"][name]

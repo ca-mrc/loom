@@ -1355,7 +1355,9 @@ successful full `dev` publication (push or manual) with an available platform ca
 publications do not roll out the platform or hide an earlier eligible platform
 candidate. Pending versions coalesce: if A waits for work to finish and B is
 published, the next check selects B. A deployment already in progress completes
-without cancellation. If a successful Deployment record and the live configured
+without cancellation. Native concurrency queuing also preserves pending manual
+recovery requests when periodic checks arrive. Each queued check selects the
+latest eligible candidate when it starts. If a successful Deployment record and the live configured
 version both match the candidate, the check reports `skipped_already_deployed`
 and avoids another backup/deployment. A matching ConfigMap alone is insufficient:
 an interrupted deployment may have updated it before verification.

@@ -31,6 +31,8 @@ permissions:
 # Publication and PR CI never wait for this environment's deployment.
 concurrency:
   group: nebius-integration-rollout
+  # Periodic checks must not replace a queued manual recovery.
+  queue: max
   cancel-in-progress: false
 
 jobs:
