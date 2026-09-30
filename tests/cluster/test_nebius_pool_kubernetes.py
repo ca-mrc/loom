@@ -123,7 +123,18 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                 assert await gateway.create(principal, receipt.reservation_id, kind="Job") == observed
                 deadline = time.monotonic() + 20
                 while True:
-                    inventory = await gateway.pod_inventory(principal, receipt.reservation_id)
+                    try:
+                        inventory = await gateway.pod_inventory(principal, receipt.reservation_id)
+                    except PoolKubernetesError:
+                        namespace = observed.document["metadata"]["namespace"]
+                        listed = (await http.get("/api/v1/namespaces/" + namespace + "/pods")).json()
+                        print("Pod inventory shape:", listed.get("kind"), listed.get("metadata", {}).keys(), [
+                            {"kind": item.get("kind"), "apiVersion": item.get("apiVersion"),
+                             "template_metadata_drift": drift_paths(item.get("metadata", {}), observed.document["spec"]["template"]["metadata"]),
+                             "owner_identity": [{key: ref.get(key) for key in ("apiVersion", "kind", "controller")}
+                                                for ref in item.get("metadata", {}).get("ownerReferences", [])]}
+                            for item in listed.get("items", [])])
+                        raise
                     if inventory.pods:
                         break
                     assert time.monotonic() < deadline, "real Job controller did not create its pending Pod"

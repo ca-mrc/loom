@@ -57,6 +57,10 @@ async def test_all_bound_pods_remain_visible_after_job_deletion_and_across_pages
     children[1]["metadata"]["deletionTimestamp"] = "2026-09-30T01:00:00Z"
     foreign = pod(job, suffix="foreign")
     foreign["metadata"].update(name="unrelated", labels={}, annotations={}, ownerReferences=[])
+    for item in [*children, foreign]:
+        # The real API supplies type metadata on PodList, not each item.
+        item.pop("apiVersion")
+        item.pop("kind")
     handler = InventoryAPI(api, [children[0], foreign, children[1]])
     api.objects.clear()  # Residual Pods are still charged even with no Job.
     before = list(api.writes)
@@ -74,7 +78,8 @@ async def test_all_bound_pods_remain_visible_after_job_deletion_and_across_pages
 
 
 @pytest.mark.parametrize("damage", ["owner-uid", "owner-name", "owner-kind", "controller", "multiple-owners",
-                                    "plan", "effect", "reservation", "claim", "namespace", "name", "identity-erased"])
+                                    "plan", "effect", "reservation", "claim", "namespace", "name", "identity-erased",
+                                    "pod-type", "pod-api"])
 async def test_spoofed_or_changed_bound_pod_is_not_treated_as_foreign_absence(sessions, damage):
     from loom_service.pool_management.kubernetes import PoolKubernetesError
 
@@ -99,6 +104,10 @@ async def test_spoofed_or_changed_bound_pod_is_not_treated_as_foreign_absence(se
         metadata["namespace"] = "other"
     elif damage == "name":
         metadata["name"] = "not-the-generated-pod"
+    elif damage == "pod-type":
+        child["kind"] = "Job"
+    elif damage == "pod-api":
+        child["apiVersion"] = "batch/v1"
     else:
         metadata.update(labels={}, annotations={}, ownerReferences=[])
     handler = InventoryAPI(api, [child])
