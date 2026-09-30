@@ -40,6 +40,11 @@ from loom.verifier_runtime import resolve_verifier_env_mode
 
 _IMMUTABLE_OCI_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 
+# Harnesses the trusted native controller runs against private task/verifier
+# sandboxes. Terminus-2 drives a model; Oracle runs the task's reference
+# solution with no model (#2054).
+SANDBOX_CONTROLLER_AGENT_NAMES: frozenset[str] = frozenset({"terminus-2", "oracle"})
+
 
 class _StrictContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -561,7 +566,7 @@ def workload_requirements_from_task(
         "public-web": NetworkAccess.APPROVED_ALLOWLIST,
         "public": NetworkAccess.UNRESTRICTED_PUBLIC,
     }[policy_kind]
-    # A later verifier pod exists only for Terminus separate grading. Callers
+    # A later verifier pod exists only for controller separate grading. Callers
     # that have the trial pass it, because that is what the compiler uses.
     # Task-only callers keep the declared env_mode so stored comparisons that
     # do not know the trial stay stable.
@@ -573,7 +578,7 @@ def workload_requirements_from_task(
         )
     else:
         separate = (
-            trial.agent_name == "terminus-2"
+            trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
             and resolve_verifier_env_mode(task, trial) == "separate"
             and not _task_declares_guest_execution(task)
         )

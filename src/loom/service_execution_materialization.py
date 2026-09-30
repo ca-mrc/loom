@@ -22,6 +22,7 @@ from pydantic import (
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_contract import (
+    SANDBOX_CONTROLLER_AGENT_NAMES,
     evaluate_execution_admission,
     nebius_cpu_execution_class,
     nebius_guest_execution_class,
@@ -54,6 +55,44 @@ from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.verifier_runtime import resolve_verifier_env_mode
+
+# Harnesses the native (Nebius) execution path can run today. OpenHands and
+# Codex are supported product entries but are not yet connected to native
+# execution (#2054); the catalog and submission paths reuse this set so they
+# report that instead of claiming readiness.
+NATIVE_EXECUTION_AGENT_NAMES: frozenset[str] = frozenset(
+    {"direct-completion", "litellm", *SANDBOX_CONTROLLER_AGENT_NAMES},
+)
+
+
+def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
+    """Whether this direct-completion task runs in the platform runner image.
+
+    The completion runner is Loom code shipped in the service image, so a
+    response-only task that names no image and no Dockerfile needs nothing
+    else from its environment. Leaving `docker_image` unset lets it survive
+    service upgrades; the execution plan freezes the concrete runner image
+    (`ExecutionRuntimePlanV1.task_image_ref`) per run. A task that pins an
+    image or declares a Dockerfile keeps exact-image semantics (#2054).
+    """
+    env = task.environment
+    return (
+        trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES
+        and env.docker_image is None
+        and env.dockerfile is None
+    )
+
+
+def resolve_runner_task_image(task: TaskConfig, task_image_ref: str) -> TaskConfig:
+    """The task as it executes: a runner-image task takes the image frozen
+    into its execution plan, so workload requirements and the plan agree."""
+    env = task.environment
+    if env.docker_image is not None or env.dockerfile is not None:
+        return task
+    return task.model_copy(
+        update={"environment": env.model_copy(update={"docker_image": task_image_ref})},
+    )
+
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -364,7 +403,11 @@ def automatic_service_execution_rejections(
     task = normalize_steps(task)
     declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
+    # Checks keyed on `terminus` belong to the Harbor harness; checks keyed on
+    # `controller` belong to the private-sandbox path Oracle shares with it.
     terminus = trial.agent_name == "terminus-2"
+    oracle = trial.agent_name == "oracle"
+    controller = trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
     reasons: list[str] = list(declared_rejections)
     if task.agent.continue_until_timeout and not terminus:
         reasons.append("agent_continuation_unsupported")
@@ -372,7 +415,7 @@ def automatic_service_execution_rejections(
         env.execution_requirements, supported_capabilities=supported_capabilities,
     ))
     if _guest_capabilities(task):
-        if not terminus:
+        if not controller:
             reasons.append("guest_private_sandboxes_required")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
@@ -391,15 +434,17 @@ def automatic_service_execution_rejections(
         reasons.append("linux_x86_64_required")
     if env.gpu_vendor != "none" or env.gpus:
         reasons.append("gpu_unsupported")
-    if env.mutable_paths and not terminus:
+    if env.mutable_paths and not controller:
         reasons.append("mutable_paths_require_terminus")
-    if env.workspace_reference_files and not terminus:
+    if env.workspace_reference_files and not controller:
         reasons.append("workspace_references_require_terminus")
-    if env.preserve_acls and not terminus:
+    if env.preserve_acls and not controller:
         reasons.append("acl_snapshots_require_terminus")
-    if env.service_lifecycle is not None and not terminus:
+    if env.service_lifecycle is not None and not controller:
         reasons.append("service_lifecycle_requires_terminus")
-    if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (
+    if not (allow_task_image_preparation and controller and env.dockerfile is not None) and not (
+        uses_runner_task_image(task, trial)
+    ) and (
         env.dockerfile is not None
         or env.docker_image is None
         or _DIGEST_REF.fullmatch(env.docker_image) is None
@@ -409,9 +454,9 @@ def automatic_service_execution_rejections(
         reasons.append("resource_limits_required")
     elif env.cpus > 128 or env.memory_mb > 1_048_576 or env.storage_mb > 1_048_576:
         reasons.append("resource_limits_out_of_range")
-    if not terminus and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
+    if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
         reasons.append("standard_workspace_identity_required")
-    if terminus:
+    if controller:
         try:
             validate_task_workdir(env.workdir)
         except ValueError:
@@ -425,8 +470,8 @@ def automatic_service_execution_rejections(
     if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
     if (
-        (set(env.environment) - ({"HOME"} if terminus else set()))
-        or (env.sidecars and (not terminus or not all(sidecar.fixture for sidecar in env.sidecars)))
+        (set(env.environment) - ({"HOME"} if controller else set()))
+        or (env.sidecars and (not controller or not all(sidecar.fixture for sidecar in env.sidecars)))
         or env.extra_hosts
         or env.dns
         or env.tmpfs
@@ -446,13 +491,17 @@ def automatic_service_execution_rejections(
         reasons.append("agent_capabilities_unsupported")
     if task.agent.extra_mcp_servers or task.agent.skills or task.agent.user is not None:
         reasons.append("extended_agent_runtime_unsupported")
-    if task.verifier.user is not None and not terminus:
+    if task.verifier.user is not None and not controller:
         reasons.append("custom_verifier_identity_unsupported")
     if len(task.steps) != 1 or task.multi_step is not None:
         reasons.append("single_step_required")
-    if trial.agent_name not in {"direct-completion", "litellm", "terminus-2"}:
+    if trial.agent_name not in NATIVE_EXECUTION_AGENT_NAMES:
         reasons.append("direct_completion_required")
-    if trial.agent_model is None or trial.agent_model.source != "api":
+    if oracle:
+        # The reference solver never calls a model (#2054).
+        if trial.agent_model is not None or trial.request_params:
+            reasons.append("oracle_model_forbidden")
+    elif trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")
     if trial.extra_mcp_servers or trial.extra_skills or trial.multi_model is not None:
         reasons.append("extended_agent_runtime_unsupported")
@@ -469,7 +518,7 @@ def automatic_service_execution_rejections(
         reasons.append("exact_verifier_path_required")
     if trial.skip_verifier or trial.verifier_env_mode not in {None, "shared", "separate"}:
         reasons.append("verifier_mode_required")
-    if terminus:
+    if controller:
         if not isinstance(verifier_path, str) or not verifier_path.startswith("verifier/"):
             reasons.append("private_verifier_directory_required")
         if trial.workspace_staging_policy_name == "none":
@@ -528,7 +577,7 @@ def compile_service_execution_plan(
     ):
         raise ValueError("fixture execution requires the frozen task's prepared component grant")
     if task_image_grant is not None:
-        if (trial.agent_name != "terminus-2"
+        if (trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES
             or task.environment.dockerfile is None
             or task_revision_sha256 != "sha256:" + task_image_grant.task_checksum
             or task != TaskConfig.model_validate(task_image_grant.task_config)
@@ -546,7 +595,7 @@ def compile_service_execution_plan(
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
-    terminus = trial.agent_name == "terminus-2"
+    controller = trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
     if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
@@ -566,8 +615,33 @@ def compile_service_execution_plan(
     assert task.environment.memory_mb is not None
     assert task.environment.storage_mb is not None
     step = task.steps[0]
-    assert trial.agent_model is not None
     output_paths = list(dict.fromkeys((*step.artifacts, *step.required_artifacts)))
+    command_identity = canonical_digest(
+        {
+            "schema_version": "loom.automatic-service-execution-command.v1",
+            "task_revision_sha256": task_revision_sha256,
+            "agent": trial.agent_name,
+            **({"agent_version": trial.agent_version, "agent_image_ref": selected_agent_image}
+               if trial.agent_version is not None else {}),
+            "model": trial.agent_model.model_dump(mode="json") if trial.agent_model else None,
+            "request_params": trial.request_params,
+            "instruction_file": str(step.instruction_file),
+            "artifacts": step.artifacts,
+            "required_artifacts": step.required_artifacts,
+            "verifier": task.verifier.model_dump(mode="json"),
+        }
+    )
+    if controller:
+        return _compile_terminus_plan(
+            task=task, trial=trial, task_revision_sha256=task_revision_sha256,
+            profile=profile, binding=binding, command_identity=command_identity,
+            output_paths=output_paths,
+            resource_requests=resource_requests,
+            task_image_materialization_id=(
+                task_image_grant.materialization_id if task_image_grant else None
+            ),
+        )
+    assert trial.agent_model is not None
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
     # the service-execution lease and supports both a JWT-bound provider
     # connection and the platform route, whose model identity is provider/name.
@@ -599,31 +673,6 @@ def compile_service_execution_plan(
             ),
         },
     )
-    command_identity = canonical_digest(
-        {
-            "schema_version": "loom.automatic-service-execution-command.v1",
-            "task_revision_sha256": task_revision_sha256,
-            "agent": trial.agent_name,
-            **({"agent_version": trial.agent_version, "agent_image_ref": selected_agent_image}
-               if trial.agent_version is not None else {}),
-            "model": trial.agent_model.model_dump(mode="json"),
-            "request_params": trial.request_params,
-            "instruction_file": str(step.instruction_file),
-            "artifacts": step.artifacts,
-            "required_artifacts": step.required_artifacts,
-            "verifier": task.verifier.model_dump(mode="json"),
-        }
-    )
-    if terminus:
-        return _compile_terminus_plan(
-            task=task, trial=trial, task_revision_sha256=task_revision_sha256,
-            profile=profile, binding=binding, command_identity=command_identity,
-            output_paths=output_paths,
-            resource_requests=resource_requests,
-            task_image_materialization_id=(
-                task_image_grant.materialization_id if task_image_grant else None
-            ),
-        )
     output_declarations = (
         *(
             RuntimeOutputDeclarationV1(
@@ -784,8 +833,11 @@ def runtime_profile_rejections(
         trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
     ):
         return ("agent_version_not_in_runtime_profile",)
-    if trial.agent_name != "terminus-2":
-        return (() if task.environment.docker_image == profile.task_image_ref
+    if trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES:
+        # A pinned image must be the deployed runner image; a task that leaves
+        # it unset runs in whichever runner image the plan freezes (#2054).
+        return (() if uses_runner_task_image(task, trial)
+                or task.environment.docker_image == profile.task_image_ref
                 else ("task_image_not_in_runtime_profile",))
     if _requires_task_identity(task) and not profile.supports_task_identity:
         return ("task_identity_runtime_unavailable",)
@@ -817,7 +869,10 @@ def _compile_terminus_plan(
     task_image_materialization_id: UUID | None = None,
     resource_requests: ExecutionResourceRequestsV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
-    """Reuse Harbor in a trusted controller with private native task/verifier sandboxes."""
+    """Reuse the trusted controller with private native task/verifier sandboxes.
+
+    Terminus-2 runs Harbor there; Oracle runs the task's reference solution.
+    """
     env = task.environment
     agent_image = controller_image_for_trial(profile, trial)
     assert agent_image is not None
@@ -881,13 +936,16 @@ def _compile_terminus_plan(
         source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",
         kind="task_artifact", required=path in task.steps[0].required_artifacts,
     ) for path in output_paths]
+    harbor_outputs = (
+        ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
+        ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
+    ) if trial.agent_name == "terminus-2" else ()
     for source, target, kind, required in (
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
         ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
         ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
-        ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
-        ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
+        *harbor_outputs,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
         ("verifier/output.json", "verifier/output.json", "verifier", shared),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
@@ -958,7 +1016,7 @@ def _compile_terminus_plan(
             manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
             total_bytes=binding.total_bytes,
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
-        main=phase("agent", "terminus-2", agent_timeout),
+        main=phase("agent", trial.agent_name, agent_timeout),
         verifier_execution="in_attempt" if colocated_verifier else "separate_execution",
         verifier_after_agent_timeout=shared and guest_execution is None,
         in_place_verifier=shared and guest_execution is None,

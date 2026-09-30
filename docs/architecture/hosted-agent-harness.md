@@ -48,10 +48,32 @@ environment it actually needs:
 |---|---|---|
 | Response-only | The model returns text and never reads or executes in the task image. | `direct-completion`; `litellm` is an alias. No private task sandbox. Verification is in the same execution attempt. |
 | Workspace-reading | The harness reads files or runs commands in the task image. | `terminus-2`. Use the private task-sandbox topology, shared verifier lifecycle and deferred verifier-plan contract. |
-| Private-solution | A trusted baseline needs `solution/` or another input forbidden to model agents. | Not admitted automatically today. Design a distinct input policy; never expose the solution through the workspace-agent path. |
+| Private-solution | A trusted baseline needs `solution/` or another input forbidden to model agents. | `oracle`, with no model. Same private task-sandbox topology as workspace-reading, plus a distinct input policy: only Oracle's own sandbox receives `solution/**`, and it is removed before the workspace snapshot and grading. |
 
-The private-solution row is forward-looking design guidance, not current
-runtime behavior.
+The workspace-reading and private-solution harnesses currently share the
+private-sandbox path through `SANDBOX_CONTROLLER_AGENT_NAMES` in
+`src/loom/execution_contract.py`. That name set is an intermediate step;
+[#2288](https://github.com/qianyi-sun/loom/issues/2288) replaces it with a
+typed harness specification declaring the execution kind.
+
+### Oracle (private-solution)
+
+`service_execution_sandbox_task oracle` stages the public workspace as for any
+workspace harness. It then additionally stages `solution/**` into the same task
+sandbox and runs the existing `OracleAgent` (`solution/solve.sh`) through
+`Driver.exec`. It removes `solution/` before the workspace snapshot, so an
+in-place verifier's planted-private-path check and the committed
+`workspace.tar` never contain it. Model agents' staging policy is unchanged.
+
+Oracle is model-free end to end. Admission rejects model fields and request
+parameters (`oracle_model_forbidden`), and needs no Provider Connection. The
+trace may contain only the solver's `env_exec` events, and a successful attempt
+needs at least one. Usage is a fixed known-zero document
+(`loom.service-execution-oracle-usage.v1`). The materializer reads the Gateway
+ledger and refuses the result (`oracle_model_calls_present`) if any call
+exists. Harbor outputs are not declared. The controller dispatcher requires the
+phase to match the trial's agent, so a plan cannot run one harness under
+another's name.
 
 Unknown agent names must fail before plan compilation or at its defense-in-depth
 admission boundary. They must not fall through to the direct-completion runner
@@ -60,12 +82,11 @@ rejection code remains `direct_completion_required`; do not interpret that code
 as a fallback or rewrite. Hosted APIs may reject the unsupported selection
 earlier with a user-facing availability message.
 
-The current workspace compiler is named `_compile_terminus_plan` because
-Terminus-2 is its only hosted caller. Keep it as the single private-sandbox
-compiler until another workspace-reading harness is implemented. At that
-point, parameterize the agent phase and harness-owned outputs; do not copy the
-sandbox, verifier, allocation or deferred-plan logic into a harness-specific
-compiler.
+The private-sandbox compiler is still named `_compile_terminus_plan`, but it
+serves both Terminus-2 and Oracle. It parameterizes only the agent phase
+(`trial.agent_name`) and the harness-owned outputs (Harbor files for Terminus
+only). Keep it as the single private-sandbox compiler. Do not copy the sandbox,
+verifier, allocation or deferred-plan logic into a harness-specific compiler.
 
 ## Controller phase contract
 
@@ -233,6 +254,8 @@ reward does not by itself satisfy this checklist.
   `src/loom/service_execution_sandbox_task.py`
 - Terminus hosted bridge:
   `src/loom/service_execution_terminus2.py`
+- Oracle hosted runner, trace and usage:
+  `src/loom/service_execution_oracle.py`
 - Unix-socket driver:
   `src/loom/driver/service_sandbox.py`
 - Parent-cleanup gate for child verifier reservations:

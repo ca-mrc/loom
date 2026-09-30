@@ -210,8 +210,11 @@ async def test_post_trial_forwards(
 
 
 async def test_post_trial_forwards_pool_pin_and_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
 ) -> None:
+    # Forwarding mechanics; hosted Nebius admission is covered separately.
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     app, raw, _team_id, captured = fwd_setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -598,11 +601,14 @@ async def test_cancel_unknown_trial_404(
 
 
 async def test_forwarder_propagates_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
 ) -> None:
     """Audit H3: upstream 429 with Retry-After must reach the client
     so backoff works. Plan 19's rate-limited batch submits depend
     on this."""
+    # Forwarding mechanics; hosted Nebius admission is covered separately.
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     app, raw, _team_id, _captured = fwd_setup
     # Re-wire the mock to return 429 with a Retry-After header.
     await app.state.http_client.aclose()
@@ -700,3 +706,33 @@ async def test_cancel_cross_team_403(
         )
     assert r.status_code == 403
     assert all(req["auth"] != f"Bearer {other_raw}" for req in captured["reqs"])
+
+
+async def test_hosted_trial_rejects_agent_without_native_execution(
+    fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+) -> None:
+    """#2054: hosted single trials run natively on Nebius, which cannot run
+    Codex yet; say so instead of forwarding a doomed trial."""
+    monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
+    app, raw, team_id, captured = fwd_setup
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        r = await ac.post(
+            "/api/v1/trials",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "task_id": "local/task-1",
+                "config": {
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
+            },
+        )
+
+    assert r.status_code == 400, r.text
+    assert "agent 'codex' is not yet runnable on hosted (Nebius) execution" in r.json()["detail"]
+    assert captured["reqs"] == []

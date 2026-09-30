@@ -31,6 +31,7 @@ from loom.db.schema import (
 from loom.security.redaction import redact_mapping, redact_text
 from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
 from loom_service import wire_responses as wire
+from loom_service.agent_catalog import native_selections_error, selection_agents
 from loom_service.auth_guards import (
     is_admin,
     require_scope,
@@ -2323,11 +2324,15 @@ async def _derive_new_batch_routes(
     replacement_connection_id: UUID | None,
     replacement_model_id: str | None,
     action: str,
+    backend: str | None,
 ) -> DerivedRoutes:
     """A clone or artifact reuse creates new trials, so its stored
     selections go through the fresh-submission contract (#2054), and every
     model-backed selection runs on the caller's selected connection rather
     than the source's. Only the resulting connections are authorized."""
+    native_err = native_selections_error(backend, selection_agents(trial_config, combinations))
+    if native_err is not None:
+        raise HTTPException(status_code=400, detail=f"cannot {action}: {native_err}")
     try:
         routes = derive_stored_routes(
             trial_config=trial_config,
@@ -2376,6 +2381,7 @@ async def clone_run_library_batch_config(
         replacement_connection_id=payload.provider_connection_id,
         replacement_model_id=payload.provider_model_id,
         action="clone",
+        backend=source.backend,
     )
 
     task_filter = dict(source.task_filter)
@@ -2572,6 +2578,7 @@ async def reuse_run_library_artifact(
         replacement_connection_id=payload.provider_connection_id,
         replacement_model_id=payload.provider_model_id,
         action="reuse",
+        backend=batch.backend if batch is not None else None,
     )
 
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"

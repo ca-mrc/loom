@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from loom.driver.base import Driver
@@ -21,7 +21,9 @@ from loom.models.exec import ExecResult
 from loom.models.mcp import MCPConnection
 from loom.models.trajectory import EnvExecEvent
 from loom.models.types import OS, ModelSpec
-from loom.trajectory.writer import TrajectoryWriter
+
+if TYPE_CHECKING:
+    from loom.trajectory.writer import TrajectoryWriter
 
 _SOLVE_SCRIPT_NAME = "solve.sh"
 

@@ -63,6 +63,7 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.service_execution_oracle import oracle_usage, parse_oracle_events
 from loom.service_execution_terminus_trace import (
     matches_terminus_usage,
     parse_terminus_events,
@@ -236,6 +237,16 @@ def validate_usage_accounting(
         document = json.loads(usage_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MaterializationIntegrityError("usage_output_invalid") from exc
+    if trial_config.agent_name == "oracle":
+        try:
+            # A successful Oracle attempt must show the solver actually ran.
+            if not parse_oracle_events(trace_body):
+                raise ValueError("Oracle trace has no solver execution")
+        except ValueError as exc:
+            raise MaterializationIntegrityError("trajectory_invalid") from exc
+        if document != oracle_usage():
+            raise MaterializationIntegrityError("usage_output_identity_drift")
+        return
     if trial_config.agent_name == "terminus-2":
         try:
             events = parse_terminus_events(trace_body, trial=trial_config)
@@ -318,18 +329,24 @@ def build_canonical_events(
     """Validate the lossless source trace and project it to Loom event rows."""
 
     terminus = trial_config.agent_name == "terminus-2"
-    calls = [] if terminus else _parse_trace_calls(trace_body)
+    oracle = trial_config.agent_name == "oracle"
+    calls = [] if terminus or oracle else _parse_trace_calls(trace_body)
+    if oracle and gateway_calls:
+        # A no-model solver that reached the Gateway is not an Oracle run.
+        raise MaterializationIntegrityError("oracle_model_calls_present")
     try:
-        native_events = parse_terminus_events(
-            trace_body, trial=trial_config, trial_id=trial_id,
-        ) if terminus else []
-        if terminus and gateway_calls is not None:
-            native_events = reconcile_terminus_ledger(
-                native_events, gateway_calls, trial_config, trial_id,
-            )
+        native_events: list[TrajectoryEvent] = []
+        if terminus:
+            native_events = parse_terminus_events(trace_body, trial=trial_config, trial_id=trial_id)
+            if gateway_calls is not None:
+                native_events = reconcile_terminus_ledger(
+                    native_events, gateway_calls, trial_config, trial_id,
+                )
+        elif oracle and trace_body is not None:
+            native_events = parse_oracle_events(trace_body, trial_id=trial_id)
     except ValueError as exc:
         raise MaterializationIntegrityError("trajectory_invalid") from exc
-    step_id = "agent" if terminus else task_config.steps[0].name if task_config.steps else "main"
+    step_id = "agent" if terminus or oracle else task_config.steps[0].name if task_config.steps else "main"
     emitted = runtime_result.started_at
     events: list[TrajectoryEvent] = [
         TrialStartEvent(
@@ -820,7 +837,7 @@ class ServiceExecutionMaterializer:
             }
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
-            )) if trial.config.get("agent_name") == "terminus-2" else None
+            )) if trial.config.get("agent_name") in {"terminus-2", "oracle"} else None
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
@@ -1027,7 +1044,7 @@ class ServiceExecutionMaterializer:
             gateway_calls=gateway_calls,
             exception_info=exception_info,
         )
-        if gateway_calls is not None:
+        if gateway_calls is not None and trial_config.agent_name == "terminus-2":
             # Preserve the immutable runtime projection as source evidence. The
             # canonical accounting is independently derived from the DB ledger.
             corrected = {
