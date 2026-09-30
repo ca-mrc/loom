@@ -68,7 +68,7 @@ def test_config_accepts_qualified_application_source_and_rejects_shared_priority
         "origin": "https://alice.dev.example", "access_generation": 1}
     values = {"_env_file": None, "service_mode": "api_only", "db_url": "postgresql+asyncpg://unused:unused@localhost/unused",
         "minio_access_key": "test", "minio_secret_key": "test", "auth_session_audience_json": json.dumps(audience),
-        "public_base_url": audience["origin"], "pool_submission_source_json": json.dumps(body)}
+        "public_base_url": audience["origin"], "auth_local_http": False, "pool_submission_source_json": json.dumps(body)}
     settings = LoomServiceSettings(**values)
     assert settings.pool_submission_source.kind == "application"
     for invalid in (source("environment"), source()):

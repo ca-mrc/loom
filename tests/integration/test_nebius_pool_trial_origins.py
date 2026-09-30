@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, insert, select
+from sqlalchemy import create_engine, delete, insert, select
 
 from loom.db.schema import Batch, Token, Trial
 from tests.integration.test_cp_trials_idempotency import app as app
@@ -45,4 +45,7 @@ def test_trial_fanout_keeps_server_origin_but_ordinary_batch_reference_cannot_pr
             actual = connection.execute(select(Trial.pool_origin).where(Trial.id == trial_id)).scalar_one()
         assert actual == (parent_origin if internal else None)
     finally:
+        with engine.begin() as connection:
+            connection.execute(delete(Trial).where(Trial.batch_id == batch_id))
+            connection.execute(delete(Batch).where(Batch.id == batch_id))
         engine.dispose()
