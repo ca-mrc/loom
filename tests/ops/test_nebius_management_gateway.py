@@ -100,6 +100,52 @@ def test_refresh_preserves_closed_retained_preflight_diagnostics(tmp_path, stage
         gateway.safe_report(json.dumps(report | {'stage': 'refresh_private-provider-payload'}).encode(), metadata)
 
 
+def capacity_report():
+    return {'schema': 'loom.nebius-platform-capacity-diagnostic.v1', 'stage': 'capacity',
+        'kind': None, 'error_type': 'ManagementCapacityError', 'nodes': [{
+            'node_uid': '18718d96-d389-40b3-a79b-11489924d0d7', 'placement_matches': True,
+            'allocatable': {'cpu_millis': 1000, 'memory_mib': 2048, 'ephemeral_storage_mib': 4096, 'pods': 8},
+            'required': {'cpu_millis': 1200, 'memory_mib': 1024, 'ephemeral_storage_mib': 2048, 'pods': 4}}]}
+
+
+def test_refresh_capacity_details_survive_both_report_boundaries(tmp_path):
+    gateway = module()
+    metadata = refresh_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage='refresh_platform_capacity', capacity=capacity_report())
+    first = gateway.safe_report(json.dumps(report).encode(), metadata)
+    assert first == report
+    assert gateway.safe_report(json.dumps(first).encode(), metadata) == report
+
+
+@pytest.mark.parametrize('damage', ['private', 'stage', 'kind', 'error', 'bool', 'negative', 'huge',
+    'extra_resource', 'uid', 'many_nodes', 'wrong_outer_stage'])
+def test_capacity_report_cannot_export_unbounded_or_private_details(tmp_path, damage):
+    gateway = module()
+    metadata = refresh_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage='refresh_platform_capacity', capacity=capacity_report())
+    detail = report['capacity']
+    if damage == 'private':
+        detail['message'] = 'secret-provider-response'
+    elif damage in {'stage', 'kind'}:
+        detail[damage] = 'private-workload-name'
+    elif damage == 'error':
+        detail['error_type'] = 'secret-exception-name'
+    elif damage in {'bool', 'negative', 'huge'}:
+        detail['nodes'][0]['required']['pods'] = {'bool': True, 'negative': -1, 'huge': 2**63}[damage]
+    elif damage == 'extra_resource':
+        detail['nodes'][0]['required']['credentials'] = 'secret'
+    elif damage == 'uid':
+        detail['nodes'][0]['node_uid'] = 'private-host'
+    elif damage == 'many_nodes':
+        detail['nodes'] *= 65
+    else:
+        report['stage'] = 'refresh_publication'
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+
+
 @pytest.mark.parametrize('damage', ['nil_uuid', 'other_uuid_path', 'old_state', 'source_mismatch', 'extra_field'])
 def test_refresh_metadata_cannot_borrow_or_reset_another_operation(tmp_path, damage):
     gateway = module()
