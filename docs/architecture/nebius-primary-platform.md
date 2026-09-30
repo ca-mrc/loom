@@ -1773,6 +1773,18 @@ qualify read-only Kubernetes observations against these retained identities befo
 using publication or failure evidence; readback alone does not implement that
 controller or prove a build completed.
 
+The native runtime consumer composes the durable handoff with read-only Kubernetes
+observation and the existing native publication/failure recorder. It checks the
+namespace UID before and after reads, the exact Job UID and reservation/plan/effect
+markers, and one controller-owned Pod. Logs are bounded/redacted and bracketed by
+Pod-UID readback. Partial Pod lists fail closed. No observed global Job UID means
+no speculative Kubernetes read or local create. The local claim, source and live
+demand are rechecked around external reads; current attempts are heartbeated while
+waiting, and stale/superseded attempts cannot publish results. Terminal or withdrawn
+work enters local `stop_pending`, retaining its capacity charge. This consumer is
+not yet installed: stop/drain delivery, queue selection, release and protected
+writer migration remain required.
+
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
 keys and participant-to-pool binding. Registration identities cannot be reassigned;
