@@ -13,7 +13,8 @@ import pytest
 from botocore.config import Config
 from fastapi import FastAPI
 from sqlalchemy import create_engine, delete, insert, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from loom.admin_secret import AdminSecretVerifier
@@ -392,6 +393,27 @@ async def test_api_only_readiness_uses_own_dependencies_and_retains_authenticati
     assert "capacity_ready" not in body and "mutation_epoch" not in body
     assert "private-provider-secret" not in response.text
     assert calls == ["artifacts", "trajectories"]
+
+
+async def test_api_only_readiness_handles_database_failure_during_authentication(
+    svc_setup: tuple[FastAPI, str, UUID], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, token, _team_id = svc_setup
+    app.state.settings = app.state.settings.model_copy(update={"service_mode": "api_only"})
+
+    async def disconnected(*_args: object, **_kwargs: object) -> None:
+        raise OperationalError("SELECT secret-column", {}, RuntimeError("private-db-password"))
+
+    monkeypatch.setattr(AsyncSession, "execute", disconnected)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://svc",
+    ) as client:
+        anonymous = await client.get("/api/v1/health/ready")
+        assert anonymous.status_code == 401
+        response = await client.get("/api/v1/health/ready", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 503
+    assert response.json() == {"detail": "readiness database unavailable"}
+    assert "private-db-password" not in response.text and "secret-column" not in response.text
 
 
 async def test_owner_rotates_token_revoking_old_secret(
