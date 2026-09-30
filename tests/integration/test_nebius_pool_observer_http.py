@@ -32,7 +32,8 @@ async def setup(sessions, tmp_path, *, role="observer", **changes):
     async with sessions.begin() as session:
         await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == pool_id).values(
             policy_revision=2, binding_json=binding, binding_sha256=canonical_digest(binding).removeprefix("sha256:")))
-    app = create_app(LoomServiceSettings(service_mode="management", auth_session_secret="test" * 16))
+    app = create_app(LoomServiceSettings(_env_file=None, service_mode="management",
+        db_url="postgresql+asyncpg://unused:unused@localhost/unused"))
     app.state.session_factory = sessions
     token = tmp_path / "pool-token"
     token.write_text(raw)
@@ -99,7 +100,7 @@ async def test_observer_http_has_no_generic_bearer_or_role_fallback(sessions, tm
 
 
 @pytest.mark.parametrize("body,status", [(b'{"unexpected":"private-input"}', 422),
-    (b'{"broken":', 422), (b" " * (1024 * 1024 + 1), 413)])
+    (b'{"broken":', 422), (b" " * (1024 * 1024 + 1), 413)], ids=["unknown-field", "invalid-json", "oversize"])
 async def test_capture_body_is_bounded_and_error_does_not_echo_inputs(sessions, tmp_path, body, status):
     app, raw, pool_id, _ = await setup(sessions, tmp_path)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example") as http:
