@@ -73,7 +73,7 @@ def test_native_adapter_renders_actual_sequential_peak_and_loadable_protected_cl
     assert [row["name"] for row in pod["containers"]] == ["publish"]
     assert pod["volumes"][0]["configMap"]["name"] == prepared.configmap["metadata"]["name"]
     assert pod["serviceAccountName"] == "build-sa" and pod["automountServiceAccountToken"] is False
-    assert {mount["name"] for mount in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp"}
+    assert {mount["name"] for mount in pod["initContainers"][1]["volumeMounts"]} == {"build", "builder-tmp", "deadline-runtime"}
     assert prepared.job["spec"]["template"]["metadata"]["labels"]["loom.lease-epoch"] == "3"
     assert prepared.job["spec"]["template"]["metadata"]["annotations"]["loom.openai.com/target-id"] == "native"
     path = tmp_path / "claim.json"
@@ -138,6 +138,20 @@ def test_native_adapter_preserves_absolute_deadline_and_selection_digest():
     later = render(participant, body, profile, now=now + timedelta(seconds=30))
     assert first.request_sha256 == later.request_sha256
     assert first.job["spec"]["activeDeadlineSeconds"] - later.job["spec"]["activeDeadlineSeconds"] == 30
+    for prepared in (first, later):
+        pod = prepared.job["spec"]["template"]["spec"]
+        prepare, build = pod["initContainers"]
+        publish, = pod["containers"]
+        for phase in (prepare, build, publish):
+            # The trusted guard is PID1 in every phase, never a background timer.
+            assert phase["command"][0].endswith("/loom-build-deadline")
+            cutoff = phase["command"][phase["command"].index("--deadline-at") + 1]
+            assert datetime.fromisoformat(cutoff) == body["deadline_at"]
+        mounts = {row["name"]: row for row in build["volumeMounts"]}
+        assert mounts["deadline-runtime"]["readOnly"] is True
+        assert mounts["deadline-runtime"]["mountPath"] == "/loom/deadline-runtime"
+        assert "claim" not in mounts and "source" not in mounts and "registry" not in mounts
+        assert {row["name"] for row in pod["volumes"]} >= {"deadline-runtime"}
     assert first.job["spec"]["activeDeadlineSeconds"] <= profile.settings.active_deadline_seconds
     changed = body | {"deadline_at": body["deadline_at"] + timedelta(seconds=1)}
     assert render(participant, changed, profile).request_sha256 != first.request_sha256
