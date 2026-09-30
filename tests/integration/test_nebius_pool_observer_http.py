@@ -99,6 +99,18 @@ async def test_observer_http_has_no_generic_bearer_or_role_fallback(sessions, tm
         assert await session.scalar(select(func.count()).select_from(NebiusPoolCapture)) == 0
 
 
+async def test_pool_observer_routes_are_not_on_application_apis():
+    from fastapi import FastAPI
+
+    from loom_service.app import register_api_routes
+
+    app = FastAPI()
+    register_api_routes(app, management=False, include_local_execution=False)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://application.example") as http:
+        for suffix in ("captures", "observations"):
+            assert (await http.post(f"/internal/pools/v1/{uuid4()}/{suffix}", json={})).status_code == 404
+
+
 @pytest.mark.parametrize("body,status", [(b'{"unexpected":"private-input"}', 422),
     (b'{"broken":', 422), (b" " * (1024 * 1024 + 1), 413)], ids=["unknown-field", "invalid-json", "oversize"])
 async def test_capture_body_is_bounded_and_error_does_not_echo_inputs(sessions, tmp_path, body, status):

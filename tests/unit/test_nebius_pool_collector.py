@@ -1,7 +1,9 @@
 """The production pool collector never sums environment inventories or falls back."""
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
@@ -263,3 +265,61 @@ async def test_actual_command_does_not_select_legacy_collector_in_pool_mode(tmp_
     # Missing protected pool configuration must fail before any collector runs.
     with pytest.raises(ValueError):
         await command._run()
+
+
+@pytest.mark.parametrize("failure", ["chunked_limit", "body_stall"])
+async def test_streaming_capture_is_bounded_without_content_length(tmp_path, failure):
+    from loom_execution_capacity_collector.pool_client import PoolPublicationError
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if failure == "body_stall":
+                await asyncio.Event().wait()
+            for _ in range(17):
+                yield b" " * 65536
+            pytest.fail("unbounded response reader consumed more than one MiB")
+
+    client, http = transport(tmp_path, lambda request: httpx.Response(200, stream=Stream()))
+    client._timeout = 0.02
+    async with http:
+        with pytest.raises(PoolPublicationError):
+            await client.issue_capture(POOL_ID)
+
+
+async def test_failed_provider_does_not_close_a_running_kubernetes_reader(tmp_path, monkeypatch):
+    from loom_execution_capacity_collector import pool_collector
+
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    reader = cluster_reader([])
+    query = reader._core.list_node
+    resource = httpx.Client()
+    reader._api_client = resource
+
+    def delayed_nodes(**kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "test did not release the bounded read"
+        return query(**kwargs)
+
+    reader._core.list_node = delayed_nodes
+    monkeypatch.setattr(pool_collector, "InClusterKubernetesCapacityReader", lambda **kw: reader)
+
+    class Provider:
+        async def capture_pool(self):
+            await started.wait()
+            raise RuntimeError("native provider failed")
+
+    client, http = transport(tmp_path, lambda request: httpx.Response(200, json=capture()))
+    async with http:
+        task = asyncio.create_task(pool_collector.collect_pool_observation(settings(tmp_path),
+            management=client, provider=Provider()))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            done, _ = await asyncio.wait({task}, timeout=0.1)
+            closed_while_reading = resource.is_closed
+        finally:
+            release.set()
+            with pytest.raises(ExceptionGroup):
+                await task
+            resource.close()
+    assert not done and not closed_while_reading
