@@ -77,11 +77,17 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
             await asyncio.to_thread(rbac.create_namespaced_role, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "Role", "metadata": {"name": "pool-create"}, "rules": [
                     {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "create", "delete"]},
-                    {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "delete"]}]})
+                    {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "delete"]},
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]})
             await asyncio.to_thread(rbac.create_namespaced_role_binding, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "RoleBinding", "metadata": {"name": "pool-create"}, "subjects": [subject],
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "pool-create"}})
         participants, principals, executions, builds, profiles, _ = await mixed_setup(sessions, namespace_uids=namespaces)
+        profile_id = participants[0].targets[0].profile_id
+        for runtime in (profiles.execution[profile_id].runtime, profiles.task_images[profile_id].target):
+            await asyncio.to_thread(core.create_namespaced_service_account, runtime.namespace, {
+                "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": runtime.service_account_name},
+                "automountServiceAccountToken": False})
         journal = PoolGatewayJournal(sessions)
         principal = await machine(sessions, participants[0].pool_id, role="gateway")
         config = core.api_client.configuration
@@ -115,6 +121,14 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                     raise
                 assert observed.phase == "observed"
                 assert await gateway.create(principal, receipt.reservation_id, kind="Job") == observed
+                deadline = time.monotonic() + 20
+                while True:
+                    inventory = await gateway.pod_inventory(principal, receipt.reservation_id)
+                    if inventory.pods:
+                        break
+                    assert time.monotonic() < deadline, "real Job controller did not create its pending Pod"
+                    await asyncio.sleep(0.1)
+                assert len(inventory.pods) == 1 and inventory.job_uid == observed.observed_uid
                 receipts.append((receipt, body.key.workload_kind))
             foreign = await http.post("/apis/batch/v1/namespaces/pool-test-execution-1/jobs", json=observed.document)
             assert foreign.status_code == 403
@@ -136,6 +150,10 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                             assert time.monotonic() < deadline, "fixed object deletion did not converge"
                             await asyncio.sleep(0.1)
                     assert deleted.phase == "observed"
+                deadline = time.monotonic() + 20
+                while (await gateway.pod_inventory(principal, receipt.reservation_id)).pods:
+                    assert time.monotonic() < deadline, "real residual Pod retirement did not converge"
+                    await asyncio.sleep(0.1)
             deletes = [path for method, path in mutations if method == "DELETE"]
             assert len(deletes) == len(set(deletes)) == 3
         legacy = await asyncio.to_thread(core.create_namespaced_service_account_token, "legacy", "pool-management",

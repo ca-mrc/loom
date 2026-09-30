@@ -60,7 +60,8 @@ async def test_all_bound_pods_remain_visible_after_job_deletion_and_across_pages
     handler = InventoryAPI(api, [children[0], foreign, children[1]])
     api.objects.clear()  # Residual Pods are still charged even with no Job.
     before = list(api.writes)
-    async with original, httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
+    await original.aclose()
+    async with httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
         gateway.http = http
         inventory = await gateway.pod_inventory(principal, receipt.reservation_id)
         assert inventory.reservation_id == receipt.reservation_id and inventory.job_uid == created.observed_uid
@@ -101,7 +102,8 @@ async def test_spoofed_or_changed_bound_pod_is_not_treated_as_foreign_absence(se
     else:
         metadata.update(labels={}, annotations={}, ownerReferences=[])
     handler = InventoryAPI(api, [child])
-    async with original, httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
+    await original.aclose()
+    async with httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
         gateway.http = http
         with pytest.raises(PoolKubernetesError):
             await gateway.pod_inventory(principal, receipt.reservation_id)
@@ -132,7 +134,8 @@ async def test_partial_or_inconsistent_inventory_cannot_prove_absence(sessions, 
             api.namespace_uid = uuid4()
 
     handler.damage = corrupt
-    async with original, httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
+    await original.aclose()
+    async with httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
         gateway.http = http
         with pytest.raises(PoolKubernetesError):
             await gateway.pod_inventory(principal, receipt.reservation_id)
