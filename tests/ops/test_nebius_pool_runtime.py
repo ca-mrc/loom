@@ -88,6 +88,119 @@ def runtime_inputs(platform_inputs, management_inputs):
     return request, actuators, services, manager
 
 
+@pytest.fixture
+def guest_runtime_inputs(runtime_inputs, platform_inputs):
+    """Use the real installed guest Pod shape, not a permissive mock actuator."""
+    from loom.nebius_platform_render import _execution_documents
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, actuators, services, manager = runtime_inputs
+    participant = request.registration.spec.participants[0]
+    config, candidate, _ = copy.deepcopy(platform_inputs)
+    config.update(namespace=request.guards[0].namespace, execution_namespace=participant.execution_namespace.name,
+        target_id=participant.targets[0].target_id, guest_execution_target={"target_id": "nebius-guest-fixture"},
+        task_image_builder={"registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 2})
+    docs = _execution_documents(config, {key: row["image_ref"] for key, row in candidate["images"].items()},
+        Path(__file__).resolve().parents[2])
+    ordinary, guest = [row for row in docs if row["kind"] == "Deployment"]
+    for row in (ordinary, guest):
+        row["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+    actuators[participant.participant_id] = ordinary
+    spec = request.registration.spec.model_dump(mode="json")
+    profile = copy.deepcopy(spec["profiles"]["execution"][0])
+    profile["profile_id"] = str(uuid4())
+    profile["runtime"]["target_id"] = "nebius-guest-fixture"
+    spec["profiles"]["execution"].append(profile)
+    spec["participants"][0]["targets"].append({"target_id": "nebius-guest-fixture",
+        "profile_id": profile["profile_id"], "workload_kinds": ["trial", "verifier"]})
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(spec)))
+    return request, actuators, services, manager, guest
+
+
+def test_execution_only_sibling_uses_same_participant_without_another_builder(guest_runtime_inputs, monkeypatch):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom_execution_actuator.config import ExecutionActuatorSettings
+
+    request, actuators, services, _, guest = guest_runtime_inputs
+    identity = request.guards[0].participant_id
+    before = copy.deepcopy(guest)
+    result = wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+        actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]),
+        guest_actuators=(guest,))
+    assert guest == before
+    wired = result["guest_actuator"]
+    assert wired["metadata"]["uid"] == guest["metadata"]["uid"]
+    assert wired["spec"]["replicas"] == 0
+    assert env(wired)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"] == "nebius-guest-fixture"
+    assert "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER" not in env(wired)
+    assert env(wired)["LOOM_EXECUTION_ACTUATOR_DB_URL"] == env(guest)["LOOM_EXECUTION_ACTUATOR_DB_URL"]
+    assert env(wired)["LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"] == env(result["actuator"])["LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"]
+    for name, row in env(wired).items():
+        if "value" in row:
+            monkeypatch.setenv(name, row["value"])
+    monkeypatch.setenv("LOOM_EXECUTION_ACTUATOR_DB_URL", "postgresql+psycopg://test:test@localhost/test")
+    monkeypatch.setenv("LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID", "guest-test")
+    settings = ExecutionActuatorSettings(_env_file=None)
+    assert settings.global_pool.participant.participant_id == identity
+    assert settings.target_id == "nebius-guest-fixture"
+    assert settings.task_image_builder is None
+
+
+def test_runtime_cannot_omit_a_registered_execution_sibling(guest_runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _, _ = guest_runtime_inputs
+    identity = request.guards[0].participant_id
+    with pytest.raises(ValueError):
+        wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+            actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]))
+
+
+@pytest.mark.parametrize("damage", ["foreign_name", "database", "service_account", "builder", "target", "namespace",
+    "duplicate", "unregistered", "pod_command", "uid", "replicas", "env_from"])
+def test_guest_runtime_rejects_unqualified_siblings(guest_runtime_inputs, damage):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _, guest = guest_runtime_inputs
+    identity = request.guards[0].participant_id
+    siblings = (guest,)
+    pod = guest["spec"]["template"]["spec"]
+    if damage == "foreign_name":
+        guest["metadata"]["name"] = "foreign-actuator"
+    elif damage == "database":
+        env(guest)["LOOM_EXECUTION_ACTUATOR_DB_URL"]["valueFrom"]["secretKeyRef"]["name"] = "foreign-db"
+    elif damage == "service_account":
+        pod["serviceAccountName"] = "foreign-writer"
+    elif damage == "builder":
+        pod["containers"][0]["env"].append(copy.deepcopy(env(actuators[identity])["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]))
+    elif damage == "target":
+        env(guest)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"] = "foreign-target"
+    elif damage == "namespace":
+        guest["metadata"]["namespace"] = "foreign-namespace"
+    elif damage == "duplicate":
+        siblings = (guest, copy.deepcopy(guest))
+    elif damage == "unregistered":
+        from loom_service.pool_management.installation import PoolInstallation
+
+        spec = request.registration.spec.model_dump(mode="json")
+        spec["participants"][0]["targets"].pop()
+        spec["profiles"]["execution"].pop()
+        request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(spec)))
+    elif damage == "pod_command":
+        pod["containers"][0]["command"] = ["foreign-command"]
+    elif damage == "uid":
+        guest["metadata"]["uid"] = actuators[identity]["metadata"]["uid"]
+    elif damage == "replicas":
+        guest["spec"]["replicas"] = 2
+    else:
+        pod["containers"][0]["envFrom"] = [{"configMapRef": {"name": "foreign-env"}}]
+    with pytest.raises(ValueError):
+        wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+            actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]),
+            guest_actuators=siblings)
+
+
 def test_shared_api_runtime_profile_matches_the_fixed_execution_catalog(runtime_inputs):
     from scripts.ops.nebius_pool_runtime import wire_participant
     from tests.unit.test_service_execution_materialization import _provenance, _task, _trial

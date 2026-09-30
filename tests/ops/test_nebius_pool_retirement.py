@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from tests.ops.test_nebius_pool_migration import MigrationAPI
 from tests.ops.test_nebius_pool_migration import run as close_pool
+from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -102,6 +103,35 @@ def test_exact_old_workloads_stop_without_changing_templates_or_opening_admissio
             assert current["spec"]["replicas"] == 0
             assert current["spec"]["template"] == original["spec"]["template"]
     assert (tmp_path / "state/retirement.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_guest_sibling_is_retired_and_drained_without_duplicate_participant(guest_runtime_inputs, retirement_inputs, tmp_path):
+    request, actuators, _, _, guest = guest_runtime_inputs
+    retirement = replace(retirement_inputs, migration=request, actuators=(*actuators.values(), guest))
+    api = initialize(retirement, tmp_path)
+    key = "Deployment:loom-nebius-exec-0:nebius-guest-fixture-actuator"
+    api.busy.add(key)
+    assert retire(retirement, api, tmp_path)["status"] == "pending_drain"
+    assert api.documents[key]["spec"]["replicas"] == 0
+    assert api.documents[key]["spec"]["template"] == guest["spec"]["template"]
+    api.busy.clear()
+    assert retire(retirement, api, tmp_path)["status"] == "old_pool_workloads_retired"
+    assert len(api.patches) == 10
+    assert retire(retirement, api, tmp_path)["status"] == "old_pool_workloads_retired"
+    assert len(api.patches) == 10
+    assert len(json.loads((tmp_path / "state/migration.json").read_text())["guards"]) == 3
+    # Even a previously drained sibling must be checked again on replay.
+    api.busy.add(key)
+    assert retire(retirement, api, tmp_path)["status"] == "pending_drain"
+
+
+def test_retirement_cannot_omit_registered_guest(guest_runtime_inputs, retirement_inputs):
+    from scripts.ops.nebius_pool_retirement import retirement_documents
+
+    request, actuators, _, _, _ = guest_runtime_inputs
+    retirement = replace(retirement_inputs, migration=request, actuators=tuple(actuators.values()))
+    with pytest.raises(ValueError):
+        retirement_documents(retirement)
 
 
 @pytest.mark.parametrize("failure", ["before", "after", "conflict"])
