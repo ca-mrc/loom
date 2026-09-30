@@ -1623,7 +1623,7 @@ credentials, registration or physical node-group identity fail closed. New
 reservations do not invalidate an in-flight capture and cannot be inserted into
 its represented-Job list. Capture/observation rows are immutable and do not alter
 request phases or release capacity. Collection runs outside SQL transactions.
-This internal observation registry now feeds transactional execution prepare; it
+This internal observation registry now feeds transactional execution/build prepare; it
 is not yet connected to production collection or public routes.
 
 The internal execution-prepare adapter accepts a typed runtime/requirements
@@ -1638,13 +1638,16 @@ does not expose an endpoint, grant capacity, write a Job or establish installed
 global admission. The registry/gateway still must qualify current authority and
 freeze the first activation document before a Kubernetes write.
 
-The internal `pool_management.registry.prepare_execution` combines that adapter
+The internal `pool_management.registry.prepare_execution` and `prepare_task_image`
+entrypoints combine their respective adapters
 with current machine/origin qualification and retained physical observations. One
 management-wide advisory transaction lock serializes grants across physical pools
 and shared provider quotas; callers must use READ COMMITTED and own the commit.
 No network call or Job creation occurs in this transaction. The rendered selector
 must match the protected physical pool, including its Nebius node-group ID.
-Provider account usage and distinct native groups remain quota floors. Observed
+Provider account usage and distinct native groups remain quota floors. Ordinary
+CPU groups need no invented memory-quota identity when Nebius supplies none;
+physical per-node memory fit is still enforced. Observed
 Jobs discount only their exact captured reservation; later grants, foreign Pods,
 expired callers and cleanup-pending work remain charged.
 
@@ -1655,14 +1658,18 @@ time stays fixed; renewal is fresh for 120 seconds, while the first actual grant
 has a separate timestamp for create-rate accounting. Impossible/stale waits do not
 block fitting work. Exact admitted replay returns its retained receipt without
 rerendering, refreshing a deadline or depending on currently free capacity.
-This is execution-only internal admission, not an activated global execution/build
-service. A separate internal task-image adapter now accepts typed materialization
+Both kinds share the same transaction, waiting queue and class/age order. Charged
+builds and earlier fitting build waiters also enforce pool-wide build concurrency;
+that limit does not reserve an idle execution share or consume a local build attempt.
+This is internal admission, not an activated global execution/build service.
+The task-image adapter accepts typed materialization
 selection and legacy or registered source identity, reuses the actual native
 prepare/build/publish renderer, and measures its sequential-init peak. Storage,
 registry, Secret, resource and runtime settings come only from its protected
 profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
-attempt or grant. Mixed execution/build admission, the HTTP boundary, actual
+attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
+not its separate selection generation. The HTTP boundary, actual
 collector/caller outboxes, fixed gateway and protected writer migration are still
 required. Application-image builds remain a later consumer of the same ledger.
 

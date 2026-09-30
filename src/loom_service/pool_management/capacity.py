@@ -71,7 +71,10 @@ def digest(value: Any) -> str:
 
 def _quota_ids(pool: NebiusPoolBinding) -> dict[str, tuple[str, ...]]:
     raw = pool.binding_json["quota_identities"]
-    if not isinstance(raw, dict) or set(raw) != {"nodes", "vcpu", "memory", "storage"}:
+    # Ordinary Nebius CPU instances have no separate memory quota. Retain
+    # physical memory fit without inventing a shared provider allowance.
+    if (not isinstance(raw, dict) or not {"nodes", "vcpu", "storage"} <= set(raw)
+            or not set(raw) <= {"nodes", "vcpu", "memory", "storage"}):
         raise ValueError("pool_quota_binding_unavailable")
     if any(not isinstance(value, list) or len(value) != 5
            or any(not isinstance(item, str) or not item for item in value) for value in raw.values()):
@@ -145,7 +148,8 @@ async def read_connected_capacity(session: AsyncSession, pool_id: UUID, now: dat
     while True:
         before = len(connected)
         for key, quotas in identities.items():
-            if any(any(quotas[name] == identities[peer][name] for name in quotas) for peer in tuple(connected)):
+            if any(any(name in identities[peer] and quotas[name] == identities[peer][name]
+                       for name in quotas) for peer in tuple(connected)):
                 connected.add(key)
         if len(connected) == before:
             break
@@ -167,6 +171,12 @@ def require_fit(capacities: dict[UUID, PoolCapacity], *, candidate: NebiusPoolRe
                 recent_grants: dict[UUID, int]) -> None:
     """Protect fitting earlier waits without acquiring their resources or writes."""
     current = capacities[candidate.pool_id]
+    build_kinds = {"task_image_build", "application_image_build"}
+    if candidate.workload_kind in build_kinds:
+        builds = sum(row.pool_id == candidate.pool_id and row.workload_kind in build_kinds
+                     for row in (*active, *protected_waits))
+        if builds + 1 > current.policy.build_concurrency_limit:
+            raise PlacementUnavailableError("pool_build_concurrency_exceeded")
     rows = [*active, *protected_waits, candidate]
     projected = {key: plan_placement(value.placement,
         ((demand_id(row), resources(row)) for row in rows if row.pool_id == key), sample=value.sample)

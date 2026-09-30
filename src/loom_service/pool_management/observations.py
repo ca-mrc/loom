@@ -23,6 +23,7 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolRequest,
 )
 from loom.nebius_pool_contract import PoolParticipantV1, PoolWorkloadKind
+from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.contracts import (
     KubernetesCapacitySnapshot,
@@ -143,11 +144,18 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
                 if row.namespace_uid != namespace.uid or metadata["namespace"] != namespace.name:
                     raise PoolObservationError
                 participant.target(row.target_id, cast(PoolWorkloadKind, row.workload_kind))
+                generation = row.generation
+                if row.workload_kind == "task_image_build":
+                    request = PoolTaskImagePrepareV1.model_validate(row.request_json)
+                    generation = request.build.expected_lease_epoch + 1
+                    if (metadata["labels"]["loom.lease-epoch"] != str(generation)
+                            or metadata["labels"]["loom.materialization-id"] != str(row.local_work_id)):
+                        raise PoolObservationError
                 jobs.append(GatewayJobBinding.model_validate({
                     "reservation_id": row.request_id, "environment_id": participant.environment_id,
                     "incarnation": participant.incarnation, "namespace": namespace.name,
                     "job_name": metadata["name"], "job_uid": str(row.job_uid), "target_id": row.target_id,
-                    "workload_kind": row.workload_kind, "generation": row.generation,
+                    "workload_kind": row.workload_kind, "generation": generation,
                     "lease_id": ("task-image:" if row.workload_kind == "task_image_build" else "") + str(row.local_work_id),
                 }))
             scope = PoolObservationScope(
