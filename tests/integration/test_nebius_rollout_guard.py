@@ -33,9 +33,9 @@ async def test_idle_check_excludes_inflight_admission_and_persists_across_connec
                 assert (await acquire(session, owner="other", candidate="b" * 40))["status"] == "skipped_locked"
             with pytest.raises(ValueError, match="owner"):
                 async with session.begin():
-                    await release(session, owner="other")
+                    await release(session, owner="other", candidate="a" * 40)
             async with session.begin():
-                await release(session, owner="test-rollout")
+                await release(session, owner="test-rollout", candidate="a" * 40)
             async with session.begin():
                 assert await admission_open(session)
     finally:
@@ -55,7 +55,7 @@ async def test_queued_work_does_not_block_but_reservations_do(isolated_migration
             assert (await acquire(session, owner="test-queued", candidate="a" * 40))["status"] == "acquired"
             with pytest.raises(ExecutionProvisioningBlockedError, match="platform_deploying"):
                 await execution._reserve(session, trial_id=trial_id, target=target, now=now)
-            await release(session, owner="test-queued")
+            await release(session, owner="test-queued", candidate="a" * 40)
             await execution._reserve(session, trial_id=trial_id, target=target, now=now)
             result = await acquire(session, owner="test-queued", candidate="a" * 40)
             assert result["status"] == "skipped_busy"
@@ -78,7 +78,17 @@ def test_operator_cli_acquires_and_releases(isolated_migration_postgres_url, mon
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "acquired"
-    result = subprocess.run([*command, "release", "--owner", "cli-test"], capture_output=True, text=True)
+    result = subprocess.run([*command, "release", "--owner", "cli-test", "--candidate", "b" * 40],
+                            capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == "Rollout guard unavailable; no automatic deployment or resume\n"
+    result = subprocess.run([*command, "observe", "--owner", "cli-test", "--candidate", "a" * 40],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"status": "held"}
+    result = subprocess.run([*command, "release", "--owner", "cli-test", "--candidate", "a" * 40],
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "released"
 
@@ -96,7 +106,7 @@ async def test_recovery_observation_matches_both_owner_and_candidate_without_wri
             assert await guard.observe(session, owner="foreign", candidate="a" * 40) == {"status": "skipped_locked"}
             assert await guard.observe(session, owner="recovery", candidate="b" * 40) == {"status": "skipped_locked"}
             assert not await admission_open(session)
-            await release(session, owner="recovery")
+            await release(session, owner="recovery", candidate="a" * 40)
             assert await guard.observe(session, owner="recovery", candidate="a" * 40) == {"status": "open"}
     finally:
         await engine.dispose()
@@ -123,6 +133,44 @@ def test_operator_cli_observes_pause_without_releasing(isolated_migration_postgr
             assert result.returncode == 0, result.stderr
             assert json.loads(result.stdout) == {"status": expected}
     finally:
-        result = subprocess.run([*command, "release", "--owner", "observe-cli"],
+        result = subprocess.run([*command, "release", "--owner", "observe-cli", "--candidate", "a" * 40],
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_release_rejects_wrong_candidate_and_retains_admission_pause(isolated_migration_postgres_url):
+    from loom.nebius_rollout_guard import observe
+
+    engine = create_async_engine(isolated_migration_postgres_url)
+    try:
+        async with AsyncSession(engine) as session:
+            async with session.begin():
+                assert (await acquire(session, owner="same-owner", candidate="a" * 40))["status"] == "acquired"
+            with pytest.raises(ValueError, match="candidate"):
+                async with session.begin():
+                    await release(session, owner="same-owner", candidate="b" * 40)
+            # A failed recovery for another candidate must retain the persisted
+            # pause and its original owner, including across transactions.
+            async with session.begin():
+                assert not await admission_open(session)
+                assert await observe(session, owner="same-owner", candidate="a" * 40) == {"status": "held"}
+                assert await release(session, owner="same-owner", candidate="a" * 40) == {"status": "released"}
+            async with session.begin():
+                assert await admission_open(session)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("action", ["acquire", "observe", "release"])
+@pytest.mark.parametrize("candidate_args", [[], ["--candidate", ""]])
+def test_operator_cli_requires_candidate_for_every_action(action, candidate_args):
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "loom.nebius_rollout_guard", action, "--owner", "cli-test", *candidate_args],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 2
+    assert "--candidate" in result.stderr

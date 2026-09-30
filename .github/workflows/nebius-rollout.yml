@@ -10,8 +10,12 @@ on:
       operation:
         description: Idle rollout, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install]
+        options: [rollout, recover, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install]
         default: rollout
+      recovery_run_id:
+        description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
+        type: string
+        default: ""
       prepare_shared_inputs:
         description: With inspect only, retain application upgrade inputs privately on the gateway (no cluster writes)
         type: boolean
@@ -53,7 +57,7 @@ jobs:
     if: >-
       github.repository == 'qianyi-sun/loom' &&
       vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && inputs.operation == 'rollout' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && (inputs.operation == 'rollout' || inputs.operation == 'recover') ||
        github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-24.04
@@ -82,13 +86,20 @@ jobs:
         id: publication
         env:
           PUBLICATION_RUN_ID: ${{ github.event.workflow_run.id }}
+          OPERATION: ${{ inputs.operation }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
         shell: bash
         run: |
           args=()
-          if [[ -n "$PUBLICATION_RUN_ID" ]]; then args+=(--run-id "$PUBLICATION_RUN_ID"); fi
+          if [[ "$OPERATION" == 'recover' ]]; then
+            test -n "$RECOVERY_RUN_ID"
+            args+=(--recovery-run-id "$RECOVERY_RUN_ID" --recovery-dir "$RUNNER_TEMP/recovery")
+          elif [[ -n "$PUBLICATION_RUN_ID" ]]; then
+            args+=(--run-id "$PUBLICATION_RUN_ID")
+          fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-        if: steps.publication.outputs.status == 'ready'
+        if: steps.publication.outputs.status == 'ready' && inputs.operation != 'recover'
         with:
           ref: ${{ steps.publication.outputs.sha }}
           fetch-depth: 0
@@ -113,6 +124,7 @@ jobs:
           REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
           CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
           CANDIDATE_SHA: ${{ steps.publication.outputs.sha }}
+          RECOVERY_EVIDENCE: ${{ steps.publication.outputs.recovery_evidence }}
         shell: bash
         run: |
           set -euo pipefail
@@ -128,11 +140,13 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
           unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          extra_args=()
+          if [[ -n "$RECOVERY_EVIDENCE" ]]; then extra_args+=(--recovery-evidence "$RECOVERY_EVIDENCE"); fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py run \
             --publication-dir "$RUNNER_TEMP/publication" \
             --candidate "$CANDIDATE_SHA" --kubeconfig "$REMOTE_KUBECONFIG" \
             --expected-cluster-id "$CLUSTER_ID" \
-            --evidence-dir "$RUNNER_TEMP/nebius-rollout" --github
+            --evidence-dir "$RUNNER_TEMP/nebius-rollout" --github "${extra_args[@]}"
       - name: Preserve sanitized deployment evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

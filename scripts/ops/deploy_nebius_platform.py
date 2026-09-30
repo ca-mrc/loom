@@ -402,6 +402,45 @@ def verify_ingress_mode(kube: Kubectl, config: dict[str, Any]) -> None:
             raise DeploymentError("shared ingress controller is not ready")
 
 
+def migration_readiness(kube: Kubectl, namespace: str, expected_head: str | None = None) -> dict[str, Any]:
+    """Inspect the existing schema/access boundary without changing credentials."""
+    from loom.db.schema_startup import service_schema_head
+
+    def query(statement: str) -> Any:
+        output = kube.run(
+            "exec", "-n", namespace, "statefulset/loom-postgres", "--",
+            "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom",
+            "-c", "BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; " + statement + "; ROLLBACK;",
+        )
+        try:
+            return json.loads(output)
+        except (ValueError, TypeError):
+            raise DeploymentError("application_database_readiness_unavailable") from None
+
+    observed = query("""SELECT json_build_object(
+        'version_table', to_regclass('public.alembic_version') IS NOT NULL,
+        'access_schema', to_regnamespace('loom_application_access') IS NOT NULL,
+        'access_guard', EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE n.nspname='loom_application_access' AND p.proname='migration_ready' AND p.pronargs=0))""")
+    if (not isinstance(observed, dict) or set(observed) != {"version_table", "access_schema", "access_guard"}
+            or type(observed["version_table"]) is not bool
+            or type(observed["access_schema"]) is not bool or type(observed["access_guard"]) is not bool):
+        raise DeploymentError("application_database_readiness_unavailable")
+    revision = query("SELECT COALESCE(to_json((SELECT version_num FROM public.alembic_version)), 'null'::json)") if observed["version_table"] else None
+    if revision is not None and not isinstance(revision, str):
+        raise DeploymentError("application_database_readiness_unavailable")
+    needed = revision != (expected_head or service_schema_head())
+    if needed and observed["access_schema"]:
+        if not observed["access_guard"]:
+            raise DeploymentError("application_database_schema_guard_not_installed")
+        ready = query("SELECT to_json(loom_application_access.migration_ready())")
+        if type(ready) is not bool:
+            raise DeploymentError("application_database_readiness_unavailable")
+        if not ready:
+            raise DeploymentError("application_database_access_active")
+    return {"migration_needed": needed}
+
+
 def preflight(
     kube: Kubectl,
     manifest: dict[str, Any],
@@ -488,7 +527,7 @@ def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candid
         "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-m",
         "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
     ))
-    if result.get("status") not in {"acquired", "released", "skipped_busy", "skipped_locked"}:
+    if result.get("status") not in {"acquired", "released", "skipped_busy", "skipped_locked", "held", "open"}:
         raise DeploymentError("invalid rollout guard response")
     return result
 
@@ -626,7 +665,10 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         "phases": [],
     }
 
-    guard_owner = "rollout-" + uuid.uuid4().hex
+    resume_owner = getattr(args, "resume_guard_owner", None)
+    if resume_owner is not None and re.fullmatch(r"rollout-[0-9a-f]{32}", resume_owner) is None:
+        raise DeploymentError("invalid recovery guard owner")
+    guard_owner = resume_owner or "rollout-" + uuid.uuid4().hex
     guard_acquired = False
     mutation_started = False
 
@@ -681,13 +723,16 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         # upgrade uses the same guard, whether invoked locally or by Actions.
         if state["database_exists"]:
             evidence["guard_owner"] = guard_owner
-            phase("check-idle")
-            guard = rollout_guard(kube, ns, "acquire", guard_owner, manifest["candidate_sha"])
+            phase("resume-owned-guard" if resume_owner else "check-idle")
+            guard = rollout_guard(kube, ns, "observe" if resume_owner else "acquire", guard_owner, manifest["candidate_sha"])
             evidence["guard"] = guard
-            if guard["status"] != "acquired":
+            if resume_owner and guard["status"] != "held":
+                raise DeploymentError("recovery requires the original candidate and held guard owner")
+            if not resume_owner and guard["status"] != "acquired":
                 evidence["status"] = guard["status"]
                 return evidence
             guard_acquired = True
+            mutation_started = bool(resume_owner)
             evidence["guard_owner"] = guard_owner
             phase("idle-reserved")
             # A same-candidate ingress cutover may have finished after preflight
@@ -701,10 +746,14 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             if expected_current is not None:
                 current = kube.get("configmap", "loom-platform-config", ns)
                 if json.loads(current["data"]["profile.json"])["candidate_sha"] != expected_current:
+                    if resume_owner:
+                        raise DeploymentError("recovery candidate was superseded; original pause retained")
                     rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
                     guard_acquired = False
                     evidence["status"] = "skipped_superseded"
                     return evidence
+            phase("check-schema-readiness")
+            state.update(migration_readiness(kube, ns, getattr(args, "migration_schema_head", None)))
             if retire_target is not None:
                 phase("validate-fresh-target")
                 execution_target_action(kube, ns, "validate", retire_target, config["target_id"])
@@ -857,6 +906,11 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         evidence["error_type"] = type(exc).__name__
         if isinstance(exc, DeploymentError):
             evidence["reason"] = str(exc)
+            if str(exc) in {
+                "application_database_access_active", "application_database_schema_guard_not_installed",
+                "application_database_readiness_unavailable",
+            }:
+                evidence["reason_code"] = str(exc)
         raise
     finally:
         evidence["finished_at"] = datetime.now(UTC).isoformat()
@@ -871,6 +925,7 @@ def main() -> int:
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed-jobs", action="store_true")
+    parser.add_argument("--resume-guard-owner", help="resume only this already held candidate/owner")
     parser.add_argument("--retire-target", help="exact installed primary ID replaced by the reviewed render")
     args = parser.parse_args()
     try:

@@ -510,6 +510,84 @@ def test_migration_diagnostic_preserves_revision_but_not_secret() -> None:
     assert "secret" not in json.dumps(error.details)
 
 
+@pytest.mark.parametrize("reason_code", [
+    "application_database_access_active",
+    "application_database_schema_busy",
+    "application_database_schema_guard_not_installed",
+    "application_database_isolation",
+])
+def test_migration_diagnostic_preserves_terminal_application_schema_reason(reason_code: str) -> None:
+    import subprocess
+
+    # The application guard runs before Alembic emits a Running upgrade line.
+    error = MigrationError(subprocess.CompletedProcess(
+        [], 1, "", "Traceback (most recent call last):\n"
+        '    raise RuntimeError("private-db-secret")\n'
+        f"RuntimeError: {reason_code}\n",
+    ))
+    assert error.details == {
+        "exit_code": 1,
+        "migration_revision": "unknown",
+        "database_error": "RuntimeError",
+        "reason_code": reason_code,
+    }
+    assert "private-db-secret" not in json.dumps(error.details)
+
+
+@pytest.mark.parametrize("stderr", [
+    "RuntimeError: application_database_access_active private-db-secret\n",
+    "RuntimeError: private-db-secret_application_database_access_active\n",
+    "RuntimeError: application_database_access_active_private-db-secret\n",
+    "RuntimeError: private-db-secret\n",
+    '    raise RuntimeError("application_database_access_active")\n'
+    "RuntimeError: private-db-secret\n",
+    "RuntimeError: application_database_access_active\n"
+    "RuntimeError: private-db-secret\n",
+    "private-db-secret RuntimeError: application_database_access_active\n",
+    "RuntimeError: application_database_access_active\nprivate-db-secret\n",
+])
+def test_migration_diagnostic_rejects_unrecognized_or_nonterminal_reason(stderr: str) -> None:
+    import subprocess
+
+    error = MigrationError(subprocess.CompletedProcess([], 1, "", stderr))
+    assert "reason_code" not in error.details
+    assert "private-db-secret" not in json.dumps(error.details)
+    assert str(error) == "migration failed"
+
+
+def test_migration_diagnostic_main_exports_only_safe_guard_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    import subprocess
+
+    from loom import nebius_platform_bootstrap as bootstrap
+
+    config = tmp_path / "platform.json"
+    config.write_text("{}")
+    monkeypatch.setenv("LOOM_PLATFORM_CONFIG", str(config))
+    monkeypatch.setattr(bootstrap.sys, "argv", ["bootstrap", "database"])
+
+    def fail_migration(_config: dict) -> None:
+        raise MigrationError(subprocess.CompletedProcess(
+            [], 1, "private-stdout-secret", "private-stderr-secret\n"
+            "RuntimeError: application_database_access_active\n",
+        ))
+
+    monkeypatch.setattr(bootstrap, "bootstrap_database", fail_migration)
+    assert bootstrap.main() == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert json.loads(output.err) == {
+        "phase": "database",
+        "error_type": "MigrationError",
+        "exit_code": 1,
+        "migration_revision": "unknown",
+        "database_error": "RuntimeError",
+        "reason_code": "application_database_access_active",
+    }
+    assert "private-" not in output.err
+
+
 def test_rendered_application_settings_and_startup_factories_accept_signed_profile(
     platform_inputs: tuple, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

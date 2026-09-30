@@ -347,6 +347,9 @@ class FakeKubectl(deploy.Kubectl):
         self.secrets = deploy.secret_requirements(files, config)
         self.fail_backup = False
         self.wrong_server = False
+        self.schema_ready = True
+        self.schema_current = True
+        self.version_table = True
         if database:
             self.objects["statefulset", "loom-postgres"] = {"metadata": {"name": "loom-postgres"}}
             self.objects["cronjob", "loom-platform-backup"] = files["80-backup.yaml"][0]
@@ -358,6 +361,14 @@ class FakeKubectl(deploy.Kubectl):
     def run(self, *args: str, timeout: int = 90) -> str:
         self.commands.append(args)
         if args[0] == "exec":
+            if "psql" in args:
+                if "migration_ready())" in args[-1]:
+                    return json.dumps(self.schema_ready)
+                from loom.db.schema_startup import service_schema_head
+                if "version_num FROM public.alembic_version" in args[-1]:
+                    return json.dumps(service_schema_head() if self.schema_current else "previous")
+                return json.dumps({"version_table": self.version_table,
+                                   "access_schema": True, "access_guard": True})
             return json.dumps({"status": "released" if "release" in args else "acquired"})
         if args[:2] == ("config", "view"):
             return json.dumps(
@@ -554,7 +565,7 @@ def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendere
         def run(self, *command, timeout=90):
             if command[:2] == ("create", "job"):
                 calls.append("backup")
-            if command[0] == "exec" and "-c" in command:
+            if command[0] == "exec" and "-c" in command and "psql" not in command:
                 action, previous, destination = command[-3:]
                 calls.append(action)
                 assert previous == "previous-primary" and destination == config["target_id"]
@@ -944,3 +955,77 @@ def test_remote_apply_streams_manifest_and_keeps_ssh_host_verification(tmp_path,
     assert "StrictHostKeyChecking=yes" in argv
     assert argv[-1].endswith("apply -f -")
     assert kwargs["input"] == manifest.read_text()
+
+
+def test_active_application_access_blocks_before_backup_or_apply(rendered):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    kube.schema_current = False
+    kube.schema_ready = False
+    with pytest.raises(deploy.DeploymentError, match='application_database_access_active'):
+        deploy.deploy(args, kube=kube)
+    assert not any(c[0] in {'create', 'apply', 'delete'} for c in kube.commands)
+    evidence = json.loads(next(args.evidence_dir.glob('*.json')).read_text())
+    assert evidence['reason_code'] == 'application_database_access_active'
+    assert evidence['dispatch_paused'] is False
+
+
+def test_current_schema_does_not_require_revoking_personal_access(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    kube.schema_ready = False
+    monkeypatch.setattr(deploy, 'public_smoke', lambda *_: None)
+    assert deploy.deploy(args, kube=kube)['status'] == 'complete'
+    assert not any('migration_ready())' in c[-1] for c in kube.commands if 'psql' in c)
+
+
+@pytest.mark.parametrize('status', ['held', 'open', 'skipped_locked'])
+def test_resume_requires_saved_owner_and_candidate_without_reacquiring(rendered, monkeypatch, status):
+    args, config, _, files = rendered
+    args.apply = True
+    args.resume_guard_owner = 'rollout-' + '1' * 32
+    args.retry_failed_jobs = True
+    calls = []
+    def guard(_kube, _ns, action, owner, candidate):
+        assert owner == args.resume_guard_owner
+        assert candidate == 'a' * 40
+        calls.append(action)
+        return {'status': status if action == 'observe' else 'released'}
+    monkeypatch.setattr(deploy, 'rollout_guard', guard)
+    monkeypatch.setattr(deploy, 'public_smoke', lambda *_: None)
+    if status == 'held':
+        assert deploy.deploy(args, kube=FakeKubectl(config, files, database=True))['status'] == 'complete'
+        assert calls == ['observe', 'release']
+    else:
+        with pytest.raises(deploy.DeploymentError, match='original candidate'):
+            deploy.deploy(args, kube=FakeKubectl(config, files, database=True))
+        assert calls == ['observe']
+
+
+def test_owned_recovery_backup_failure_preserves_existing_pause(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    args.resume_guard_owner = 'rollout-' + '1' * 32
+    calls = []
+    monkeypatch.setattr(deploy, 'rollout_guard', lambda _k, _n, action, _o, _c: calls.append(action) or {'status': 'held'})
+    kube = FakeKubectl(config, files, database=True)
+    kube.fail_backup = True
+    with pytest.raises(deploy.DeploymentError):
+        deploy.deploy(args, kube=kube)
+    assert calls == ['observe']
+    evidence = json.loads(next(args.evidence_dir.glob('*.json')).read_text())
+    assert evidence['dispatch_paused'] is True
+
+
+def test_partial_first_install_without_version_table_can_resume(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    kube.version_table = False
+    monkeypatch.setattr(deploy, "public_smoke", lambda *_: None)
+    result = deploy.deploy(args, kube=kube)
+    assert result["status"] == "complete"
+    assert result["preflight"]["migration_needed"] is True
+    assert not any("version_num FROM public.alembic_version" in c[-1] for c in kube.commands if "psql" in c)

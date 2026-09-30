@@ -231,3 +231,37 @@ def test_version_table_recreation_is_a_schema_change(database_access):
     with pytest.raises(RuntimeError, match="application_database_access_active"):
         command.ensure_version(config)
     assert admin.execute("SELECT to_regclass('public.alembic_version')").fetchone() == (None,)
+
+
+def test_rollout_readiness_uses_real_access_retirement_boundary(database_access):
+    import json
+
+    from scripts.ops.deploy_nebius_platform import DeploymentError, migration_readiness
+
+    admin, _, access, _ = database_access
+    app, incarnation = uuid4(), uuid4()
+    access.grant(app, incarnation, 1, token_urlsafe(48), schema_revision="test_revision")
+    admin.execute("INSERT INTO shared_records(value) VALUES ('retained')")
+
+    class DatabaseKubectl:
+        def run(self, *args):
+            assert "psql" in args
+            cursor = admin.execute(args[-1])
+            result = None
+            while True:
+                if cursor.description:
+                    result = cursor.fetchone()[0]
+                if not cursor.nextset():
+                    break
+            return json.dumps(result)
+
+    kube = DatabaseKubectl()
+    with pytest.raises(DeploymentError, match="application_database_access_active"):
+        migration_readiness(kube, "test-platform")
+    access.revoke(app, incarnation, 1)
+    assert access.drain(app, incarnation, 1)
+    assert migration_readiness(kube, "test-platform") == {"migration_needed": True}
+    admin.execute("UPDATE alembic_version SET version_num=%s", (service_schema_head(),))
+    access.grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision=service_schema_head())
+    assert migration_readiness(kube, "test-platform") == {"migration_needed": False}
+    assert admin.execute("SELECT value FROM shared_records").fetchall() == [("retained",)]
