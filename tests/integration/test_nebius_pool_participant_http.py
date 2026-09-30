@@ -20,26 +20,31 @@ from tests.integration.test_nebius_pool_build_outbox import counts, local_setup,
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-async def setup(sessions, tmp_path, **changes):
-    participants, principals, executions, builds, profiles, observer = await mixed_setup(sessions, **changes)
+async def setup(sessions, tmp_path, *, credential_role="participant", **changes):
+    participants, principals, executions, builds, profiles, _ = await mixed_setup(sessions, **changes)
     app = create_app(LoomServiceSettings(_env_file=None, service_mode="management",
         db_url="postgresql+asyncpg://unused:unused@localhost/unused"))
     app.state.session_factory, app.state.pool_profiles = sessions, profiles
-    # The fixture installed a hashed credential; rotate only this test token's
-    # digest to a known value, retaining the real dedicated binding/role checks.
-    # Instead enroll a second real credential for the same principal machine.
+    # Enroll a real credential for the same participant machine; retain the
+    # production dedicated binding/role checks rather than overriding auth.
     from sqlalchemy import insert
 
-    from loom.db.nebius_pool_schema import NebiusPoolMachineCredential
+    from loom.db.nebius_pool_schema import NebiusPoolMachine, NebiusPoolMachineCredential
 
     raw = "loom_pool_" + uuid4().hex + uuid4().hex
     token_hash = hashlib.sha256(raw.encode()).digest()
     async with sessions.begin() as session:
         old = await session.get(Token, principals[0].token_hash)
+        machine_id = principals[0].machine_id
+        if credential_role != "participant":
+            machine_id = uuid4()
+            await session.execute(insert(NebiusPoolMachine).values(machine_id=machine_id,
+                pool_id=participants[0].pool_id, participant_id=None, role=credential_role,
+                credential_epoch=1, phase="active"))
         await session.execute(insert(Token).values(token_hash=token_hash, type="pool_machine", scopes=[],
             issued_at=old.issued_at, expires_at=old.expires_at))
         await session.execute(insert(NebiusPoolMachineCredential).values(token_hash=token_hash,
-            machine_id=principals[0].machine_id, credential_epoch=principals[0].credential_epoch))
+            machine_id=machine_id, credential_epoch=principals[0].credential_epoch))
     token = tmp_path / "participant-token"
     token.write_text(raw)
     token.chmod(0o600)
@@ -114,24 +119,28 @@ async def test_durable_local_selection_through_real_management_http_claims_only_
     assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
 
 
-@pytest.mark.parametrize("damage", ["ordinary", "worker", "revoked", "foreign-pool", "foreign-participant", "observer"])
+@pytest.mark.parametrize("damage", ["ordinary", "admin", "worker", "revoked", "foreign-pool", "foreign-participant",
+                                    "observer", "gateway", "old-epoch"])
 async def test_participant_routes_reject_other_authority_without_creating_demand(sessions, tmp_path, damage):
-    app, raw, _, participants, executions, _ = await setup(sessions, tmp_path)
+    app, raw, _, participants, executions, _ = await setup(sessions, tmp_path,
+        credential_role=damage if damage in {"observer", "gateway"} else "participant")
     request = executions[0]
-    if damage in {"worker", "revoked"}:
+    if damage in {"admin", "worker", "revoked"}:
         async with sessions.begin() as session:
             await session.execute(update(Token).where(Token.token_hash == hashlib.sha256(raw.encode()).digest()).values(
-                **({"type": "worker"} if damage == "worker" else {"revoked_at": datetime.now(UTC)})))
+                **({"type": damage} if damage != "revoked" else {"revoked_at": datetime.now(UTC)})))
     elif damage == "ordinary":
         raw = "ordinary-user-token"
     elif damage == "foreign-pool":
         request = request.model_copy(update={"pool_id": uuid4()})
     elif damage == "foreign-participant":
         request = request.model_copy(update={"key": request.key.model_copy(update={"participant_id": participants[1].participant_id})})
-    elif damage == "observer":
-        from tests.integration.test_nebius_pool_auth import credential
+    elif damage == "old-epoch":
+        from loom.db.nebius_pool_schema import NebiusPoolMachine
 
-        raw, _, _, _ = await credential(sessions, role="observer")
+        async with sessions.begin() as session:
+            await session.execute(update(NebiusPoolMachine).where(
+                NebiusPoolMachine.participant_id == participants[0].participant_id).values(credential_epoch=2))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example") as http:
         response = await http.post(f"/internal/pools/v1/{request.pool_id}/prepare", json=request.model_dump(mode="json"),
                                    headers={"Authorization": "Bearer " + raw})

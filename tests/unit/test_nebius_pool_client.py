@@ -36,7 +36,7 @@ def transport(tmp_path, handler, **changes):
 
 @pytest.mark.parametrize("damage", ["pool", "key", "epoch", "digest", "redirect", "timeout", "malformed", "oversize", "compressed"])
 async def test_prepare_checks_reply_identity_and_never_retries_or_redirects(tmp_path, damage):
-    from loom_execution_actuator.pool_client import PoolRequestUnconfirmed
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 
     request, receipt = inputs()
     calls = []
@@ -68,14 +68,14 @@ async def test_prepare_checks_reply_identity_and_never_retries_or_redirects(tmp_
 
     management, http = transport(tmp_path, handler)
     async with http:
-        with pytest.raises(PoolRequestUnconfirmed) as caught:
+        with pytest.raises(PoolRequestUnconfirmedError) as caught:
             await management.prepare(request)
     assert "private-test-credential" not in str(caught.value)
     assert len(calls) == 1
 
 
 async def test_waiting_identity_is_checked_and_never_becomes_an_activation_receipt(tmp_path):
-    from loom_execution_actuator.pool_client import PoolRequestUnconfirmed
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 
     request, receipt = inputs()
     waiting = {"schema_version": "loom.pool-waiting.v1", "phase": "waiting",
@@ -86,18 +86,18 @@ async def test_waiting_identity_is_checked_and_never_becomes_an_activation_recei
         assert (await management.prepare(request)).phase == "waiting"
         action = PoolRequestActionV1(pool_id=request.pool_id, request_key=request.key,
             admission_epoch=request.admission_epoch, request_sha256=receipt["request_sha256"])
-        with pytest.raises(PoolRequestUnconfirmed):
+        with pytest.raises(PoolRequestUnconfirmedError):
             await management.activate(action)
-        with pytest.raises(PoolRequestUnconfirmed):
+        with pytest.raises(PoolRequestUnconfirmedError):
             await management.cancel_unstarted(action)
         waiting["request_sha256"] = "b" * 64
-        with pytest.raises(PoolRequestUnconfirmed):
+        with pytest.raises(PoolRequestUnconfirmedError):
             await management.prepare(request)
 
 
 @pytest.mark.parametrize("kind", ["slow", "overflow"])
 async def test_stream_read_has_total_timeout_and_incremental_byte_limit(tmp_path, kind):
-    from loom_execution_actuator.pool_client import PoolRequestUnconfirmed
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 
     request, _ = inputs()
     visited = []
@@ -113,7 +113,7 @@ async def test_stream_read_has_total_timeout_and_incremental_byte_limit(tmp_path
 
     management, http = transport(tmp_path, lambda _: httpx.Response(200, stream=Stream()), timeout_seconds=0.02)
     async with http:
-        with pytest.raises(PoolRequestUnconfirmed):
+        with pytest.raises(PoolRequestUnconfirmedError):
             await management.prepare(request)
     assert not visited
 

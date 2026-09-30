@@ -8,10 +8,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import Field, TypeAdapter
 from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +22,8 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
-from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1, PoolRequestKeyV1
+from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1
+from loom.nebius_pool_contract import PoolWaitingV1 as PoolWaitingV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_control_plane.execution_placement import PlacementUnavailableError
@@ -72,18 +73,6 @@ def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profil
 class PoolAdmissionError(ValueError):
     def __init__(self, reason: str = "pool_admission_unavailable") -> None:
         super().__init__(reason)
-
-
-class PoolWaitingV1(BaseModel):
-    """No reservation identity: this demand has acquired no capacity."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal["loom.pool-waiting.v1"] = "loom.pool-waiting.v1"
-    phase: Literal["waiting"] = "waiting"
-    request_key: PoolRequestKeyV1
-    pool_id: UUID
-    request_sha256: str
-    reason: str
 
 
 def _receipt(row: NebiusPoolRequest) -> PoolReceiptV1:

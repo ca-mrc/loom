@@ -20,6 +20,7 @@ _Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 PoolRequestPhase = Literal[
     "reserved", "create_intent", "observed", "cleanup_intent", "released", "cancelled_unstarted",
 ]
+MAX_POOL_REQUEST_BYTES = 1024 * 1024
 
 
 def _non_nil(*identities: UUID) -> None:
@@ -112,6 +113,22 @@ class PoolRequestActionV1(_PoolContract):
 
     @model_validator(mode="after")
     def identity(self) -> PoolRequestActionV1:
+        _non_nil(self.pool_id)
+        return self
+
+
+class PoolWaitingV1(_PoolContract):
+    """No reservation identity: this demand has acquired no capacity."""
+
+    schema_version: Literal["loom.pool-waiting.v1"] = "loom.pool-waiting.v1"
+    phase: Literal["waiting"] = "waiting"
+    request_key: PoolRequestKeyV1
+    pool_id: UUID
+    request_sha256: _Digest
+    reason: str = Field(min_length=1, max_length=512)
+
+    @model_validator(mode="after")
+    def identity(self) -> PoolWaitingV1:
         _non_nil(self.pool_id)
         return self
 

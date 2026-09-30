@@ -1699,9 +1699,16 @@ never a rerender or renewed allowance. Status does not renew waiting freshness.
 Unstarted cancellation can atomically cancel waiting or reserved work, including
 while intake is closed; it cannot cancel an already activated intent into free
 capacity. Concurrent activation/cancellation has one winner. These functions own
-no commit and perform no external write. Connected gateway reconciliation,
-output-drain qualification and complete cleanup remain required before exposing
-admission.
+no commit and perform no external write. The management-only participant API
+exposes these operations under `/internal/pools/v1/{pool_id}` as `prepare`,
+`status`, `activate`, and `cancel-unstarted`. It requires a dedicated credential
+bound to that pool and participant; ordinary users, administrators, generic
+workers and observer/gateway credentials cannot substitute. Prepare and first
+activation require the protected runtime-profile catalog. The participant client
+uses bounded HTTPS requests, checks exact response identity, and never redirects
+or automatically retries uncertain writes. Connected controller/gateway workers,
+output-drain qualification and complete cleanup remain required before installation
+can enable global admission.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
@@ -1761,6 +1768,8 @@ for cancellation, but cannot use them for a new claim. SQL guards retain request
 receipt and claim identity; local history has no foreign keys to the management
 database. This primitive does not yet implement controller activation, output drain,
 or release, and does not independently authorize an originating application.
+Database-backed HTTP tests connect this journal to real management prepare and
+activation; this is not evidence that installed controllers use it.
 
 These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer
