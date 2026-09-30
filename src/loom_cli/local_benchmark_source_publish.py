@@ -52,6 +52,28 @@ from loom_cli.local_benchmark_validate import (
 )
 
 
+def _validate_staged_package_compatibility(
+    bundle: Path, *, task_id: str, native_source: bool,
+) -> None:
+    issues = [
+        issue for issue in collect_task_dir_compatibility_issues(bundle)
+        if issue.severity == CompatibilitySeverity.ERROR
+    ]
+    if not issues:
+        return
+    if native_source:
+        # Native preparation owns projection into canonical TaskConfig and
+        # records original package defects. Legacy producers still own their
+        # later normalization/adaptation; do not validate raw Harbor as Loom.
+        task = TaskConfig.model_validate(tomllib.loads((bundle / "task.toml").read_text()))
+        issues = [issue for issue in issues if issue not in task.import_blockers]
+    if issues:
+        raise LocalBenchmarkValidationError(
+            f"task bundle compatibility preflight failed for {task_id}:\n"
+            + format_compatibility_issues(issues),
+        )
+
+
 async def publish_versioned_local_benchmark(
     result: LocalBenchmarkValidationResult | PreparedAdapterBenchmark,
     *,
@@ -65,6 +87,8 @@ async def publish_versioned_local_benchmark(
 ) -> LocalBenchmarkPublishStats:
     entry = result.entry
     adapter_tasks = {item["task_id"]: item for item in result.tasks.values()} if isinstance(result, PreparedAdapterBenchmark) else {}
+    native_origin = (result.manifest.get("benchmark_profile_provenance", {}).get("upstream_origin")
+                     if isinstance(result, PreparedAdapterBenchmark) else None)
     source_prefix = f"s3://{bucket}/{task_bundle_catalog_prefix(entry.id)}"
     engine = create_async_engine(normalize_db_url(db_url), isolation_level="READ COMMITTED")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -86,18 +110,9 @@ async def publish_versioned_local_benchmark(
                 shutil.copytree(task_toml.parent, staged, symlinks=False)
                 if compat_flatten_environment:
                     compat_flattened_files += len(_flatten_environment_subdir(staged))
-                issues = [
-                    issue for issue in collect_task_dir_compatibility_issues(staged)
-                    if issue.severity == CompatibilitySeverity.ERROR
-                ]
-                native_origin = (result.manifest.get("benchmark_profile_provenance", {}).get("upstream_origin")
-                                 if isinstance(result, PreparedAdapterBenchmark) else None)
-                declared = TaskConfig.model_validate(tomllib.loads((staged / "task.toml").read_text())).import_blockers
-                if issues and (native_origin is None or any(issue not in declared for issue in issues)):
-                    raise LocalBenchmarkValidationError(
-                        f"task bundle compatibility preflight failed for {task_id}:\n"
-                        + format_compatibility_issues(issues),
-                    )
+                _validate_staged_package_compatibility(
+                    staged, task_id=task_id, native_source=native_origin is not None,
+                )
                 adapt_stats = None
                 if execution_profile == NEBIUS_TERMINUS_PROFILE:
                     authored = staged / "task.toml"

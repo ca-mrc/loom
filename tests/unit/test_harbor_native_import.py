@@ -355,6 +355,9 @@ def test_catalog_api_and_cli_share_runtime_blockers():
 
 
 def test_fragile_native_dockerfile_is_preserved_with_persisted_blocker(tmp_path, monkeypatch):
+    from loom_cli.local_benchmark_source_publish import _validate_staged_package_compatibility
+    from loom_cli.local_benchmark_validate import LocalBenchmarkValidationError
+
     source = tmp_path / "source"
     original = native_tree(source)
     dockerfile = original / "environment/Dockerfile"
@@ -376,6 +379,16 @@ def test_fragile_native_dockerfile_is_preserved_with_persisted_blocker(tmp_path,
     assert any(
         "TASK_COMPAT_BROAD_TRAILING_TRUE" in reason for reason in task_runtime_rejections(task)
     )
+    bundle = prepared.task_tomls[0].parent
+    _validate_staged_package_compatibility(bundle, task_id=task.task.id, native_source=True)
+    with pytest.raises(LocalBenchmarkValidationError, match="TASK_COMPAT_BROAD_TRAILING_TRUE"):
+        _validate_staged_package_compatibility(bundle, task_id=task.task.id, native_source=False)
+    unrecorded = task.model_copy(update={"import_blockers": ()})
+    prepared.task_tomls[0].write_text(
+        tomli_w.dumps(unrecorded.model_dump(mode="json", exclude_none=True))
+    )
+    with pytest.raises(LocalBenchmarkValidationError, match="TASK_COMPAT_BROAD_TRAILING_TRUE"):
+        _validate_staged_package_compatibility(bundle, task_id=task.task.id, native_source=True)
 
 
 def test_unknown_format_and_invalid_args_are_not_silently_normalized():
