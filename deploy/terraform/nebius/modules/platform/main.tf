@@ -6,6 +6,7 @@ variable "integration_platform" {
     bucket_prefix              = string
     system_preset              = optional(string, "4vcpu-16gb")
     system_disk_gib            = optional(number, 80)
+    system_max_pods            = optional(number, 64)
     system_create_before_drain = optional(bool, false)
     execution_max_nodes        = optional(number, 100)
     native_builder_group_id    = optional(string)
@@ -17,11 +18,13 @@ variable "integration_platform" {
       contains(["4vcpu-16gb", "8vcpu-32gb"], var.integration_platform.system_preset) &&
       var.integration_platform.system_disk_gib >= 80 && var.integration_platform.system_disk_gib <= 1024 &&
       floor(var.integration_platform.system_disk_gib) == var.integration_platform.system_disk_gib &&
+      var.integration_platform.system_max_pods >= 16 && var.integration_platform.system_max_pods <= 110 &&
+      floor(var.integration_platform.system_max_pods) == var.integration_platform.system_max_pods &&
       var.integration_platform.execution_max_nodes >= 1 && var.integration_platform.execution_max_nodes <= 100 &&
       floor(var.integration_platform.execution_max_nodes) == var.integration_platform.execution_max_nodes &&
       (var.integration_platform.native_builder_group_id == null ? true : can(regex("^group-[a-z0-9]+$", var.integration_platform.native_builder_group_id)))
     )
-    error_message = "Integration needs a unique bucket prefix, a supported system preset, an integer system disk from 80 to 1024 GiB, and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
+    error_message = "Integration needs a unique bucket prefix, a supported system preset, an integer system disk from 80 to 1024 GiB, an integer system Pod limit from 16 to 110, and an integer execution ceiling from 1 through the native API maximum of 100 nodes."
   }
 }
 
@@ -168,7 +171,7 @@ resource "nebius_mk8s_v1_node_group" "integration" {
   }
   template = {
     service_account_id = var.node_registry_pull_service_account_id
-    max_pods           = 64
+    max_pods           = each.key == "system" ? var.integration_platform.system_max_pods : 64
     metadata = {
       # Zero-node autoscaler templates need the same OS/architecture labels
       # required by native builds; kubelet cannot add them before scale-up.
