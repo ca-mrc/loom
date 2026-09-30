@@ -9,14 +9,21 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from uuid import uuid4
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolCancellation,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
 from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1, PoolRequestActionV1
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import digest, resources
+from loom_service.pool_management.early_cancellation import read_early_cancellation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.origin import qualify_pool_origin
 from loom_service.pool_management.registry import (
@@ -39,13 +46,14 @@ async def _clock(session: AsyncSession) -> datetime:
 
 
 @asynccontextmanager
-async def _locked_request(session: AsyncSession, principal: PoolPrincipal, action: PoolRequestActionV1) -> AsyncIterator[
-    tuple[NebiusPoolRequest, NebiusPoolBinding],
+async def _locked_request(session: AsyncSession, principal: PoolPrincipal, action: PoolRequestActionV1, *,
+                          allow_absent: bool = False) -> AsyncIterator[
+    tuple[NebiusPoolRequest | None, NebiusPoolBinding],
 ]:
     try:
         with session.no_autoflush:
             action = PoolRequestActionV1.model_validate(action.model_dump())
-            if (any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest))
+            if (any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest, NebiusPoolCancellation))
                     for row in session.new | session.dirty | session.deleted)
                     or (action.pool_id, action.request_key.participant_id) != (principal.pool_id, principal.participant_id)):
                 raise PoolControlError
@@ -62,9 +70,10 @@ async def _locked_request(session: AsyncSession, principal: PoolPrincipal, actio
                 NebiusPoolRequest.local_work_id == key.local_work_id,
                 NebiusPoolRequest.generation == key.generation,
             ).with_for_update().execution_options(populate_existing=True))).one_or_none()
-            if (row is None or pool is None or row.pool_id != pool.pool_id
-                    or row.request_sha256 != action.request_sha256 or row.admission_epoch != action.admission_epoch
-                    or digest(row.request_json) != row.request_sha256):
+            if (pool is None or (row is None and not allow_absent)
+                    or (row is not None and (row.pool_id != pool.pool_id
+                        or row.request_sha256 != action.request_sha256 or row.admission_epoch != action.admission_epoch
+                        or digest(row.request_json) != row.request_sha256))):
                 raise PoolControlError
             yield row, pool
     except PoolControlError:
@@ -75,7 +84,12 @@ async def _locked_request(session: AsyncSession, principal: PoolPrincipal, actio
 
 async def pool_request_status(session: AsyncSession, principal: PoolPrincipal,
                               action: PoolRequestActionV1) -> PoolReceiptV1 | PoolWaitingV1:
-    async with _locked_request(session, principal, action) as (row, _):
+    async with _locked_request(session, principal, action, allow_absent=True) as (row, _):
+        if row is None:
+            cancelled = await read_early_cancellation(session, action)
+            if cancelled is None:
+                raise PoolControlError
+            return cancelled
         if row.phase == "waiting":
             return PoolWaitingV1(request_key=action.request_key, pool_id=row.pool_id,
                                  request_sha256=row.request_sha256, reason="pool_request_waiting")
@@ -84,20 +98,38 @@ async def pool_request_status(session: AsyncSession, principal: PoolPrincipal,
 
 async def cancel_unstarted_pool_request(session: AsyncSession, principal: PoolPrincipal,
                                         action: PoolRequestActionV1) -> PoolReceiptV1:
-    async with _locked_request(session, principal, action) as (row, _):
+    async with _locked_request(session, principal, action, allow_absent=True) as (row, pool):
+        if row is None:
+            cancelled = await read_early_cancellation(session, action)
+            if cancelled is not None:
+                return cancelled
+            # Closed/fenced intake does not prohibit terminal recovery. Never
+            # pre-cancel an as-yet-uninstalled future admission epoch, though.
+            if action.admission_epoch > pool.admission_epoch:
+                raise PoolControlError
+            key = action.request_key
+            identity = uuid4()
+            session.add(NebiusPoolCancellation(cancellation_id=identity, pool_id=action.pool_id,
+                participant_id=key.participant_id, workload_kind=key.workload_kind,
+                local_work_id=key.local_work_id, generation=key.generation,
+                admission_epoch=action.admission_epoch, request_sha256=action.request_sha256))
+            await session.flush()
+            return PoolReceiptV1(reservation_id=identity, pool_id=action.pool_id, request_key=key,
+                admission_epoch=action.admission_epoch, request_sha256=action.request_sha256, phase="cancelled_unstarted")
         if row.phase == "cancelled_unstarted":
             return _receipt(row)
         if row.phase not in {"waiting", "reserved"}:
             raise PoolControlError("pool_request_already_started")
-        cancelled = (await session.scalars(update(NebiusPoolRequest).where(
+        cancelled_row = (await session.scalars(update(NebiusPoolRequest).where(
             NebiusPoolRequest.request_id == row.request_id,
         ).values(phase="cancelled_unstarted").returning(NebiusPoolRequest).execution_options(populate_existing=True))).one()
-        return _receipt(cancelled)
+        return _receipt(cancelled_row)
 
 
 async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal, action: PoolRequestActionV1, *,
                                 profiles: PoolProfiles) -> PoolReceiptV1:
     async with _locked_request(session, principal, action) as (row, pool):
+        assert row is not None  # Activation never accepts a pre-prepare tombstone.
         if row.phase in {"waiting", "cancelled_unstarted"}:
             raise PoolControlError("pool_request_not_reserved")
         if row.phase != "reserved":

@@ -1655,6 +1655,17 @@ for cancellation without consuming an attempt; a new immutable selection generat
 is allowed only after that cancellation is confirmed. This local check does not
 replace management registration qualification or establish an installed controller.
 
+An authenticated unstarted cancellation may precede management prepare. In that
+case the manager retains an immutable `nebius_pool_cancellations` identity/digest
+record with a terminal receipt, but no resource envelope, namespace or render plan.
+Delayed same-body prepare returns that cancellation, even after intake closes or
+the deadline expires; changed-body replay conflicts. Existing started requests
+still require the stop/drain/cleanup protocol and cannot use this shortcut. Both
+SQL insertion paths share the global mutation lock and exclude a request and an
+early-cancellation record for the same participant/work key. Cancellation records
+cannot be changed, deleted or lost by downgrade. The local outbox can consequently
+finish a pre-prepare cancellation after a restart without consuming a build attempt.
+
 The management-side observation registry issues a persisted capture scope from
 registered participants and committed gateway Job receipts. A dedicated observer
 can publish exactly one provider/cluster snapshot for that scope; an identical

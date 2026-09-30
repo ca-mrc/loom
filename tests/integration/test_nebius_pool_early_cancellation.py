@@ -12,6 +12,7 @@ from sqlalchemy import func, select, update
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolRequest
 from loom_service.pool_management.registry import PoolProfiles
 from tests.integration.test_nebius_pool_build_admission import mixed_setup, prepare_build
+from tests.integration.test_nebius_pool_build_outbox import counts, local_setup, outbox
 from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_participant_http import client, setup
 from tests.integration.test_nebius_pool_registry import prepare
@@ -99,3 +100,41 @@ async def test_lost_early_cancel_http_reply_is_recovered_without_preparing_work(
     assert [path.rsplit("/", 1)[-1] for path in paths] == ["cancel-unstarted", "status", "cancel-unstarted"]
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 0
+
+
+async def test_local_selection_recovery_cancels_before_prepare_without_any_build_attempt(sessions, tmp_path):
+    app, _, token, participants, _, _ = await setup(sessions, tmp_path)
+    participant = participants[0]
+    _, selected, _ = await local_setup(sessions, environment_id=participant.environment_id)
+    request = selected.model_copy(update={"pool_id": participant.pool_id,
+        "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
+        "key": selected.key.model_copy(update={"participant_id": participant.participant_id})})
+    journal = outbox(sessions, participant)
+    await journal.remember(request)
+    pending = await journal.request_cancel(request.key)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        management = client(http, token)
+        cancelled = await management.cancel_unstarted(pending.action)
+        # Both a restarted local controller and a delayed manager prepare
+        # converge on the terminal record, without first buying a reservation.
+        recovered = await outbox(sessions, participant).confirm_cancel(request.key, cancelled)
+        assert recovered.phase == "cancelled"
+        assert await management.prepare(request) == cancelled
+    assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
+    following = request.model_copy(update={"key": request.key.model_copy(update={"generation": request.key.generation + 1})})
+    assert (await journal.remember(following)).phase == "selected"
+
+
+async def test_early_cancellation_does_not_commit_the_callers_transaction(sessions):
+    from loom.db.nebius_pool_schema import NebiusPoolCancellation
+    from loom_service.pool_management.control import cancel_unstarted_pool_request
+
+    _, principals, executions, _, _, _ = await mixed_setup(sessions)
+    async with sessions() as session:
+        result = await cancel_unstarted_pool_request(session, principals[0], action(executions[0]))
+        assert result.phase == "cancelled_unstarted"
+        async with sessions() as observer:
+            assert await observer.scalar(select(func.count()).select_from(NebiusPoolCancellation)) == 0
+        await session.rollback()
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolCancellation)) == 0

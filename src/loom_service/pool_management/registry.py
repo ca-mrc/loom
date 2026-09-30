@@ -17,12 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
+    NebiusPoolCancellation,
     NebiusPoolCapture,
     NebiusPoolObservation,
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
-from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1
+from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1, PoolRequestActionV1
 from loom.nebius_pool_contract import PoolWaitingV1 as PoolWaitingV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
@@ -35,6 +36,7 @@ from loom_service.pool_management.capacity import (
     require_fit,
     resources,
 )
+from loom_service.pool_management.early_cancellation import read_early_cancellation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
 from loom_service.pool_management.origin import qualify_pool_origin
 from loom_service.pool_management.render import (
@@ -115,7 +117,7 @@ async def _prepare(session: AsyncSession, principal: PoolPrincipal, request: Poo
 async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, request: PoolPrepareWorkload,
                            profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
     request = _WORKLOAD.validate_json(request.model_dump_json())
-    if any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest,
+    if any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest, NebiusPoolCancellation,
                            NebiusPoolCapture, NebiusPoolObservation))
            for row in session.new | session.dirty | session.deleted):
         raise PoolAdmissionError
@@ -129,14 +131,18 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
     ).with_for_update().execution_options(populate_existing=True))).one_or_none()
     await authorize_pool_machine(session, principal, role="participant",
                                  pool_id=request.pool_id, participant_id=request.key.participant_id)
+    request_json = request.model_dump(mode="json")
+    request_sha = digest(request_json)
+    cancelled = await read_early_cancellation(session, PoolRequestActionV1(pool_id=request.pool_id,
+        request_key=request.key, admission_epoch=request.admission_epoch, request_sha256=request_sha))
+    if cancelled is not None:
+        return cancelled
     row = (await session.scalars(select(NebiusPoolRequest).where(
         NebiusPoolRequest.participant_id == request.key.participant_id,
         NebiusPoolRequest.workload_kind == request.key.workload_kind,
         NebiusPoolRequest.local_work_id == request.key.local_work_id,
         NebiusPoolRequest.generation == request.key.generation,
     ).with_for_update().execution_options(populate_existing=True))).one_or_none()
-    request_json = request.model_dump(mode="json")
-    request_sha = digest(request_json)
     if row is not None:
         if row.request_sha256 != request_sha or row.request_json != request_json:
             raise PoolAdmissionError("pool_request_conflict")

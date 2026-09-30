@@ -108,6 +108,33 @@ class NebiusPoolMachineCredential(Base):
     credential_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
+class NebiusPoolCancellation(Base):
+    """Terminal identity for cancellation before prepare, never a resource claim."""
+
+    __tablename__ = "nebius_pool_cancellations"
+    __table_args__ = (
+        ForeignKeyConstraint(["participant_id", "pool_id"],
+            ["nebius_pool_participants.participant_id", "nebius_pool_participants.pool_id"],
+            ondelete="RESTRICT", name="nebius_pool_cancellation_participant_fk"),
+        UniqueConstraint("participant_id", "workload_kind", "local_work_id", "generation",
+                         name="nebius_pool_cancellation_replay_key"),
+        CheckConstraint("generation > 0 AND admission_epoch > 0 AND "
+            "cancellation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "local_work_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "workload_kind IN ('trial','verifier','task_image_build','application_image_build') AND "
+            "request_sha256 ~ '^[0-9a-f]{64}$'", name="nebius_pool_cancellation_identity_check"),
+    )
+    cancellation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    participant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    workload_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    local_work_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admission_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
 class NebiusPoolRequest(Base):
     __tablename__ = "nebius_pool_requests"
     __table_args__ = (

@@ -472,6 +472,40 @@ CREATE TABLE nebius_pool_observations (
         BEFORE UPDATE OR DELETE ON nebius_pool_machine_credentials
         FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_machine_mutation();
 
+        CREATE TABLE nebius_pool_cancellations (
+            cancellation_id UUID PRIMARY KEY, pool_id UUID NOT NULL, participant_id UUID NOT NULL,
+            workload_kind TEXT NOT NULL, local_work_id UUID NOT NULL, generation BIGINT NOT NULL,
+            admission_epoch BIGINT NOT NULL, request_sha256 TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            CONSTRAINT nebius_pool_cancellation_participant_fk FOREIGN KEY (participant_id, pool_id)
+                REFERENCES nebius_pool_participants (participant_id, pool_id) ON DELETE RESTRICT,
+            CONSTRAINT nebius_pool_cancellation_replay_key UNIQUE (participant_id, workload_kind, local_work_id, generation),
+            CONSTRAINT nebius_pool_cancellation_identity_check CHECK (
+                generation > 0 AND admission_epoch > 0 AND
+                cancellation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+                local_work_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+                workload_kind IN ('trial','verifier','task_image_build','application_image_build') AND
+                request_sha256 ~ '^[0-9a-f]{64}$')
+        );
+
+        CREATE FUNCTION retain_nebius_pool_cancellation() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP <> 'INSERT' THEN
+                RAISE EXCEPTION 'pool cancellation history is retained' USING ERRCODE = '23514';
+            END IF;
+            IF current_setting('transaction_isolation') <> 'read committed' THEN
+                RAISE EXCEPTION 'pool mutation requires read committed';
+            END IF;
+            PERFORM pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation', 1915));
+            IF EXISTS (SELECT 1 FROM nebius_pool_requests WHERE participant_id = NEW.participant_id
+                AND workload_kind = NEW.workload_kind AND local_work_id = NEW.local_work_id AND generation = NEW.generation) THEN
+                RAISE EXCEPTION 'pool request identity already retained' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER nebius_pool_cancellation_guard BEFORE INSERT OR UPDATE OR DELETE ON nebius_pool_cancellations
+            FOR EACH ROW EXECUTE FUNCTION retain_nebius_pool_cancellation();
+
         CREATE FUNCTION validate_nebius_pool_request_mutation() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN
@@ -479,6 +513,14 @@ CREATE TABLE nebius_pool_observations (
                 RAISE EXCEPTION 'global pool request history is retained';
             END IF;
             IF TG_OP = 'INSERT' THEN
+                IF current_setting('transaction_isolation') <> 'read committed' THEN
+                    RAISE EXCEPTION 'pool mutation requires read committed';
+                END IF;
+                PERFORM pg_advisory_xact_lock(hashtextextended('nebius-global-pool-mutation', 1915));
+                IF EXISTS (SELECT 1 FROM nebius_pool_cancellations WHERE participant_id = NEW.participant_id
+                    AND workload_kind = NEW.workload_kind AND local_work_id = NEW.local_work_id AND generation = NEW.generation) THEN
+                    RAISE EXCEPTION 'pool request identity already retained' USING ERRCODE = '23514';
+                END IF;
                 IF NEW.phase NOT IN ('waiting','reserved') THEN
                     RAISE EXCEPTION 'global pool request must start without external effects';
                 END IF;
@@ -557,7 +599,7 @@ def downgrade() -> None:
                    nebius_pool_cleanup_observations, nebius_pool_machines,
                    nebius_pool_machine_credentials, nebius_pool_captures,
                    nebius_pool_observations, nebius_pool_effects, nebius_pool_build_outbox,
-                   nebius_pool_submissions, batches, trials IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_submissions, nebius_pool_cancellations, batches, trials IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
@@ -565,6 +607,7 @@ def downgrade() -> None:
                OR EXISTS (SELECT 1 FROM nebius_pool_cleanup_observations)
                OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox)
                OR EXISTS (SELECT 1 FROM nebius_pool_submissions)
+               OR EXISTS (SELECT 1 FROM nebius_pool_cancellations)
                OR EXISTS (SELECT 1 FROM batches WHERE pool_origin IS NOT NULL)
                OR EXISTS (SELECT 1 FROM trials WHERE pool_origin IS NOT NULL) THEN
                 RAISE EXCEPTION 'cannot remove global pool history';
@@ -576,12 +619,14 @@ def downgrade() -> None:
         DROP TABLE nebius_pool_cleanup_observations;
         DROP TABLE nebius_pool_effects;
         DROP TABLE nebius_pool_requests;
+        DROP TABLE nebius_pool_cancellations;
         DROP TABLE nebius_pool_machine_credentials;
         DROP TABLE nebius_pool_machines;
         DROP TABLE nebius_pool_participants;
         DROP TABLE nebius_pool_bindings;
         DROP FUNCTION retain_nebius_pool_cleanup_observation();
         DROP FUNCTION validate_nebius_pool_request_mutation();
+        DROP FUNCTION retain_nebius_pool_cancellation();
         DROP FUNCTION validate_nebius_pool_registration_mutation();
         DROP FUNCTION validate_nebius_pool_machine_mutation();
         DROP FUNCTION retain_nebius_pool_capture_evidence();
