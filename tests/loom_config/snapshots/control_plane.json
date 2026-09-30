@@ -134,6 +134,11 @@
     "default": "2.0",
     "required": false
   },
+  "service_execution_global_pool_json": {
+    "annotation": "str | None",
+    "default": "None",
+    "required": false
+  },
   "service_execution_scheduler_enabled": {
     "annotation": "<class 'bool'>",
     "default": "False",

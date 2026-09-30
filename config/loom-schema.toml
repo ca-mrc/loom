@@ -68,6 +68,11 @@ python_type = "bool"
 default     = false
 description = "Enable normal queued-Trial reservation for tasks carrying an immutable service_execution binding. Disabled environments retain the legacy worker-only claim path."
 
+[service_config.service_execution_global_pool_json]
+used_by     = ["control-plane"]
+python_type = "str"
+description = "Protected global pool participant runtime JSON: registration, data environment, logical pool, HTTPS management origin and owner-only machine token file. When configured, queued execution uses global selection and direct admin reservations are rejected; activation still requires the protected writer migration."
+
 [service_config.service_execution_materializer_enabled]
 used_by     = ["control-plane"]
 python_type = "bool"

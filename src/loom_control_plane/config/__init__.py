@@ -8,13 +8,31 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import computed_field
+from pydantic import computed_field, model_validator
 
+from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom_control_plane.config._generated import ControlPlaneSettings as _BaseSettings
 
 
 class ControlPlaneSettings(_BaseSettings):
     """ControlPlaneSettings adds behavior on top of the codegen'd class."""
+
+    @property
+    def global_pool(self) -> PoolRuntimeSettings | None:
+        raw = self.service_execution_global_pool_json
+        if raw is None:
+            return None
+        if len(raw) > 65536:
+            raise ValueError("global pool runtime configuration exceeds its bound")
+        return PoolRuntimeSettings.model_validate_json(raw)
+
+    @model_validator(mode="after")
+    def _global_pool_binding(self) -> ControlPlaneSettings:
+        pool = self.global_pool
+        if pool is not None and (pool.environment != self.service_execution_scheduler_environment
+                or pool.logical_pool_id != self.service_execution_scheduler_pool_id):
+            raise ValueError("global pool runtime differs from scheduler identity")
+        return self
 
     @computed_field  # type: ignore[prop-decorator]
     @property

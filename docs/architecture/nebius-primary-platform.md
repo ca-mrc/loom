@@ -2032,6 +2032,18 @@ freezes the evidence and allocated runtime together. Missing evidence cannot fal
 back to local allocation. This sizing read grants nothing; the registry still
 checks current physical fit and provider quota for the rendered workload.
 
+Protected process configuration now selects these adapters at startup. The control
+plane's `service_execution_global_pool_json` and actuator's `global_pool` bind the
+same registered participant, data environment, logical pool, HTTPS management
+origin and private machine-token file. Configuration rejects mismatched scheduler,
+target or namespace identities. Global mode fences direct admin reservations,
+omits the legacy namespace watch and uses the native build outbox controller.
+Build lease maintenance runs independently of admission HTTP and participates in
+readiness. Shutdown drains every controller loop before closing the management,
+Kubernetes or database clients, including when another loop fails. These settings
+do not register participants, install profiles, grant Kubernetes authority or
+perform the protected writer migration.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.

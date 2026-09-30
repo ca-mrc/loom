@@ -192,6 +192,8 @@ async def create_execution_reservation(
     authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
     await _admin(request, authorization)
+    if getattr(request.app.state.settings, "global_pool", None) is not None:
+        raise HTTPException(status_code=409, detail="global execution requires queued admission")
     try:
         image_admission_keyring = ImageAdmissionKeyring.from_json(
             request.app.state.settings.execution_image_admission_public_keys_json
