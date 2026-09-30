@@ -103,6 +103,10 @@ def test_execution_prepare_preserves_absolute_deadline_and_input_identity():
     later = render(participant, body, now=now + timedelta(seconds=5))
     assert first.request_sha256 == later.request_sha256
     assert first.job["spec"]["activeDeadlineSeconds"] - later.job["spec"]["activeDeadlineSeconds"] == 5
+    for prepared in (first, later):
+        execution = prepared.job["spec"]["template"]["spec"]["containers"][0]
+        index = execution["args"].index("--deadline-at")
+        assert datetime.fromisoformat(execution["args"][index + 1]) == body["deadline_at"]
     with pytest.raises(ValueError):
         render(participant, body, now=body["deadline_at"])
 
