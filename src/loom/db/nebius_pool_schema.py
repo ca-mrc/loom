@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     LargeBinary,
+    SmallInteger,
     Text,
     UniqueConstraint,
     func,
@@ -170,6 +171,55 @@ class NebiusPoolRequest(Base):
     renewed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     granted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     priority: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+
+class NebiusPoolEffect(Base):
+    """Append-once external write authority, bound to an immutable workload plan."""
+
+    __tablename__ = "nebius_pool_effects"
+    __table_args__ = (
+        ForeignKeyConstraint(["request_id", "plan_sha256", "namespace_uid"],
+            ["nebius_pool_requests.request_id", "nebius_pool_requests.plan_sha256", "nebius_pool_requests.namespace_uid"],
+            ondelete="RESTRICT", name="nebius_pool_effect_plan_fk"),
+        UniqueConstraint("request_id", "effect_key", name="nebius_pool_effect_replay_key"),
+        UniqueConstraint("request_id", "sequence", name="nebius_pool_effect_sequence_key"),
+        CheckConstraint("effect_id <> '00000000-0000-0000-0000-000000000000'::uuid AND sequence > 0 AND "
+                        "effect_key ~ '^[a-zA-Z0-9._:-]{1,128}$'", name="nebius_pool_effect_identity_check"),
+        CheckConstraint("phase IN ('prepared','dispatched','observed','rejected') AND jsonb_typeof(intent_json) = 'object' AND "
+                        "((intent_json->>'kind' IN ('Job','ConfigMap','Pod')) AND "
+                        "(intent_json->>'action' IN ('create','delete')) AND "
+                        "(intent_json->>'kind' <> 'Pod' OR intent_json->>'action' = 'delete')) IS TRUE",
+                        name="nebius_pool_effect_shape_check"),
+        CheckConstraint("(phase = 'prepared') = (dispatch_id IS NULL) AND "
+                        "(dispatch_id IS NULL) = (dispatch_machine_id IS NULL) AND "
+                        "(dispatch_id IS NULL) = (dispatch_epoch IS NULL) AND "
+                        "(dispatch_epoch IS NULL OR dispatch_epoch > 0) AND "
+                        "(dispatch_id IS NULL OR dispatch_id <> '00000000-0000-0000-0000-000000000000'::uuid)",
+                        name="nebius_pool_effect_dispatch_check"),
+        CheckConstraint("(phase = 'observed') = (observed_uid IS NOT NULL) AND "
+                        "(observed_uid IS NULL OR observed_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
+                        "(observed_resource_version IS NULL OR length(observed_resource_version) BETWEEN 1 AND 253) AND "
+                        "(observed_resource_version IS NOT NULL) = (phase = 'observed' AND intent_json->>'action' = 'create')",
+                        name="nebius_pool_effect_observation_check"),
+        CheckConstraint("(phase = 'rejected') = (rejection_status IS NOT NULL) AND "
+                        "(rejection_status IS NULL OR rejection_status IN (409,422))",
+                        name="nebius_pool_effect_rejection_check"),
+    )
+    effect_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    plan_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace_uid: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    effect_key: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    intent_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    dispatch_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    dispatch_machine_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_machines.machine_id", ondelete="RESTRICT"))
+    dispatch_epoch: Mapped[int | None] = mapped_column(BigInteger)
+    observed_uid: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    observed_resource_version: Mapped[str | None] = mapped_column(Text)
+    rejection_status: Mapped[int | None] = mapped_column(SmallInteger)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
 class NebiusPoolCleanupObservation(Base):

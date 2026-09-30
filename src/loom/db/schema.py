@@ -64,6 +64,7 @@ from loom.db.nebius_pool_schema import NebiusPoolCapture as NebiusPoolCapture
 from loom.db.nebius_pool_schema import (
     NebiusPoolCleanupObservation as NebiusPoolCleanupObservation,
 )
+from loom.db.nebius_pool_schema import NebiusPoolEffect as NebiusPoolEffect
 from loom.db.nebius_pool_schema import NebiusPoolMachine as NebiusPoolMachine
 from loom.db.nebius_pool_schema import NebiusPoolMachineCredential as NebiusPoolMachineCredential
 from loom.db.nebius_pool_schema import NebiusPoolObservation as NebiusPoolObservation

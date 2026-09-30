@@ -140,6 +140,50 @@ CREATE TABLE nebius_pool_captures (
         registration_sha256 ~ '^[0-9a-f]{64}$' AND scope_sha256 ~ '^[0-9a-f]{64}$' AND
         jsonb_typeof(scope_json) = 'object')
 );
+
+CREATE TABLE nebius_pool_effects (
+    effect_id UUID PRIMARY KEY,
+    request_id UUID NOT NULL,
+    plan_sha256 TEXT NOT NULL,
+    namespace_uid UUID NOT NULL,
+    effect_key TEXT NOT NULL,
+    sequence BIGINT NOT NULL,
+    intent_json JSONB NOT NULL,
+    phase TEXT NOT NULL,
+    dispatch_id UUID,
+    dispatch_machine_id UUID REFERENCES nebius_pool_machines(machine_id) ON DELETE RESTRICT,
+    dispatch_epoch BIGINT,
+    observed_uid UUID,
+    observed_resource_version TEXT,
+    rejection_status SMALLINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT nebius_pool_effect_plan_fk FOREIGN KEY(request_id, plan_sha256, namespace_uid)
+        REFERENCES nebius_pool_requests(request_id, plan_sha256, namespace_uid) ON DELETE RESTRICT,
+    CONSTRAINT nebius_pool_effect_replay_key UNIQUE(request_id, effect_key),
+    CONSTRAINT nebius_pool_effect_sequence_key UNIQUE(request_id, sequence),
+    CONSTRAINT nebius_pool_effect_identity_check CHECK (
+        effect_id <> '00000000-0000-0000-0000-000000000000'::uuid AND sequence > 0 AND
+        effect_key ~ '^[a-zA-Z0-9._:-]{1,128}$'),
+    CONSTRAINT nebius_pool_effect_shape_check CHECK (
+        phase IN ('prepared','dispatched','observed','rejected') AND jsonb_typeof(intent_json) = 'object' AND
+        ((intent_json->>'kind' IN ('Job','ConfigMap','Pod')) AND
+         (intent_json->>'action' IN ('create','delete')) AND
+         (intent_json->>'kind' <> 'Pod' OR intent_json->>'action' = 'delete')) IS TRUE),
+    CONSTRAINT nebius_pool_effect_dispatch_check CHECK (
+        (phase = 'prepared') = (dispatch_id IS NULL) AND
+        (dispatch_id IS NULL) = (dispatch_machine_id IS NULL) AND
+        (dispatch_id IS NULL) = (dispatch_epoch IS NULL) AND
+        (dispatch_epoch IS NULL OR dispatch_epoch > 0) AND
+        (dispatch_id IS NULL OR dispatch_id <> '00000000-0000-0000-0000-000000000000'::uuid)),
+    CONSTRAINT nebius_pool_effect_observation_check CHECK (
+        (phase = 'observed') = (observed_uid IS NOT NULL) AND
+        (observed_uid IS NULL OR observed_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND
+        (observed_resource_version IS NULL OR length(observed_resource_version) BETWEEN 1 AND 253) AND
+        (observed_resource_version IS NOT NULL) = (phase = 'observed' AND intent_json->>'action' = 'create')),
+    CONSTRAINT nebius_pool_effect_rejection_check CHECK (
+        (phase = 'rejected') = (rejection_status IS NOT NULL) AND
+        (rejection_status IS NULL OR rejection_status IN (409,422)))
+);
 CREATE TABLE nebius_pool_observations (
     observation_id UUID PRIMARY KEY,
     pool_id UUID NOT NULL,
@@ -157,6 +201,57 @@ CREATE TABLE nebius_pool_observations (
 
     """)
     op.execute("""
+        CREATE FUNCTION validate_nebius_pool_effect_mutation() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'global pool effect history is retained' USING ERRCODE = '23514';
+            END IF;
+            IF TG_OP = 'INSERT' THEN
+                IF NEW.phase <> 'prepared' OR NOT EXISTS (
+                    SELECT 1 FROM nebius_pool_requests WHERE request_id = NEW.request_id AND
+                        ((phase = 'create_intent' AND NEW.intent_json->>'action' = 'create') OR
+                         (phase = 'cleanup_intent' AND NEW.intent_json->>'action' = 'delete'))
+                ) THEN
+                    RAISE EXCEPTION 'global pool effect requires current fixed intent' USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF to_jsonb(NEW) = to_jsonb(OLD) THEN
+                RETURN NEW;
+            END IF;
+            IF (to_jsonb(NEW) - ARRAY['phase','dispatch_id','dispatch_machine_id','dispatch_epoch',
+                    'observed_uid','observed_resource_version','rejection_status']::text[])
+               IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['phase','dispatch_id','dispatch_machine_id','dispatch_epoch',
+                    'observed_uid','observed_resource_version','rejection_status']::text[]) THEN
+                RAISE EXCEPTION 'global pool effect intent is immutable' USING ERRCODE = '23514';
+            END IF;
+            IF OLD.phase = 'prepared' AND NEW.phase = 'dispatched' THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM nebius_pool_machines m JOIN nebius_pool_requests r ON r.pool_id = m.pool_id
+                    WHERE r.request_id = NEW.request_id AND m.machine_id = NEW.dispatch_machine_id
+                      AND m.role = 'gateway' AND m.phase = 'active' AND m.credential_epoch = NEW.dispatch_epoch
+                ) THEN
+                    RAISE EXCEPTION 'global pool effect dispatcher is not qualified' USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF OLD.phase = 'dispatched' AND NEW.phase IN ('observed','rejected') AND
+               NEW.dispatch_id = OLD.dispatch_id AND NEW.dispatch_machine_id = OLD.dispatch_machine_id AND
+               NEW.dispatch_epoch = OLD.dispatch_epoch THEN
+                IF NEW.phase = 'observed' AND NEW.intent_json->>'action' = 'delete' AND
+                   (NEW.intent_json->>'uid' IS NULL OR NEW.observed_uid::text <> NEW.intent_json->>'uid') THEN
+                    RAISE EXCEPTION 'global pool delete observation identity differs' USING ERRCODE = '23514';
+                END IF;
+                RETURN NEW;
+            END IF;
+            RAISE EXCEPTION 'global pool effect history is immutable' USING ERRCODE = '23514';
+        END;
+        $$;
+        CREATE TRIGGER nebius_pool_effect_mutation_guard
+        BEFORE INSERT OR UPDATE OR DELETE ON nebius_pool_effects
+        FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_effect_mutation();
+
         CREATE FUNCTION retain_nebius_pool_capture_evidence() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN
@@ -318,7 +413,7 @@ def downgrade() -> None:
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
                    nebius_pool_cleanup_observations, nebius_pool_machines,
                    nebius_pool_machine_credentials, nebius_pool_captures,
-                   nebius_pool_observations IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_observations, nebius_pool_effects IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
@@ -331,6 +426,7 @@ def downgrade() -> None:
         DROP TABLE nebius_pool_observations;
         DROP TABLE nebius_pool_captures;
         DROP TABLE nebius_pool_cleanup_observations;
+        DROP TABLE nebius_pool_effects;
         DROP TABLE nebius_pool_requests;
         DROP TABLE nebius_pool_machine_credentials;
         DROP TABLE nebius_pool_machines;
@@ -341,4 +437,5 @@ def downgrade() -> None:
         DROP FUNCTION validate_nebius_pool_registration_mutation();
         DROP FUNCTION validate_nebius_pool_machine_mutation();
         DROP FUNCTION retain_nebius_pool_capture_evidence();
+        DROP FUNCTION validate_nebius_pool_effect_mutation();
     """)
