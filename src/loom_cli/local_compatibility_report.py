@@ -121,6 +121,13 @@ def _inspect_task(path: Path, report: TaskCompatibilityReport, *, execution_prof
         report.add("package_defect", "invalid_task_config", reason,
                    "Supply the missing Loom intake fields or repair the declared schema; preserve task requirements.")
         return
+    from loom.task_runtime_compatibility import task_runtime_rejections
+
+    for rejection in task_runtime_rejections(task):
+        field, _, code = rejection.partition(": ")
+        report.add("runtime_capability", code, "Declared task requirement is retained but its runtime is unavailable.",
+                   "Qualify this capability through #2282; do not drop the declaration.",
+                   source=f"{report.source_location}#{field}")
     _build_context_diagnostics(path.parent, task, report)
     if execution_profile != NEBIUS_TERMINUS_PROFILE:
         if not report.diagnostics:
@@ -692,7 +699,7 @@ def _dropped_runtime_requirements(
     for section in ("agent", "verifier"):
         mapped = _section(normalized, section)
         for key in _section(raw, section):
-            if key in mapped or (section == "verifier" and key == "environment_mode"):
+            if key in mapped or (section == "verifier" and key in {"environment_mode", "env"}):
                 continue
             report.add("unsupported_conversion", f"unmapped_{section}_requirement",
                        f"Harbor normalization discards {section}.{key}.",
@@ -709,7 +716,11 @@ def _dropped_runtime_requirements(
             artifact for step in normalized.get("steps", [])
             for artifact in step.get("artifacts", [])
         ]
-        if any(artifact not in mapped_artifacts for artifact in artifacts):
+        structured = [artifact for step in normalized.get("steps", [])
+                      for artifact in step.get("artifact_sources", [])]
+        if any(artifact not in mapped_artifacts and
+               (artifact if isinstance(artifact, dict) else {"source": artifact}) not in structured
+               for artifact in artifacts):
             report.add("unsupported_conversion", "unmapped_artifact_requirement",
                        "Harbor normalization discards declared artifact paths.",
                        "Provide a supported artifact collection contract without dropping required outputs.",

@@ -20,7 +20,8 @@ COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execu
     src/loom/verifier_runtime.py \
     src/loom/task_bundle_registration.py src/loom/task_bundle_source.py \
     src/loom/task_bundle_source_journal.py src/loom/task_bundle_source_storage.py \
-    src/loom/task_image_bundle_manifest.py src/loom/terminal_bench_normalize.py ./src/loom/
+    src/loom/task_image_bundle_manifest.py src/loom/terminal_bench_normalize.py \
+    src/loom/harbor_task_import.py src/loom/task_runtime_compatibility.py ./src/loom/
 COPY src/loom/driver/__init__.py src/loom/driver/task_image.py ./src/loom/driver/
 COPY src/loom/family_run/__init__.py src/loom/family_run/spec.py ./src/loom/family_run/
 COPY src/loom/trajectory/__init__.py src/loom/trajectory/storage.py ./src/loom/trajectory/
@@ -28,7 +29,8 @@ COPY src/loom/db ./src/loom/db
 COPY src/loom/security ./src/loom/security
 COPY src/loom/models/__init__.py src/loom/models/healthcheck.py src/loom/models/mcp.py \
     src/loom/models/networking.py src/loom/models/skill.py src/loom/models/task.py \
-    src/loom/models/types.py src/loom/models/trial.py src/loom/models/resource_usage.py ./src/loom/models/
+    src/loom/models/types.py src/loom/models/trial.py src/loom/models/resource_usage.py \
+    src/loom/models/harbor.py src/loom/models/task_compatibility.py ./src/loom/models/
 COPY src/loom/pipeline/__init__.py src/loom/pipeline/keys.py ./src/loom/pipeline/
 COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admission.py \
     src/loom_control_plane/execution_capacity.py src/loom_control_plane/execution_finance.py \
@@ -49,7 +51,9 @@ import loom_execution_actuator.__main__
 import loom_execution_capacity_collector.__main__
 import loom.task_bundle_source_journal
 import loom.execution_diagnosis_store
-from loom.models.task import EnvironmentConfig, TaskSidecarConfig
+from loom.models.task import EnvironmentConfig, TaskSidecarConfig, TaskConfig
+from loom.harbor_task_import import project_harbor_task
+from loom.task_runtime_compatibility import task_runtime_rejections
 
 EnvironmentConfig(os="linux", docker_image="registry.example/task@sha256:" + "a" * 64)
 fixture = TaskSidecarConfig(
@@ -64,6 +68,11 @@ EnvironmentConfig(
     dockerfile="environment/Dockerfile", docker_build_context="environment",
     sidecars=[fixture],
 )
+native = TaskConfig.model_validate(project_harbor_task({
+    "task": {"name": "native-image-import-check"},
+    "environment": {"gpus": 1, "gpu_types": ["H100"]},
+}))
+assert "environment.gpu_types: exact_gpu_model_runtime_unavailable" in task_runtime_rejections(native)
 PY
 EXPOSE 8093
 CMD ["python", "-m", "loom_execution_actuator"]

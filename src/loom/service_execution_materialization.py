@@ -359,10 +359,13 @@ def automatic_service_execution_rejections(
 ) -> tuple[str, ...]:
     """Return stable reasons why the v1 ordinary-TaskSet compiler cannot run a task."""
 
+    from loom.task_runtime_compatibility import task_runtime_rejections
+
     task = normalize_steps(task)
+    declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
     terminus = trial.agent_name == "terminus-2"
-    reasons: list[str] = []
+    reasons: list[str] = list(declared_rejections)
     if task.agent.continue_until_timeout and not terminus:
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(

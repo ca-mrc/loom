@@ -215,6 +215,12 @@ class Trial:
                 driver_started = False
                 try:
                     from loom.agent.terminus2.runtime import LoomTerminus2Runtime
+                    from loom.errors import DriverError
+                    from loom.task_runtime_compatibility import task_runtime_rejections
+
+                    rejections = task_runtime_rejections(self.ctx.task_config, agent_name=self.ctx.agent.name)
+                    if rejections:
+                        raise DriverError("Unsupported task requirements: " + "; ".join(rejections))
 
                     if isinstance(self.ctx.agent, LoomTerminus2Runtime):
                         self.ctx.agent.continue_until_timeout = self.ctx.task_config.agent.continue_until_timeout

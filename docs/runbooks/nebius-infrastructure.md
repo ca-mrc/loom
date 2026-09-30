@@ -87,7 +87,8 @@ From the repository root, use exact pinned Terraform `1.16.0`:
 python3 scripts/check_nebius_iac.py
 terraform fmt -check -recursive deploy/terraform/nebius
 terraform -chdir=deploy/terraform/nebius/modules/execution-target init -backend=false
-terraform -chdir=deploy/terraform/nebius/modules/execution-target validate
+terraform -chdir=deploy/terraform/nebius/stack init -backend=false
+terraform -chdir=deploy/terraform/nebius/stack validate
 terraform -chdir=deploy/terraform/nebius/modules/execution-target test
 ```
 
@@ -1075,3 +1076,47 @@ decision. A restore rehearsal starts from the versioned remote state and
 reviewed target inputs, applies to the same isolated target, repeats the entire
 live-smoke order, and ends with a zero-drift plan. Never delete the state bucket
 until its retention and recovery window have expired under separate approval.
+
+## Optional H100 pool configuration
+
+The shared execution target accepts an optional `h100_pool` object inside its
+existing `target` input. Omission (`null`) creates no GPU node group. An initial
+qualification configuration is:
+
+```json
+"h100_pool": {
+  "max_nodes": 1,
+  "disk_gib": 1100,
+  "drivers_preset": "cuda12.8"
+}
+```
+
+This adds an independent `eu-north1` node group on `gpu-h100-sxm` /
+`1gpu-16vcpu-200gb`, with minimum zero, explicit maximum, no replacement surge,
+on-demand capacity, the existing subnet/registry-pull identity and model-specific
+labels/taints. CPU settings remain independent. Terraform validates the region,
+integer 1–32 ceiling, at least 1100 GiB boot disk and supported driver preset.
+The ceiling bounds configuration; it is not a claim about current shared quota.
+The output explicitly reports `runtime_qualified = false`.
+
+Validate with the existing mocked-provider Terraform tests; validate the stack
+wrapper to supply the module's aliased provider configuration:
+
+```bash
+terraform -chdir=deploy/terraform/nebius/stack init -backend=false
+terraform -chdir=deploy/terraform/nebius/stack validate
+terraform -chdir=deploy/terraform/nebius/modules/execution-target test
+```
+
+The provider driver preset alone does not qualify the Kubernetes GPU device
+plugin, allocatable resources, task-visible CUDA, GPU quota accounting or exact
+model scheduling. Those capabilities remain blocked under #2282. In particular,
+TB4 `jax-speedrun-gpu` needs 16 allocatable verifier CPUs, 32 GiB RAM, one H100
+and 1000 GiB usable disk. A nominal 16-vCPU node loses CPU capacity to system
+reservations, and a 1100-GiB boot disk does not prove 1000 GiB allocatable task
+storage. Keep this original task blocked until those constraints are satisfied;
+do not lower its requirement or substitute H200/CPU.
+
+Do not apply this configuration or scale a pool based on local validation.
+Use the authority boundary above for a separately approved one-node no-model
+qualification and idle scale-down/provider readback.

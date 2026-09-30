@@ -43,3 +43,7 @@ output "staging_spool" {
   sensitive   = true
   value       = module.execution_target.staging_spool
 }
+
+output "h100_resource_pool" {
+  value = module.execution_target.h100_resource_pool
+}

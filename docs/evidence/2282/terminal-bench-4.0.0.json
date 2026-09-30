@@ -1,0 +1,2216 @@
+{
+  "benchmark_id": "terminal-bench-4@4.0.0",
+  "blocked_task_count": 66,
+  "requirement_counts": {
+    "collection_hook_tasks": 5,
+    "compose_tasks": 11,
+    "h100_tasks": 3,
+    "managed_artifact_collection_tasks": 66,
+    "upstream_absolute_artifact_tasks": 58,
+    "upstream_structured_artifact_tasks": 10
+  },
+  "source": {
+    "dataset_config": null,
+    "importer": "loom.harbor-native.v1",
+    "kind": "git",
+    "locator": "https://github.com/harbor-framework/terminal-bench.git",
+    "release": "4.0.0",
+    "revision": "452bf305c6daa62fc59061d22133a7cbc7c1572e",
+    "split": "test",
+    "subset": []
+  },
+  "task_count": 66,
+  "tasks": [
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/atrx-vep-crispr",
+      "upstream_task_id": "terminal-bench/atrx-vep-crispr"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 1.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/batched-eval-parity",
+      "upstream_task_id": "terminal-bench/batched-eval-parity"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 4,
+        "upstream_absolute_artifact_count": 4,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/biped-contact-dynamics",
+      "upstream_task_id": "terminal-bench/biped-contact-dynamics"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 5,
+        "upstream_absolute_artifact_count": 5,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/bun-sourcemap-leak",
+      "upstream_task_id": "terminal-bench/bun-sourcemap-leak"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/cad-model",
+      "upstream_task_id": "terminal-bench/cad-model"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 5,
+        "upstream_absolute_artifact_count": 5,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/cargo-flight-dispatch",
+      "upstream_task_id": "terminal-bench/cargo-flight-dispatch"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/coq-block-bound",
+      "upstream_task_id": "terminal-bench/coq-block-bound"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "verifier.collect: service_collection_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 1,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 1,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/ctr-optimization",
+      "upstream_task_id": "terminal-bench/ctr-optimization"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "verifier.collect: service_collection_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 1,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/cumulative-layout-shift",
+      "upstream_task_id": "terminal-bench/cumulative-layout-shift"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/data-anonymization",
+      "upstream_task_id": "terminal-bench/data-anonymization"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 15000
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 15000
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/distributed-dedup",
+      "upstream_task_id": "terminal-bench/distributed-dedup"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/embedding-drift-monitor",
+      "upstream_task_id": "terminal-bench/embedding-drift-monitor"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/fin-saccr-rwa",
+      "upstream_task_id": "terminal-bench/fin-saccr-rwa"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/foodstuff-beta-activity",
+      "upstream_task_id": "terminal-bench/foodstuff-beta-activity"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/formal-crypto",
+      "upstream_task_id": "terminal-bench/formal-crypto"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 16384,
+          "storage_mb": 30720
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 16384,
+          "storage_mb": 30720
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/fp8-rmsnorm-gemm",
+      "upstream_task_id": "terminal-bench/fp8-rmsnorm-gemm"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/freecad-impeller",
+      "upstream_task_id": "terminal-bench/freecad-impeller"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/freecad-platform-drawing",
+      "upstream_task_id": "terminal-bench/freecad-platform-drawing"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/freecad-spring-clip",
+      "upstream_task_id": "terminal-bench/freecad-spring-clip"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/freight-dispatch-shift",
+      "upstream_task_id": "terminal-bench/freight-dispatch-shift"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/glycan-ms2-elucidation",
+      "upstream_task_id": "terminal-bench/glycan-ms2-elucidation"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/gsea-proteomics",
+      "upstream_task_id": "terminal-bench/gsea-proteomics"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 2,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/heat-pump-warranty",
+      "upstream_task_id": "terminal-bench/heat-pump-warranty"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/hof-topology-interpenetration",
+      "upstream_task_id": "terminal-bench/hof-topology-interpenetration"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/html-js-filter",
+      "upstream_task_id": "terminal-bench/html-js-filter"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/interleaved-vigenere",
+      "upstream_task_id": "terminal-bench/interleaved-vigenere"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 5,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 4,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/intrastat-meldung",
+      "upstream_task_id": "terminal-bench/intrastat-meldung"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 16.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 32768,
+          "storage_mb": 1024000
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 16.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 32768,
+          "storage_mb": 1024000
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/jax-speedrun-gpu",
+      "upstream_task_id": "terminal-bench/jax-speedrun-gpu"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/ks-solver-cpp",
+      "upstream_task_id": "terminal-bench/ks-solver-cpp"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "environment.healthcheck.start_interval_sec: healthcheck_start_interval_runtime_unavailable",
+          "verifier.environment.healthcheck.start_interval_sec: healthcheck_start_interval_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 3,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/kv-live-surgery",
+      "upstream_task_id": "terminal-bench/kv-live-surgery"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/lake-temp-glm",
+      "upstream_task_id": "terminal-bench/lake-temp-glm"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/layout-config-recreation",
+      "upstream_task_id": "terminal-bench/layout-config-recreation"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/layout-config-recreation2",
+      "upstream_task_id": "terminal-bench/layout-config-recreation2"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 1,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/legacy-utility-triage",
+      "upstream_task_id": "terminal-bench/legacy-utility-triage"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "verifier.environment_vars: verifier_environment_variables_runtime_unavailable",
+          "verifier.collect: service_collection_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 16.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 5,
+        "structured_artifact_count": 4,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 4,
+        "verifier": {
+          "cpus": 16.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 40960
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/live-database-cutover",
+      "upstream_task_id": "terminal-bench/live-database-cutover"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment/Dockerfile:28: TASK_COMPAT_BROAD_TRAILING_TRUE",
+          "environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment.gpu_types: exact_gpu_model_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 16384,
+          "storage_mb": 30720
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 8.0,
+          "gpu_types": [
+            "H100"
+          ],
+          "gpus": 1,
+          "memory_mb": 16384,
+          "storage_mb": 30720
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/math-eval-grader",
+      "upstream_task_id": "terminal-bench/math-eval-grader"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 1,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/medical-claims-processing",
+      "upstream_task_id": "terminal-bench/medical-claims-processing"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 5120
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 5120
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/mp-checkpoint-consolidation",
+      "upstream_task_id": "terminal-bench/mp-checkpoint-consolidation"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/music-harmony",
+      "upstream_task_id": "terminal-bench/music-harmony"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 14,
+        "upstream_absolute_artifact_count": 14,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/mvcc-lsm-compaction",
+      "upstream_task_id": "terminal-bench/mvcc-lsm-compaction"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 15360
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 8,
+        "upstream_absolute_artifact_count": 8,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 15360
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/nextjs-performance",
+      "upstream_task_id": "terminal-bench/nextjs-performance"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 17,
+        "upstream_absolute_artifact_count": 17,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/ontology-kg-querying",
+      "upstream_task_id": "terminal-bench/ontology-kg-querying"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "environment.compose_files: native_compose_runtime_unavailable",
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "verifier.environment_vars: verifier_environment_variables_runtime_unavailable",
+          "verifier.collect: service_collection_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "compose_files": [
+            "environment/docker-compose.yaml"
+          ],
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 1,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 1,
+        "verifier": {
+          "cpus": 6.0,
+          "gpus": 0,
+          "memory_mb": 12288,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/payments-pipeline-fix",
+      "upstream_task_id": "terminal-bench/payments-pipeline-fix"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/photonic-waveguide-routing",
+      "upstream_task_id": "terminal-bench/photonic-waveguide-routing"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 4096
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 26,
+        "upstream_absolute_artifact_count": 26,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 4096
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/pretrain-shard-corruption",
+      "upstream_task_id": "terminal-bench/pretrain-shard-corruption"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/production-planning",
+      "upstream_task_id": "terminal-bench/production-planning"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/protein-autointerp-disulfide",
+      "upstream_task_id": "terminal-bench/protein-autointerp-disulfide"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 6,
+        "upstream_absolute_artifact_count": 6,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/react-lead-form",
+      "upstream_task_id": "terminal-bench/react-lead-form"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/retro-console-soc",
+      "upstream_task_id": "terminal-bench/retro-console-soc"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/risk-scorer-replay",
+      "upstream_task_id": "terminal-bench/risk-scorer-replay"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/roy-polymorph-cn",
+      "upstream_task_id": "terminal-bench/roy-polymorph-cn"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/rs-archive-clone",
+      "upstream_task_id": "terminal-bench/rs-archive-clone"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/satb-audio-transcription",
+      "upstream_task_id": "terminal-bench/satb-audio-transcription"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/session-window-debug",
+      "upstream_task_id": "terminal-bench/session-window-debug"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 18000
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 18000
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/sglang-qwen-burst",
+      "upstream_task_id": "terminal-bench/sglang-qwen-burst"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "verifier.collect: service_collection_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 1,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/shadow-relay",
+      "upstream_task_id": "terminal-bench/shadow-relay"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/sound-change-cascade",
+      "upstream_task_id": "terminal-bench/sound-change-cascade"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 51200
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 4.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 51200
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/takens-embedding-lean",
+      "upstream_task_id": "terminal-bench/takens-embedding-lean"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/telecom-entity-resolution",
+      "upstream_task_id": "terminal-bench/telecom-entity-resolution"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 3,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/uefi-bootkit",
+      "upstream_task_id": "terminal-bench/uefi-bootkit"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 1,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 20480
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/vba-userform-port",
+      "upstream_task_id": "terminal-bench/vba-userform-port"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/vf2-speedup-networkx",
+      "upstream_task_id": "terminal-bench/vf2-speedup-networkx"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/vllm-deepseek-streaming",
+      "upstream_task_id": "terminal-bench/vllm-deepseek-streaming"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 15360
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 3,
+        "upstream_absolute_artifact_count": 0,
+        "upstream_structured_artifact_count": 3,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 8192,
+          "storage_mb": 15360
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/vpp-loss-divergence",
+      "upstream_task_id": "terminal-bench/vpp-loss-divergence"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 1,
+        "upstream_absolute_artifact_count": 1,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 2.0,
+          "gpus": 0,
+          "memory_mb": 4096,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/wal-recovery-ordering",
+      "upstream_task_id": "terminal-bench/wal-recovery-ordering"
+    },
+    {
+      "compatibility": {
+        "blockers": [
+          "verifier.environment: independent_verifier_environment_runtime_unavailable",
+          "steps.0.artifact_sources: structured_artifact_collection_runtime_unavailable"
+        ],
+        "imported": true,
+        "runtime_verified": false,
+        "status": "blocked"
+      },
+      "import": "preserved_and_schema_valid",
+      "requirements": {
+        "agent": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 10240
+        },
+        "collection_hook_count": 0,
+        "structured_artifact_count": 2,
+        "upstream_absolute_artifact_count": 2,
+        "upstream_structured_artifact_count": 0,
+        "verifier": {
+          "cpus": 8.0,
+          "gpus": 0,
+          "memory_mb": 16384,
+          "storage_mb": 10240
+        }
+      },
+      "task_id": "terminal-bench-4@4.0.0/terminal-bench/wdm-design",
+      "upstream_task_id": "terminal-bench/wdm-design"
+    }
+  ],
+  "verification": "Local import/static capability evidence. No database, cloud resources, images or models used. Existing commit-addressed source archive reused read-only."
+}
