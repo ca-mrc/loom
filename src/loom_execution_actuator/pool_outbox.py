@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
 from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt
 from loom.nebius_pool_contract import (
+    PoolActivationV1,
     PoolParticipantV1,
     PoolReceiptV1,
     PoolRequestActionV1,
@@ -46,6 +47,8 @@ class PoolBuildHandoff:
     phase: str
     reservation_id: UUID | None
     attempt_id: UUID | None
+    activation: PoolActivationV1 | None
+    activated: PoolReceiptV1 | None
 
     @property
     def action(self) -> PoolRequestActionV1:
@@ -55,6 +58,10 @@ class PoolBuildHandoff:
 
 def _digest(request: PoolTaskImagePrepareV1) -> str:
     return canonical_digest(request.model_dump(mode="json")).removeprefix("sha256:")
+
+
+async def _clock(session: AsyncSession) -> datetime:
+    return (await session.execute(select(func.clock_timestamp()))).scalar_one()  # type: ignore[no-any-return]
 
 
 def _snapshot(row: TaskImageMaterialization) -> dict[str, Any]:
@@ -108,7 +115,9 @@ class PoolBuildOutbox:
                 or row.logical_pool_id != self.logical_pool_id or request.pool_id != self.participant.pool_id
                 or request.origin.data_environment_id != self.participant.environment_id):
             raise PoolHandoffError
-        return PoolBuildHandoff(request, row.request_sha256, row.phase, row.reservation_id, row.attempt_id)
+        return PoolBuildHandoff(request, row.request_sha256, row.phase, row.reservation_id, row.attempt_id,
+            PoolActivationV1.model_validate(row.activation_json) if row.activation_json is not None else None,
+            PoolReceiptV1.model_validate(row.activated_json) if row.activated_json is not None else None)
 
     @asynccontextmanager
     async def _transaction(self, key: PoolRequestKeyV1) -> AsyncIterator[tuple[AsyncSession, NebiusPoolBuildOutbox | None]]:
@@ -208,7 +217,9 @@ class PoolBuildOutbox:
             receipt = self._receipt(row, receipt)
             if receipt.phase != "reserved" or row.phase == "cancelled":
                 raise PoolHandoffError
-            if row.phase == "attached":
+            if row.attempt_id is not None:
+                # A delayed prepare reply recovers identity, never rewinds a
+                # later activation/cancellation phase or grants new consent.
                 return self._view(row)
             request = self._view(row).request
             selected = await session.get(TaskImageMaterialization, key.local_work_id, with_for_update=True)
@@ -237,15 +248,82 @@ class PoolBuildOutbox:
             await session.flush()
             return self._view(row)
 
+    async def _claim_current(self, session: AsyncSession, outbox: NebiusPoolBuildOutbox, *,
+                             recheck_origin: bool = True) -> TaskImageMaterialization | None:
+        request = self._view(outbox).request
+        try:
+            self._request(request)
+        except ValueError:
+            return None
+        row = await session.get(TaskImageMaterialization, outbox.materialization_id, with_for_update=True)
+        attempt = await session.get(TaskImageMaterializationAttempt, outbox.attempt_id, with_for_update=True)
+        now = await _clock(session)
+        if (row is None or attempt is None or row.state != "claimed" or row.claimed_by != self.builder_id
+                or row.lease_epoch != outbox.lease_epoch or row.attempt_count != outbox.attempt_number
+                or row.lease_expires_at is None or row.lease_expires_at <= now or request.deadline_at <= now
+                or _snapshot(row) != outbox.selection_json or not _source_matches(request, row)
+                or attempt.native_build is not None or attempt.grant_id is not None):
+            return None
+        from loom.nebius_rollout_guard import admission_open
+
+        origin = await preferred_task_image_origin(session, materialization_id=row.id,
+            participant=self.participant, logical_pool_id=self.logical_pool_id)
+        if (origin is None or (recheck_origin and origin != request.origin) or not await admission_open(session)):
+            return None
+        return row
+
+    async def begin_activation(self, key: PoolRequestKeyV1) -> PoolBuildHandoff:
+        """Commit bounded claim consent before HTTP; a replay must still qualify."""
+        async with self._transaction(key) as (session, row):
+            if row is None or row.phase == "selected":
+                raise PoolHandoffError
+            if row.phase not in {"attached", "activation_pending"}:
+                return self._view(row)
+            claim = await self._claim_current(session, row)
+            now = await _clock(session)
+            saved = self._view(row)
+            if claim is None or (saved.activation is not None and saved.activation.not_after <= now):
+                row.phase = "cancel_pending"
+            else:
+                if saved.activation is None:
+                    assert claim.lease_expires_at is not None
+                    row.activation_json = PoolActivationV1(action=saved.action,
+                        not_after=min(claim.lease_expires_at, saved.request.deadline_at)).model_dump(mode="json")
+                row.phase = "activation_pending"
+            await session.flush()
+            return self._view(row)
+
+    async def confirm_activation(self, key: PoolRequestKeyV1, receipt: PoolReceiptV1) -> PoolBuildHandoff:
+        """Retain manager acceptance even after caller loss; never refund it."""
+        async with self._transaction(key) as (session, row):
+            if (row is None or row.activation_json is None
+                    or row.phase not in {"activation_pending", "cancel_pending", "active", "stop_pending"}):
+                raise PoolHandoffError
+            receipt = self._receipt(row, receipt)
+            if receipt.plan_sha256 is None:
+                raise PoolHandoffError
+            if row.activated_json is not None:
+                previous = PoolReceiptV1.model_validate(row.activated_json)
+                if (previous.plan_sha256 != receipt.plan_sha256
+                        or (previous.job_uid is not None and previous.job_uid != receipt.job_uid)):
+                    raise PoolHandoffError
+                return self._view(row)
+            current = await self._claim_current(session, row, recheck_origin=False)
+            row.phase = ("active" if row.phase == "activation_pending" and current is not None
+                and receipt.phase in {"create_intent", "observed"} else "stop_pending")
+            row.activated_json = receipt.model_dump(mode="json")
+            await session.flush()
+            return self._view(row)
+
     async def request_cancel(self, key: PoolRequestKeyV1) -> PoolBuildHandoff:
         async with self._transaction(key) as (session, row):
             if row is None:
                 raise PoolHandoffError
-            if row.phase in {"selected", "attached"}:
+            if row.phase in {"selected", "attached", "activation_pending", "active"}:
                 # Intent is not release: the manager may already have committed
                 # activation after a lost reply. Only its terminal cancellation
                 # receipt below can close/refund this retained local attempt.
-                row.phase = "cancel_pending"
+                row.phase = "stop_pending" if row.phase == "active" else "cancel_pending"
                 await session.flush()
             return self._view(row)
 

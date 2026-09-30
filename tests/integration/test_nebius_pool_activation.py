@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, text, update
+from sqlalchemy import text, update
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import TaskImageMaterialization, Trial

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
+    PoolActivationV1,
     PoolReceiptV1,
     PoolRequestActionV1,
     PoolWaitingV1,
@@ -130,7 +131,8 @@ async def _participant(request: Request, pool_id: UUID,
                 else:
                     result = await prepare_task_image(session, principal, workload, profiles=profiles)
             else:
-                action = PoolRequestActionV1.model_validate_json(body)
+                activation = PoolActivationV1.model_validate_json(body) if operation == "activate" else None
+                action = activation.action if activation is not None else PoolRequestActionV1.model_validate_json(body)
                 if action.pool_id != pool_id or action.request_key.participant_id != principal.participant_id:
                     raise _error(403, "pool_participant_scope_unavailable")
                 if operation == "status":
@@ -140,7 +142,8 @@ async def _participant(request: Request, pool_id: UUID,
                 else:
                     if not isinstance(profiles, PoolProfiles):
                         raise _error(503, "pool_profiles_unavailable")
-                    result = await activate_pool_request(session, principal, action, profiles=profiles)
+                    assert activation is not None
+                    result = await activate_pool_request(session, principal, activation, profiles=profiles)
             encoded = result.model_dump_json().encode()
             if len(encoded) > MAX_POOL_REQUEST_BYTES:
                 raise _error(503, "pool_response_too_large")

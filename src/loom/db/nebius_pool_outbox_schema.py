@@ -65,8 +65,8 @@ class NebiusPoolBuildOutbox(Base):
             name="nebius_pool_build_outbox_identity_check"),
         CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object' AND "
             "jsonb_typeof(selection_json) = 'object'", name="nebius_pool_build_outbox_payload_check"),
-        CheckConstraint("phase IN ('selected','attached','cancel_pending','cancelled') AND "
-            "(phase <> 'attached' OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
+        CheckConstraint("phase IN ('selected','attached','activation_pending','active','cancel_pending','stop_pending','cancelled') AND "
+            "(phase NOT IN ('attached','activation_pending','active','stop_pending') OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
             "(phase <> 'selected' OR attempt_id IS NULL) AND "
             "(attempt_id IS NULL OR reservation_id IS NOT NULL) AND "
             "num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND "
@@ -76,7 +76,12 @@ class NebiusPoolBuildOutbox(Base):
             "(reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
             "(receipt_json IS NULL OR jsonb_typeof(receipt_json) = 'object') AND "
             "(phase = 'cancelled') = (cancelled_json IS NOT NULL) AND "
-            "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json) = 'object')",
+            "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json) = 'object') AND "
+            "(activation_json IS NULL OR (jsonb_typeof(activation_json) = 'object' AND attempt_id IS NOT NULL AND "
+            "phase NOT IN ('selected','attached'))) AND "
+            "(phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND "
+            "(phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND "
+            "(activated_json IS NULL OR jsonb_typeof(activated_json) = 'object')",
             name="nebius_pool_build_outbox_phase_check"),
     )
     outbox_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
@@ -94,6 +99,8 @@ class NebiusPoolBuildOutbox(Base):
     reservation_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     receipt_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     cancelled_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    activation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    activated_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     attempt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     attempt_number: Mapped[int | None] = mapped_column(Integer)
     lease_epoch: Mapped[int | None] = mapped_column(BigInteger)

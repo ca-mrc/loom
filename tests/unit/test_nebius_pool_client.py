@@ -7,7 +7,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from loom.nebius_pool_contract import PoolRequestActionV1
+from loom.nebius_pool_contract import PoolActivationV1, PoolRequestActionV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
@@ -87,7 +87,7 @@ async def test_waiting_identity_is_checked_and_never_becomes_an_activation_recei
         action = PoolRequestActionV1(pool_id=request.pool_id, request_key=request.key,
             admission_epoch=request.admission_epoch, request_sha256=receipt["request_sha256"])
         with pytest.raises(PoolRequestUnconfirmedError):
-            await management.activate(action)
+            await management.activate(PoolActivationV1(action=action, not_after=request.deadline_at))
         with pytest.raises(PoolRequestUnconfirmedError):
             await management.cancel_unstarted(action)
         waiting["request_sha256"] = "b" * 64

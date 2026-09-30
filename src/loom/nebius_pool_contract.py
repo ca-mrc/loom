@@ -6,6 +6,7 @@ reservation keys. Runtime profiles and namespace ownership are registry-bound.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -114,6 +115,21 @@ class PoolRequestActionV1(_PoolContract):
     @model_validator(mode="after")
     def identity(self) -> PoolRequestActionV1:
         _non_nil(self.pool_id)
+        return self
+
+
+class PoolActivationV1(_PoolContract):
+    """One retained claim consent; expiry prevents first activation, not release."""
+
+    schema_version: Literal["loom.pool-activation.v1"] = "loom.pool-activation.v1"
+    action: PoolRequestActionV1
+    not_after: datetime
+
+    @model_validator(mode="after")
+    def aware_deadline(self) -> PoolActivationV1:
+        if self.not_after.utcoffset() is None:
+            raise ValueError("pool_activation_requires_absolute_deadline")
+        object.__setattr__(self, "not_after", self.not_after.astimezone(UTC))
         return self
 
 

@@ -20,7 +20,12 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
-from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1, PoolRequestActionV1
+from loom.nebius_pool_contract import (
+    PoolActivationV1,
+    PoolParticipantV1,
+    PoolReceiptV1,
+    PoolRequestActionV1,
+)
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import digest, resources
 from loom_service.pool_management.early_cancellation import read_early_cancellation
@@ -126,8 +131,10 @@ async def cancel_unstarted_pool_request(session: AsyncSession, principal: PoolPr
         return _receipt(cancelled_row)
 
 
-async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal, action: PoolRequestActionV1, *,
+async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal, activation: PoolActivationV1, *,
                                 profiles: PoolProfiles) -> PoolReceiptV1:
+    activation = PoolActivationV1.model_validate_json(activation.model_dump_json())
+    action = activation.action
     async with _locked_request(session, principal, action) as (row, pool):
         assert row is not None  # Activation never accepts a pre-prepare tombstone.
         if row.phase in {"waiting", "cancelled_unstarted"}:
@@ -135,7 +142,8 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
         if row.phase != "reserved":
             # Retained intent is idempotent readback, never another render or
             # permission to repeat an uncertain external write.
-            if row.plan_json is None or digest(row.plan_json) != row.plan_sha256:
+            if (row.plan_json is None or digest(row.plan_json) != row.plan_sha256
+                    or row.plan_json.get("activation") != activation.model_dump(mode="json")):
                 raise PoolControlError
             return _receipt(row)
         if pool.mode != "global" or row.admission_epoch != pool.admission_epoch or digest(pool.binding_json) != pool.binding_sha256:
@@ -148,6 +156,8 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
             raise PoolControlError
         participant = PoolParticipantV1.model_validate(registered.binding_json)
         now = await _clock(session)
+        if not now < activation.not_after <= row.deadline_at:
+            raise PoolControlError("pool_activation_expired")
         prepared = _render(request, participant, profiles, row.request_id, now)
         if (prepared.request_sha256 != row.request_sha256 or prepared.resources != resources(row)
                 or prepared.pod_slots != row.pod_slots or prepared.namespace_uid != row.namespace_uid
@@ -155,9 +165,15 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
             raise PoolControlError
         plan = {"schema_version": "loom.pool-workload-plan.v1", "job": prepared.job,
                 "configmap": prepared.configmap if isinstance(prepared, PreparedPoolTaskImage) else None,
-                "deadline_at": row.deadline_at.isoformat(), "request_sha256": row.request_sha256}
+                "deadline_at": row.deadline_at.isoformat(), "request_sha256": row.request_sha256,
+                "activation": activation.model_dump(mode="json")}
         activated = (await session.scalars(update(NebiusPoolRequest).where(
             NebiusPoolRequest.request_id == row.request_id,
+            # Rendering/locks may outlive the local consent. Recheck at the
+            # actual durable write; no HTTP or Kubernetes I/O occurs here.
+            func.clock_timestamp() < activation.not_after,
         ).values(phase="create_intent", plan_json=plan, plan_sha256=digest(plan))
-            .returning(NebiusPoolRequest).execution_options(populate_existing=True))).one()
+            .returning(NebiusPoolRequest).execution_options(populate_existing=True))).one_or_none()
+        if activated is None:
+            raise PoolControlError("pool_activation_expired")
         return _receipt(activated)

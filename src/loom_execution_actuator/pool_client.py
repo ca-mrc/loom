@@ -15,6 +15,7 @@ from pydantic import Field, TypeAdapter
 
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
+    PoolActivationV1,
     PoolReceiptV1,
     PoolRequestActionV1,
     PoolWaitingV1,
@@ -93,9 +94,9 @@ class PoolClient:
         action = PoolRequestActionV1.model_validate_json(action.model_dump_json())
         return await self._post(action, "status", action.model_dump_json().encode())
 
-    async def activate(self, action: PoolRequestActionV1) -> PoolReceiptV1:
-        action = PoolRequestActionV1.model_validate_json(action.model_dump_json())
-        receipt = await self._post(action, "activate", action.model_dump_json().encode())
+    async def activate(self, activation: PoolActivationV1) -> PoolReceiptV1:
+        activation = PoolActivationV1.model_validate_json(activation.model_dump_json())
+        receipt = await self._post(activation.action, "activate", activation.model_dump_json().encode())
         if not isinstance(receipt, PoolReceiptV1) or receipt.phase in {"reserved", "cancelled_unstarted"}:
             raise PoolRequestUnconfirmedError
         return receipt

@@ -130,7 +130,8 @@ async def test_real_manager_decides_whether_attached_claim_can_be_refunded(sessi
         receipt = await management.prepare(request)
         attached = await journal.accept_grant(request.key, receipt)
         if activated:
-            await management.activate(attached.action)
+            activating = await journal.begin_activation(request.key)
+            await management.activate(activating.activation)
         pending = await journal.request_cancel(request.key)
         if activated:
             with pytest.raises(PoolRequestUnconfirmedError):

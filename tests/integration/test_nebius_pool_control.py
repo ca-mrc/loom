@@ -16,12 +16,13 @@ from tests.integration.test_nebius_pool_registry import prepare
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-def action(request):
-    from loom.nebius_pool_contract import PoolRequestActionV1
+def action(request, *, activation=False):
+    from loom.nebius_pool_contract import PoolActivationV1, PoolRequestActionV1
 
-    return PoolRequestActionV1(pool_id=request.pool_id, request_key=request.key,
+    result = PoolRequestActionV1(pool_id=request.pool_id, request_key=request.key,
         admission_epoch=request.admission_epoch,
         request_sha256=canonical_digest(request.model_dump(mode="json")).removeprefix("sha256:"))
+    return PoolActivationV1(action=result, not_after=request.deadline_at) if activation else result
 
 
 async def operate(sessions, principal, request, *, profiles=None, operation="activate"):
@@ -54,7 +55,7 @@ async def test_activation_freezes_actual_documents_once_and_replay_never_renews_
         return activation_time
 
     monkeypatch.setattr(control, "_clock", clock)
-    activated = await operate(sessions, principals[0], action(body), profiles=profiles)
+    activated = await operate(sessions, principals[0], action(body, activation=True), profiles=profiles)
     assert activated.phase == "create_intent" and activated.reservation_id == receipt.reservation_id
     assert activated.capacity_charged and activated.job_uid is None
     async with sessions() as session:
@@ -67,7 +68,7 @@ async def test_activation_freezes_actual_documents_once_and_replay_never_renews_
         if kind == "build":
             assert frozen["job"]["metadata"]["labels"]["loom.lease-epoch"] == "3"
     activation_time = body.deadline_at + timedelta(hours=1)
-    replay = await operate(sessions, principals[0], action(body), profiles=PoolProfiles())
+    replay = await operate(sessions, principals[0], action(body, activation=True), profiles=PoolProfiles())
     assert replay == activated
     async with sessions() as session:
         assert (await session.get(NebiusPoolRequest, receipt.reservation_id)).plan_json == frozen
@@ -87,7 +88,7 @@ async def test_expired_unactivated_grant_is_still_charged_and_never_gets_an_inte
 
     monkeypatch.setattr(control, "_clock", clock)
     with pytest.raises(control.PoolControlError):
-        await operate(sessions, principals[0], action(body), profiles=profiles)
+        await operate(sessions, principals[0], action(body, activation=True), profiles=profiles)
     async with sessions() as session:
         row = await session.get(NebiusPoolRequest, receipt.reservation_id)
         assert row.phase == "reserved" and row.plan_json is None
@@ -109,7 +110,7 @@ async def test_status_does_not_renew_and_cancelled_wait_or_grant_cannot_activate
     assert cancelled.phase == "cancelled_unstarted" and not cancelled.capacity_charged
     assert await operate(sessions, principals[0], action(body), operation="cancel") == cancelled
     with pytest.raises(PoolControlError):
-        await operate(sessions, principals[0], action(body), profiles=profiles)
+        await operate(sessions, principals[0], action(body, activation=True), profiles=profiles)
     async with sessions() as session:
         row = await session.get(NebiusPoolRequest, identity)
         assert row.renewed_at == renewed and row.plan_json is None
@@ -122,7 +123,7 @@ async def test_concurrent_activation_and_cancellation_cannot_both_win(sessions):
     receipt = await prepare(sessions, principals[0], executions[0], profiles)
     request = action(executions[0])
     results = await asyncio.wait_for(asyncio.gather(
-        operate(sessions, principals[0], request, profiles=profiles),
+        operate(sessions, principals[0], action(executions[0], activation=True), profiles=profiles),
         operate(sessions, principals[0], request, operation="cancel"), return_exceptions=True), timeout=10)
     assert sum(isinstance(result, PoolControlError) for result in results) == 1
     async with sessions() as session:
@@ -137,7 +138,7 @@ async def test_activation_never_commits_the_callers_transaction(sessions):
     _, principals, executions, _, profiles, _ = await mixed_setup(sessions)
     receipt = await prepare(sessions, principals[0], executions[0], profiles)
     async with sessions() as session:
-        assert (await activate_pool_request(session, principals[0], action(executions[0]), profiles=profiles)).phase == "create_intent"
+        assert (await activate_pool_request(session, principals[0], action(executions[0], activation=True), profiles=profiles)).phase == "create_intent"
         async with sessions() as observer:
             assert (await observer.get(NebiusPoolRequest, receipt.reservation_id)).phase == "reserved"
         await session.rollback()
@@ -174,7 +175,7 @@ async def test_unqualified_activation_creates_no_intent(sessions, damage):
         profiles = PoolProfiles(profiles.execution | {key: replace(original,
             runtime=replace(original.runtime, node_selector={"nebius.com/node-group-id": "foreign"}))}, profiles.task_images)
     with pytest.raises(PoolControlError):
-        await operate(sessions, principal, request, profiles=profiles)
+        await operate(sessions, principal, action(executions[0], activation=True).model_copy(update={"action": request}), profiles=profiles)
     async with sessions() as session:
         row = (await session.scalars(select(NebiusPoolRequest))).one()
         assert row.phase in {"reserved", "waiting"} and row.plan_json is None

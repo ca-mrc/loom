@@ -1742,6 +1742,12 @@ origin/profile and charged envelope, then freezes the actual execution Job or
 native-build Job/ConfigMap once. The absolute deadline is retained and first
 activation uses only the remaining runtime; replay returns the stored receipt,
 never a rerender or renewed allowance. Status does not renew waiting freshness.
+First activation also requires a distinct, immutable consent with an aware
+`not_after` deadline. Management checks it under the request lock and again at
+the intent write, bounds it by the workload deadline, and retains it in the frozen
+plan. Exact replay can recover an expired consent's already-committed intent;
+changed consent cannot renew it. Consent expiry does not release capacity or
+shorten an already-accepted workload's runtime deadline.
 Unstarted cancellation can atomically cancel waiting or reserved work, including
 while intake is closed; it cannot cancel an already activated intent into free
 capacity. Concurrent activation/cancellation has one winner. These functions own
@@ -1819,7 +1825,13 @@ This retains its immutable attempt and lease epoch, records a truthful no-Job re
 and commits the refund and terminal outbox evidence together. It cannot change a
 superseding claim or hide an existing native-build effect. If activation won the race,
 the grant remains charged and requires stop/drain reconciliation instead.
-This primitive does not yet implement controller activation, output drain,
+Before requesting activation the outbox rechecks the exact current claim, source,
+live lease/demand, originating class and rollout intake, then saves consent bounded
+by that lease and the original runtime deadline. A heartbeat cannot extend saved
+consent. Local cancellation or stale ownership after manager activation retains
+the receipt as `stop_pending`, without a refund. The outbox preserves first
+activation evidence independently from the original reservation receipt.
+This primitive does not yet connect the installed controller, output drain,
 or release, and does not independently authorize an originating application.
 Database-backed HTTP tests connect this journal to real management prepare and
 activation; this is not evidence that installed controllers use it.

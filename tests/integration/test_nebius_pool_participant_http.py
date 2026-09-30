@@ -11,7 +11,7 @@ from sqlalchemy import func, select, update
 
 from loom.db.nebius_pool_schema import NebiusPoolRequest
 from loom.db.schema import Token
-from loom.nebius_pool_contract import PoolRequestActionV1
+from loom.nebius_pool_contract import PoolActivationV1, PoolRequestActionV1
 from loom.pipeline.keys import canonical_digest
 from loom_service.app import create_app
 from loom_service.config import LoomServiceSettings
@@ -71,10 +71,11 @@ async def test_actual_participant_client_and_routes_prepare_replay_activate_and_
         first = await management.prepare(request)
         assert first.phase == "reserved"
         assert await management.prepare(request) == first
-        activated = await management.activate(action(request))
+        activation = PoolActivationV1(action=action(request), not_after=request.deadline_at)
+        activated = await management.activate(activation)
         assert activated.phase == "create_intent" and activated.reservation_id == first.reservation_id
         assert await management.status(action(request)) == activated
-        assert await management.activate(action(request)) == activated
+        assert await management.activate(activation) == activated
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
         row = await session.get(NebiusPoolRequest, first.reservation_id)
@@ -115,7 +116,8 @@ async def test_durable_local_selection_through_real_management_http_claims_only_
         replay = await client(http, token).prepare((await outbox(sessions, participant).get(request.key)).request)
         assert replay == reserved
         assert await journal.accept_grant(request.key, replay) == attached
-        assert (await management.activate(attached.action)).phase == "create_intent"
+        pending = await journal.begin_activation(request.key)
+        assert (await management.activate(pending.activation)).phase == "create_intent"
     assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
 
 
@@ -219,14 +221,15 @@ async def test_lost_committed_http_reply_recovers_the_same_grant_and_local_attem
             assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
         reserved = await client(http, token).prepare(request)
         attached = await journal.accept_grant(request.key, reserved)
+        pending = await journal.begin_activation(request.key)
         if lost_operation == "activate":
             with pytest.raises(PoolRequestUnconfirmedError):
-                await management.activate(attached.action)
+                await management.activate(pending.activation)
             assert calls == ["prepare", "activate"]
             assert (await client(http, token).status(attached.action)).phase == "create_intent"
         else:
-            assert (await management.activate(attached.action)).phase == "create_intent"
-        assert await outbox(sessions, participant).accept_grant(request.key, reserved) == attached
+            assert (await management.activate(pending.activation)).phase == "create_intent"
+        assert await outbox(sessions, participant).accept_grant(request.key, reserved) == pending
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
         assert (await session.get(NebiusPoolRequest, reserved.reservation_id)).phase == "create_intent"
