@@ -120,8 +120,50 @@ CREATE TABLE nebius_pool_cleanup_observations (
 );
 ALTER TABLE nebius_pool_requests ADD CONSTRAINT nebius_pool_request_cleanup_fk FOREIGN KEY(cleanup_observation_id, request_id, plan_sha256, namespace_uid) REFERENCES nebius_pool_cleanup_observations (observation_id, request_id, plan_sha256, namespace_uid) ON DELETE RESTRICT;
 
+CREATE TABLE nebius_pool_captures (
+    capture_id UUID PRIMARY KEY,
+    pool_id UUID NOT NULL REFERENCES nebius_pool_bindings(pool_id) ON DELETE RESTRICT,
+    admission_epoch BIGINT NOT NULL,
+    registration_sha256 TEXT NOT NULL,
+    scope_sha256 TEXT NOT NULL,
+    scope_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT nebius_pool_capture_pool_key UNIQUE(capture_id, pool_id),
+    CONSTRAINT nebius_pool_capture_shape_check CHECK (
+        capture_id <> '00000000-0000-0000-0000-000000000000'::uuid AND admission_epoch > 0 AND
+        registration_sha256 ~ '^[0-9a-f]{64}$' AND scope_sha256 ~ '^[0-9a-f]{64}$' AND
+        jsonb_typeof(scope_json) = 'object')
+);
+CREATE TABLE nebius_pool_observations (
+    observation_id UUID PRIMARY KEY,
+    pool_id UUID NOT NULL,
+    capture_id UUID NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    observation_sha256 TEXT NOT NULL,
+    observation_json JSONB NOT NULL,
+    CONSTRAINT nebius_pool_observation_capture_fk FOREIGN KEY(capture_id, pool_id)
+        REFERENCES nebius_pool_captures(capture_id, pool_id) ON DELETE RESTRICT,
+    CONSTRAINT nebius_pool_observation_replay_key UNIQUE(capture_id),
+    CONSTRAINT nebius_pool_observation_shape_check CHECK (
+        observation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        observation_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(observation_json) = 'object')
+);
+
     """)
     op.execute("""
+        CREATE FUNCTION retain_nebius_pool_capture_evidence() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'global pool capture evidence is immutable' USING ERRCODE = '23514';
+        END;
+        $$;
+        CREATE TRIGGER nebius_pool_capture_retention_guard
+        BEFORE UPDATE OR DELETE ON nebius_pool_captures
+        FOR EACH ROW EXECUTE FUNCTION retain_nebius_pool_capture_evidence();
+        CREATE TRIGGER nebius_pool_observation_retention_guard
+        BEFORE UPDATE OR DELETE ON nebius_pool_observations
+        FOR EACH ROW EXECUTE FUNCTION retain_nebius_pool_capture_evidence();
+
         CREATE FUNCTION validate_nebius_pool_registration_mutation() RETURNS trigger
         LANGUAGE plpgsql AS $$
         DECLARE
@@ -260,7 +302,8 @@ def downgrade() -> None:
     op.execute("""
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
                    nebius_pool_cleanup_observations, nebius_pool_machines,
-                   nebius_pool_machine_credentials IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_machine_credentials, nebius_pool_captures,
+                   nebius_pool_observations IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
@@ -270,6 +313,8 @@ def downgrade() -> None:
             END IF;
         END $$;
         ALTER TABLE nebius_pool_requests DROP CONSTRAINT nebius_pool_request_cleanup_fk;
+        DROP TABLE nebius_pool_observations;
+        DROP TABLE nebius_pool_captures;
         DROP TABLE nebius_pool_cleanup_observations;
         DROP TABLE nebius_pool_requests;
         DROP TABLE nebius_pool_machine_credentials;
@@ -280,4 +325,5 @@ def downgrade() -> None:
         DROP FUNCTION validate_nebius_pool_request_mutation();
         DROP FUNCTION validate_nebius_pool_registration_mutation();
         DROP FUNCTION validate_nebius_pool_machine_mutation();
+        DROP FUNCTION retain_nebius_pool_capture_evidence();
     """)

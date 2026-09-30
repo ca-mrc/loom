@@ -1615,6 +1615,16 @@ gateway are integrated and qualified together.
 
 ## Global pool reservation journal
 
+The management-side observation registry issues a persisted capture scope from
+registered participants and committed gateway Job receipts. A dedicated observer
+can publish exactly one provider/cluster snapshot for that scope; an identical
+replay returns its retained identity, not a fresh observation. Changed bodies,
+credentials, registration or physical node-group identity fail closed. New
+reservations do not invalidate an in-flight capture and cannot be inserted into
+its represented-Job list. Capture/observation rows are immutable and do not alter
+request phases or release capacity. Collection runs outside SQL transactions.
+This internal registry is not yet connected to public routes or global grants.
+
 The internal execution-prepare adapter accepts a typed runtime/requirements
 snapshot, not arbitrary Kubernetes documents or a caller's resource total. It
 qualifies the registered namespace/profile, execution-class compatibility and

@@ -13,6 +13,7 @@ from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant,
 from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.contracts import (
     KubernetesCapacitySnapshot,
+    ManagedPodPlacement,
     NodeGroupPlacement,
     ProviderCapacitySnapshot,
     ResourceTotals,
@@ -188,3 +189,82 @@ async def test_participant_machine_cannot_issue_or_publish_observer_scope(sessio
         principal = await resolve_pool_machine(session, "Bearer " + raw)
         with pytest.raises(PoolObservationError):
             await issue_pool_capture(session, principal)
+
+
+async def observed_request(sessions, participant):
+    request_id, local_id, job_uid = uuid4(), uuid4(), uuid4()
+    plan = {"job": {"metadata": {"name": "fixed-job", "namespace": participant.execution_namespace.name},
+                    "private_command": "never-return-this"}}
+    async with sessions.begin() as session:
+        await session.execute(insert(NebiusPoolRequest).values(
+            request_id=request_id, pool_id=participant.pool_id, participant_id=participant.participant_id,
+            namespace_uid=participant.execution_namespace.uid, workload_kind="trial", local_work_id=local_id,
+            generation=1, admission_epoch=1, target_id="native", request_sha256="d" * 64,
+            request_json={"typed": True}, deadline_at=datetime.now(UTC) + timedelta(minutes=10),
+            phase="reserved", cpu_millis=1000, memory_mib=1024, ephemeral_storage_mib=1024, pod_slots=1,
+        ))
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == request_id).values(
+            phase="create_intent", plan_json=plan, plan_sha256=canonical_digest(plan).removeprefix("sha256:")))
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == request_id).values(
+            phase="observed", job_uid=job_uid))
+    return request_id, local_id, job_uid
+
+
+async def test_capture_uses_exact_committed_job_receipts_without_exposing_private_plan(sessions):
+    participant, principal, _ = await setup(sessions)
+    request_id, local_id, job_uid = await observed_request(sessions, participant)
+    capture = await capture_scope(sessions, principal)
+    assert len(capture.scope.jobs) == 1
+    job = capture.scope.jobs[0]
+    assert (job.reservation_id, job.lease_id, job.job_uid, job.generation, job.target_id) == (
+        request_id, str(local_id), str(job_uid), 1, "native")
+    assert "never-return-this" not in capture.scope.model_dump_json()
+    _, kubernetes = snapshots(capture)
+    kubernetes = kubernetes.model_copy(update={"pending_jobs": 1, "pending_pods": [ManagedPodPlacement(
+        uid="pod-1", lease_id=f"reservation:{request_id}", generation=1,
+        requests=ResourceTotals(cpu_millis=1000, memory_mib=1024, storage_mib=1024),
+    )]})
+    await publish(sessions, principal, capture, kubernetes=kubernetes)
+
+
+async def test_later_receipt_cannot_be_smuggled_into_an_older_capture(sessions):
+    from loom_service.pool_management.observations import PoolObservationError
+
+    participant, principal, _ = await setup(sessions)
+    capture = await capture_scope(sessions, principal)
+    request_id, _, _ = await observed_request(sessions, participant)
+    _, kubernetes = snapshots(capture)
+    kubernetes = kubernetes.model_copy(update={"pending_jobs": 1, "pending_pods": [ManagedPodPlacement(
+        uid="pod-1", lease_id=f"reservation:{request_id}", generation=1,
+        requests=ResourceTotals(cpu_millis=1000, memory_mib=1024, storage_mib=1024),
+    )]})
+    with pytest.raises(PoolObservationError):
+        await publish(sessions, principal, capture, kubernetes=kubernetes)
+
+
+async def test_pending_registration_change_is_not_erased_or_flushed_by_capture(sessions):
+    from loom_service.pool_management.observations import PoolObservationError, issue_pool_capture
+
+    participant, principal, _ = await setup(sessions)
+    async with sessions() as session:
+        row = await session.get(NebiusPoolParticipant, participant.participant_id)
+        row.phase = "fenced"
+        with pytest.raises(PoolObservationError):
+            await issue_pool_capture(session, principal)
+        assert row.phase == "fenced" and row in session.dirty
+        async with sessions() as reader:
+            assert (await reader.get(NebiusPoolParticipant, participant.participant_id)).phase == "active"
+
+
+async def test_rolled_back_capture_has_no_authority(sessions):
+    from loom.db.nebius_pool_schema import NebiusPoolCapture
+    from loom_service.pool_management.observations import PoolObservationError, issue_pool_capture
+
+    _, principal, _ = await setup(sessions)
+    async with sessions() as session:
+        capture = await issue_pool_capture(session, principal)
+        await session.rollback()
+    async with sessions() as session:
+        assert await session.get(NebiusPoolCapture, capture.capture_id) is None
+    with pytest.raises(PoolObservationError):
+        await publish(sessions, principal, capture)

@@ -60,11 +60,13 @@ from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
 )
 from loom.db.nebius_pool_schema import NebiusPoolBinding as NebiusPoolBinding
+from loom.db.nebius_pool_schema import NebiusPoolCapture as NebiusPoolCapture
 from loom.db.nebius_pool_schema import (
     NebiusPoolCleanupObservation as NebiusPoolCleanupObservation,
 )
 from loom.db.nebius_pool_schema import NebiusPoolMachine as NebiusPoolMachine
 from loom.db.nebius_pool_schema import NebiusPoolMachineCredential as NebiusPoolMachineCredential
+from loom.db.nebius_pool_schema import NebiusPoolObservation as NebiusPoolObservation
 from loom.db.nebius_pool_schema import NebiusPoolParticipant as NebiusPoolParticipant
 from loom.db.nebius_pool_schema import NebiusPoolRequest as NebiusPoolRequest
 

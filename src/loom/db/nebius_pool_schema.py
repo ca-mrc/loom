@@ -185,3 +185,42 @@ class NebiusPoolCleanupObservation(Base):
     writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
     evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class NebiusPoolCapture(Base):
+    """Server-issued physical inventory scope, separate from later reservations."""
+
+    __tablename__ = "nebius_pool_captures"
+    __table_args__ = (
+        UniqueConstraint("capture_id", "pool_id", name="nebius_pool_capture_pool_key"),
+        CheckConstraint("capture_id <> '00000000-0000-0000-0000-000000000000'::uuid AND admission_epoch > 0 AND "
+                        "registration_sha256 ~ '^[0-9a-f]{64}$' AND scope_sha256 ~ '^[0-9a-f]{64}$' AND "
+                        "jsonb_typeof(scope_json) = 'object'", name="nebius_pool_capture_shape_check"),
+    )
+    capture_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_bindings.pool_id", ondelete="RESTRICT"), nullable=False)
+    admission_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    registration_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.clock_timestamp())
+
+
+class NebiusPoolObservation(Base):
+    """One immutable provider/cluster snapshot for an issued capture scope."""
+
+    __tablename__ = "nebius_pool_observations"
+    __table_args__ = (
+        ForeignKeyConstraint(["capture_id", "pool_id"], ["nebius_pool_captures.capture_id", "nebius_pool_captures.pool_id"],
+                             ondelete="RESTRICT", name="nebius_pool_observation_capture_fk"),
+        UniqueConstraint("capture_id", name="nebius_pool_observation_replay_key"),
+        CheckConstraint("observation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "observation_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(observation_json) = 'object'",
+                        name="nebius_pool_observation_shape_check"),
+    )
+    observation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    capture_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    observation_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    observation_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
