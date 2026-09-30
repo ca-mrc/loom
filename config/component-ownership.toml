@@ -515,6 +515,8 @@ build_context = "."
 source_paths = [
   ".dockerignore",
   "README.md",
+  "cmd/loom-build-deadline/**",
+  "go.mod",
   "database/capacity_guard_migrations/**",
   "database/capacity_build_guard_migrations/**",
   "deploy/Dockerfile.service",
@@ -826,6 +828,7 @@ include_paths = [
   "tests/integrations/**/*.py",
 ]
 exclude_paths = [
+  "tests/integration/test_nebius_build_deadline.py",
   "tests/integration/test_application_schema_reference.py",
   "tests/integration/test_execution_actuator_k3s.py",
   "tests/integration/test_node_share_memory_k3s.py",
@@ -896,6 +899,7 @@ id = "python-integration-docker"
 language = "python"
 lane = "integration-docker"
 include_paths = [
+  "tests/integration/test_nebius_build_deadline.py",
   "tests/integration/test_docker_driver_exec.py",
   "tests/integration/test_docker_driver_exec_streaming.py",
   "tests/integration/test_docker_driver_healthcheck.py",

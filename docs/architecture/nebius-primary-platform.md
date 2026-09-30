@@ -1891,9 +1891,21 @@ remain authorized, then confirm durable committed/unavailable output before fina
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
 it does not qualify execution output. The execution runtime adapter,
-installed gateway startup and native-build delayed-start absolute deadline
-remain unimplemented boundaries. The execution PID1 runtime enforces its original
+and installed gateway startup remain unimplemented boundaries.
+The execution PID1 runtime enforces its original
 absolute deadline, but does not itself attest output drain or release capacity.
+
+Global native builds also enforce that same original absolute deadline across
+prepare, rootless build and publish. Each container runs the static
+`loom-build-deadline` supervisor as PID1; expired startup cannot launch its phase.
+The service image includes the supervisor, and prepare copies it into a separate
+8-MiB volume mounted read-only by the untrusted builder, without claim or Secret
+mounts. The guard disables same-UID process inspection, signals the phase process
+group at timeout/cancellation and allows at most ten seconds before exiting PID1;
+container teardown also retires descendants that changed process groups.
+Existing per-component and Kubernetes Job timeouts remain additional bounds.
+The small volume remains inside the existing aggregate Pod storage limit. Timeout
+is a result/stop condition, never proof that global capacity has been released.
 
 The native-build local outbox commits an immutable typed selection before contacting
 management. It keeps selection generation separate from build lease epoch and permits

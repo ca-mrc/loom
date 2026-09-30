@@ -81,6 +81,21 @@ def prepare_pool_task_image(request: PoolTaskImagePrepareV1, *, participant: Poo
         metadata["labels"]["app.kubernetes.io/managed-by"] = "loom-pool-gateway"
         metadata.setdefault("annotations", {})["loom.openai.com/target-id"] = request.target_id
     pod = job["spec"]["template"]["spec"]
+    # Job.activeDeadlineSeconds starts at Job startup, not original admission.
+    # Each trusted phase therefore keeps the same absolute cutoff even when
+    # CREATE, scheduling or a preceding phase was delayed.
+    pod["volumes"].append({"name": "deadline-runtime", "emptyDir": {"sizeLimit": "8Mi"}})
+    for phase in [*pod["initContainers"], *pod["containers"]]:
+        runtime = "/usr/local/bin/loom-build-deadline"
+        extra: list[str] = []
+        if phase["name"] in {"prepare", "build"}:
+            phase["volumeMounts"].append({"name": "deadline-runtime", "mountPath": "/loom/deadline-runtime",
+                                         "readOnly": phase["name"] == "build"})
+        if phase["name"] == "prepare":
+            extra.append("--install-runtime")
+        elif phase["name"] == "build":
+            runtime = "/loom/deadline-runtime/loom-build-deadline"
+        phase["command"] = [runtime, "--deadline-at", request.deadline_at.isoformat(), *extra, "--", *phase["command"]]
     for volume in pod["volumes"]:
         if volume["name"] == "claim":
             volume["configMap"]["name"] = name
