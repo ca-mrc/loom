@@ -60,17 +60,20 @@ async def machine(sessions, pool_id, participant_id=None):
 
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
-                pinned=True):
+                pinned=True, memory_quota=True):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
     ))
     placement = placement.model_copy(update={"node_group": placement.node_group.model_copy(update={"max_nodes": max_nodes})})
+    if not memory_quota:
+        placement = placement.model_copy(update={"quota_resources": {
+            key: quota for key, quota in placement.quota_resources.items() if key != "memory"}})
     first, body = inputs()
     policy = {"observation_max_age_seconds": 60, "max_create_per_minute": 10,
               "max_pending_jobs": 10, "max_unschedulable_jobs": 0,
               "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2}
-    selector = {"loom.nebius/role": "execution"}
+    selector = {"loom.nebius/role": "execution", "loom.nebius/node-os": "linux", "loom.nebius/node-arch": "amd64"}
     if pinned:
         selector["nebius.com/node-group-id"] = group_id
     binding = {"node_selector": selector, "admission": policy,
@@ -92,7 +95,8 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
             "environment_class": environment_classes[index],
             "execution_namespace": first.execution_namespace.model_copy(update={"name": f"{group_id}-execution-{index}", "uid": uuid4()}),
             "build_namespace": first.build_namespace.model_copy(update={"name": f"{group_id}-build-{index}", "uid": uuid4()}),
-            "targets": (first.targets[0].model_copy(update={"profile_id": uuid4()}),),
+            "targets": (first.targets[0].model_copy(update={"profile_id": uuid4(),
+                "workload_kinds": ("trial", "verifier", "task_image_build")}),),
         })
         async with sessions.begin() as session:
             await session.execute(insert(NebiusPoolParticipant).values(
@@ -144,10 +148,11 @@ async def publish_placement(sessions, observer, placement):
 
 
 async def prepare(sessions, principal, request, profiles):
-    from loom_service.pool_management.registry import prepare_execution
+    from loom_service.pool_management.registry import PoolProfiles, prepare_execution
 
     async with sessions.begin() as session:
-        return await prepare_execution(session, principal, request, profiles=profiles)
+        return await prepare_execution(session, principal, request,
+            profiles=profiles if isinstance(profiles, PoolProfiles) else PoolProfiles(execution=profiles))
 
 
 async def test_concurrent_environment_sessions_cannot_overbook_before_pods_exist(sessions):
@@ -230,10 +235,11 @@ async def test_waiting_renews_without_reordering_or_fabricating_a_grant(sessions
         assert current.phase == "waiting" and current.granted_at is None and current.priority == 2
 
 
-async def test_distinct_physical_pools_cannot_double_spend_shared_provider_quota(sessions):
-    first = await setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3, parent_id="shared")
+@pytest.mark.parametrize("memory_quotas", [(True, True), (False, False), (True, False)])
+async def test_distinct_physical_pools_cannot_double_spend_shared_provider_quota(sessions, memory_quotas):
+    first = await setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3, parent_id="shared", memory_quota=memory_quotas[0])
     second = await setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3,
-                         parent_id="shared", group_id="other-pool")
+                         parent_id="shared", group_id="other-pool", memory_quota=memory_quotas[1])
     profiles = first[3] | second[3]
     results = await asyncio.wait_for(asyncio.gather(
         prepare(sessions, first[1][0], first[2][0], profiles),
@@ -283,21 +289,25 @@ async def test_a_generic_execution_label_is_not_a_physical_node_group_binding(se
 
 
 async def test_admission_rejects_a_transaction_that_cannot_see_committed_peer_grants(sessions):
-    from loom_service.pool_management.registry import PoolAdmissionError, prepare_execution
+    from loom_service.pool_management.registry import (
+        PoolAdmissionError,
+        PoolProfiles,
+        prepare_execution,
+    )
 
     _, principals, requests, profiles, _ = await setup(sessions)
     async with sessions.begin() as session:
         await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
         with pytest.raises(PoolAdmissionError):
-            await prepare_execution(session, principals[0], requests[0], profiles=profiles)
+            await prepare_execution(session, principals[0], requests[0], profiles=PoolProfiles(execution=profiles))
 
 
 async def test_prepare_never_commits_the_callers_transaction(sessions):
-    from loom_service.pool_management.registry import prepare_execution
+    from loom_service.pool_management.registry import PoolProfiles, prepare_execution
 
     _, principals, requests, profiles, _ = await setup(sessions)
     async with sessions() as session:
-        assert (await prepare_execution(session, principals[0], requests[0], profiles=profiles)).phase == "reserved"
+        assert (await prepare_execution(session, principals[0], requests[0], profiles=PoolProfiles(execution=profiles))).phase == "reserved"
         await session.rollback()
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 0
