@@ -1,10 +1,16 @@
 """Only explicit key rejection at the frozen object endpoint proves revocation."""
 from __future__ import annotations
 
+import copy
+import json
+
 import httpx
 import pytest
 
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
+from tests.unit.test_nebius_application_render import inputs
+from tests.unit.test_nebius_environment_contract import foundation_from
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def plan():
@@ -96,3 +102,92 @@ async def test_client_auth_cannot_replace_the_original_key_probe():
         with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
             await ApplicationObjectAccessVerifier(http).verify_retired(
                 plan(), {"access-key": "retired-access", "secret-key": "private-key"})
+
+
+@pytest.fixture
+def protected_scope(platform_inputs):
+    from loom.nebius_application_render import render_application
+    from loom_service.application_management.cloud_effects import ApplicationStorageAccessV1
+    from loom_service.application_management.plans import freeze_plan
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    config = copy.deepcopy(foundation.platform_config)
+    config["buckets"].update(artifacts="probe-artifacts", trajectories="probe-trajectories", source="probe-source")
+    foundation = foundation_from(config)
+    frozen = freeze_plan(render_application(row, release, shared, foundation), release, shared)
+    storage = ApplicationStorageAccessV1(data_environment_id=shared.data_environment_id,
+        project_id="application-project", data_group_id="data-group", source_group_id="source-group")
+    return foundation, shared, storage, frozen
+
+
+@pytest.mark.parametrize("denial", ["AccessDenied", "InvalidAccessKeyId"])
+async def test_scoped_denial_probes_all_original_business_and_source_buckets(protected_scope, denial):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation, shared, storage, frozen = protected_scope
+    before = json.dumps(frozen, sort_keys=True)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(403, text=f"<Error><Code>{denial}</Code></Error>")
+
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"], transport=httpx.MockTransport(respond)) as http:
+        verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
+        await verifier.verify_retired(frozen, {"access-key": "original-key", "secret-key": "original-secret"})
+    assert {request.url.path for request in requests} == {"/probe-artifacts", "/probe-trajectories", "/probe-source"}
+    assert len(requests) == 3
+    assert all(request.method == "GET" and request.url.params["max-keys"] == "1" for request in requests)
+    assert all("Credential=original-key/" in request.headers["Authorization"] for request in requests)
+    assert json.dumps(frozen, sort_keys=True) == before  # No invented legacy plan fields.
+
+
+@pytest.mark.parametrize("bad_bucket", ["probe-artifacts", "probe-trajectories", "probe-source"])
+@pytest.mark.parametrize("status,body", [(200, "<ListBucketResult/>"), (500, "<Error><Code>AccessDenied</Code></Error>"),
+    (403, "<html>denied</html>"), (403, "<Error><Code>SignatureDoesNotMatch</Code></Error>")])
+async def test_one_unqualified_scope_prevents_retirement(protected_scope, bad_bucket, status, body):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation, shared, storage, frozen = protected_scope
+
+    def respond(request):
+        return (httpx.Response(status, text=body) if request.url.path == "/" + bad_bucket
+                else httpx.Response(403, text="<Error><Code>AccessDenied</Code></Error>"))
+
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"], transport=httpx.MockTransport(respond)) as http:
+        verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
+        with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
+            await verifier.verify_retired(frozen, {"access-key": "original-key", "secret-key": "original-secret"})
+
+
+async def test_active_key_qualifies_identical_read_only_probes_in_every_scope(protected_scope):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation, shared, storage, frozen = protected_scope
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, text=("<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>"
+            f"<Name>{request.url.path[1:]}</Name><Prefix>loom-application-access-probe/</Prefix>"
+            "<KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"))
+
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"], transport=httpx.MockTransport(respond)) as http:
+        verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
+        await verifier.verify_active(frozen, {"access-key": "active-key", "secret-key": "active-secret"})
+    assert {request.url.path for request in requests} == {"/probe-artifacts", "/probe-trajectories", "/probe-source"}
+    assert len(requests) == 3 and all(request.method == "GET" for request in requests)
+    assert all("Credential=active-key/" in request.headers["Authorization"] for request in requests)
+
+
+@pytest.mark.parametrize("status,body", [(403, "<Error><Code>AccessDenied</Code></Error>"),
+    (200, "<html>ok</html>"), (200, "<ListBucketResult><Name>foreign</Name></ListBucketResult>")])
+async def test_invalid_positive_probe_never_qualifies_active_access(protected_scope, status, body):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation, shared, storage, frozen = protected_scope
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(lambda request: httpx.Response(status, text=body))) as http:
+        verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
+        with pytest.raises(ProviderWaitingError, match="application_object_access_not_ready"):
+            await verifier.verify_active(frozen, {"access-key": "active-key", "secret-key": "active-secret"})
