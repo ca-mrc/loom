@@ -176,11 +176,15 @@ do not select a physical target or hand-author a binding.
 
 Automatic compilation is fail-closed and intentionally not a general Docker
 converter. It accepts one Linux x86 CPU task with explicit CPU, RAM,
-ephemeral-storage and timeout bounds, one safe instruction, a shared script
-verifier, and safe relative artifact paths. The API-model agent can be
-`direct-completion`, `litellm`, or `terminus-2`. Direct-completion/LiteLLM tasks
-use `/workspace`; Terminus tasks can use `/workspace` or `/app`. Both require
-the `agent` identity and `gateway-only` network policy.
+ephemeral-storage and timeout bounds, one safe instruction, a script verifier,
+and safe relative artifact paths. The API-model agent can be
+`direct-completion`, `litellm`, or `terminus-2`. Direct-completion/LiteLLM use
+the response-only compiler: the model never enters the task image and
+verification runs in the same execution attempt. Terminus-2 is the current
+implementation of the private-sandbox compiler for an agent that reads and
+executes in the task filesystem. Its controller can use `/workspace` or `/app`,
+while terminal commands run in the task-image sidecar. Both shapes require the
+`agent` identity and `gateway-only` network policy.
 
 Terminus task Dockerfiles can enter the separate task-image preparation path;
 execution still uses the prepared immutable image and a matching frozen grant.
@@ -188,6 +192,18 @@ Terminus also requires a private `verifier/` script and workspace isolation.
 All declared and required artifact paths are frozen into the runtime plan with
 the lossless model-call trajectory, attributed usage and structured verifier
 output. Multiple artifacts are supported within those path constraints.
+
+Shared and separate verification are properties of the private-sandbox plan,
+not of the Terminus harness. Shared grading injects private inputs and verifies
+in the existing task sandbox. Separate grading commits a validated public
+workspace. The deferred-plan compiler emits a fixed verifier command without
+inspecting or rewriting the preceding agent command, and the reservation path
+gates a child lease on parent cleanup. Automatic child-lease reservation is not
+wired yet; [#2212](https://github.com/qianyi-sun/loom/issues/2212) owns that
+on-demand lifecycle. A future workspace-reading harness supplies its own
+trusted agent phase and evidence declarations while reusing this topology,
+deferred-plan contract, allocation and cleanup gate. The implementation
+checklist is in [`hosted-agent-harness.md`](hosted-agent-harness.md).
 
 The compiler rejects GPU, multi-step, undeclared identity extensions, ordinary sidecars, skill, MCP,
 extra environment-variable, custom DNS/host/tmpfs, health-check, capability,

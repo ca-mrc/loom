@@ -1868,9 +1868,11 @@ loom run
 - `direct-completion` — sends the prompt directly through the Gateway and can
   project response text to exact artifact paths; it does not execute workspace
   tools. `litellm` remains a deprecated compatibility alias.
-- `terminus-2` — Harbor Terminus2 embedded in the worker image; tool-use
-  terminal loop with typed `terminus2_*` trajectory events and Harbor artifacts
-  under `.loom/agent/`. Requires a provider + model; does not use
+- `terminus-2` — Harbor Terminus2 embedded in the local/worker runtime or the
+  digest-pinned Nebius controller image; tool-use terminal loop with typed
+  `terminus2_*` trajectory events and Harbor artifacts under `.loom/agent/`.
+  Hosted terminal commands execute in the separate task-image sandbox through
+  Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
 

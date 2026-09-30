@@ -38,6 +38,9 @@ architecture and retained data.
   registration and materialization within the current trust boundary.
 - **[Agent adapter](agent-adapter.md)** — `loom-launcher`, built-in agents, and
   per-trial installation caching.
+- **[Hosted agent harnesses](hosted-agent-harness.md)** — Nebius controller
+  phases, private task sandboxes, verifier ownership, evidence contracts, and
+  the acceptance checklist for adding a hosted harness.
 - **[Terminus-2 runtime](terminus2-runtime.md)** — the Harbor-embedded runtime
   and its Loom integration.
 - **[Verifier protocol](verifier-protocol.md)** — verifier result schema and

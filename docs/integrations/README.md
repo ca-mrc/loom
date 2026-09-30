@@ -23,6 +23,9 @@ streams.
 - Adding a whole new benchmark adapter (not just a task): see
   [`../architecture/benchmark-adapter.md`](../architecture/benchmark-adapter.md).
 - Adding a new agent harness: see
-  [`../architecture/agent-adapter.md`](../architecture/agent-adapter.md).
+  [`../architecture/agent-adapter.md`](../architecture/agent-adapter.md) for
+  local/worker adapters and
+  [`../architecture/hosted-agent-harness.md`](../architecture/hosted-agent-harness.md)
+  for automatic Nebius execution.
 - Adding a new sandbox backend: see
   [`../architecture/driver-protocol.md`](../architecture/driver-protocol.md).

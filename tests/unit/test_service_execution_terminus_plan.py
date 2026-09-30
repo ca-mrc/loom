@@ -7,7 +7,11 @@ from uuid import uuid4
 
 import pytest
 
-from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.execution_contract import VerifierTopology, workload_requirements_from_task
+from loom.execution_runtime_contract import (
+    ExecutionRuntimeResultV1,
+    validate_runtime_plan_requirements,
+)
 from loom.models.trajectory import LLMCallEvent, Terminus2UserPromptEvent
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -69,6 +73,11 @@ def test_deferred_verifier_plan_restores_committed_workspace():
         task=task, trial=trial, profile=profile, source_provenance=_provenance(),
         task_revision_sha256=_REVISION,
     )
+    agent = agent.model_copy(update={
+        "main": agent.main.model_copy(update={
+            "argv": (*agent.main.argv[:4], "future-workspace-agent", *agent.main.argv[5:]),
+        }),
+    })
     assert any(
         item.relative_path == "artifacts/workspace.tar" and item.required
         for item in agent.output_declarations
@@ -79,7 +88,10 @@ def test_deferred_verifier_plan_restores_committed_workspace():
     assert [sidecar.role_name for sidecar in verifier.sidecars if sidecar.private_sandbox] == [
         "verifier-sandbox",
     ]
-    assert verifier.main.argv[4] == "verify-sandbox"
+    assert verifier.main.argv == (
+        "python", "-I", "-m", "loom.service_execution_sandbox_task",
+        "verify-sandbox", "--workspace", "/workspace",
+    )
     assert any(
         item.relative_path == "verifier/output.json" and item.required
         for item in verifier.output_declarations
@@ -125,6 +137,34 @@ def test_shared_terminus_plan_omits_idle_verifier_sidecar():
                     if item.relative_path == "artifacts/answer.txt").required
     assert {"trajectory/events.jsonl", "artifacts/harbor/trajectory.json",
             "artifacts/workspace.tar", "accounting/usage.json"} <= paths
+
+
+def test_workload_topology_matches_direct_completion_plan_with_separate_task_default():
+    task = _task()
+    trial = _trial()
+    assert task.verifier.env_mode == "separate"
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=_profile(), source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    requirements = workload_requirements_from_task(task, trial)
+    assert requirements.verifier_topology == VerifierTopology.IN_ATTEMPT
+    assert plan.verifier_execution == "in_attempt"
+    validate_runtime_plan_requirements(plan, requirements)
+
+
+def test_workload_topology_matches_shared_terminus_trial_override():
+    task, trial, profile = _inputs()
+    assert task.verifier.env_mode == "separate"
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    requirements = workload_requirements_from_task(task, trial)
+    assert requirements.verifier_topology == VerifierTopology.IN_ATTEMPT
+    assert plan.verifier_execution == "in_attempt"
+    validate_runtime_plan_requirements(plan, requirements)
 
 
 def test_terminus_rejects_missing_controller_and_disabled_private_isolation():
