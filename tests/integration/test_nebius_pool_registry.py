@@ -1,0 +1,196 @@
+"""Global execution prepare serializes real management transactions before Pods."""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import func, insert, select, update
+
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolMachine,
+    NebiusPoolMachineCredential,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
+from loom.db.schema import Token
+from loom.execution_contract import nebius_cpu_execution_class
+from loom.nebius_pool_workload import PoolExecutionPrepareV1
+from loom.pipeline.keys import canonical_digest
+from loom_execution_actuator.renderer import ExecutionTargetRuntime
+from loom_execution_capacity_collector.contracts import CapacityPlacement
+from loom_service.pool_management.auth import resolve_pool_machine
+from loom_service.pool_management.render import PoolExecutionProfile
+from tests.execution_placement_fixtures import placement_fixture
+from tests.integration.test_nebius_pool_observation_registry import (
+    capture_scope,
+    publish,
+    sessions,  # noqa: F401 -- shared real PostgreSQL fixture
+    snapshots,
+)
+from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
+from tests.unit.test_nebius_pool_execution_render import inputs
+
+
+async def machine(sessions, pool_id, participant_id=None):
+    raw = "loom_pool_" + uuid4().hex + uuid4().hex
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    machine_id = uuid4()
+    async with sessions.begin() as session:
+        await session.execute(insert(NebiusPoolMachine).values(
+            machine_id=machine_id, pool_id=pool_id, participant_id=participant_id,
+            role="participant" if participant_id else "observer", credential_epoch=1, phase="active"))
+        await session.execute(insert(Token).values(token_hash=token_hash, type="pool_machine", scopes=[],
+            issued_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(hours=1)))
+        await session.execute(insert(NebiusPoolMachineCredential).values(
+            token_hash=token_hash, machine_id=machine_id, credential_epoch=1))
+    async with sessions() as session:
+        return await resolve_pool_machine(session, "Bearer " + raw)
+
+
+async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
+    placement = CapacityPlacement.model_validate(placement_fixture(
+        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
+        requested_cpu=occupied_cpu, quota_nodes=max_nodes, used_nodes=1,
+    ))
+    placement = placement.model_copy(update={"node_group": placement.node_group.model_copy(update={"max_nodes": max_nodes})})
+    first, body = inputs()
+    policy = {"observation_max_age_seconds": 60, "max_create_per_minute": 10,
+              "max_pending_jobs": 10, "max_unschedulable_jobs": 0,
+              "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2}
+    binding = {"node_selector": {"loom.nebius/role": "execution"}, "admission": policy,
+               "quota_identities": {name: [quota.parent_id, quota.region, quota.service, quota.name, quota.unit]
+                                    for name, quota in placement.quota_resources.items()}}
+    async with sessions.begin() as session:
+        await session.execute(insert(NebiusPoolBinding).values(
+            pool_id=first.pool_id, installation_id=first.installation_id, cluster_id="cluster-1",
+            node_group_id="pool-test", policy_revision=1, admission_epoch=2, mode="global",
+            binding_json=binding, binding_sha256=canonical_digest(binding).removeprefix("sha256:")))
+    participants = []
+    principals = []
+    profiles = {}
+    for index in range(2):
+        participant = first.model_copy(update={
+            "participant_id": first.participant_id if index == 0 else uuid4(),
+            "environment_id": first.environment_id if index == 0 else uuid4(),
+            "incarnation": first.incarnation if index == 0 else uuid4(),
+            "execution_namespace": first.execution_namespace.model_copy(update={"name": f"execution-{index}", "uid": uuid4()}),
+            "build_namespace": first.build_namespace.model_copy(update={"name": f"build-{index}", "uid": uuid4()}),
+            "targets": (first.targets[0].model_copy(update={"profile_id": uuid4()}),),
+        })
+        async with sessions.begin() as session:
+            await session.execute(insert(NebiusPoolParticipant).values(
+                participant_id=participant.participant_id, pool_id=first.pool_id,
+                environment_id=participant.environment_id, incarnation=participant.incarnation,
+                binding_revision=1, admission_epoch=2, phase="active", binding_json=participant.model_dump(mode="json"),
+                binding_sha256=canonical_digest(participant).removeprefix("sha256:")))
+        participants.append(participant)
+        principals.append(await machine(sessions, first.pool_id, participant.participant_id))
+        profiles[participant.targets[0].profile_id] = PoolExecutionProfile(
+            profile_id=participant.targets[0].profile_id,
+            runtime=ExecutionTargetRuntime(target_id="native", namespace=participant.execution_namespace.name),
+            candidate_sha="1" * 40, execution_class_id="linux-amd64-cpu-pod-v1",
+            runtime_image_ref="registry.example/runtime@sha256:" + "b" * 64,
+            runtime_binary_sha256="sha256:" + "c" * 64,
+            execution_class=nebius_cpu_execution_class(), image_admission_keyring=IMAGE_ADMISSION_KEYRING,
+        )
+    observer = await machine(sessions, first.pool_id)
+    capture = await capture_scope(sessions, observer)
+    provider, kubernetes = snapshots(capture)
+    provider = provider.model_copy(update={"node_group": placement.node_group, "node_count": 1,
+        "target_node_count": 1, "ready_node_count": 1, "quota_resources": placement.quota_resources})
+    kubernetes = kubernetes.model_copy(update={"nodes": placement.nodes, "active_nodes": 1, "ready_nodes": 1,
+        "template_samples": placement.template_samples})
+    await publish(sessions, observer, capture, provider=provider, kubernetes=kubernetes)
+    requests = []
+    for participant in participants:
+        # Independent environment DBs may reuse their local work UUID.
+        requests.append(PoolExecutionPrepareV1.model_validate(body | {
+            "key": body["key"] | {"participant_id": participant.participant_id},
+            "origin": body["origin"] | {"data_environment_id": participant.environment_id},
+        }))
+    return participants, principals, requests, profiles, observer
+
+
+async def prepare(sessions, principal, request, profiles):
+    from loom_service.pool_management.registry import prepare_execution
+
+    async with sessions.begin() as session:
+        return await prepare_execution(session, principal, request, profiles=profiles)
+
+
+async def test_concurrent_environment_sessions_cannot_overbook_before_pods_exist(sessions):
+    _, principals, requests, profiles, _ = await setup(sessions)
+    third = requests[0].model_copy(update={"key": requests[0].key.model_copy(update={"local_work_id": uuid4()})})
+    results = await asyncio.wait_for(asyncio.gather(
+        prepare(sessions, principals[0], requests[0], profiles),
+        prepare(sessions, principals[1], requests[1], profiles),
+        prepare(sessions, principals[0], third, profiles),
+    ), timeout=15)
+    assert sorted(result.phase for result in results) == ["reserved", "reserved", "waiting"]
+    assert len({result.reservation_id for result in results if result.phase == "reserved"}) == 2
+    async with sessions() as session:
+        rows = list((await session.scalars(select(NebiusPoolRequest))).all())
+        assert len(rows) == 3 and sum(row.cpu_millis for row in rows if row.phase == "reserved") == 3000
+        assert all(row.job_uid is None and row.plan_json is None for row in rows)
+        assert all((row.granted_at is not None) == (row.phase == "reserved") for row in rows)
+
+
+async def test_same_body_replay_returns_one_grant_and_changed_body_conflicts(sessions):
+    from loom_service.pool_management.registry import PoolAdmissionError
+
+    _, principals, requests, profiles, _ = await setup(sessions)
+    first = await prepare(sessions, principals[0], requests[0], profiles)
+    replay = await prepare(sessions, principals[0], requests[0], profiles)
+    assert first.reservation_id == replay.reservation_id
+    assert first.request_sha256 == replay.request_sha256
+    changed = requests[0].model_copy(update={"deadline_at": requests[0].deadline_at + timedelta(seconds=1)})
+    with pytest.raises(PoolAdmissionError, match="conflict"):
+        await prepare(sessions, principals[0], changed, profiles)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
+
+
+@pytest.mark.parametrize("damage", ["closed", "fenced", "deadline", "profile", "foreign-owner", "missing-observation"])
+async def test_prepare_has_no_grant_on_unqualified_authority_or_work(sessions, damage):
+    from loom_service.pool_management.registry import PoolAdmissionError
+
+    participants, principals, requests, profiles, _ = await setup(sessions)
+    request = requests[0]
+    async with sessions.begin() as session:
+        if damage == "closed":
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == participants[0].pool_id).values(mode="closed"))
+        elif damage == "fenced":
+            await session.execute(update(NebiusPoolParticipant).where(
+                NebiusPoolParticipant.participant_id == participants[0].participant_id).values(phase="fenced"))
+        elif damage == "missing-observation":
+            # New binding identity invalidates the old capture, not its stored history.
+            await session.execute(update(NebiusPoolBinding).where(
+                NebiusPoolBinding.pool_id == participants[0].pool_id).values(policy_revision=2))
+    if damage == "deadline":
+        request = request.model_copy(update={"deadline_at": datetime.now(UTC) - timedelta(seconds=1)})
+    elif damage == "profile":
+        profiles = {}
+    elif damage == "foreign-owner":
+        request = requests[1]
+    with pytest.raises(PoolAdmissionError):
+        await prepare(sessions, principals[0], request, profiles)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest).where(NebiusPoolRequest.phase == "reserved")) == 0
+
+
+async def test_waiting_renews_without_reordering_or_fabricating_a_grant(sessions):
+    _, principals, requests, profiles, _ = await setup(sessions, occupied_cpu=3000)
+    waiting = await prepare(sessions, principals[0], requests[0], profiles)
+    assert waiting.phase == "waiting" and not hasattr(waiting, "reservation_id")
+    async with sessions() as session:
+        original = (await session.scalars(select(NebiusPoolRequest))).one()
+        created_at, renewed_at = original.created_at, original.renewed_at
+    await prepare(sessions, principals[0], requests[0], profiles)
+    async with sessions() as session:
+        current = (await session.scalars(select(NebiusPoolRequest))).one()
+        assert current.created_at == created_at and current.renewed_at > renewed_at
+        assert current.phase == "waiting" and current.granted_at is None and current.priority == 2
