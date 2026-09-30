@@ -18,7 +18,10 @@ from loom.db.schema import (
 )
 from loom_control_plane import service_execution_scheduler as scheduler
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
-from tests.integration.test_service_execution_leases import _configure_scheduler_trial, _seed_ready_trial
+from tests.integration.test_service_execution_leases import (
+    _configure_scheduler_trial,
+    _seed_ready_trial,
+)
 
 
 @pytest.mark.parametrize("capacity_enabled", [True, False])

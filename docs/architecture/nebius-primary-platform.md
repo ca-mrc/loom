@@ -1974,6 +1974,13 @@ independently of build lease epochs. A configured native controller selects one
 new candidate after reconciliation, then uses the same driver/runtime path.
 The installed startup and protected no-dual-writer transition are not yet connected.
 
+The service scheduler separates workload compilation from reservation. Compilation
+retains the existing image-readiness and configuration handling, but does not claim
+the Trial, consume an attempt, reserve admission/cost/capacity, or append a command.
+The legacy scheduler immediately reserves the compiled candidate. A global
+consumer must durably freeze its selected target and runtime before prepare, then
+recheck local authority when attaching the grant; compilation alone is not a lease.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.

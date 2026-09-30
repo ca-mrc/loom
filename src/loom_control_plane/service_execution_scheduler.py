@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from sqlalchemy import select, text, update
@@ -18,7 +19,11 @@ from loom.db.schema import (
     Trial,
     TrialTaskImageMaterialization,
 )
-from loom.execution_contract import ExecutionRoutingReason, workload_requirements_from_task
+from loom.execution_contract import (
+    ExecutionRoutingReason,
+    WorkloadRequirementsV1,
+    workload_requirements_from_task,
+)
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.models.task import TaskConfig, bind_service_execution_runtime_plan
@@ -44,6 +49,23 @@ _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
 
 class ServiceExecutionConfigurationError(ValueError):
     """A known per-Trial configuration cannot run under this scheduler's bounds."""
+
+
+@dataclass(frozen=True)
+class CompiledServiceExecution:
+    """A proposed workload, not a lease, capacity grant or attempt reservation.
+
+    Consumers must freeze their selected target/allocated plan durably before
+    external admission, then recheck local authority when committing the claim.
+    """
+
+    runtime_plan: ExecutionRuntimePlanV1
+    requirements: WorkloadRequirementsV1
+    deadline_at: datetime
+    targets: tuple[ServiceExecutionTarget, ...]
+    allocate_resources: bool
+    image_ready_at: datetime | None
+    image_mode: Literal["reused", "built", "unknown", "prebuilt"]
 
 
 _NEXT_SERVICE_TRIAL = text("""
@@ -211,16 +233,15 @@ async def reserve_next_service_execution(
     return None
 
 
-async def _reserve_service_candidate(
+async def _compile_service_candidate(
     session: AsyncSession,
     *,
     row: Any,
     environment: str,
     pool_id: str,
-    image_admission_keyring: ImageAdmissionKeyring,
     maximum_deadline_seconds: int,
     current_time: datetime,
-) -> ServiceExecutionLease | None:
+) -> CompiledServiceExecution | None:
     # Architecture records are alternatives. Nebius's current execution class
     # uses x86_64; an unused arm64 build must not hold up admission.
     prerequisites = list((await session.execute(
@@ -316,8 +337,32 @@ async def _reserve_service_candidate(
         else resolve_runner_task_image(task, runtime_plan.task_image_ref),
         trial_config if binding is None else None,
     )
+    ready_times = [image.ready_at for image in prerequisites if image.ready_at]
+    image_ready = max(ready_times) if ready_times else row["submitted_at"]
+    return CompiledServiceExecution(runtime_plan=runtime_plan, requirements=requirements,
+        deadline_at=deadline_at, targets=tuple(targets), allocate_resources=allocate_resources,
+        image_ready_at=max(row["submitted_at"], image_ready) if ready_times or not prerequisites else None,
+        image_mode=("reused" if ready_times and image_ready <= row["submitted_at"]
+                    else "built" if ready_times else "unknown" if prerequisites else "prebuilt"))
+
+
+async def _reserve_service_candidate(
+    session: AsyncSession,
+    *,
+    row: Any,
+    environment: str,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease | None:
+    compiled = await _compile_service_candidate(session, row=row, environment=environment,
+        pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    if compiled is None:
+        return None
+    runtime_plan, requirements = compiled.runtime_plan, compiled.requirements
     blocked: ExecutionProvisioningBlockedError | None = None
-    for target in targets:
+    for target in compiled.targets:
         if requirements.data_residency and target.data_residency != requirements.data_residency:
             continue
         # A target's failed admission must not keep a route, cost reservation or
@@ -327,7 +372,7 @@ async def _reserve_service_candidate(
             async with session.begin_nested():
                 allocated_plan = (await allocate_target_resources(
                     session, runtime_plan, target_id=target_id, now=current_time,
-                ) if allocate_resources else runtime_plan)
+                ) if compiled.allocate_resources else runtime_plan)
                 lease = await reserve_trial_execution(
                     session,
                     request_id=canonical_uuid5(
@@ -337,7 +382,7 @@ async def _reserve_service_candidate(
                             "trial_id": str(row["id"]),
                             "attempt": int(row["attempt_count"]) + 1,
                             "target_id": target_id,
-                            "task_revision_sha256": task_revision,
+                            "task_revision_sha256": runtime_plan.task_revision_sha256,
                             "runtime_contract_sha256": canonical_digest(
                                 allocated_plan.canonical_payload()
                             ),
@@ -350,18 +395,14 @@ async def _reserve_service_candidate(
                     runtime_contract=allocated_plan,
                     image_admission_keyring=image_admission_keyring,
                     routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
-                    deadline_at=deadline_at,
+                    deadline_at=compiled.deadline_at,
                     now=current_time,
                 )
-                ready_times = [image.ready_at for image in prerequisites if image.ready_at]
-                image_ready = max(ready_times) if ready_times else row["submitted_at"]
                 await session.execute(update(Trial).where(Trial.id == row["id"]).values(
                     scheduling_observation={
                         "observed_at": current_time.isoformat(), "lease_id": str(lease.id),
-                        "image_ready_at": (max(row["submitted_at"], image_ready).isoformat()
-                                           if ready_times or not prerequisites else None),
-                        "image_mode": ("reused" if ready_times and image_ready <= row["submitted_at"]
-                                       else "built" if ready_times else "unknown" if prerequisites else "prebuilt"),
+                        "image_ready_at": compiled.image_ready_at.isoformat() if compiled.image_ready_at else None,
+                        "image_mode": compiled.image_mode,
                     },
                 ))
                 return lease
