@@ -23,21 +23,24 @@ async def publish_benchmark(
     path: Path | None = None,
     *,
     benchmark: str | None = None,
+    harbor_source: Path | None = None,
     cache_dir: Path | None = None,
     refresh: bool = False,
     limit: int | None = None,
     instance_ids: set[str] | None = None,
     **publication: Any,
 ) -> LocalBenchmarkPublishStats:
-    if (path is None) == (benchmark is None):
-        raise ValueError("choose exactly one local PATH or --benchmark SLUG")
-    if benchmark is None:
+    if sum(value is not None for value in (path, benchmark, harbor_source)) != 1:
+        raise ValueError("choose exactly one local PATH, --benchmark SLUG or --harbor-source SPEC.json")
+    if benchmark is None and harbor_source is None:
         if refresh or limit is not None or instance_ids or cache_dir is not None:
             raise ValueError(
                 "--cache-dir, --refresh, --limit and --instance-id require --benchmark"
             )
         assert path is not None
         return await local_benchmark_publish.publish_local_benchmark(path, **publication)
+    if harbor_source is not None and (publication.get("execution_profile") or publication.get("compat_flatten_environment")):
+        raise ValueError("native Harbor intake preserves official semantics; publish a distinct derived profile for repairs")
     if any(
         publication.get(key) is not None
         for key in (
@@ -56,8 +59,20 @@ async def publish_benchmark(
 
         with tempfile.TemporaryDirectory(prefix="loom-adapter-prepare-") as temporary:
             root = Path(temporary)
+            adapter = None
+            if harbor_source is not None:
+                from loom_cli.harbor_benchmark_prepare import (
+                    HarborBenchmarkSpec,
+                    HarborNativeAdapter,
+                )
+
+                spec = HarborBenchmarkSpec.model_validate_json(harbor_source.read_bytes())
+                adapter = HarborNativeAdapter(spec)
+                benchmark = spec.id
+            assert benchmark is not None
             prepared = prepare_adapter_benchmark(
                 benchmark,
+                adapter_override=adapter,
                 cache_dir=(cache_dir or default_benchmark_cache()).expanduser(),
                 staging_dir=root,
                 refresh=refresh,

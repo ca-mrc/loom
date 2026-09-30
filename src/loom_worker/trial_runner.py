@@ -179,6 +179,12 @@ class LocalTrialRunner:
                 raise RuntimeError("trial start authorization refused")
         # The gate precedes factories, bridges, sidecars, tokens and vLLM launch.
         # On denial there are no runner-owned resources that need cleanup.
+        from loom.errors import DriverError
+        from loom.task_runtime_compatibility import task_runtime_rejections
+
+        rejections = task_runtime_rejections(self.task_config, agent_name=self.trial_config.agent_name)
+        if rejections:
+            raise DriverError("Unsupported task requirements: " + "; ".join(rejections))
         driver = self.driver_factory()
 
         # #188 / Phase B: per-trial sandbox bridge + singleton attach.

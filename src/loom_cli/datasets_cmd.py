@@ -364,6 +364,7 @@ def _add_validate_local_args(p: argparse.ArgumentParser) -> None:
 def _add_publish_local_args(p: argparse.ArgumentParser) -> None:
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument("path", type=Path, nargs="?")
+    source.add_argument("--harbor-source", type=Path, help="Pinned native Harbor source descriptor (Git/Hub); import via the common publisher.")
     source.add_argument("--benchmark", help="Installed adapter slug to fetch and convert before publication.")
     p.add_argument("--cache-dir", type=Path, default=None, help="Upstream cache (default: LOOM_BENCHMARK_CACHE or user cache).")
     p.add_argument("--refresh", action="store_true", help="Refresh the selected adapter's upstream cache.")
@@ -622,6 +623,13 @@ def _build_parser() -> argparse.ArgumentParser:
             ),
         )
     )
+
+    native = sub.add_parser("prepare-harbor", help="Fetch and persist a pinned Harbor-native import without DB, uploads or model calls.")
+    native.add_argument("spec", type=Path)
+    native.add_argument("--output", type=Path, required=True)
+    native.add_argument("--cache-dir", type=Path)
+    native.add_argument("--refresh", action="store_true")
+    native.add_argument("--instance-id", dest="instance_ids", action="append", default=None)
 
     _add_validate_local_args(
         sub.add_parser(
@@ -1397,6 +1405,40 @@ def _cmd_validate_local(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_prepare_harbor(args: argparse.Namespace) -> int:
+    import tempfile
+
+    from loom_cli.benchmark_prepare import prepare_adapter_benchmark
+    from loom_cli.benchmark_publish import default_benchmark_cache
+    from loom_cli.harbor_benchmark_prepare import HarborBenchmarkSpec, HarborNativeAdapter
+
+    try:
+        spec = HarborBenchmarkSpec.model_validate_json(args.spec.read_bytes())
+        output = args.output.resolve()
+        if output.exists():
+            raise ValueError("prepare-harbor output already exists; choose a new version directory")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="loom-harbor-", dir=output.parent) as temporary:
+            root = Path(temporary) / "import"
+            root.mkdir()
+            prepared = prepare_adapter_benchmark(
+                spec.id, adapter_override=HarborNativeAdapter(spec),
+                cache_dir=args.cache_dir or default_benchmark_cache(), staging_dir=root,
+                refresh=args.refresh,
+                instance_ids=set(args.instance_ids) if args.instance_ids else None,
+            )
+            (root / "manifest.json").write_text(json.dumps(prepared.manifest, indent=2, sort_keys=True) + "\n")
+            root.rename(output)
+        print(json.dumps({"output": str(output), "benchmark_id": spec.id,
+                          "task_count": prepared.task_count,
+                          "provenance": prepared.manifest["benchmark_profile_provenance"]}, indent=2))
+        return 0
+    except (ValueError, OSError) as exc:
+        from loom.security.redaction import redact_text
+        print("error: " + redact_text(str(exc)), file=sys.stderr)
+        return 1
+
+
 def _cmd_publish_local(args: argparse.Namespace) -> int:
     from loom.trajectory.storage import MinioObjectStore
     from loom_cli.benchmark_publish import publish_benchmark
@@ -1473,6 +1515,7 @@ def _cmd_publish_local(args: argparse.Namespace) -> int:
             publish_benchmark(
                 args.path,
                 benchmark=args.benchmark,
+                harbor_source=getattr(args, "harbor_source", None),
                 cache_dir=args.cache_dir,
                 refresh=args.refresh,
                 limit=args.limit,
@@ -1680,6 +1723,7 @@ _DISPATCH: dict[str, Callable[[argparse.Namespace], int]] = {
     "audit": _cmd_audit,
     "activate": _cmd_activate,
     "provision-catalog": _cmd_provision_catalog_provision,
+    "prepare-harbor": _cmd_prepare_harbor,
     "validate-local": _cmd_validate_local,
     "validate": _cmd_validate_local,
     "publish-local": _cmd_publish_local,

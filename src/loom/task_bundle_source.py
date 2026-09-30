@@ -131,8 +131,17 @@ class TaskBundleSourceSpecV1(BaseModel):
 
     @property
     def provenance(self) -> dict[str, Any]:
+        config = TaskConfig.model_validate(self.task_config)
+        upstream = {} if config.upstream_origin is None else {
+            "upstream_origin": config.upstream_origin.model_dump(mode="json", exclude_none=True),
+            "upstream_task_id": config.upstream_task_id,
+            **({"upstream_package_digest": config.upstream_package_digest} if config.upstream_package_digest else {}),
+            **({"conversion": config.upstream_conversion.model_dump(mode="json")}
+               if config.upstream_conversion else {}),
+        }
         task_file = next(item for item in self.manifest.files if item.path == "task.toml")
         return {
+            **upstream,
             "bundle_content_manifest_sha256": self.manifest.digest,
             "bundle_file_metadata_sha256": "sha256:" + self.manifest.bundle_file_metadata_sha256,
             "bundle_task_identity": {

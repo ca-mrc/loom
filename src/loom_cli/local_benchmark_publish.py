@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -108,9 +108,9 @@ async def publish_local_benchmark(
         license_spdx=license_spdx,
         source_subdir=source_subdir,
     )
-    if source_registration_mode == "versioned-v1":
-        if isinstance(result, PreparedAdapterBenchmark):
-            raise ValueError("adapter publication uses the current catalog publisher")
+    native_origin = (result.manifest.get("benchmark_profile_provenance", {}).get("upstream_origin")
+                     if isinstance(result, PreparedAdapterBenchmark) else None)
+    if source_registration_mode == "versioned-v1" or native_origin is not None:
         from loom_cli.local_benchmark_source_publish import publish_versioned_local_benchmark
 
         return await publish_versioned_local_benchmark(
@@ -228,7 +228,14 @@ async def publish_local_benchmark(
                         body=manifest_body,
                     )
                     uploaded_objects += 1
+                    upstream_provenance = {}
+                    if raw_cfg.get("upstream_origin") is not None:
+                        upstream_provenance = {
+                            "upstream_origin": raw_cfg["upstream_origin"],
+                            "upstream_task_id": raw_cfg.get("upstream_task_id"),
+                        }
                     source_provenance = {
+                        **upstream_provenance,
                         **adapter_task.get("source_provenance", {}),
                         "bundle_file_metadata_sha256": f"sha256:{metadata_digest}",
                         **sei_provenance,
@@ -324,6 +331,7 @@ async def _upsert_benchmark(
     imported_by: str | None,
     adapter_manifest: dict[str, Any] | None = None,
 ) -> None:
+    origin = None
     values: dict[str, Any] = dict(
         display_name=entry.display_name,
         upstream_kind=S3_FOLDER_KIND,
@@ -341,13 +349,24 @@ async def _upsert_benchmark(
         )})
         values["splits"] = adapter_manifest["splits"]
         values["profile_provenance"] = adapter_manifest["benchmark_profile_provenance"]
+        origin = values["profile_provenance"].get("upstream_origin")
+        if origin is not None:
+            # Import and conversion never establish executable or full-profile qualification.
+            values["execution_state"] = "pending"
         if entry.id == "terminal-bench-2@tb2.1-r6":
             values["execution_state"] = "pending"
-    await session.execute(
-        pg_insert(Benchmark).values(id=entry.id, **values).on_conflict_do_update(
-            index_elements=["id"], set_=values,
-        ),
-    )
+    statement = pg_insert(Benchmark).values(id=entry.id, **values)
+    # PostgreSQL evaluates this predicate against the conflicting row under its
+    # own lock, including concurrent first imports. A prior SELECT cannot bind
+    # an identity that does not exist yet.
+    predicate: ColumnElement[bool] = Benchmark.profile_provenance["upstream_origin"].is_(None)
+    if origin is not None:
+        predicate = Benchmark.profile_provenance["upstream_origin"] == statement.excluded.profile_provenance["upstream_origin"]
+    result = await session.execute(statement.on_conflict_do_update(
+        index_elements=["id"], set_=values, where=predicate,
+    ).returning(Benchmark.id))
+    if result.scalar_one_or_none() is None:
+        raise ValueError("benchmark id is already bound to another upstream origin; use a distinct version/subset id")
 
 
 def _task_prefix(benchmark_id: str, rel: Path) -> str:
