@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -32,6 +33,41 @@ def transport(tmp_path, handler, **changes):
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return PoolClient(origin="https://management.example", bearer_token_file=token,
         timeout_seconds=changes.get("timeout_seconds", 1), client=http), http
+
+
+@pytest.mark.parametrize("damage", [None, "target", "epoch", "resources"])
+async def test_node_allocation_checks_scope_and_shape_at_the_http_boundary(tmp_path, damage):
+    from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+
+    request, _ = inputs()
+    scope = PoolNodeAllocationRequestV1(pool_id=request.pool_id, participant_id=request.key.participant_id,
+        admission_epoch=request.admission_epoch, participant_revision=request.participant_revision,
+        target_id=request.target_id)
+    now = datetime.now(UTC)
+    reply = {"schema_version": "loom.pool-node-allocation.v1", "scope": scope.model_dump(mode="json"),
+        "observation_id": str(uuid4()), "observed_at": now.isoformat(),
+        "valid_until": (now + timedelta(seconds=60)).isoformat(),
+        "usable_node": {"cpu_millis": 3000, "memory_mib": 8192, "ephemeral_storage_mib": 32768}}
+    if damage == "target":
+        reply["scope"]["target_id"] = "foreign"
+    elif damage == "epoch":
+        reply["scope"]["admission_epoch"] += 1
+    elif damage == "resources":
+        reply["usable_node"]["memory_mib"] = -1
+
+    def handler(incoming):
+        assert incoming.url.path == f"/internal/pools/v1/{request.pool_id}/node-allocation"
+        assert incoming.content == scope.model_dump_json().encode()
+        return httpx.Response(200, json=reply)
+
+    management, http = transport(tmp_path, handler)
+    async with http:
+        if damage:
+            with pytest.raises(PoolRequestUnconfirmedError):
+                await management.node_allocation(scope)
+        else:
+            assert (await management.node_allocation(scope)).usable_node.memory_mib == 8192
 
 
 @pytest.mark.parametrize("damage", ["pool", "key", "epoch", "digest", "redirect", "timeout", "malformed", "oversize", "compressed"])

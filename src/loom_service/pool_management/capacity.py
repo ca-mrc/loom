@@ -63,6 +63,8 @@ class PoolCapacity:
     provider: ProviderCapacitySnapshot
     kubernetes: KubernetesCapacitySnapshot
     sample: NodeTemplateSample | None
+    observation_id: UUID
+    observed_at: datetime
 
 
 def digest(value: Any) -> str:
@@ -134,7 +136,8 @@ async def _read_capacity(session: AsyncSession, pool: NebiusPoolBinding, now: da
         ).order_by(NebiusPoolObservation.observed_at.desc()).limit(100))).all()
         sample = cold_sample(placement, (_placement(row.observation_json)[0] for row in history
                                         if digest(row.observation_json) == row.observation_sha256))
-    return PoolCapacity(pool, participants, policy, placement, provider, kubernetes, sample)
+    return PoolCapacity(pool, participants, policy, placement, provider, kubernetes, sample,
+        observation.observation_id, observation.observed_at)
 
 
 async def read_connected_capacity(session: AsyncSession, pool_id: UUID, now: datetime) -> dict[UUID, PoolCapacity]:

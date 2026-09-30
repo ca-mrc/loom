@@ -18,6 +18,8 @@ from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
 from loom.db.schema import Batch, ServiceExecutionLease, ServiceExecutionTarget, Task, Trial
 from loom.execution_contract import ExecutionRoutingReason
 from loom.execution_image_admission import ImageAdmissionKeyring
+from loom.execution_resource_allocation import allocate_node_resources
+from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_pool_contract import (
     PoolActivationV1,
     PoolParticipantV1,
@@ -32,7 +34,6 @@ from loom.nebius_rollout_guard import admission_open
 from loom.pipeline.keys import canonical_digest
 from loom.task_bundle_source_journal import require_task_bundle_transaction
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
-from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.pool_execution_handoff import execution_selection_snapshot
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
@@ -174,7 +175,8 @@ class PoolExecutionOutbox:
             raise PoolHandoffError
         return receipt
 
-    async def propose(self, *, trial_id: UUID, target_id: str) -> PoolExecutionHandoff | None:
+    async def propose(self, *, trial_id: UUID, target_id: str,
+                      node_allocation: PoolNodeAllocationV1 | None = None) -> PoolExecutionHandoff | None:
         """Freeze actual compiled input without claiming an execution or budget."""
         self.participant.target(target_id, "trial")
         async with self.sessions.begin() as session:
@@ -212,8 +214,19 @@ class PoolExecutionOutbox:
                 return None
             if target_id not in {target.id for target in compiled.targets}:
                 raise PoolHandoffError
-            runtime = (await allocate_target_resources(session, compiled.runtime_plan, target_id=target_id, now=now)
-                       if compiled.allocate_resources else compiled.runtime_plan)
+            runtime = compiled.runtime_plan
+            evidence = None
+            if compiled.allocate_resources:
+                if node_allocation is None:
+                    raise PoolHandoffError
+                evidence = PoolNodeAllocationV1.model_validate_json(node_allocation.model_dump_json())
+                scope = PoolNodeAllocationRequestV1(pool_id=self.participant.pool_id,
+                    participant_id=self.participant.participant_id, admission_epoch=self.participant.admission_epoch,
+                    participant_revision=self.participant.binding_revision, target_id=target_id)
+                if (evidence.scope != scope or evidence.observed_at > now + timedelta(seconds=60)
+                        or evidence.valid_until <= now):
+                    raise PoolHandoffError
+                runtime = allocate_node_resources(runtime, target_id=target_id, usable_node=evidence.usable_node)
             # Compilation can freeze a legacy verifier default. Snapshot the
             # actual persisted input after that legitimate change, not old SQL.
             await session.flush()
@@ -227,7 +240,7 @@ class PoolExecutionOutbox:
                 key=PoolRequestKeyV1(participant_id=self.participant.participant_id, workload_kind="trial",
                     local_work_id=lease_id, generation=1), target_id=target_id, deadline_at=compiled.deadline_at,
                 origin=origin, execution=PoolExecutionWorkloadV1(lease_generation=1, execution_unit_key=unit,
-                    parent_lease_id=None, requirements=compiled.requirements, runtime=runtime))
+                    parent_lease_id=None, requirements=compiled.requirements, runtime=runtime, node_allocation=evidence))
             payload = request.model_dump(mode="json")
             row = NebiusPoolExecutionOutbox(lease_id=lease_id, trial_id=trial_id, pool_id=request.pool_id,
                 participant_id=request.key.participant_id, request_json=payload,

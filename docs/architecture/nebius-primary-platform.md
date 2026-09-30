@@ -2023,8 +2023,14 @@ now select global proposals from its normal queued-Trial eligibility contract;
 it preserves team fairness within shared/personal priority, skips live proposals
 and incompatible candidates, and never falls back to local reservation on an
 empty or failed global selection. Image-preparation and configuration failures
-retain their existing no-attempt terminal semantics. Protected startup, global
-node-share allocation evidence and the installed writer transition remain open.
+retain their existing no-attempt terminal semantics. Node-share compilation now
+fetches participant/target/epoch-qualified sizing evidence from the management
+observation before opening local SQL. It uses measured allocatable minus resident
+DaemonSets, including compatible retained samples after scale-zero, never free
+resources or environment-local totals. The local proposal rechecks freshness and
+freezes the evidence and allocated runtime together. Missing evidence cannot fall
+back to local allocation. This sizing read grants nothing; the registry still
+checks current physical fit and provider quota for the rendered workload.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

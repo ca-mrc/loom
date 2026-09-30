@@ -89,13 +89,15 @@ async def test_global_allocation_requires_exact_registered_participant_scope(ses
 
 
 async def test_node_share_selection_freezes_global_evidence_with_local_allocator_disabled(sessions, tmp_path):
+    from loom_execution_actuator.pool_execution_driver import PoolExecutionDriver
     from loom_execution_actuator.pool_execution_selection import PoolExecutionSelector
 
     outbox, original, proposal, app, token = await selected(sessions, tmp_path)
     following = await another_trial(sessions, original)
     await configure_node_share(sessions, following)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
-        selected_work = await PoolExecutionSelector(outbox=outbox, allocation_reader=client(http, token)).select_next()
+        management = client(http, token)
+        selected_work = await PoolExecutionSelector(outbox=outbox, allocation_reader=management).select_next()
     assert selected_work is not None and selected_work.lease_id is None
     allocation = selected_work.request.execution.node_allocation
     assert allocation.scope == scope(outbox, proposal.request.target_id)
@@ -106,6 +108,12 @@ async def test_node_share_selection_freezes_global_evidence_with_local_allocator
         assert (await session.get(NebiusPoolExecutionOutbox, selected_work.request.key.local_work_id)).trial_id == following
         assert await session.scalar(select(func.count()).select_from(ServiceExecutionLease)) == 0
         assert (await session.get(Trial, following)).attempt_count == 0
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        active = await PoolExecutionDriver(outbox=outbox, management=client(http, token)).advance(selected_work.request.key)
+        assert active.phase == "active" and active.activated.phase == "create_intent"
+    async with sessions() as session:
+        saved_lease = await session.get(ServiceExecutionLease, active.lease_id)
+        assert saved_lease.runtime_contract_json["node_resource_allocation"]["usable_node"]["memory_mib"] == 8192
 
 
 async def test_missing_global_evidence_never_falls_back_to_enabled_local_allocation(sessions, tmp_path):

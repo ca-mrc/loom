@@ -12,6 +12,7 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     validate_runtime_plan_requirements,
 )
+from loom.nebius_pool_allocation import PoolNodeAllocationV1
 from loom.nebius_pool_contract import PoolRequestKeyV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
 
@@ -26,12 +27,19 @@ class PoolExecutionWorkloadV1(BaseModel):
     parent_lease_id: UUID | None
     requirements: WorkloadRequirementsV1
     runtime: ExecutionRuntimePlanV1
+    node_allocation: PoolNodeAllocationV1 | None = None
 
     @model_validator(mode="after")
     def consistent_workload(self) -> PoolExecutionWorkloadV1:
         if not self.execution_unit_key.int or (self.parent_lease_id is not None and not self.parent_lease_id.int):
             raise ValueError("nil_pool_execution_identity")
         validate_runtime_plan_requirements(self.runtime, self.requirements)
+        allocation = self.runtime.node_resource_allocation
+        if ((allocation is None) != (self.node_allocation is None)
+                or (allocation is not None and self.node_allocation is not None
+                    and (allocation.usable_node != self.node_allocation.usable_node
+                         or allocation.target_id != self.node_allocation.scope.target_id))):
+            raise ValueError("pool_node_allocation_runtime_mismatch")
         return self
 
 
@@ -55,5 +63,12 @@ class PoolExecutionPrepareV1(BaseModel):
         role = {"trial": "attempt", "verifier": "verifier"}.get(self.key.workload_kind)
         if role is None or role != self.execution.runtime.execution_role or self.origin.kind == "personal_build":
             raise ValueError("pool_execution_kind_mismatch")
+        allocation = self.execution.node_allocation
+        if allocation is not None and (
+            allocation.scope.pool_id, allocation.scope.participant_id, allocation.scope.admission_epoch,
+            allocation.scope.participant_revision, allocation.scope.target_id, allocation.scope.workload_kind,
+        ) != (self.pool_id, self.key.participant_id, self.admission_epoch,
+              self.participant_revision, self.target_id, self.key.workload_kind):
+            raise ValueError("pool_node_allocation_scope_mismatch")
         object.__setattr__(self, "deadline_at", self.deadline_at.astimezone(UTC))
         return self

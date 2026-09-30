@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
     PoolActivationV1,
@@ -25,6 +26,7 @@ from loom_execution_capacity_collector.pool_contracts import (
     PoolObservationReceiptV1,
     PoolObservationV1,
 )
+from loom_service.pool_management.allocation import node_allocation
 from loom_service.pool_management.auth import PoolAuthenticationError, resolve_pool_machine
 from loom_service.pool_management.control import (
     PoolControlError,
@@ -110,7 +112,7 @@ async def publish_observation(request: Request, pool_id: UUID) -> Response:
 
 
 async def _participant(request: Request, pool_id: UUID,
-                       operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime"]) -> Response:
+                       operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime", "node-allocation"]) -> Response:
     body = await request.body()
     if len(body) > MAX_POOL_REQUEST_BYTES:
         raise _error(413, "pool_request_too_large")
@@ -124,9 +126,14 @@ async def _participant(request: Request, pool_id: UUID,
                 raise _error(401, "pool_machine_authority_unavailable")
             if principal.pool_id != pool_id or principal.role != "participant" or principal.participant_id is None:
                 raise _error(403, "pool_participant_scope_unavailable")
-            result: PoolReceiptV1 | PoolWaitingV1 | PoolNativeRuntimeV1 | PoolExecutionRuntimeV1
+            result: PoolReceiptV1 | PoolWaitingV1 | PoolNativeRuntimeV1 | PoolExecutionRuntimeV1 | PoolNodeAllocationV1
             profiles = getattr(request.app.state, "pool_profiles", None)
-            if operation == "prepare":
+            if operation == "node-allocation":
+                allocation_request = PoolNodeAllocationRequestV1.model_validate_json(body)
+                if allocation_request.pool_id != pool_id or allocation_request.participant_id != principal.participant_id:
+                    raise _error(403, "pool_participant_scope_unavailable")
+                result = await node_allocation(session, principal, allocation_request)
+            elif operation == "prepare":
                 workload = _WORKLOAD.validate_json(body)
                 if workload.pool_id != pool_id or workload.key.participant_id != principal.participant_id:
                     raise _error(403, "pool_participant_scope_unavailable")
@@ -177,6 +184,11 @@ async def _participant(request: Request, pool_id: UUID,
 @router.post("/{pool_id}/prepare")
 async def prepare(request: Request, pool_id: UUID) -> Response:
     return await _participant(request, pool_id, "prepare")
+
+
+@router.post("/{pool_id}/node-allocation")
+async def allocation(request: Request, pool_id: UUID) -> Response:
+    return await _participant(request, pool_id, "node-allocation")
 
 
 @router.post("/{pool_id}/status")

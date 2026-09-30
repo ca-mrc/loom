@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 from pydantic import Field, TypeAdapter
 
+from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
     PoolActivationV1,
@@ -29,7 +30,7 @@ from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
 PoolResult = PoolReceiptV1 | PoolWaitingV1
-PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime"]
+PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime", "node-allocation"]
 _RESULT: TypeAdapter[PoolResult] = TypeAdapter(Annotated[PoolResult, Field(discriminator="schema_version")])
 
 
@@ -52,7 +53,8 @@ class PoolClient:
         self._owns_client, self._closed = client is None, False
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False, trust_env=False)
 
-    async def _exchange(self, action: PoolRequestActionV1, operation: PoolOperation, body: bytes) -> bytes:
+    async def _exchange(self, action: PoolRequestActionV1 | PoolNodeAllocationRequestV1,
+                        operation: PoolOperation, body: bytes) -> bytes:
         if self._closed or len(body) > MAX_POOL_REQUEST_BYTES:
             raise PoolRequestUnconfirmedError
         try:
@@ -156,5 +158,16 @@ class PoolClient:
                 await self._exchange(action, "execution-runtime", action.model_dump_json().encode()))
             self._identity(action, runtime.receipt)
             return runtime
+        except ValueError:
+            raise PoolRequestUnconfirmedError from None
+
+    async def node_allocation(self, scope: PoolNodeAllocationRequestV1) -> PoolNodeAllocationV1:
+        scope = PoolNodeAllocationRequestV1.model_validate_json(scope.model_dump_json())
+        try:
+            result = PoolNodeAllocationV1.model_validate_json(
+                await self._exchange(scope, "node-allocation", scope.model_dump_json().encode()))
+            if result.scope != scope:
+                raise PoolRequestUnconfirmedError
+            return result
         except ValueError:
             raise PoolRequestUnconfirmedError from None

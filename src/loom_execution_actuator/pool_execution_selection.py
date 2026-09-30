@@ -7,17 +7,20 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import text, update
 
 from loom.db.schema import Trial
+from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_rollout_guard import admission_open
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution_scheduler import (
     _SERVICE_TRIAL_SQL,
     ServiceExecutionConfigurationError,
 )
+from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 from loom_execution_actuator.pool_execution_outbox import (
     PoolExecutionHandoff,
     PoolExecutionOutbox,
@@ -38,9 +41,14 @@ _CANDIDATES = text(_SERVICE_TRIAL_SQL + """
 """)
 
 
+class PoolNodeAllocationReader(Protocol):
+    async def node_allocation(self, scope: PoolNodeAllocationRequestV1) -> PoolNodeAllocationV1: ...
+
+
 class PoolExecutionSelector:
-    def __init__(self, *, outbox: PoolExecutionOutbox) -> None:
+    def __init__(self, *, outbox: PoolExecutionOutbox, allocation_reader: PoolNodeAllocationReader | None = None) -> None:
         self.outbox = outbox
+        self.allocation_reader = allocation_reader
         self.targets = tuple(item.target_id for item in outbox.participant.targets if "trial" in item.workload_kinds)
         if not self.targets:
             raise ValueError("global execution selection requires a registered trial target")
@@ -55,6 +63,19 @@ class PoolExecutionSelector:
                 finished_at=now, next_attempt_at=None))
 
     async def select_next(self) -> PoolExecutionHandoff | None:
+        allocations = {}
+        if self.allocation_reader is not None:
+            participant = self.outbox.participant
+            for target_id in self.targets:
+                scope = PoolNodeAllocationRequestV1(pool_id=participant.pool_id, participant_id=participant.participant_id,
+                    admission_epoch=participant.admission_epoch, participant_revision=participant.binding_revision,
+                    target_id=target_id)
+                try:
+                    allocations[target_id] = await self.allocation_reader.node_allocation(scope)
+                except PoolRequestUnconfirmedError:
+                    # Explicit resource plans can still queue; node-share plans
+                    # require qualified evidence and never use local snapshots.
+                    pass
         async with self.outbox.sessions() as session:
             if not await admission_open(session):
                 return None
@@ -66,7 +87,8 @@ class PoolExecutionSelector:
                 async for candidate in rows.mappings():
                     for target_id in self.targets:
                         try:
-                            selected = await self.outbox.propose(trial_id=candidate["id"], target_id=target_id)
+                            selected = await self.outbox.propose(trial_id=candidate["id"], target_id=target_id,
+                                node_allocation=allocations.get(target_id))
                             if selected is not None:
                                 return selected
                             break  # No runtime/image ready on any target for this candidate.
