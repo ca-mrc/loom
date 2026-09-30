@@ -1606,10 +1606,15 @@ Only the sanitized resource/identity projection leaves the reader; Pod payloads,
 environment values and commands are not evidence. A scope fingerprint binds the
 observation to the registry and gateway receipts used for that capture.
 
-This is a read-only library entrypoint, not live global admission. The caller must
-bind the selector to the actual native node group, combine fresh provider quota
-evidence, and use the management ledger to retain unobserved grants. Existing
-single-target collection remains unchanged. Managed hosted execution stays
+The production collector now has an explicit `collection_mode=pool` path. It
+requires a global pool UUID and separate management URL/observer credential,
+fetches one frozen scope, binds its selector to the configured native node group,
+and combines the existing native reader with one actual `capture_pool` inventory.
+Ready provider/cluster counts must agree; cold samples must match the native
+template. Existing single-target collection remains the default and is never an
+error fallback. A cancelled pool read retains its clients until the synchronous
+Kubernetes reads finish. This source integration is not installed global admission.
+The management ledger still retains unobserved grants. Managed hosted execution stays
 disabled until the shared ledger, local claim protocol and protected Job-write
 gateway are integrated and qualified together.
 
@@ -1623,8 +1628,15 @@ credentials, registration or physical node-group identity fail closed. New
 reservations do not invalidate an in-flight capture and cannot be inserted into
 its represented-Job list. Capture/observation rows are immutable and do not alter
 request phases or release capacity. Collection runs outside SQL transactions.
-This internal observation registry now feeds transactional execution/build prepare; it
-is not yet connected to production collection or public routes.
+The management-only `/internal/pools/v1/{pool_id}/captures` and `/observations`
+routes connect this registry to the production collector. Only a current dedicated
+pool-observer credential is accepted; ordinary users, admin/worker tokens and other
+machine roles cannot publish. HTTPS transport uses no redirects or automatic write
+retries, checks exact receipt identity/digest, and bounds streamed bodies to one
+MiB with a total request timeout. Validation errors do not echo inputs. The routes
+are absent from application APIs and confer no dispatch or cleanup authority.
+The same observation registry feeds transactional execution/build prepare; live
+installation still requires the protected collector/writer migration.
 
 The internal execution-prepare adapter accepts a typed runtime/requirements
 snapshot, not arbitrary Kubernetes documents or a caller's resource total. It
@@ -1669,8 +1681,8 @@ registry, Secret, resource and runtime settings come only from its protected
 profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
 attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
-not its separate selection generation. The HTTP boundary, actual
-collector/caller outboxes, fixed gateway and protected writer migration are still
+not its separate selection generation. Admission HTTP, actual
+caller outboxes, fixed gateway and protected writer migration are still
 required. Application-image builds remain a later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,

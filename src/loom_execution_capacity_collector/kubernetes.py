@@ -772,10 +772,24 @@ class InClusterKubernetesCapacityReader:
         from loom_execution_capacity_collector.pool import PoolPodClassifier
 
         pool = PoolPodClassifier(scope)
-        return await asyncio.to_thread(
+        reading = asyncio.create_task(asyncio.to_thread(
             self._capture_sync, namespace="", target_id="",
             node_label_selector=pool.node_selector, pool=pool,
-        )
+        ))
+        try:
+            return await asyncio.shield(reading)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop the SDK read. Keep ownership
+            # until its bounded calls finish before outer cleanup closes clients.
+            while not reading.done():
+                try:
+                    await asyncio.shield(reading)
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # Retrieve a concurrent SDK failure without replacing cancellation.
+            if not reading.cancelled():
+                reading.exception()
+            raise
 
 
 __all__ = ["InClusterKubernetesCapacityReader", "KubernetesObservationError"]

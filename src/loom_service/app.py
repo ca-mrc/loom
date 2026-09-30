@@ -159,8 +159,11 @@ def register_api_routes(
     app.include_router(team_registrations.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     if management:
+        from loom_service.pool_management.routes import router as pool_observer_router
+
         app.include_router(environments.router, prefix="/api/v1")
         app.include_router(applications.router, prefix="/api/v1")
+        app.include_router(pool_observer_router)
     if not management:
         app.include_router(managed_child.router, prefix="/api/v1")
         for workload_router in (
