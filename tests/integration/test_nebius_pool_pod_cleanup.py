@@ -30,6 +30,9 @@ async def residual(sessions, *, drained=True, job_gone=True):
         await gateway.delete(principal, receipt.reservation_id, kind="Job")
     metadata = child["metadata"]
     ref = PoolPodReference(metadata["name"], UUID(metadata["uid"]), metadata["resourceVersion"], False)
+    await http.aclose()
+    http = httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(api))
+    gateway.http = http
     return gateway, api, principal, receipt, http, created, ref, path
 
 
