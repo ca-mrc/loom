@@ -78,6 +78,14 @@ def test_six_retained_roles_become_readers_only_after_all_old_processes_drain(fe
     assert len(api.patches) == 6 and len(retirement.patches) == 9
 
 
+def test_changed_original_role_is_rejected_before_stopping_any_controller(fencing_inputs, tmp_path):
+    api = Roles(fencing_inputs, initialize(fencing_inputs.retirement, tmp_path))
+    next(iter(api.roles.values()))["metadata"]["uid"] = str(uuid4())
+    with pytest.raises(ValueError):
+        run(fencing_inputs, api, tmp_path)
+    assert api.patches == [] and api.retirement.patches == []
+
+
 @pytest.mark.parametrize("failure", ["before", "after", "conflict"])
 def test_role_fence_recovers_only_confirmed_effects_without_repeating_unknown_updates(fencing_inputs, tmp_path, failure):
     api = Roles(fencing_inputs, initialize(fencing_inputs.retirement, tmp_path))
