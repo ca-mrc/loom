@@ -10,6 +10,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def _probe_object_access(minio_client: Any, bucket: str) -> None:
+    # Object-only runtime roles can list configured buckets without permission
+    # to inspect bucket metadata. Discard the bounded listing and fail closed.
+    response = minio_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+    if response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 200:
+        raise ValueError("object-store access probe failed")
+
+
 @dataclass(frozen=True, slots=True)
 class ApiDependencyReadiness:
     """API-only dependency health, not legacy staging capacity authority."""
@@ -54,7 +62,7 @@ async def probe_api_dependencies(
     object_store_ready = True
     for bucket in normalized_buckets:
         try:
-            await asyncio.to_thread(minio_client.head_bucket, Bucket=bucket)
+            await asyncio.to_thread(_probe_object_access, minio_client, bucket)
         except Exception:  # provider exceptions may contain credentials
             object_store_ready = False
     if not object_store_ready:
@@ -97,7 +105,7 @@ async def probe_dependencies(
 ) -> DependencyReadiness:
     """Probe PostgreSQL and exact configured buckets without writing state.
 
-    The object-store call is HEAD-only and executes off the event loop.  Results
+    Object access uses a bounded read-only listing off the event loop. Results
     deliberately expose stable component codes, never connection strings,
     credentials, provider error text, or object names.
     """
@@ -120,7 +128,7 @@ async def probe_dependencies(
     object_store_ready = True
     for bucket in normalized_buckets:
         try:
-            await asyncio.to_thread(minio_client.head_bucket, Bucket=bucket)
+            await asyncio.to_thread(_probe_object_access, minio_client, bucket)
         except Exception:  # pragma: no cover - botocore/provider classes vary
             object_store_ready = False
             blockers.append(f"object-store-bucket-unavailable:{bucket}")
