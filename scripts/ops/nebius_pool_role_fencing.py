@@ -71,10 +71,16 @@ def fence_pool_roles(*, request: PoolRoleFenceRequest, api: PoolRoleFenceAPI,
         targets = role_fence_documents(request)
         originals = {_key(row): row for row in request.originals}
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
+        operation = str(request.retirement.migration.registration.spec.operation_id)
+        marker, path = anchor / (operation + "-role-fencing.json"), state / "role-fencing.json"
+        if not any(item.exists() or item.is_symlink() for item in (marker, path)):
+            # Qualify every original Role before initiating downtime. A resumed
+            # fenced phase instead validates retained targets below.
+            if any(not _matches(api.read_role(key), row, _uid(row)) for key, row in originals.items()):
+                raise ValueError
         retirement = retire_pool_workloads(request=request.retirement, api=api.retirement, state_dir=state, anchor_dir=anchor)
         if retirement["status"] != "old_pool_workloads_retired":
             return retirement
-        operation = str(request.retirement.migration.registration.spec.operation_id)
 
         def result(status: str) -> dict[str, Any]:
             return {"status": status, "operation_id": operation, "writer_migration_complete": False}
@@ -84,7 +90,6 @@ def fence_pool_roles(*, request: PoolRoleFenceRequest, api: PoolRoleFenceAPI,
                 "state_dir": str(state), "retirement_sha256": _hash(state / "retirement.json"),
                 "originals_sha256": digest({key: {"uid": _uid(row), "document": _stable(row)} for key, row in originals.items()}),
                 "targets_sha256": digest(targets)}
-            marker, path = anchor / (operation + "-role-fencing.json"), state / "role-fencing.json"
             if marker.exists() or marker.is_symlink():
                 if json.loads(private_state._private_read(marker)) != identity:
                     raise ValueError
