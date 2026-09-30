@@ -163,7 +163,7 @@ def test_execution_prepare_charges_qualified_runtime_overhead():
 
 def test_execution_prepare_rejects_changed_signed_image_bundle():
     participant, body = inputs()
-    body["execution"]["runtime"]["image_admission"]["admissions"][0]["signature_base64"] = "AA=="
+    body["execution"]["runtime"]["image_admission"]["admissions"][0]["statement"]["sbom_sha256"] = "sha256:" + "f" * 64
     with pytest.raises(ValueError):
         render(participant, body)
 
@@ -202,7 +202,42 @@ def test_rendered_pod_accounting_includes_init_peak_sidecars_and_pod_requests():
 
 
 def test_rendered_pod_accounting_rejects_unqualified_api_defaulting():
-    from loom_execution_capacity_collector.kubernetes import KubernetesObservationError, rendered_pod_resources
+    from loom_execution_capacity_collector.kubernetes import (
+        KubernetesObservationError,
+        rendered_pod_resources,
+    )
 
     with pytest.raises(KubernetesObservationError):
         rendered_pod_resources({"containers": [{"resources": {"limits": {"cpu": "1"}}}]})
+
+
+def test_execution_prepare_measures_actual_restartable_sidecar():
+    from tests.support.execution_image_admission import signed_image_admission_bundle
+
+    participant, body = inputs()
+    runtime = body["execution"]["runtime"]
+    sidecar_image = "registry.example/database@sha256:" + "d" * 64
+    runtime["sidecars"] = [{
+        "role_name": "database", "image_ref": sidecar_image, "argv": ["/bin/database"],
+        "resources": {"cpu_millis": 250, "memory_mib": 256, "ephemeral_storage_mib": 128},
+        "startup_probe": {"kind": "tcp", "port": 5432}, "readiness_probe": {"kind": "tcp", "port": 5432},
+    }]
+    runtime["image_admission"] = signed_image_admission_bundle(
+        (runtime["task_image_ref"], runtime["runtime_image_ref"], sidecar_image),
+    ).model_dump(mode="json")
+    body["execution"]["requirements"]["sidecar_count"] = 1
+    prepared = render(participant, body)
+    assert prepared.resources.model_dump() == {"cpu_millis": 1750, "memory_mib": 2304, "storage_mib": 4224}
+
+
+def test_rendered_pod_accounting_rejects_null_requests():
+    from loom_execution_capacity_collector.kubernetes import (
+        KubernetesObservationError,
+        rendered_pod_resources,
+    )
+
+    with pytest.raises(KubernetesObservationError):
+        rendered_pod_resources({"containers": [{"resources": {
+            "requests": {"cpu": None, "memory": "1Mi", "ephemeral-storage": "1Mi"},
+            "limits": {"cpu": "1"},
+        }}]})
