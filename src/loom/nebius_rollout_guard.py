@@ -19,6 +19,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 LOCK_KEY = 731946021
 
 
+# Shared by the read-only rollout check and atomic guard acquisition.
+ACTIVITY_SQL = """
+        SELECT
+          (SELECT count(*) FROM trials WHERE state IN ('claimed','running')) AS trials,
+          (SELECT count(*) FROM execution_leases
+            WHERE revoked_at IS NULL OR cleanup_state <> 'complete'
+               OR materialization_state IN ('pending','running')) AS executions,
+          (SELECT count(*) FROM task_image_materializations
+            WHERE state IN ('claimed','running')) AS builds,
+          (SELECT count(*) FROM task_image_materialization_attempts
+            WHERE native_build IS NOT NULL
+              AND native_build->>'capacity_released_at' IS NULL) AS build_cleanup
+    """
+
 async def admission_open(session: AsyncSession) -> bool:
     locked = await session.scalar(text(
         "SELECT pg_try_advisory_xact_lock_shared(:key)"
@@ -36,18 +50,7 @@ async def acquire(session: AsyncSession, *, owner: str, candidate: str) -> dict[
         return {"status": "skipped_locked", "reason": "deployment_or_recovery_in_progress"}
     # Count reservations before Pods exist, result processing after Pods stop,
     # and native build cleanup even if the materialization is already ready.
-    counts = dict((await session.execute(text("""
-        SELECT
-          (SELECT count(*) FROM trials WHERE state IN ('claimed','running')) AS trials,
-          (SELECT count(*) FROM execution_leases
-            WHERE revoked_at IS NULL OR cleanup_state <> 'complete'
-               OR materialization_state IN ('pending','running')) AS executions,
-          (SELECT count(*) FROM task_image_materializations
-            WHERE state IN ('claimed','running')) AS builds,
-          (SELECT count(*) FROM task_image_materialization_attempts
-            WHERE native_build IS NOT NULL
-              AND native_build->>'capacity_released_at' IS NULL) AS build_cleanup
-    """))).mappings().one())
+    counts = dict((await session.execute(text(ACTIVITY_SQL))).mappings().one())
     if any(counts.values()):
         return {"status": "skipped_busy", "active": counts}
     await session.execute(text("""

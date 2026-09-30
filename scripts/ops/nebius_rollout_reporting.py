@@ -38,9 +38,12 @@ def explanation(result: dict) -> str:
         return ("Work is still active: " + "; ".join(reasons) + "." if reasons
                 else "The environment reported active work; detailed counts are unavailable.")
     return {
-        "ready": "Candidate publication succeeded; the idle check and deployment have not run yet.",
+        "ready": "Candidate is eligible for deployment; deployment has not run yet and must acquire the idle guard.",
         "complete": "Candidate deployed; HTTPS and workload versions verified; dispatch resumed.",
         "skipped_locked": "Another deployment or recovery owns the rollout guard; dispatch is paused.",
+        "blocked_recovery": "A previous deployment needs investigation or recovery; automatic deployment is blocked.",
+        "failed": "Deployment failed; the environment may be partially updated or paused.",
+        "skipped_already_deployed": "The successful deployment record and live version already match this candidate.",
         "skipped_superseded": "The deployed version supersedes this candidate, or changed during the idle check.",
         "skipped_no_candidate": "No successful dev candidate publication is available.",
         "skipped_no_platform_candidate": "Publication produced no available platform candidate artifact (for example, a harness-only build).",
@@ -52,11 +55,26 @@ def explanation(result: dict) -> str:
     }.get(status, "See the sanitized deployment evidence for this result.")
 
 
+def rollout_outcome(status: str) -> str:
+    """Keep deployment decision codes stable while making their result explicit."""
+    return {
+        "complete": "deployed",
+        "skipped_busy": "waiting_idle",
+        "skipped_locked": "blocked_recovery",
+        "blocked_recovery": "blocked_recovery",
+        "failed": "failed",
+        "ready": "ready",
+    }.get(status, "skipped" if status.startswith("skipped_") else status)
+
+
 def emit_result(result: dict) -> None:
     """Publish only decision fields, never raw deployment or provider evidence."""
     description = explanation(result)
     status = result["status"]
-    lines = [f"## Nebius rollout: {status}", "", description, ""]
+    outcome = rollout_outcome(status)
+    automatic_retry = status == "skipped_busy"
+    lines = [f"## Nebius rollout: {outcome}", "", f"Decision: `{status}`", "", description, "",
+             f"Automatic retry: **{'yes' if automatic_retry else 'no'}**.", ""]
     sha = result.get("candidate_sha", result.get("sha", ""))
     if re.fullmatch(r"[0-9a-f]{40}", sha):
         lines += [f"Candidate: [`{sha[:12]}`](https://github.com/{REPOSITORY}/commit/{sha})", ""]
@@ -68,20 +86,27 @@ def emit_result(result: dict) -> None:
         lines += [f"| {ACTIVITY[key][0]} | {count} |" for key, count in counts.items()]
         lines += ["", "Trial and execution counts can describe the same task; do not add them together.",
                   "Historical failed image builds alone do not block rollout; unfinished cleanup can.", ""]
-    if status.startswith("skipped_"):
+    if status.startswith("skipped_") or status == "blocked_recovery":
         lines += ["**No deployment was applied by this run.**", ""]
-        if status == "skipped_locked":
+        if outcome == "blocked_recovery":
             lines += ["Inspect the owning deployment/recovery before retrying; do not clear its guard.", ""]
         elif status == "skipped_busy":
-            lines += ["This run does not wait or retry. After work and cleanup finish, trigger a new rollout or let a later publication trigger one.", ""]
+            lines += ["The next scheduled check selects the latest eligible full platform publication, "
+                      "approximately every 10 minutes while automatic rollout is enabled. "
+                      "This run exits without reserving a deployment window or creating a backup; "
+                      "GitHub may delay scheduled checks.", ""]
         elif status.startswith("skipped_publication_"):
             lines += ["Open the source publication above, resolve its failed/cancelled work, and publish successfully before rollout.", ""]
         # Fixed vocabulary and integer counts only: no raw external error strings.
-        print(f"::notice title=Nebius rollout skipped::{description}")
+        print(f"::notice title=Nebius rollout {outcome}::{description}")
+    if outcome == "failed":
+        lines += ["Inspect the failed phase and persisted dispatch guard before explicit retry or recovery; "
+                  "failed deployments are not retried automatically.", ""]
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary).open("a") as stream:
             stream.write("\n".join(lines) + "\n")
-    output = {"status": status, "description": description}
+    output = {"status": status, "outcome": outcome, "automatic_retry": automatic_retry,
+              "description": description}
     if re.fullmatch(r"[0-9a-f]{40}", sha):
         output["candidate_sha"] = sha
     print(json.dumps(output))
@@ -91,7 +116,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("publication",))
     parser.parse_args()
-    run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())["workflow_run"]
+    run = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()).get("workflow_run")
+    if run is None:
+        if os.environ.get("AUTO_ROLLOUT_ENABLED") != "true":
+            emit_result({"status": "skipped_disabled"})
+        return 0
     conclusion = run.get("conclusion")
     if conclusion != "success":
         status = {"failure": "skipped_publication_failed", "cancelled": "skipped_publication_cancelled"}.get(

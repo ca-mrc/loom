@@ -118,8 +118,8 @@ def test_certificate_operation_is_protected_and_not_a_route_to_application_rollo
     for condition in ("github.repository == 'qianyi-sun/loom'", "github.ref == 'refs/heads/dev'",
                       "github.event_name == 'workflow_dispatch'", "inputs.operation == 'certificate'"):
         assert condition in job["if"]
-    # No schedule is enabled until protected Secret delivery/reload is integrated.
-    assert "schedule" not in workflow["on"]
+    # Automatic application retries never invoke the certificate operation.
+    assert "github.event_name == 'workflow_dispatch'" in job["if"]
     assert "inputs.operation == 'rollout'" in workflow["jobs"]["rollout"]["if"]
     commands = "\n".join(step.get("run", "") for step in job["steps"])
     assert "nebius_certificate_rollout.py" in commands

@@ -1,6 +1,8 @@
 name: nebius-rollout
 
 on:
+  schedule:
+    - cron: "7-57/10 * * * *"
   workflow_run:
     workflows: [nebius-candidate]
     types: [completed]
@@ -36,9 +38,10 @@ jobs:
     name: Explain why automatic rollout did not start
     if: >-
       github.repository == 'qianyi-sun/loom' &&
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      (github.event.workflow_run.conclusion != 'success' || vars.NEBIUS_AUTO_ROLLOUT_ENABLED != 'true')
+      (github.event_name == 'schedule' && vars.NEBIUS_AUTO_ROLLOUT_ENABLED != 'true' ||
+       github.event_name == 'workflow_run' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       (github.event.workflow_run.conclusion != 'success' || vars.NEBIUS_AUTO_ROLLOUT_ENABLED != 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -53,15 +56,22 @@ jobs:
           AUTO_ROLLOUT_ENABLED: ${{ vars.NEBIUS_AUTO_ROLLOUT_ENABLED }}
         run: python3 scripts/ops/nebius_rollout_reporting.py publication
 
-  rollout:
+  check:
+    name: Check deployment conditions
     if: >-
       github.repository == 'qianyi-sun/loom' &&
       vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && (inputs.operation == 'rollout' || inputs.operation == 'recover') ||
+       github.event_name == 'schedule' && github.ref == 'refs/heads/dev' ||
        github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    outputs:
+      status: ${{ steps.readiness.outputs.status || steps.publication.outputs.status }}
+      candidate_sha: ${{ steps.publication.outputs.sha }}
+      run_id: ${{ steps.publication.outputs.run_id }}
+      artifact: ${{ steps.publication.outputs.artifact }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 15
     environment:
       name: nebius-integration
       deployment: false
@@ -90,33 +100,18 @@ jobs:
           RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
         shell: bash
         run: |
+          set -euo pipefail
           args=()
           if [[ "$OPERATION" == 'recover' ]]; then
             test -n "$RECOVERY_RUN_ID"
             args+=(--recovery-run-id "$RECOVERY_RUN_ID" --recovery-dir "$RUNNER_TEMP/recovery")
           elif [[ -n "$PUBLICATION_RUN_ID" ]]; then
-            args+=(--run-id "$PUBLICATION_RUN_ID")
+            args+=(--trigger-run-id "$PUBLICATION_RUN_ID")
           fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - name: Check deployment conditions
+        id: readiness
         if: steps.publication.outputs.status == 'ready' && inputs.operation != 'recover'
-        with:
-          ref: ${{ steps.publication.outputs.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install selected candidate tooling
-        if: steps.publication.outputs.status == 'ready'
-        run: uv sync --locked --no-dev --extra cluster
-      - name: Download selected candidate
-        if: steps.publication.outputs.status == 'ready'
-        env:
-          PUBLICATION_RUN_ID: ${{ steps.publication.outputs.run_id }}
-          ARTIFACT_NAME: ${{ steps.publication.outputs.artifact }}
-        run: >-
-          gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY"
-          --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/publication"
-      - name: Deploy once if idle
-        if: steps.publication.outputs.status == 'ready'
         env:
           DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
@@ -124,7 +119,94 @@ jobs:
           REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
           CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
           CANDIDATE_SHA: ${{ steps.publication.outputs.sha }}
-          RECOVERY_EVIDENCE: ${{ steps.publication.outputs.recovery_evidence }}
+          AUTOMATIC: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-check-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-check-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          test -n "$REMOTE_KUBECONFIG"
+          test -n "$CLUSTER_ID"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          extra_args=()
+          if [[ "$AUTOMATIC" == 'true' ]]; then extra_args+=(--automatic); fi
+          uv run --no-sync python scripts/ops/nebius_idle_rollout.py check \
+            --candidate "$CANDIDATE_SHA" --kubeconfig "$REMOTE_KUBECONFIG" \
+            --expected-cluster-id "$CLUSTER_ID" \
+            --github "${extra_args[@]}"
+
+  rollout:
+    name: Deploy selected candidate
+    needs: check
+    if: >-
+      needs.check.outputs.status == 'ready' &&
+      github.repository == 'qianyi-sun/loom' &&
+      vars.NEBIUS_AUTO_ROLLOUT_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && (inputs.operation == 'rollout' || inputs.operation == 'recover') ||
+       github.event_name == 'schedule' && github.ref == 'refs/heads/dev' ||
+       github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: nebius-integration
+      deployment: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install deployment tooling
+        run: uv sync --locked --no-dev --extra cluster
+      - name: Load original recovery evidence
+        id: recovery
+        if: inputs.operation == 'recover'
+        env:
+          OPERATION: ${{ inputs.operation }}
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ "$OPERATION" == 'recover' ]]; then
+            test -n "$RECOVERY_RUN_ID"
+            args+=(--recovery-run-id "$RECOVERY_RUN_ID" --recovery-dir "$RUNNER_TEMP/recovery")
+          fi
+          uv run --no-sync python scripts/ops/nebius_idle_rollout.py select "${args[@]}"
+      - name: Download selected candidate
+        env:
+          PUBLICATION_RUN_ID: ${{ needs.check.outputs.run_id }}
+          ARTIFACT_NAME: ${{ needs.check.outputs.artifact }}
+        run: >-
+          gh run download "$PUBLICATION_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          --name "$ARTIFACT_NAME" --dir "$RUNNER_TEMP/publication"
+      - name: Deploy once if idle
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          REMOTE_KUBECONFIG: ${{ vars.NEBIUS_DEPLOY_KUBECONFIG_PATH }}
+          CLUSTER_ID: ${{ vars.NEBIUS_DEPLOY_CLUSTER_ID }}
+          CANDIDATE_SHA: ${{ needs.check.outputs.candidate_sha }}
+          AUTOMATIC: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_run' }}
+          RECOVERY_EVIDENCE: ${{ steps.recovery.outputs.recovery_evidence }}
         shell: bash
         run: |
           set -euo pipefail
@@ -141,6 +223,7 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
           unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
           extra_args=()
+          if [[ "$AUTOMATIC" == 'true' ]]; then extra_args+=(--automatic); fi
           if [[ -n "$RECOVERY_EVIDENCE" ]]; then extra_args+=(--recovery-evidence "$RECOVERY_EVIDENCE"); fi
           uv run --no-sync python scripts/ops/nebius_idle_rollout.py run \
             --publication-dir "$RUNNER_TEMP/publication" \
