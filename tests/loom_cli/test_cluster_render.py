@@ -363,12 +363,8 @@ def test_worker_manifest_sets_subprocess_gateway_url_for_sandboxes() -> None:
     )
 
 
-def test_hf_token_secret_is_injected_into_service_not_worker() -> None:
-    """HF mirror provisioning is a catalog/service boundary.
-
-    Workers must materialize SkillLearnBench from the internal object-store
-    mirror and must not receive the HF read token.
-    """
+def test_dataset_hf_token_is_not_injected_into_service_or_worker() -> None:
+    """Dataset download runs upstream; neither hosted API nor workers get its token."""
     docs = _load_docs(render_manifests(_DEFAULT_CFG))
     service = next(
         d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "loom-service"
@@ -378,16 +374,8 @@ def test_hf_token_secret_is_injected_into_service_not_worker() -> None:
     )
     service_env = service["spec"]["template"]["spec"]["containers"][0]["env"]
     service_by_name = {entry["name"]: entry for entry in service_env}
-    assert service_by_name["HF_TOKEN"] == {
-        "name": "HF_TOKEN",
-        "valueFrom": {
-            "secretKeyRef": {
-                "name": "loom-secrets",
-                "key": "huggingface-api-key",
-                "optional": True,
-            },
-        },
-    }
+    assert "HF_TOKEN" not in service_by_name
+    assert "LOOM_SVC_LOCAL_SERVERS_JSON" not in service_by_name
     worker_env = worker["spec"]["template"]["spec"]["containers"][0]["env"]
     worker_by_name = {entry["name"]: entry for entry in worker_env}
     assert "HF_TOKEN" not in worker_by_name
