@@ -254,3 +254,33 @@ async def test_lost_lifecycle_reply_replays_committed_local_evidence(sessions, t
     async with sessions() as session:
         managed = await session.get(NebiusPoolRequest, handoff.reservation_id)
         assert managed.phase == "cleanup_intent" and managed.drain_json is not None
+
+
+async def test_one_broken_runtime_does_not_starve_other_selected_builds(sessions, tmp_path):
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+    from tests.integration.test_nebius_pool_build_outbox import local_setup
+
+    app, token, participant, first, journal = await selected(sessions, tmp_path, max_nodes=3)
+    _, original, _ = await local_setup(sessions, environment_id=participant.environment_id)
+    second = original.model_copy(update={"pool_id": participant.pool_id,
+        "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
+        "key": original.key.model_copy(update={"participant_id": participant.participant_id})})
+    await journal.remember(second)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        first_job = await gateway_job(sessions, await driver.advance(first.key))
+        second_job = await gateway_job(sessions, await driver.advance(second.key))
+        first_job["metadata"]["uid"] = str(uuid4())
+        finish(second_job, second)
+
+        class Both:
+            async def observe_pool(self, runtime, *, capture_logs=False):
+                return first_job if runtime.receipt.request_key == first.key else second_job
+
+        with pytest.raises(ValueError):
+            await PoolNativeBuildController(driver=driver, kubernetes=Both()).run_once()
+    async with sessions() as session:
+        first_row = await session.get(TaskImageMaterialization, first.key.local_work_id)
+        second_row = await session.get(TaskImageMaterialization, second.key.local_work_id)
+        assert first_row.state == "claimed" and not first_row.registry_images
+        assert second_row.state == "ready" and second_row.registry_images
