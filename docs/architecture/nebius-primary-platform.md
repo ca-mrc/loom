@@ -1572,6 +1572,13 @@ branch-bound candidate for that deployment until the conversion is qualified.
 
 ## Physical pool observation for managed environments
 
+Each environment binding lists its local target aliases; different environments
+may use the same alias. A gateway receipt binds one exact alias, so a Pod with a
+different alias cannot discount that reservation even when both aliases belong
+to the same environment. Alias order does not change the capture fingerprint.
+All aliases share the same one-time physical inventory rather than contributing
+separate copies of node capacity.
+
 `InClusterKubernetesCapacityReader.capture_pool` reads one Node/Pod/DaemonSet
 inventory for a protected physical-pool selector. It does not add per-environment
 node totals. Its `PoolObservationScope` contains registry-bound environment
