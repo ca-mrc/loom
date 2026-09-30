@@ -2129,8 +2129,12 @@ final readback cannot qualify. Staging alone proves neither database registratio
 the parent migration must qualify candidate publication, namespace ownership,
 successful runtime execution and the no-dual-writer barrier before opening intake.
 
-The migration's initial closure stage binds all three data participants and their
-retained control-plane Deployment/namespace identities. It uses the existing
+The migration's initial closure stage binds every qualified data participant and
+its retained control-plane Deployment/namespace identity. Environment classes do
+not imply a fixed number of installed databases. The protected preflight must
+qualify the complete installed participant/writer inventory; closure requires
+exactly one original controller guard per participant and rejects missing,
+duplicate or foreign guards. It uses the existing
 `nebius_rollout_guard`, retaining earlier idle guards while another environment is
 busy. A lost acquisition response requires exact owner/candidate observation; an
 open database after an uncertain acquisition does not authorize another command.
@@ -2144,7 +2148,7 @@ barriers; none is implied by a closed-registration receipt.
 
 The separate controller-retirement stage retains that closure evidence without
 replaying commands in control-plane Pods after stopping them. It suspends the
-three recorded collectors, then scales the three actuators and three control
+recorded collectors, then scales the recorded actuators and control
 planes to zero, preserving their UIDs and Pod templates. Exact UID, resource
 version and spec preconditions bound each PATCH. Lost or unqualified responses
 retain write intent and permit readback only; only a complete Kubernetes conflict
@@ -2154,9 +2158,9 @@ all collector container states. Replay rechecks earlier stopped workloads withou
 writing. This stage neither changes RBAC nor activates a replacement writer;
 effective authority fencing and the connected protected installer remain required.
 
-The participant-role phase composes that retained retirement barrier with six
-fixed Role replacements: the existing execution-actuator and task-image-builder
-roles in each participant's namespaces. It preserves Role UIDs, bindings and
+The participant-role phase composes that retained retirement barrier with two
+fixed Role replacements per participant: the existing execution-actuator and
+task-image-builder roles in its namespaces. It preserves Role UIDs, bindings and
 unrelated metadata, changing only the recorded rules to the fixed reader rules
 and adding its operation marker. Exact preconditions, retained update intent and
 bounded readback handle lost replies without uncertain retries. It rechecks the

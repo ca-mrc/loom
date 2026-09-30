@@ -1,6 +1,7 @@
 """Protected initial migration barriers; closed registration is not activation.
 
-The connected caller qualifies publication, predecessor and original controllers.
+The connected caller qualifies publication, predecessor and the complete installed
+participant/writer inventory, including each original controller.
 Reuse each environment's durable idle rollout guard. This stage never releases a
 guard, stops a controller, grants a write role or opens global admission.
 """
@@ -44,7 +45,7 @@ class PoolMigrationRequest:
 
 class PoolMigrationAPI(Protocol):
     def preflight(self, request: PoolMigrationRequest) -> None:
-        """Qualify integrated publication, predecessor and exact controller inputs."""
+        """Qualify publication, predecessor and the complete installed writer set."""
         ...
 
     def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
@@ -59,8 +60,9 @@ class PoolMigrationAPI(Protocol):
 def migration_contract(request: PoolMigrationRequest) -> dict[str, Any]:
     registration_documents(request.registration)
     participants = request.registration.spec.participants
-    if (len(participants) != 3 or {row.environment_class for row in participants} != {"production", "staging", "development"}
-            or len(request.guards) != len(participants)
+    # Environment classes describe policy, not the number of installed databases.
+    # Registration validates the participant set; every member must be guarded.
+    if (len(request.guards) != len(participants)
             or {row.participant_id for row in request.guards} != {row.participant_id for row in participants}
             or len({row.namespace for row in request.guards}) != len(request.guards)
             or len({row.namespace_uid for row in request.guards}) != len(request.guards)):

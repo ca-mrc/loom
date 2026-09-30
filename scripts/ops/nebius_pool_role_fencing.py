@@ -1,4 +1,4 @@
-"""Replace six retained writer roles with fixed readers after process retirement.
+"""Replace retained participant writer roles with readers after process retirement.
 
 No new bindings, gateway authority or activation. The parent must additionally
 qualify effective permissions and the complete writer inventory before cutover.
