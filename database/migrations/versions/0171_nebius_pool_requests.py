@@ -58,7 +58,7 @@ CREATE TABLE nebius_pool_build_outbox (
     builder_id TEXT NOT NULL, logical_pool_id TEXT NOT NULL,
     request_sha256 TEXT NOT NULL, request_json JSONB NOT NULL, selection_json JSONB NOT NULL,
     phase TEXT NOT NULL, reservation_id UUID, receipt_json JSONB, cancelled_json JSONB,
-    activation_json JSONB, activated_json JSONB,
+    activation_json JSONB, activated_json JSONB, released_json JSONB,
     attempt_id UUID, attempt_number INTEGER, lease_epoch BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT nebius_pool_build_outbox_replay_key UNIQUE (participant_id, materialization_id, generation),
@@ -77,8 +77,8 @@ CREATE TABLE nebius_pool_build_outbox (
         request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object' AND
         jsonb_typeof(selection_json) = 'object'),
     CONSTRAINT nebius_pool_build_outbox_phase_check CHECK (
-        phase IN ('selected','attached','activation_pending','active','cancel_pending','stop_pending','cancelled') AND
-        (phase NOT IN ('attached','activation_pending','active','stop_pending') OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND
+        phase IN ('selected','attached','activation_pending','active','cancel_pending','stop_pending','cancelled','released') AND
+        (phase NOT IN ('attached','activation_pending','active','stop_pending','released') OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND
         (phase <> 'selected' OR attempt_id IS NULL) AND
         (attempt_id IS NULL OR reservation_id IS NOT NULL) AND
         num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND
@@ -91,12 +91,14 @@ CREATE TABLE nebius_pool_build_outbox (
         (cancelled_json IS NULL OR jsonb_typeof(cancelled_json) = 'object') AND
         (activation_json IS NULL OR (jsonb_typeof(activation_json) = 'object' AND attempt_id IS NOT NULL AND
             phase NOT IN ('selected','attached'))) AND
-        (phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND
-        (phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND
-        (activated_json IS NULL OR jsonb_typeof(activated_json) = 'object'))
+        (phase NOT IN ('activation_pending','active','stop_pending','released') OR activation_json IS NOT NULL) AND
+        (phase IN ('active','stop_pending','released')) = (activated_json IS NOT NULL) AND
+        (activated_json IS NULL OR jsonb_typeof(activated_json) = 'object') AND
+        (phase = 'released') = (released_json IS NOT NULL) AND
+        (released_json IS NULL OR jsonb_typeof(released_json) = 'object'))
 );
 CREATE UNIQUE INDEX nebius_pool_build_outbox_live_key ON nebius_pool_build_outbox(materialization_id)
-    WHERE phase <> 'cancelled';
+    WHERE phase NOT IN ('cancelled','released');
 CREATE FUNCTION validate_nebius_pool_build_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
@@ -115,22 +117,24 @@ BEGIN
             RAISE EXCEPTION 'pool local selection must begin unclaimed' USING ERRCODE = '23514';
         END IF;
     ELSE
-        IF (to_jsonb(OLD) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch','activation_json','activated_json'])
+        IF (to_jsonb(OLD) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch','activation_json','activated_json','released_json'])
            IS DISTINCT FROM
-           (to_jsonb(NEW) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch','activation_json','activated_json'])
+           (to_jsonb(NEW) - ARRAY['phase','reservation_id','receipt_json','cancelled_json','attempt_id','attempt_number','lease_epoch','activation_json','activated_json','released_json'])
            OR (OLD.reservation_id IS NOT NULL AND (NEW.reservation_id IS DISTINCT FROM OLD.reservation_id OR
                                                     NEW.receipt_json IS DISTINCT FROM OLD.receipt_json))
            OR (OLD.attempt_id IS NOT NULL AND ROW(NEW.attempt_id, NEW.attempt_number, NEW.lease_epoch)
                     IS DISTINCT FROM ROW(OLD.attempt_id, OLD.attempt_number, OLD.lease_epoch))
            OR (OLD.cancelled_json IS NOT NULL AND NEW.cancelled_json IS DISTINCT FROM OLD.cancelled_json)
            OR (OLD.activation_json IS NOT NULL AND NEW.activation_json IS DISTINCT FROM OLD.activation_json)
-           OR (OLD.activated_json IS NOT NULL AND NEW.activated_json IS DISTINCT FROM OLD.activated_json) THEN
+           OR (OLD.activated_json IS NOT NULL AND NEW.activated_json IS DISTINCT FROM OLD.activated_json)
+           OR (OLD.released_json IS NOT NULL AND NEW.released_json IS DISTINCT FROM OLD.released_json) THEN
             RAISE EXCEPTION 'pool local selection evidence is immutable' USING ERRCODE = '23514';
         END IF;
         IF NOT (NEW.phase = OLD.phase OR (OLD.phase = 'selected' AND NEW.phase IN ('attached','cancel_pending'))
                 OR (OLD.phase = 'attached' AND NEW.phase IN ('activation_pending','cancel_pending'))
                 OR (OLD.phase = 'activation_pending' AND NEW.phase IN ('active','cancel_pending','stop_pending'))
                 OR (OLD.phase = 'active' AND NEW.phase = 'stop_pending')
+                OR (OLD.phase = 'stop_pending' AND NEW.phase = 'released')
                 OR (OLD.phase = 'cancel_pending' AND NEW.phase IN ('cancelled','stop_pending'))) THEN
             RAISE EXCEPTION 'pool local handoff transition forbidden' USING ERRCODE = '23514';
         END IF;
@@ -174,6 +178,19 @@ BEGIN
         NEW.activated_json->>'request_sha256' = NEW.request_sha256 AND
         NEW.activated_json->'request_key' = NEW.request_json->'key') IS NOT TRUE THEN
         RAISE EXCEPTION 'pool local activated receipt differs' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.released_json IS NOT NULL AND (
+        NEW.released_json->>'phase' = 'released' AND
+        (NEW.released_json->>'cleanup_observation_id')::uuid <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        NEW.released_json->>'reservation_id' = NEW.reservation_id::text AND
+        NEW.released_json->>'pool_id' = NEW.pool_id::text AND
+        NEW.released_json->>'admission_epoch' = NEW.admission_epoch::text AND
+        NEW.released_json->>'request_sha256' = NEW.request_sha256 AND
+        NEW.released_json->'request_key' = NEW.request_json->'key' AND
+        NEW.released_json->>'plan_sha256' = NEW.activated_json->>'plan_sha256' AND
+        (NEW.activated_json->>'job_uid' IS NULL OR
+            NEW.released_json->>'job_uid' = NEW.activated_json->>'job_uid')) IS NOT TRUE THEN
+        RAISE EXCEPTION 'pool local release identity differs' USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END $$;

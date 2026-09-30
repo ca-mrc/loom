@@ -1876,7 +1876,7 @@ remain authorized, then confirm durable committed/unavailable output before fina
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
 it does not qualify execution output. The execution runtime adapter,
-local release recovery, gateway orchestration and delayed-start absolute deadline
+gateway orchestration and delayed-start absolute deadline
 remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
@@ -1902,8 +1902,17 @@ by that lease and the original runtime deadline. A heartbeat cannot extend saved
 consent. Local cancellation or stale ownership after manager activation retains
 the receipt as `stop_pending`, without a refund. The outbox preserves first
 activation evidence independently from the original reservation receipt.
-This primitive does not yet connect the installed controller, output drain,
-or release, and does not independently authorize an originating application.
+After manager-confirmed cleanup, the native controller retains the exact released
+receipt and marks only the original attempt and outbox terminal in one local
+transaction. It checks the retained activation, native identity and saved
+stop/drain/output evidence; neither a success result nor stop/drain acknowledgment
+alone can close the handoff. Release recovery never changes the materialization's
+result, retry budget or a newer claim. Exact replay preserves the receipt and first
+release timestamp. Released selections no longer occupy the local live-selection
+key or pending scan, so a later eligible retry can proceed with a new generation.
+SQL retains both the original activation and terminal release receipt.
+This primitive does not yet connect the installed controller and does not
+independently authorize an originating application.
 Database-backed HTTP tests connect this journal to real management prepare and
 activation; this is not evidence that installed controllers use it.
 The native handoff driver composes those committed steps with the participant

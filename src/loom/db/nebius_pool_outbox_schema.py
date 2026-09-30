@@ -51,7 +51,7 @@ class NebiusPoolBuildOutbox(Base):
         UniqueConstraint("participant_id", "materialization_id", "generation", name="nebius_pool_build_outbox_replay_key"),
         UniqueConstraint("reservation_id", name="nebius_pool_build_outbox_grant_key"),
         Index("nebius_pool_build_outbox_live_key", "materialization_id", unique=True,
-              postgresql_where=text("phase <> 'cancelled'")),
+              postgresql_where=text("phase NOT IN ('cancelled','released')")),
         ForeignKeyConstraint(["materialization_id"], ["task_image_materializations.id"], ondelete="RESTRICT"),
         ForeignKeyConstraint(["attempt_id", "materialization_id", "attempt_number", "lease_epoch", "builder_id"],
             ["task_image_materialization_attempts.id", "task_image_materialization_attempts.materialization_id",
@@ -65,8 +65,8 @@ class NebiusPoolBuildOutbox(Base):
             name="nebius_pool_build_outbox_identity_check"),
         CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object' AND "
             "jsonb_typeof(selection_json) = 'object'", name="nebius_pool_build_outbox_payload_check"),
-        CheckConstraint("phase IN ('selected','attached','activation_pending','active','cancel_pending','stop_pending','cancelled') AND "
-            "(phase NOT IN ('attached','activation_pending','active','stop_pending') OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
+        CheckConstraint("phase IN ('selected','attached','activation_pending','active','cancel_pending','stop_pending','cancelled','released') AND "
+            "(phase NOT IN ('attached','activation_pending','active','stop_pending','released') OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
             "(phase <> 'selected' OR attempt_id IS NULL) AND "
             "(attempt_id IS NULL OR reservation_id IS NOT NULL) AND "
             "num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND "
@@ -79,9 +79,11 @@ class NebiusPoolBuildOutbox(Base):
             "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json) = 'object') AND "
             "(activation_json IS NULL OR (jsonb_typeof(activation_json) = 'object' AND attempt_id IS NOT NULL AND "
             "phase NOT IN ('selected','attached'))) AND "
-            "(phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND "
-            "(phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND "
-            "(activated_json IS NULL OR jsonb_typeof(activated_json) = 'object')",
+            "(phase NOT IN ('activation_pending','active','stop_pending','released') OR activation_json IS NOT NULL) AND "
+            "(phase IN ('active','stop_pending','released')) = (activated_json IS NOT NULL) AND "
+            "(activated_json IS NULL OR jsonb_typeof(activated_json) = 'object') AND "
+            "(phase = 'released') = (released_json IS NOT NULL) AND "
+            "(released_json IS NULL OR jsonb_typeof(released_json) = 'object')",
             name="nebius_pool_build_outbox_phase_check"),
     )
     outbox_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
@@ -101,6 +103,7 @@ class NebiusPoolBuildOutbox(Base):
     cancelled_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     activation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     activated_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    released_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     attempt_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     attempt_number: Mapped[int | None] = mapped_column(Integer)
     lease_epoch: Mapped[int | None] = mapped_column(BigInteger)

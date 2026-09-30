@@ -27,7 +27,7 @@ from tests.integration.test_nebius_pool_registry import machine
 
 
 @asynccontextmanager
-async def completed(sessions, tmp_path, *, outcome="success"):
+async def completed(sessions, tmp_path, *, outcome="success", started=True):
     from loom_service.pool_management.gateway_journal import PoolGatewayJournal
     from loom_service.pool_management.kubernetes import KubernetesPoolGateway
 
@@ -41,10 +41,12 @@ async def completed(sessions, tmp_path, *, outcome="success"):
                 transport=httpx.MockTransport(InventoryAPI(api, []))) as kube:
             gateway = KubernetesPoolGateway(PoolGatewayJournal(sessions), kube)
             principal = await machine(sessions, request.pool_id, role="gateway")
-            for kind in ("ConfigMap", "Job"):
-                await gateway.create(principal, handoff.reservation_id, kind=kind)
-            job = copy.deepcopy(next(item for item in api.objects.values() if item["kind"] == "Job"))
-            job["pods"] = [pod(job)]
+            job = None
+            if started:
+                for kind in ("ConfigMap", "Job"):
+                    await gateway.create(principal, handoff.reservation_id, kind=kind)
+                job = copy.deepcopy(next(item for item in api.objects.values() if item["kind"] == "Job"))
+                job["pods"] = [pod(job)]
             if outcome in {"success", "invalid"}:
                 finish(job, request, invalid=outcome == "invalid")
             elif outcome == "cancelled":
@@ -59,8 +61,9 @@ async def completed(sessions, tmp_path, *, outcome="success"):
             await controller.run_once()
             assert (await journal.get(request.key)).phase == "stop_pending"
             # Real gateway journal + identity checks at the external HTTP boundary.
-            for kind in ("Job", "ConfigMap"):
-                await gateway.delete(principal, handoff.reservation_id, kind=kind)
+            if started:
+                for kind in ("Job", "ConfigMap"):
+                    await gateway.delete(principal, handoff.reservation_id, kind=kind)
             receipt = await gateway.verify_cleanup(principal, handoff.reservation_id)
             yield participant, request, journal, driver, reader, receipt
 
@@ -104,6 +107,26 @@ async def test_released_handoff_allows_new_selection_and_preserves_old_replay(se
         assert await outbox(sessions, participant).confirm_release(request.key, receipt) == released
         assert await counts(sessions, request.key.local_work_id) == (2, 1, 2)
         assert [item.request.key for item in await journal.pending()] == [following.key]
+
+
+async def test_release_without_dispatched_job_preserves_cancel_refund_and_empty_uid(sessions, tmp_path):
+    async with completed(sessions, tmp_path, outcome="cancelled", started=False) as (_, request, journal, driver, reader, receipt):
+        assert receipt.job_uid is None and receipt.cleanup_observation_id is not None
+        await PoolNativeBuildController(driver=driver, kubernetes=reader).run_once()
+        assert (await journal.get(request.key)).released == receipt and not reader.calls
+        assert await counts(sessions, request.key.local_work_id) == (1, 0, 1)
+
+
+async def test_delayed_runtime_and_activation_readbacks_cannot_reopen_released_handoff(sessions, tmp_path):
+    async with completed(sessions, tmp_path) as (_, request, journal, driver, reader, receipt):
+        runtime = await driver.management.native_runtime((await journal.get(request.key)).action)
+        stale = runtime.model_copy(update={"receipt": receipt.model_copy(update={
+            "phase": "cleanup_intent", "cleanup_observation_id": None})})
+        released = await journal.confirm_release(request.key, receipt)
+        before = (await local_rows(sessions, request))[1].native_build
+        assert not await PoolNativeBuildController(driver=driver, kubernetes=reader)._record(stale)
+        assert await journal.confirm_activation(request.key, stale.receipt) == released
+        assert (await local_rows(sessions, request))[1].native_build == before
 
 
 @pytest.mark.parametrize("damage", ["pool", "reservation", "key", "epoch", "digest", "plan", "job", "no-proof", "not-released"])

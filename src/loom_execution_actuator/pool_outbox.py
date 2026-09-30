@@ -25,6 +25,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolRequestKeyV1,
 )
+from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_task_image import PoolRegisteredBuildSourceV1, PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom.task_bundle_source_journal import require_task_bundle_transaction
@@ -49,6 +50,7 @@ class PoolBuildHandoff:
     attempt_id: UUID | None
     activation: PoolActivationV1 | None
     activated: PoolReceiptV1 | None
+    released: PoolReceiptV1 | None
 
     @property
     def action(self) -> PoolRequestActionV1:
@@ -117,7 +119,8 @@ class PoolBuildOutbox:
             raise PoolHandoffError
         return PoolBuildHandoff(request, row.request_sha256, row.phase, row.reservation_id, row.attempt_id,
             PoolActivationV1.model_validate(row.activation_json) if row.activation_json is not None else None,
-            PoolReceiptV1.model_validate(row.activated_json) if row.activated_json is not None else None)
+            PoolReceiptV1.model_validate(row.activated_json) if row.activated_json is not None else None,
+            PoolReceiptV1.model_validate(row.released_json) if row.released_json is not None else None)
 
     @asynccontextmanager
     async def _transaction(self, key: PoolRequestKeyV1) -> AsyncIterator[tuple[AsyncSession, NebiusPoolBuildOutbox | None]]:
@@ -149,7 +152,7 @@ class PoolBuildOutbox:
         async with self.sessions() as session:
             rows = await session.scalars(select(NebiusPoolBuildOutbox).where(
                 NebiusPoolBuildOutbox.participant_id == self.participant.participant_id,
-                NebiusPoolBuildOutbox.phase != "cancelled",
+                NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released")),
             ).order_by(NebiusPoolBuildOutbox.created_at, NebiusPoolBuildOutbox.outbox_id).limit(limit))
             return tuple(self._view(row) for row in rows)
 
@@ -177,7 +180,7 @@ class PoolBuildOutbox:
                 return self._view(existing)
             latest, live = (await session.execute(select(
                 func.max(NebiusPoolBuildOutbox.generation),
-                func.count().filter(NebiusPoolBuildOutbox.phase != "cancelled"),
+                func.count().filter(NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released"))),
             ).where(
                 NebiusPoolBuildOutbox.materialization_id == request.key.local_work_id,
             ))).one()
@@ -313,7 +316,7 @@ class PoolBuildOutbox:
         """Retain manager acceptance even after caller loss; never refund it."""
         async with self._transaction(key) as (session, row):
             if (row is None or row.activation_json is None
-                    or row.phase not in {"activation_pending", "cancel_pending", "active", "stop_pending"}):
+                    or row.phase not in {"activation_pending", "cancel_pending", "active", "stop_pending", "released"}):
                 raise PoolHandoffError
             receipt = self._receipt(row, receipt)
             if receipt.plan_sha256 is None:
@@ -390,5 +393,68 @@ class PoolBuildOutbox:
                 row.reservation_id, row.receipt_json = receipt.reservation_id, receipt.model_dump(mode="json")
             await self._finish_unstarted_claim(session, row)
             row.phase, row.cancelled_json = "cancelled", receipt.model_dump(mode="json")
+            await session.flush()
+            return self._view(row)
+
+    def _lifecycle(self, row: NebiusPoolBuildOutbox,
+                   attempt: TaskImageMaterializationAttempt) -> tuple[PoolStopV1, PoolDrainV1]:
+        """Qualify the same retained local evidence for drain and release recovery."""
+        handoff = self._view(row)
+        native = attempt.native_build or {}
+        try:
+            stop = PoolStopV1.model_validate(native["pool_stop"])
+            drain = PoolDrainV1.model_validate(native["pool_drain"])
+            output = native["pool_output"]
+            if (handoff.activated is None or attempt.grant_id is not None
+                    or attempt.id != row.attempt_id or attempt.materialization_id != row.materialization_id
+                    or attempt.lease_epoch != row.lease_epoch or attempt.builder_id != row.builder_id
+                    or native["pool_reservation_id"] != str(row.reservation_id)
+                    or native["pool_plan_sha256"] != handoff.activated.plan_sha256
+                    or type(native["lease_epoch"]) is not int or native["lease_epoch"] != attempt.lease_epoch
+                    or stop.action != handoff.action or drain.action != handoff.action
+                    or stop.reservation_id != row.reservation_id or drain.reservation_id != stop.reservation_id
+                    or stop.plan_sha256 != handoff.activated.plan_sha256 or drain.plan_sha256 != stop.plan_sha256
+                    or stop.lease_generation != attempt.lease_epoch or drain.lease_generation != attempt.lease_epoch
+                    or drain.output_generation != attempt.lease_epoch
+                    or output["attempt_id"] != str(attempt.id) or output["lease_epoch"] != attempt.lease_epoch
+                    or output["cause"] != stop.cause or output["output_state"] != drain.output_state
+                    or drain.stop_sha256 != canonical_digest(native["pool_stop"]).removeprefix("sha256:")
+                    or drain.evidence_sha256 != canonical_digest(output).removeprefix("sha256:")):
+                raise PoolHandoffError
+        except (KeyError, TypeError, ValueError):
+            raise PoolHandoffError from None
+        return stop, drain
+
+    async def confirm_release(self, key: PoolRequestKeyV1, receipt: PoolReceiptV1) -> PoolBuildHandoff:
+        """Consume authenticated manager readback; never infer external absence.
+
+        Finishes only the retained attempt/outbox. Its result, retry budget and
+        any successor materialization claim are deliberately not written here.
+        """
+        async with self._transaction(key) as (session, row):
+            if row is None or row.phase not in {"stop_pending", "released"} or row.attempt_id is None:
+                raise PoolHandoffError
+            receipt = self._receipt(row, receipt)
+            handoff = self._view(row)
+            if (receipt.phase != "released" or handoff.activated is None
+                    or receipt.plan_sha256 != handoff.activated.plan_sha256
+                    or (handoff.activated.job_uid is not None and receipt.job_uid != handoff.activated.job_uid)):
+                raise PoolHandoffError
+            if row.phase == "released":
+                if row.released_json != receipt.model_dump(mode="json"):
+                    raise PoolHandoffError
+                return handoff
+            attempt = await session.get(TaskImageMaterializationAttempt, row.attempt_id, with_for_update=True)
+            if attempt is None:
+                raise PoolHandoffError
+            self._lifecycle(row, attempt)
+            native = dict(attempt.native_build or {})
+            if native.get("job_uid") is not None and native["job_uid"] != str(receipt.job_uid):
+                raise PoolHandoffError
+            if native.get("capacity_released_at") is not None:
+                raise PoolHandoffError
+            native.update(state="released", capacity_released_at=(await _clock(session)).isoformat())
+            attempt.native_build = native
+            row.phase, row.released_json = "released", receipt.model_dump(mode="json")
             await session.flush()
             return self._view(row)

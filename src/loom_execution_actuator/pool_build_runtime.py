@@ -86,25 +86,14 @@ class PoolNativeBuildController:
             attempt = await session.get(TaskImageMaterializationAttempt, saved.attempt_id)
             if attempt is None or attempt.native_build is None:
                 raise PoolHandoffError
-            native = attempt.native_build
-            stop, drain = PoolStopV1.model_validate(native["pool_stop"]), PoolDrainV1.model_validate(native["pool_drain"])
-            handoff = outbox._view(saved)
-            if (handoff.activated is None or stop.action != handoff.action or drain.action != handoff.action
-                    or stop.reservation_id != saved.reservation_id or drain.reservation_id != stop.reservation_id
-                    or stop.plan_sha256 != handoff.activated.plan_sha256 or drain.plan_sha256 != stop.plan_sha256
-                    or stop.lease_generation != attempt.lease_epoch or drain.lease_generation != attempt.lease_epoch
-                    or drain.output_generation != attempt.lease_epoch
-                    or drain.stop_sha256 != _digest(native["pool_stop"])
-                    or drain.evidence_sha256 != _digest(native["pool_output"])):
-                raise PoolHandoffError
-            return stop, drain
+            return outbox._lifecycle(saved, attempt)
 
     async def _record(self, runtime: PoolNativeRuntimeV1, observed: dict[str, Any] | None = None) -> bool:
         """Requalify both sides of external reads; stale work retains stop intent."""
         outbox = self.driver.outbox
         runtime = PoolNativeRuntimeV1.model_validate_json(runtime.model_dump_json())
         async with outbox._transaction(runtime.receipt.request_key) as (session, saved):
-            if saved is None or saved.phase not in {"active", "stop_pending"} or saved.attempt_id is None:
+            if saved is None or saved.phase not in {"active", "stop_pending", "released"} or saved.attempt_id is None:
                 raise PoolHandoffError
             handoff = outbox._view(saved)
             outbox._receipt(saved, runtime.receipt)
@@ -114,6 +103,8 @@ class PoolNativeBuildController:
                     or runtime.target_id != request.target_id or runtime.lease_epoch != request.build.expected_lease_epoch + 1
                     or runtime.deadline_at != request.deadline_at):
                 raise PoolHandoffError
+            if saved.phase == "released":
+                return False  # A concurrent reconciler already completed this handoff.
             row = await session.get(TaskImageMaterialization, saved.materialization_id, with_for_update=True)
             attempt = await session.get(TaskImageMaterializationAttempt, saved.attempt_id, with_for_update=True)
             if (row is None or attempt is None or attempt.grant_id is not None
@@ -171,6 +162,9 @@ class PoolNativeBuildController:
         if handoff.phase not in {"active", "stop_pending"}:
             return
         runtime = await self.driver.management.native_runtime(handoff.action)
+        if runtime.receipt.phase == "released":
+            await self.driver.outbox.confirm_release(key, runtime.receipt)
+            return
         if await self._record(runtime) and runtime.receipt.job_uid is not None:
             observed = await self.kubernetes.observe_pool(runtime)
             if observed is not None:
