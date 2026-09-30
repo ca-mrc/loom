@@ -57,6 +57,7 @@ class LoomServiceSettings(BaseSettings):
     minio_public_endpoint: str | None = None
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr | None = None
+    pool_profiles_file: Path | None = None
     pool_submission_source_json: str | None = None
     public_base_url: HttpUrl | None = None
     service_execution_runtime_profile_json: str = "{}"

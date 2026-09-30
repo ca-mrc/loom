@@ -67,6 +67,9 @@ class LoomServiceSettings(_BaseSettings):
 
     @model_validator(mode="after")
     def _validate_service_mode(self) -> Self:
+        if self.pool_profiles_file is not None and (
+                self.service_mode != "management" or not self.pool_profiles_file.is_absolute()):
+            raise ValueError("pool profiles require management mode and an absolute configuration path")
         if (self.management_http_max_body_bytes <= 0 or self.management_http_max_inflight <= 0
                 or not math.isfinite(self.management_http_body_timeout_sec)
                 or self.management_http_body_timeout_sec <= 0):

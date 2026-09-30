@@ -184,6 +184,11 @@
     "default": "None",
     "required": false
   },
+  "pool_profiles_file": {
+    "annotation": "pathlib.Path | None",
+    "default": "None",
+    "required": false
+  },
   "pool_submission_source_json": {
     "annotation": "str | None",
     "default": "None",

@@ -169,6 +169,11 @@ used_by     = ["loom-service"]
 python_type = "Path"
 description = "Protected management-installation JSON: foundation, pinned publications, public image trust and child platform allowance. Management mode only; absent leaves provisioning unconfigured. Never mount in personal applications."
 
+[service_config.pool_profiles_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Protected global pool renderer catalog JSON. Management mode only; absent leaves pool prepare/activation unavailable. Contains fixed execution/build profiles and public image trust, not Kubernetes credentials or registration authority."
+
 [service_config.management_http_max_body_bytes]
 used_by     = ["loom-service"]
 python_type = "int"

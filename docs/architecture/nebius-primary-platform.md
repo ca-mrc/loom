@@ -2044,6 +2044,16 @@ Kubernetes or database clients, including when another loop fails. These setting
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
 
+Management startup loads `pool_profiles_file`, a bounded installer-owned
+`loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
+build entries keyed by the registered profile UUID, plus public image-admission
+keys. The loader rejects duplicate identities/JSON fields, unknown fields,
+unqualified node groups or runtime overhead, and mutable trusted images without
+echoing configuration in diagnostics. Both entries reuse the existing renderers;
+no owner API can replace the catalog. The file grants neither registration nor
+Kubernetes authority. Without it, prepare and activation remain unavailable;
+retained status and cleanup do not depend on current rendering profiles.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
