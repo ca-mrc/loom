@@ -68,8 +68,8 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
         if kind == 'namespace':
             uid = request.registration.binding.kube_system_uid if name == 'kube-system' else str(target.namespace_uid)
             return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
-        if kind == 'pods':
-            assert 'app=loom-postgres' in args
+        if kind == '--raw':
+            assert args == ['get', '--raw', f'/api/v1/namespaces/{target.namespace}/pods?labelSelector=app%3Dloom-postgres&limit=100']
             rows = [state.pod] * (2 if state.second_pod else 1)
             if state.executed and state.after_drift:
                 rows = copy.deepcopy(rows)
@@ -99,7 +99,7 @@ def test_stopped_control_plane_does_not_prevent_bound_readonly_guard_observation
 
 @pytest.mark.parametrize('damage', ['database_uid', 'database_template', 'database_status', 'selector', 'secret_uid',
     'secret_version', 'url_host', 'url_database', 'url_port', 'url_scheme', 'url_query', 'env_override', 'pod_owner', 'pod_image',
-    'pod_security', 'pod_readiness', 'pod_storage', 'extra_pod', 'pagination', 'after_drift', 'release'])
+    'pod_security', 'pod_init', 'pod_readiness', 'pod_storage', 'extra_pod', 'pagination', 'after_drift', 'release'])
 def test_database_guard_rejects_ambiguous_or_changed_identity(database_guard, damage):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
@@ -129,6 +129,8 @@ def test_database_guard_rejects_ambiguous_or_changed_identity(database_guard, da
         state.pod['spec']['containers'][0]['image'] = 'foreign:latest'
     elif damage == 'pod_security':
         state.pod['spec']['hostPID'] = True
+    elif damage == 'pod_init':
+        state.pod['spec']['initContainers'] = [{'name': 'foreign', 'image': 'foreign:latest'}]
     elif damage == 'pod_readiness':
         state.pod['status']['containerStatuses'][0]['ready'] = False
     elif damage == 'pod_storage':
@@ -166,3 +168,45 @@ def test_database_observer_never_exposes_unqualified_query_output(database_guard
     with pytest.raises(PoolMigrationError) as error:
         api.guard(state.target, 'observe')
     assert 'private-marker' not in str(error.value)
+
+
+def test_bound_acquisition_uses_live_controller_then_observation_survives_retirement(database_guard, monkeypatch):
+    api, state = database_guard
+    controller = copy.deepcopy(state.target.controller)
+    controller['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
+        'updatedReplicas': 1, 'availableReplicas': 1}
+    replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+        'name': 'loom-control-plane-abc', 'namespace': state.target.namespace, 'uid': str(uuid4()),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': 'loom-control-plane',
+            'uid': controller['metadata']['uid'], 'controller': True}]}, 'spec': {
+                'template': copy.deepcopy(controller['spec']['template'])}}
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': 'loom-control-plane-abc-def', 'namespace': state.target.namespace, 'uid': str(uuid4()),
+        'labels': {'app': 'loom-control-plane'}, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet',
+            'name': replica['metadata']['name'], 'uid': replica['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(controller['spec']['template']['spec']), 'status': {
+            'phase': 'Running', 'containerStatuses': [{'name': 'loom-control-plane', 'ready': True}]}}
+    database_run = api._run
+    writes = []
+
+    def run(args):
+        if args[:2] == ['get', 'deployment']:
+            return controller
+        if args[:2] == ['get', 'replicaset']:
+            return replica
+        if args == ['get', '--raw', f'/api/v1/namespaces/{state.target.namespace}/pods?labelSelector=app%3Dloom-control-plane&limit=100']:
+            return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [pod]}
+        if args[:1] == ['exec'] and args[5] == 'loom-control-plane':
+            assert args[3] == 'pod/loom-control-plane-abc-def'
+            assert args[7:] == ['python', '-m', 'loom.nebius_rollout_guard', 'acquire', '--owner',
+                str(state.request.registration.spec.operation_id), '--candidate', state.request.registration.candidate['candidate_sha']]
+            writes.append(args)
+            return {'status': 'acquired', 'active': {'trials': 0}}
+        return database_run(args)
+
+    monkeypatch.setattr(api, '_run', run)
+    assert api.guard(state.target, 'acquire') == {'status': 'acquired'}
+    assert len(writes) == 1
+    assert sum(args[:2] == ['get', 'secret'] for args in state.calls) == 2
+    monkeypatch.setattr(api, '_run', database_run)
+    assert api.guard(state.target, 'observe') == {'status': 'held'}

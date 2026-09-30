@@ -65,7 +65,7 @@ def guard_runtime(monkeypatch, tmp_path):
         elif args[1] == "replicaset":
             value = state.replica
         else:
-            assert args[1] == "pods" and "app=loom-control-plane" in args
+            assert args == ["get", "--raw", f"/api/v1/namespaces/{target.namespace}/pods?labelSelector=app%3Dloom-control-plane&limit=100"]
             value = {"apiVersion": "v1", "kind": "PodList", "metadata": {"resourceVersion": "1",
                 "continue": "next" if state.continuation else ""}, "items": [state.pod] * (2 if state.extra_pod else 1)}
             if state.executed and state.final_drift:
@@ -87,7 +87,7 @@ def test_guard_uses_only_fixed_command_for_exact_running_controller(guard_runtim
 
 
 @pytest.mark.parametrize("damage", ["namespace", "controller", "template", "owner", "replica_owner", "extra_pod",
-    "continuation", "terminating", "not_ready", "release", "target", "config", "final_drift", "bad_report"])
+    "continuation", "terminating", "not_ready", "init", "release", "target", "config", "final_drift", "bad_report"])
 def test_guard_refuses_drift_foreign_lineage_and_unapproved_commands(guard_runtime, damage):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
@@ -109,6 +109,8 @@ def test_guard_refuses_drift_foreign_lineage_and_unapproved_commands(guard_runti
         state.pod["metadata"]["deletionTimestamp"] = "2026-09-30T00:00:00Z"
     elif damage == "not_ready":
         state.pod["status"]["containerStatuses"][0]["ready"] = False
+    elif damage == "init":
+        state.pod["spec"]["initContainers"] = [{"name": "foreign", "image": "foreign:latest"}]
     elif damage == "release":
         action = "release"
     elif damage == "target":
