@@ -1645,6 +1645,16 @@ idempotency key to recover their own retry after a lost response. Missing
 configuration remains compatible/unknown; this producer coverage does not establish
 an installed global-admission or priority guarantee.
 
+The native build handoff derives its origin from the highest-class live eligible
+Trial consumer of that exact materialization, then oldest consumer within a class.
+It reuses the native demand filter, including explicitly bound direct Nebius trials;
+cancelled, terminal, wrong-pool, family/legacy-route and unknown-origin work cannot
+promote a shared image. Selection and grant attachment both recheck this origin.
+If eligible consumers change it before attachment, the unstarted grant is retained
+for cancellation without consuming an attempt; a new immutable selection generation
+is allowed only after that cancellation is confirmed. This local check does not
+replace management registration qualification or establish an installed controller.
+
 The management-side observation registry issues a persisted capture scope from
 registered participants and committed gateway Job receipts. A dedicated observer
 can publish exactly one provider/cluster snapshot for that scope; an identical

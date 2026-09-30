@@ -30,8 +30,8 @@ from loom.task_bundle_source_journal import require_task_bundle_transaction
 from loom.task_image_materialization import admit_task_image_source
 from loom_control_plane.task_image_materializations import (
     claim_task_image_materialization,
-    has_nebius_task_image_demand,
 )
+from loom_execution_actuator.pool_origins import preferred_task_image_origin
 
 
 class PoolHandoffError(ValueError):
@@ -156,8 +156,8 @@ class PoolBuildOutbox:
             return False
         available = ((row.state == "queued" and (row.next_attempt_at is None or row.next_attempt_at <= now))
             or (row.state in {"claimed", "running"} and row.lease_expires_at is not None and row.lease_expires_at <= now))
-        return available and await has_nebius_task_image_demand(session, materialization_id=row.id,
-                                                               pool_id=self.logical_pool_id)
+        return available and request.origin == await preferred_task_image_origin(session,
+            materialization_id=row.id, participant=self.participant, logical_pool_id=self.logical_pool_id)
 
     async def remember(self, request: PoolTaskImagePrepareV1) -> PoolBuildHandoff:
         request = self._request(request)

@@ -76,6 +76,18 @@ async def test_outbox_refuses_unknown_origin_instead_of_trusting_request_class(s
     assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
 
 
+async def test_request_cannot_promote_personal_consumers_and_equal_class_keeps_oldest(sessions):
+    participant, request, trial = await local_setup(sessions, origin_kind="application")
+    another = request.origin.model_copy(update={"submission_id": uuid4()})
+    await consumer(sessions, request.key.local_work_id, trial, another.model_dump(mode="json"))
+    assert await preferred(sessions, participant, request.key.local_work_id) == request.origin
+    spoofed = request.model_copy(update={"origin": request.origin.model_copy(update={
+        "kind": "environment", "application": None})})
+    with pytest.raises(ValueError):
+        await outbox(sessions, participant).remember(spoofed)
+    assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
+
+
 async def test_higher_consumer_arrival_cancels_unstarted_grant_before_reselection(sessions):
     participant, request, trial = await local_setup(sessions, origin_kind="application")
     journal = outbox(sessions, participant)
