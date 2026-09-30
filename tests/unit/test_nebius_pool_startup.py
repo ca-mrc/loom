@@ -48,12 +48,13 @@ def test_global_actuator_configuration_rejects_cross_binding_before_startup(tmp_
                 "registry_repository": "registry.example/task-images"})
 
 
-@pytest.mark.parametrize("loop_failure", [False, True])
-async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_and_schedules_heartbeat(tmp_path, monkeypatch, loop_failure):
+@pytest.mark.parametrize("shutdown", ["cancel", "loop_failure", "server_exit"])
+async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_and_schedules_heartbeat(tmp_path, monkeypatch, shutdown):
     from loom_execution_actuator import __main__ as entrypoint
     from loom_execution_actuator.config import ExecutionActuatorSettings
     from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
 
+    loop_failure = shutdown == "loop_failure"
     config = configuration(tmp_path)
     participant = config["participant"]
     settings = ExecutionActuatorSettings(_env_file=None, db_url="postgresql+psycopg://unused/unused", controller_id="global",
@@ -63,6 +64,7 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
             "storage_region": "eu-north1", "source_bucket": "source", "registry_repository": "registry.example/task-images"})
     observed, closed = {}, []
     started, stop = asyncio.Event(), asyncio.Event()
+    server_stop = asyncio.Event()
     fail, cleanup_started, cleanup_allowed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class ExternalResource:
@@ -79,7 +81,7 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
         pass
 
     async def serve():
-        await stop.wait()
+        await server_stop.wait()
 
     def loop(name):
         async def run(controller, interval, health):
@@ -131,8 +133,15 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(asyncio.shield(task), timeout=0.02)
             assert not closed  # Shared clients must outlive every settling loop.
+            cleanup_allowed.set()
+            with pytest.raises(RuntimeError, match="test controller loop failed"):
+                await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        elif shutdown == "server_exit":
+            server_stop.set()
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
     finally:
         cleanup_allowed.set()
+        server_stop.set()
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
