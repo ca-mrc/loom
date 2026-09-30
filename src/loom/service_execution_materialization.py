@@ -63,6 +63,37 @@ NATIVE_EXECUTION_AGENT_NAMES: frozenset[str] = frozenset(
     {"direct-completion", "litellm", "terminus-2"},
 )
 
+
+
+def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
+    """Whether this direct-completion task runs in the platform runner image.
+
+    The completion runner is Loom code shipped in the service image, so a
+    response-only task that names no image and no Dockerfile needs nothing
+    else from its environment. Leaving `docker_image` unset lets it survive
+    service upgrades; the execution plan freezes the concrete runner image
+    (`ExecutionRuntimePlanV1.task_image_ref`) per run. A task that pins an
+    image or declares a Dockerfile keeps exact-image semantics (#2054).
+    """
+    env = task.environment
+    return (
+        trial.agent_name != "terminus-2"
+        and env.docker_image is None
+        and env.dockerfile is None
+    )
+
+
+def resolve_runner_task_image(task: TaskConfig, task_image_ref: str) -> TaskConfig:
+    """The task as it executes: a runner-image task takes the image frozen
+    into its execution plan, so workload requirements and the plan agree."""
+    env = task.environment
+    if env.docker_image is not None or env.dockerfile is not None:
+        return task
+    return task.model_copy(
+        update={"environment": env.model_copy(update={"docker_image": task_image_ref})},
+    )
+
+
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GLOB_MAGIC = re.compile(r"[*?[]")
@@ -396,7 +427,9 @@ def automatic_service_execution_rejections(
         reasons.append("acl_snapshots_require_terminus")
     if env.service_lifecycle is not None and not terminus:
         reasons.append("service_lifecycle_requires_terminus")
-    if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and (
+    if not (allow_task_image_preparation and terminus and env.dockerfile is not None) and not (
+        uses_runner_task_image(task, trial)
+    ) and (
         env.dockerfile is not None
         or env.docker_image is None
         or _DIGEST_REF.fullmatch(env.docker_image) is None
@@ -782,7 +815,10 @@ def runtime_profile_rejections(
     ):
         return ("agent_version_not_in_runtime_profile",)
     if trial.agent_name != "terminus-2":
-        return (() if task.environment.docker_image == profile.task_image_ref
+        # A pinned image must be the deployed runner image; a task that leaves
+        # it unset runs in whichever runner image the plan freezes (#2054).
+        return (() if uses_runner_task_image(task, trial)
+                or task.environment.docker_image == profile.task_image_ref
                 else ("task_image_not_in_runtime_profile",))
     if _requires_task_identity(task) and not profile.supports_task_identity:
         return ("task_identity_runtime_unavailable",)

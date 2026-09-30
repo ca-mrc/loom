@@ -855,6 +855,19 @@ execution: `/api/v1/agents` reports them as `unavailable` with that reason, and
 hosted submissions naming them are rejected before admission. Local Docker
 execution is unaffected. Tracking: #2054.
 
+A response-only task for `direct-completion`/`litellm` should leave
+`environment.docker_image` (and `dockerfile`) unset. It then runs in the
+platform's runner image, which each execution plan freezes per run, so the task
+keeps working across service upgrades. A task that pins `docker_image` must
+still match the deployed runner image exactly, and a task with a Dockerfile is
+not run in the runner image. The #2054 acceptance TaskSet (answer `17 × 19`
+with only `323`) is built with:
+
+```bash
+uv run python scripts/ops/build_agent_model_acceptance_taskset.py --output /tmp/ts-2054
+loom tasksets submit /tmp/ts-2054
+```
+
 Every model-backed selection needs an explicitly selected, authorized
 OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
 or shared with your team. There is no fallback to platform credentials, and
