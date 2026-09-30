@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_pool_migration import migration_request
+from tests.support.execution_image_admission import signed_image_admission_bundle
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -18,14 +19,30 @@ def env(document):
     return {row["name"]: row for row in document["spec"]["template"]["spec"]["containers"][0]["env"]}
 
 
+def desired_profile(request, service):
+    from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+
+    original = ServiceExecutionRuntimeProfileV1.model_validate_json(env(service)["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
+    images = request.registration.candidate["images"]
+    refs = (images["service"]["image_ref"], images["execution_runtime"]["image_ref"])
+    return original.model_copy(update={"candidate_sha": request.registration.candidate["candidate_sha"],
+        "task_image_ref": refs[0], "runtime_image_ref": refs[1], "runtime_binary_sha256": "sha256:" + "f" * 64,
+        "image_admission": signed_image_admission_bundle(refs)})
+
+
 @pytest.fixture
 def runtime_inputs(platform_inputs, management_inputs):
     from loom.nebius_platform_render import build_platform
+    from loom.service_execution_materialization import build_nebius_runtime_profile
     from loom_service.pool_management.installation import PoolInstallation
 
     request = migration_request()
     spec = request.registration.spec.model_dump(mode="json")
     config, candidate, profile = copy.deepcopy(platform_inputs)
+    profile = build_nebius_runtime_profile(candidate_sha=candidate["candidate_sha"],
+        task_image_ref=profile["task_image_ref"], runtime_image_ref=profile["runtime_image_ref"],
+        runtime_binary_sha256="sha256:" + "a" * 64,
+        image_admission=signed_image_admission_bundle((profile["task_image_ref"], profile["runtime_image_ref"]))).model_dump(mode="json")
     candidate["source_ref"] = "refs/heads/dev"
     config["task_image_builder"] = {"registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 2}
     controllers, actuators, services, guards = {}, {}, {}, []
@@ -59,12 +76,30 @@ def runtime_inputs(platform_inputs, management_inputs):
         image["image_ref"] = image["image_ref"].replace("b" * 64, "e" * 64)
     for row in spec["profiles"]["task_images"]:
         row["settings"]["service_image"] = new_candidate["images"]["service"]["image_ref"]
+    for row in spec["profiles"]["execution"]:
+        row.update(candidate_sha=new_candidate["candidate_sha"], runtime_image_ref=new_candidate["images"]["execution_runtime"]["image_ref"],
+            runtime_binary_sha256="sha256:" + "f" * 64)
     request = replace(request, registration=replace(request.registration,
         spec=PoolInstallation.model_validate(spec), candidate=new_candidate), guards=tuple(guards))
     manager = next(row for row in render_manager(management_inputs).files["40-services.yaml"] if row["kind"] == "Deployment")
     manager["metadata"].update(uid=str(uuid4()), resourceVersion="1")
     manager["metadata"]["labels"]["loom.nebius/management-installation"] = request.registration.binding.installation_id
     return request, actuators, services, manager
+
+
+def test_shared_api_runtime_profile_matches_the_fixed_execution_catalog(runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom.service_execution_materialization import load_service_execution_runtime_profile
+
+    request, actuators, services, _ = runtime_inputs
+    target = request.guards[0]
+    result = wire_participant(request=request, participant_id=target.participant_id, management_origin="https://manage.example.com",
+        actuator=actuators[target.participant_id], service=services[target.participant_id])
+    actual = load_service_execution_runtime_profile(env(result["service"])["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
+    assert actual.candidate_sha == "d" * 40
+    assert actual.runtime_binary_sha256 == "sha256:" + "f" * 64
+    assert actual.runtime_image_ref == request.registration.spec.profiles.execution[0].runtime_image_ref
 
 
 def test_manager_catalog_is_mounted_without_changing_existing_authorities(runtime_inputs, tmp_path, monkeypatch):
