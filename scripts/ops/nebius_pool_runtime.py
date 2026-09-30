@@ -10,14 +10,17 @@ import copy
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 
+from loom.nebius_platform_render import _obj
 from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.pool_management.installation_render import mount_machine_token
 
 
@@ -125,3 +128,124 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         return {"control_plane": cp, "actuator": worker, "service": api}
     except Exception:
         raise ValueError("pool_participant_runtime_unqualified") from None
+
+
+def wire_collector(*, request: PoolMigrationRequest, original: dict[str, Any], config_map: dict[str, Any],
+                   management_origin: str) -> dict[str, tuple[dict[str, Any], ...]]:
+    """Reuse development's cloud reader; return a suspended pool-only CronJob.
+
+The parent must suspend/drain ALL previous collectors before changing this
+template. Its existing SA needs read-only nodes/Pods/DaemonSets, not Job writes.
+No cloud credential is copied or replaced. The historical token filename is
+retained for the existing two-file initializer, but now holds observer authority.
+"""
+    try:
+        migration_contract(request)
+        spec = request.registration.spec
+        development, = (row for row in spec.participants if row.environment_class == "development")
+        observer, = (row for row in spec.machines if row.role == "observer")
+        namespace, name = development.execution_namespace.name, "loom-execution-capacity-collector"
+        for document, kind, version in ((original, "CronJob", "batch/v1"), (config_map, "ConfigMap", "v1")):
+            _uid(document)
+            _snapshot(document)
+            if (document.get("apiVersion") != version or document.get("kind") != kind
+                    or document["metadata"].get("name") != name or document["metadata"].get("namespace") != namespace):
+                raise ValueError
+        origin = urlsplit(management_origin)
+        if (origin.scheme != "https" or not origin.hostname or origin.username is not None or origin.password is not None
+                or origin.path not in {"", "/"} or origin.query or origin.fragment):
+            raise ValueError
+        result = copy.deepcopy(original)
+        pod = result["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        container, = pod["containers"]
+        initializer, = pod["initContainers"]
+        if (container.get("name") != "collector" or container.get("command") != ["python", "-m", "loom_execution_capacity_collector"]
+                or container.get("envFrom") != [{"configMapRef": {"name": name}}]
+                or pod.get("serviceAccountName") != name or result["spec"].get("concurrencyPolicy") != "Forbid"
+                or initializer.get("command") != ["python", "-m", "loom_execution_capacity_collector.secret_init",
+                    "--source", "/var/run/loom-projected", "--destination", "/var/run/loom-owned/credentials"]):
+            raise ValueError
+        prefix = "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
+        env = _environment(container)
+        paths = {prefix + "NEBIUS_CREDENTIALS_FILE": "/var/run/loom-owned/credentials/nebius-credentials.json",
+            prefix + "CONTROL_PLANE_BEARER_TOKEN_FILE": "/var/run/loom-owned/credentials/control-plane-token"}
+        if (set(env) != set(paths) or any(env[key] != {"name": key, "value": value} for key, value in paths.items())
+                or not all(isinstance(key, str) and key.startswith(prefix) and isinstance(value, str)
+                    for key, value in config_map["data"].items())):
+            raise ValueError
+        supplied = {key.removeprefix(prefix).lower(): value for key, value in config_map["data"].items()}
+        legacy = {"target_id", "pool_id", "namespace", "node_label_selector", "control_plane_url", "source",
+            "request_attempts", "build_concurrency_limit"}
+        if ("collection_mode" in supplied or not set(supplied) <= set(PoolCapacityCollectorSettings.model_fields) | legacy
+                or {"management_url", "management_bearer_token_file"} & set(supplied)):
+            raise ValueError
+        values = {key: field.default for key, field in PoolCapacityCollectorSettings.model_fields.items() if not field.is_required()}
+        values.update({key: value for key, value in supplied.items() if key not in legacy})
+        values.update(pool_id=spec.pool_id, management_url=management_origin,
+            nebius_credentials_file=paths[prefix + "NEBIUS_CREDENTIALS_FILE"],
+            management_bearer_token_file=paths[prefix + "CONTROL_PLANE_BEARER_TOKEN_FILE"])
+        settings = PoolCapacityCollectorSettings(_env_file=None, **values)
+        quotas = {key: (settings.nebius_quota_parent_id or settings.nebius_project_id, settings.nebius_region,
+            settings.quota_service, getattr(settings, "quota_" + key + "_name"), getattr(settings, "quota_" + key + "_unit"))
+            for key in ("nodes", "vcpu", "memory", "storage") if getattr(settings, "quota_" + key + "_name") is not None}
+        if (settings.nebius_node_group_id != spec.node_group_id or settings.kubernetes_connection is not None
+                or quotas != spec.quota_identities):
+            raise ValueError
+        projected, = (row for row in pod["volumes"] if row["name"] == "projected-credentials")
+        expected_sources = [
+            {"secret": {"name": name + "-nebius", "items": [{"key": "credentials.json", "path": "nebius-credentials.json"}]}},
+            {"secret": {"name": name + "-control-plane", "items": [{"key": "token", "path": "control-plane-token"}]}}]
+        if projected["projected"]["sources"] != expected_sources:
+            raise ValueError
+        projected["projected"]["sources"][1]["secret"]["name"] = "loom-pool-machine-" + observer.machine_id.hex
+        config_name = "loom-pool-collector-" + spec.operation_id.hex
+        data = {prefix + key.upper(): str(value) for key, value in settings.model_dump(mode="json").items()
+            if value is not None and key not in {"nebius_credentials_file", "management_bearer_token_file"}}
+        data[prefix + "COLLECTION_MODE"] = "pool"
+        configuration = {"apiVersion": "v1", "kind": "ConfigMap", "immutable": True,
+            "metadata": {"name": config_name, "namespace": namespace, "labels": {
+                "loom.nebius/management-installation": str(spec.installation_id), "loom.nebius/pool-operation": str(spec.operation_id)}},
+            "data": data}
+        container["envFrom"] = [{"configMapRef": {"name": config_name}}]
+        container["env"] = [{"name": prefix + key.upper(), "value": str(getattr(settings, key))}
+            for key in ("nebius_credentials_file", "management_bearer_token_file")]
+        container["image"] = initializer["image"] = _image(request, "execution_actuator")
+        result["spec"]["suspend"] = True
+        result.pop("status", None)
+        return {"configuration": (configuration,), "workload": (result,)}
+    except Exception:
+        raise ValueError("pool_collector_runtime_unqualified") from None
+
+
+def participant_readonly_roles(*, request: PoolMigrationRequest) -> tuple[dict[str, Any], ...]:
+    """Fixed replacements for the existing actuator and native-builder roles.
+
+Not sufficient alone to fence a writer: the parent must also qualify the full
+binding inventory and stop all old processes before granting gateway authority.
+The existing node-usage reader is unchanged; CPs need no Kubernetes permission.
+"""
+    migration_contract(request)
+    documents: list[dict[str, Any]] = []
+    for participant in request.registration.spec.participants:
+        subject = {"kind": "ServiceAccount", "name": "loom-execution-actuator", "namespace": participant.execution_namespace.name}
+        identity_name = "loom-pool-reader-" + participant.participant_id.hex
+        identity = _obj("ClusterRole", identity_name, None, api="rbac.authorization.k8s.io/v1")
+        identity["rules"] = [{"apiGroups": [""], "resources": ["namespaces"], "verbs": ["get"],
+            "resourceNames": [participant.execution_namespace.name, participant.build_namespace.name]}]
+        binding = _obj("ClusterRoleBinding", identity_name, None, api="rbac.authorization.k8s.io/v1")
+        binding.update(subjects=[subject.copy()], roleRef={"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": identity_name})
+        documents.extend((identity, binding))
+        for namespace, name in ((participant.execution_namespace.name, "loom-execution-actuator"),
+                (participant.build_namespace.name, "loom-task-image-builder")):
+            role = _obj("Role", name, namespace, api="rbac.authorization.k8s.io/v1")
+            role["rules"] = [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]
+            if namespace == participant.build_namespace.name:
+                role["rules"].append({"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]})
+            binding = _obj("RoleBinding", name, namespace, api="rbac.authorization.k8s.io/v1")
+            binding.update(subjects=[subject.copy()], roleRef={"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name})
+            documents.extend((role, binding))
+    for document in documents:
+        document["metadata"]["labels"] = {"loom.nebius/management-installation": str(request.registration.spec.installation_id),
+            "loom.nebius/pool-operation": str(request.registration.spec.operation_id)}
+    return tuple(documents)

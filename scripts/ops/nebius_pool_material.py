@@ -46,7 +46,10 @@ def machine_documents(request: PoolMigrationRequest, tokens: dict[UUID, str]) ->
                     or hashlib.sha256(token.encode()).hexdigest() != machine.token_sha256):
                 raise ValueError
             destinations = [binding.namespace]
-            if machine.participant_id is not None:
+            if machine.role == "observer":
+                development, = (row for row in spec.participants if row.environment_class == "development")
+                destinations = [development.execution_namespace.name]
+            elif machine.participant_id is not None:
                 destinations = [platforms[machine.participant_id], participants[machine.participant_id].execution_namespace.name]
             for namespace in destinations:
                 document = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",

@@ -2089,6 +2089,18 @@ with exact namespace UID checks and no automatic credential rotation. All target
 Deployments have zero replicas: these builders do not perform the protected
 cutover, install RBAC or activate admission.
 
+The shared-development capacity CronJob is retained as the one pool observer,
+using its existing read-only Nebius credential and a dedicated observer token in
+that execution namespace. Its immutable configuration selects pool collection,
+binds the exact node group and provider quota identities, and removes the legacy
+control-plane publication URL/token. The rendered CronJob remains suspended until
+the migration retires the other collectors and qualifies the global runtime.
+Participant reader-role targets replace the existing actuator/builder roles,
+allowing only scoped Job/Pod observation and native build logs, plus exact
+namespace identity reads. They grant no Job creation/deletion. Applying these
+roles alone is not proof that every old writer has been fenced; the protected
+migration must verify all effective bindings and old-process retirement.
+
 Initial registration uses the fixed `loom_service.pool_management.installation`
 Job and a versioned `loom.pool-installation.v1` configuration. It binds physical
 pool identity, exact participant namespaces/targets, the renderer catalog and
