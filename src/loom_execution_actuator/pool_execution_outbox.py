@@ -57,6 +57,7 @@ class PoolExecutionHandoff:
     lease_id: UUID | None
     activation: PoolActivationV1 | None
     activated: PoolReceiptV1 | None
+    released: PoolReceiptV1 | None
 
     @property
     def action(self) -> PoolRequestActionV1:
@@ -93,7 +94,8 @@ class PoolExecutionOutbox:
             raise PoolHandoffError
         return PoolExecutionHandoff(request, row.request_sha256, row.phase, row.reservation_id, row.attached_lease_id,
             PoolActivationV1.model_validate(row.activation_json) if row.activation_json is not None else None,
-            PoolReceiptV1.model_validate(row.activated_json) if row.activated_json is not None else None)
+            PoolReceiptV1.model_validate(row.activated_json) if row.activated_json is not None else None,
+            PoolReceiptV1.model_validate(row.released_json) if row.released_json is not None else None)
 
     async def _load(self, session: AsyncSession, key: PoolRequestKeyV1) -> NebiusPoolExecutionOutbox:
         await require_task_bundle_transaction(session)
@@ -148,7 +150,7 @@ class PoolExecutionOutbox:
                 {"key": "pool-execution-selection:" + str(trial_id)})
             existing = await session.scalar(select(NebiusPoolExecutionOutbox).where(
                 NebiusPoolExecutionOutbox.trial_id == trial_id,
-                NebiusPoolExecutionOutbox.phase != "cancelled").with_for_update())
+                NebiusPoolExecutionOutbox.phase.not_in(("cancelled", "released"))).with_for_update())
             if existing is not None:
                 view = self._view(existing)
                 if view.request.target_id != target_id:
@@ -260,7 +262,7 @@ class PoolExecutionOutbox:
             row = await self._load(session, key)
             receipt = self._receipt(row, receipt)
             if (row.activation_json is None or receipt.plan_sha256 is None
-                    or row.phase not in {"activation_pending", "cancel_pending", "active", "stop_pending"}):
+                    or row.phase not in {"activation_pending", "cancel_pending", "active", "stop_pending", "released"}):
                 raise PoolHandoffError
             if row.activated_json is not None:
                 previous = PoolReceiptV1.model_validate(row.activated_json)
@@ -285,7 +287,7 @@ class PoolExecutionOutbox:
 
     async def _cleanup_lease(self, session: AsyncSession, row: NebiusPoolExecutionOutbox) -> ServiceExecutionLease:
         saved = self._view(row)
-        if saved.phase not in {"active", "stop_pending"} or saved.activated is None or row.attached_lease_id is None:
+        if saved.phase not in {"active", "stop_pending", "released"} or saved.activated is None or row.attached_lease_id is None:
             raise PoolHandoffError
         lease = await session.get(ServiceExecutionLease, row.attached_lease_id, with_for_update=True, populate_existing=True)
         if (lease is None or lease.trial_id != row.trial_id or lease.target_id != saved.request.target_id
@@ -382,6 +384,41 @@ class PoolExecutionOutbox:
             execution_unit_key=str(lease.execution_unit_key), normalized_state=NormalizedJobState.DELETED)
         await record_kubernetes_observation(session, lease_id=lease.id, generation=lease.generation,
             payload=observation.event_payload(), observed_at=now)
+
+    async def confirm_release(self, key: PoolRequestKeyV1, receipt: PoolReceiptV1) -> PoolExecutionHandoff:
+        """Project deletion only with the exact manager's qualified cleanup receipt."""
+        async with self.sessions.begin() as session:
+            row = await self._load(session, key)
+            receipt = self._receipt(row, receipt)
+            saved = self._view(row)
+            if (receipt.phase != "released" or row.phase not in {"stop_pending", "released"}
+                    or saved.activated is None or receipt.plan_sha256 != saved.activated.plan_sha256
+                    or (saved.activated.job_uid is not None and receipt.job_uid != saved.activated.job_uid)
+                    or row.stop_json is None or row.drain_json is None or row.output_json is None):
+                raise PoolHandoffError
+            if row.released_json is not None:
+                if row.released_json != receipt.model_dump(mode="json"):
+                    raise PoolHandoffError
+                return saved
+            lease = await self._cleanup_lease(session, row)
+            drain = PoolDrainV1.model_validate(row.drain_json)
+            job_uid = str(receipt.job_uid) if receipt.job_uid is not None else None
+            if (lease.desired_state not in {"cancel", "retry", "timeout", "delete_pending"}
+                    or (lease.job_uid is not None and lease.job_uid != job_uid)
+                    or lease.output_generation != lease.resource_generation
+                    or self._output_evidence(lease) != row.output_json
+                    or drain.stop_sha256 != canonical_digest(row.stop_json).removeprefix("sha256:")
+                    or drain.evidence_sha256 != canonical_digest(row.output_json).removeprefix("sha256:")):
+                raise PoolHandoffError
+            observation = KubernetesJobObservation(namespace=lease.namespace_name, job_name=lease.job_name,
+                lease_id=str(lease.id), resource_generation=lease.resource_generation, target_id=lease.target_id,
+                execution_unit_key=str(lease.execution_unit_key), normalized_state=NormalizedJobState.DELETED,
+                job_uid=job_uid, reason="PoolCleanupConfirmed")
+            await record_kubernetes_observation(session, lease_id=lease.id, generation=lease.generation,
+                payload=observation.event_payload(), observed_at=await _clock(session))
+            row.phase, row.released_json = "released", receipt.model_dump(mode="json")
+            await session.flush()
+            return self._view(row)
 
     async def confirm_cancel(self, key: PoolRequestKeyV1, receipt: PoolReceiptV1) -> PoolExecutionHandoff:
         async with self.sessions.begin() as session:

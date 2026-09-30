@@ -50,33 +50,35 @@ class NebiusPoolExecutionOutbox(Base):
     __table_args__ = (
         UniqueConstraint("reservation_id", name="nebius_pool_execution_outbox_grant_key"),
         Index("nebius_pool_execution_outbox_live_key", "trial_id", unique=True,
-              postgresql_where=text("phase <> 'cancelled'")),
+              postgresql_where=text("phase NOT IN ('cancelled','released')")),
         CheckConstraint("lease_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
             "participant_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
             "pool_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
             "request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json)='object' AND "
             "jsonb_typeof(selection_json)='object'", name="nebius_pool_execution_outbox_identity_check"),
-        CheckConstraint("phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled') AND "
+        CheckConstraint("phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled','released') AND "
             "(phase <> 'selected' OR reservation_id IS NULL) AND "
             "(phase NOT IN ('grant_pending','attached','cancelled') OR reservation_id IS NOT NULL) AND "
             "(reservation_id IS NULL) = (receipt_json IS NULL) AND "
             "(reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
             "(receipt_json IS NULL OR jsonb_typeof(receipt_json)='object') AND "
             "(attached_lease_id IS NULL OR attached_lease_id=lease_id) AND "
-            "(phase NOT IN ('attached','activation_pending','active','stop_pending') OR attached_lease_id IS NOT NULL) AND "
+            "(phase NOT IN ('attached','activation_pending','active','stop_pending','released') OR attached_lease_id IS NOT NULL) AND "
             "(phase NOT IN ('selected','grant_pending') OR attached_lease_id IS NULL) AND "
             "(attached_lease_id IS NULL OR reservation_id IS NOT NULL) AND "
             "(activation_json IS NULL OR (jsonb_typeof(activation_json)='object' AND attached_lease_id IS NOT NULL AND "
             "phase NOT IN ('selected','grant_pending','attached'))) AND "
-            "(phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND "
-            "(phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND "
+            "(phase NOT IN ('activation_pending','active','stop_pending','released') OR activation_json IS NOT NULL) AND "
+            "(phase IN ('active','stop_pending','released')) = (activated_json IS NOT NULL) AND "
             "(activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND "
             "(phase='cancelled') = (cancelled_json IS NOT NULL) AND "
             "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object') AND "
-            "(stop_json IS NULL OR (phase='stop_pending' AND jsonb_typeof(stop_json)='object')) AND "
+            "(stop_json IS NULL OR (phase IN ('stop_pending','released') AND jsonb_typeof(stop_json)='object')) AND "
             "(drain_json IS NULL) = (output_json IS NULL) AND "
             "(drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json)='object' AND "
-            "jsonb_typeof(output_json)='object'))",
+            "jsonb_typeof(output_json)='object')) AND "
+            "(phase='released') = (released_json IS NOT NULL) AND "
+            "(released_json IS NULL OR (drain_json IS NOT NULL AND jsonb_typeof(released_json)='object'))",
             name="nebius_pool_execution_outbox_phase_check"),
     )
     lease_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
@@ -96,6 +98,7 @@ class NebiusPoolExecutionOutbox(Base):
     stop_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     drain_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     output_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    released_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 

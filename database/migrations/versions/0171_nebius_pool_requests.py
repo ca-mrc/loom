@@ -20,7 +20,7 @@ CREATE TABLE nebius_pool_execution_outbox (
     pool_id UUID NOT NULL, participant_id UUID NOT NULL, request_sha256 TEXT NOT NULL,
     request_json JSONB NOT NULL, selection_json JSONB NOT NULL, phase TEXT NOT NULL,
     reservation_id UUID, receipt_json JSONB, cancelled_json JSONB, activation_json JSONB, activated_json JSONB,
-    stop_json JSONB, drain_json JSONB, output_json JSONB,
+    stop_json JSONB, drain_json JSONB, output_json JSONB, released_json JSONB,
     attached_lease_id UUID REFERENCES execution_leases(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT nebius_pool_execution_outbox_grant_key UNIQUE (reservation_id),
@@ -31,30 +31,32 @@ CREATE TABLE nebius_pool_execution_outbox (
         request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json)='object' AND
         jsonb_typeof(selection_json)='object'),
     CONSTRAINT nebius_pool_execution_outbox_phase_check CHECK (
-        phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled') AND
+        phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled','released') AND
         (phase <> 'selected' OR reservation_id IS NULL) AND
         (phase NOT IN ('grant_pending','attached','cancelled') OR reservation_id IS NOT NULL) AND
         (reservation_id IS NULL) = (receipt_json IS NULL) AND
         (reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND
         (receipt_json IS NULL OR jsonb_typeof(receipt_json)='object') AND
         (attached_lease_id IS NULL OR attached_lease_id=lease_id) AND
-        (phase NOT IN ('attached','activation_pending','active','stop_pending') OR attached_lease_id IS NOT NULL) AND
+        (phase NOT IN ('attached','activation_pending','active','stop_pending','released') OR attached_lease_id IS NOT NULL) AND
         (phase NOT IN ('selected','grant_pending') OR attached_lease_id IS NULL) AND
         (attached_lease_id IS NULL OR reservation_id IS NOT NULL) AND
         (activation_json IS NULL OR (jsonb_typeof(activation_json)='object' AND attached_lease_id IS NOT NULL AND
             phase NOT IN ('selected','grant_pending','attached'))) AND
-        (phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND
-        (phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND
+        (phase NOT IN ('activation_pending','active','stop_pending','released') OR activation_json IS NOT NULL) AND
+        (phase IN ('active','stop_pending','released')) = (activated_json IS NOT NULL) AND
         (activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND
         (phase='cancelled') = (cancelled_json IS NOT NULL) AND
         (cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object') AND
-        (stop_json IS NULL OR (phase='stop_pending' AND jsonb_typeof(stop_json)='object')) AND
+        (stop_json IS NULL OR (phase IN ('stop_pending','released') AND jsonb_typeof(stop_json)='object')) AND
         (drain_json IS NULL) = (output_json IS NULL) AND
         (drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json)='object' AND
-            jsonb_typeof(output_json)='object')))
+            jsonb_typeof(output_json)='object')) AND
+        (phase='released') = (released_json IS NOT NULL) AND
+        (released_json IS NULL OR (drain_json IS NOT NULL AND jsonb_typeof(released_json)='object')))
 );
 CREATE UNIQUE INDEX nebius_pool_execution_outbox_live_key ON nebius_pool_execution_outbox(trial_id)
-    WHERE phase <> 'cancelled';
+    WHERE phase NOT IN ('cancelled','released');
 CREATE FUNCTION validate_nebius_pool_execution_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
@@ -73,8 +75,8 @@ BEGIN
             RAISE EXCEPTION 'execution selection must start unclaimed' USING ERRCODE='23514';
         END IF;
     ELSE
-        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json']) IS DISTINCT FROM
-           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json']) OR
+        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json','released_json']) IS DISTINCT FROM
+           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json','released_json']) OR
            (OLD.reservation_id IS NOT NULL AND ROW(OLD.reservation_id,OLD.receipt_json) IS DISTINCT FROM
                                                ROW(NEW.reservation_id,NEW.receipt_json)) OR
            (OLD.attached_lease_id IS NOT NULL AND OLD.attached_lease_id IS DISTINCT FROM NEW.attached_lease_id) OR
@@ -83,7 +85,8 @@ BEGIN
            (OLD.activated_json IS NOT NULL AND OLD.activated_json IS DISTINCT FROM NEW.activated_json) OR
            (OLD.stop_json IS NOT NULL AND OLD.stop_json IS DISTINCT FROM NEW.stop_json) OR
            (OLD.drain_json IS NOT NULL AND OLD.drain_json IS DISTINCT FROM NEW.drain_json) OR
-           (OLD.output_json IS NOT NULL AND OLD.output_json IS DISTINCT FROM NEW.output_json) THEN
+           (OLD.output_json IS NOT NULL AND OLD.output_json IS DISTINCT FROM NEW.output_json) OR
+           (OLD.released_json IS NOT NULL AND OLD.released_json IS DISTINCT FROM NEW.released_json) THEN
             RAISE EXCEPTION 'execution selection evidence is immutable' USING ERRCODE='23514';
         END IF;
         IF NOT (OLD.phase=NEW.phase OR (OLD.phase='selected' AND NEW.phase IN ('grant_pending','cancel_pending')) OR
@@ -91,6 +94,7 @@ BEGIN
             (OLD.phase='attached' AND NEW.phase IN ('activation_pending','cancel_pending')) OR
             (OLD.phase='activation_pending' AND NEW.phase IN ('active','stop_pending','cancel_pending')) OR
             (OLD.phase='active' AND NEW.phase='stop_pending') OR
+            (OLD.phase='stop_pending' AND NEW.phase='released') OR
             (OLD.phase='cancel_pending' AND NEW.phase IN ('cancelled','stop_pending'))) THEN
             RAISE EXCEPTION 'execution selection transition forbidden' USING ERRCODE='23514';
         END IF;
@@ -152,7 +156,8 @@ BEGIN
         NEW.stop_json->>'lease_generation'=NEW.request_json->'execution'->>'lease_generation' AND
         NEW.stop_json->>'cause' IN ('completed','failed','cancelled','lease_lost','deadline') AND
         EXISTS (SELECT 1 FROM execution_leases l WHERE l.id=NEW.attached_lease_id AND
-            l.desired_state IN ('cancel','retry','timeout','delete_pending') AND l.revoked_at IS NOT NULL AND
+            (l.desired_state IN ('cancel','retry','timeout','delete_pending') OR
+             (NEW.phase='released' AND l.desired_state='deleted')) AND l.revoked_at IS NOT NULL AND
             (NEW.stop_json->>'grace_deadline_at')::timestamptz <= l.cleanup_deadline_at)) IS NOT TRUE THEN
         RAISE EXCEPTION 'execution stop identity differs' USING ERRCODE='23514';
     END IF;
@@ -177,6 +182,20 @@ BEGIN
             NEW.output_json->>'unavailable_reason' IS NOT DISTINCT FROM l.output_unavailable_reason)) IS NOT TRUE THEN
         RAISE EXCEPTION 'execution drain evidence differs' USING ERRCODE='23514';
     END IF;
+    IF NEW.released_json IS NOT NULL AND (
+        NEW.released_json->>'reservation_id'=NEW.reservation_id::text AND
+        NEW.released_json->>'pool_id'=NEW.pool_id::text AND
+        NEW.released_json->>'request_sha256'=NEW.request_sha256 AND
+        NEW.released_json->>'admission_epoch'=NEW.request_json->>'admission_epoch' AND
+        NEW.released_json->'request_key'=NEW.request_json->'key' AND
+        NEW.released_json->>'plan_sha256'=NEW.activated_json->>'plan_sha256' AND
+        NEW.released_json->>'phase'='released' AND
+        (NEW.released_json->>'cleanup_observation_id')::uuid <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        EXISTS (SELECT 1 FROM execution_leases l WHERE l.id=NEW.attached_lease_id AND
+            l.desired_state='deleted' AND l.cleanup_state='complete' AND l.deleted_at IS NOT NULL AND
+            l.job_uid IS NOT DISTINCT FROM NEW.released_json->>'job_uid')) IS NOT TRUE THEN
+        RAISE EXCEPTION 'execution release identity differs' USING ERRCODE='23514';
+    END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER nebius_pool_execution_outbox_guard BEFORE INSERT OR UPDATE OR DELETE ON nebius_pool_execution_outbox
@@ -191,6 +210,19 @@ BEGIN
 END $$;
 CREATE CONSTRAINT TRIGGER nebius_execution_attachment_guard AFTER INSERT ON execution_leases
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION require_nebius_execution_attachment();
+CREATE FUNCTION require_nebius_execution_release() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.desired_state='deleted' AND EXISTS (
+        SELECT 1 FROM nebius_pool_execution_outbox o WHERE o.attached_lease_id=NEW.id AND
+            NOT ((o.phase='cancelled' AND o.cancelled_json->>'phase'='cancelled_unstarted') OR
+                 (o.phase='released' AND o.released_json->>'phase'='released'))
+    ) THEN
+        RAISE EXCEPTION 'global execution cleanup lacks manager release' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END $$;
+CREATE CONSTRAINT TRIGGER nebius_execution_release_guard AFTER UPDATE ON execution_leases
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION require_nebius_execution_release();
     """)
     op.execute("""
         CREATE TABLE nebius_pool_submissions (
@@ -900,6 +932,8 @@ def downgrade() -> None:
         DROP FUNCTION validate_nebius_pool_execution_outbox();
         DROP TRIGGER nebius_execution_attachment_guard ON execution_leases;
         DROP FUNCTION require_nebius_execution_attachment();
+        DROP TRIGGER nebius_execution_release_guard ON execution_leases;
+        DROP FUNCTION require_nebius_execution_release();
         DROP TABLE nebius_pool_submissions;
         DROP FUNCTION retain_nebius_submission_handoff();
         DROP TRIGGER batches_pool_origin_guard ON batches;

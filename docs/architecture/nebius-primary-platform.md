@@ -2005,9 +2005,14 @@ messages before HTTP. Stop derives from existing lease revocation and does not
 wait for output; drain requires that lease's committed/unavailable output at its
 original resource generation, retaining the exact manifest/marker or unavailable
 evidence. Lost replies replay the same records and grace deadline. These messages
-do not close the output window, project deletion, or release capacity. The
-controller hookup, release projection and installed writer transition remain
-unconnected.
+do not close the output window, project deletion, or release capacity. Only the
+manager's exact released receipt, including its cleanup-observation reference,
+permits the local outbox to project deletion through the existing execution event
+handler. The receipt, local deletion and outbox completion commit atomically;
+a deferred database guard rejects global-lease deletion without retained release
+or never-started cancellation evidence. Replays preserve the old lease/attempt,
+and release permits the next queued attempt's distinct selection. The controller
+hookup and installed writer transition remain unconnected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
