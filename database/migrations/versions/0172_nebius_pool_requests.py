@@ -1,14 +1,14 @@
 """Journal global pool registrations, immutable requests and bound cleanup evidence.
 
-Revision ID: 0171
-Revises: 0170
+Revision ID: 0172
+Revises: 0171
 
 This migration does not activate global admission or authorize external writes.
 """
 from alembic import op
 
-revision = "0171"
-down_revision = "0170"
+revision = "0172"
+down_revision = "0171"
 branch_labels = None
 depends_on = None
 

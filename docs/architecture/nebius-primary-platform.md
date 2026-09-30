@@ -1795,7 +1795,7 @@ Restart replays the saved evidence, grace and cause after a lost stop/drain repl
 This consumer is not yet installed: protected startup and writer
 migration remain required.
 
-Migration `0171` adds protected pool/participant registrations, immutable request
+Migration `0172` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
 keys and participant-to-pool binding. Registration identities cannot be reassigned;
 binding changes require a newer revision, and epochs cannot move backwards.
