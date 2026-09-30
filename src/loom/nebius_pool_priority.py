@@ -56,6 +56,30 @@ class PoolWorkOriginV1(BaseModel):
         return self
 
 
+class PoolSubmissionSourceV1(BaseModel):
+    """Protected process identity, before a new submission has its own UUID.
+
+    This is installation configuration, never a public submission field. It is
+    not authorization to dispatch work or proof of management registration.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal["loom.pool-submission-source.v1"] = "loom.pool-submission-source.v1"
+    data_environment_id: UUID
+    kind: Literal["environment", "application"]
+    application: PoolApplicationOriginV1 | None
+
+    @model_validator(mode="after")
+    def explicit_source(self) -> PoolSubmissionSourceV1:
+        if not self.data_environment_id.int or (self.kind == "application") != (self.application is not None):
+            raise ValueError("pool_submission_source_scope")
+        return self
+
+    def origin(self, submission_id: UUID) -> PoolWorkOriginV1:
+        return PoolWorkOriginV1(data_environment_id=self.data_environment_id, submission_id=submission_id,
+                                kind=self.kind, application=self.application)
+
+
 def pool_request_priority(participant: PoolParticipantV1, origin: PoolWorkOriginV1, *,
                           workload_kind: PoolWorkloadKind) -> int:
     """Order already-qualified new demand; lower numbers take precedence.

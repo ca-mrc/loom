@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from pydantic import computed_field, model_validator
 
 from loom.application_session import ApplicationSessionAudienceV1, canonical_session_origin
+from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.workload_trust import WorkloadTrustContract
 from loom_service.config._generated import LoomServiceSettings as _BaseSettings
 from loom_service.public_links import configured_public_base_url
@@ -22,6 +23,27 @@ from loom_service.public_links import configured_public_base_url
 
 class LoomServiceSettings(_BaseSettings):
     """LoomServiceSettings adds behavior on top of the codegen'd class."""
+
+    @property
+    def pool_submission_source(self) -> PoolSubmissionSourceV1 | None:
+        if self.pool_submission_source_json is None:
+            return None
+        if len(self.pool_submission_source_json) > 4096:
+            raise ValueError("pool submission source exceeds maximum length")
+        return PoolSubmissionSourceV1.model_validate_json(self.pool_submission_source_json)
+
+    @model_validator(mode="after")
+    def _validate_pool_submission_source(self) -> Self:
+        source = self.pool_submission_source
+        if source is not None:
+            if self.service_mode == "management":
+                raise ValueError("management is not a workload submission origin")
+            audience = self.session_audience
+            if ((source.kind == "application") != (audience is not None)
+                    or (source.application is not None and audience is not None
+                        and source.application.application_id != audience.application_id)):
+                raise ValueError("pool submission source differs from application audience")
+        return self
 
     @model_validator(mode="after")
     def _validate_session_audience(self) -> Self:

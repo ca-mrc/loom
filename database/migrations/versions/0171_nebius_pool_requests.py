@@ -15,6 +15,23 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
+        ALTER TABLE batches ADD COLUMN pool_origin JSONB;
+        ALTER TABLE batches ADD CONSTRAINT batches_pool_origin_check
+            CHECK (pool_origin IS NULL OR jsonb_typeof(pool_origin) = 'object');
+        ALTER TABLE trials ADD COLUMN pool_origin JSONB;
+        CREATE FUNCTION retain_nebius_submission_origin() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.pool_origin IS DISTINCT FROM OLD.pool_origin THEN
+                RAISE EXCEPTION 'submission origin is immutable' USING ERRCODE = '23514';
+            END IF;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER batches_pool_origin_guard BEFORE UPDATE OF pool_origin ON batches
+            FOR EACH ROW EXECUTE FUNCTION retain_nebius_submission_origin();
+        CREATE TRIGGER trials_pool_origin_guard BEFORE UPDATE OF pool_origin ON trials
+            FOR EACH ROW EXECUTE FUNCTION retain_nebius_submission_origin();
+    """)
+    op.execute("""
 CREATE TABLE nebius_pool_build_outbox (
     outbox_id UUID PRIMARY KEY, pool_id UUID NOT NULL, participant_id UUID NOT NULL,
     materialization_id UUID NOT NULL REFERENCES task_image_materializations(id) ON DELETE RESTRICT,
@@ -520,13 +537,16 @@ def downgrade() -> None:
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
                    nebius_pool_cleanup_observations, nebius_pool_machines,
                    nebius_pool_machine_credentials, nebius_pool_captures,
-                   nebius_pool_observations, nebius_pool_effects, nebius_pool_build_outbox IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_observations, nebius_pool_effects, nebius_pool_build_outbox,
+                   batches, trials IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
                OR EXISTS (SELECT 1 FROM nebius_pool_requests)
                OR EXISTS (SELECT 1 FROM nebius_pool_cleanup_observations)
-               OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox) THEN
+               OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox)
+               OR EXISTS (SELECT 1 FROM batches WHERE pool_origin IS NOT NULL)
+               OR EXISTS (SELECT 1 FROM trials WHERE pool_origin IS NOT NULL) THEN
                 RAISE EXCEPTION 'cannot remove global pool history';
             END IF;
         END $$;
@@ -548,4 +568,9 @@ def downgrade() -> None:
         DROP FUNCTION validate_nebius_pool_effect_mutation();
         DROP TABLE nebius_pool_build_outbox;
         DROP FUNCTION validate_nebius_pool_build_outbox();
+        DROP TRIGGER batches_pool_origin_guard ON batches;
+        DROP TRIGGER trials_pool_origin_guard ON trials;
+        DROP FUNCTION retain_nebius_submission_origin();
+        ALTER TABLE batches DROP COLUMN pool_origin;
+        ALTER TABLE trials DROP COLUMN pool_origin;
     """)

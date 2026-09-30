@@ -560,6 +560,11 @@ python_type = "bool"
 default     = false
 description = "Explicit HTTP-only local-development compatibility. Uses the legacy cookie name without Secure; cannot downgrade production or a canonical HTTPS public_base_url. Never enable for hosted development."
 
+[service_config.pool_submission_source_json]
+used_by     = ["loom-service"]
+python_type = "str"
+description = "Protected loom.pool-submission-source.v1 process identity for durable global-capacity provenance. Environment sources bind the data environment; personal sources additionally bind exact application/incarnation/deployment/release/source. Never accepted from public requests. Missing preserves unknown legacy provenance, not shared-dev priority. Does not enable global admission."
+
 [service_config.auth_csrf_header_name]
 used_by     = ["loom-service"]
 python_type = "str"

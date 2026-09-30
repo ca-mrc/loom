@@ -1620,6 +1620,20 @@ gateway are integrated and qualified together.
 
 ## Global pool reservation journal
 
+Submission provenance is stamped from protected `LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON`
+configuration, not a public priority/origin parameter. Personal application rendering
+binds the exact application, incarnation, deployment generation, release and source
+digest. New batches, failed-case reruns, shared-run clones and artifact reuse record
+the current submitting service's origin with their new submission ID; reusing shared
+results does not give personal work shared-dev priority. The internal `submit:batch`
+producer carries that retained origin into child trials. Ordinary callers referencing
+a batch cannot inherit its origin. PostgreSQL prevents origin changes, including
+silently classifying an old NULL, and refuses a downgrade that would erase origins.
+Missing configuration/history remains unknown, not environment-priority work.
+Direct single-trial submissions still require a trusted service-to-control-plane
+origin handoff before global admission can support them; this Batch path does not
+establish complete producer coverage or an installed priority guarantee.
+
 The management-side observation registry issues a persisted capture scope from
 registered participants and committed gateway Job receipts. A dedicated observer
 can publish exactly one provider/cluster snapshot for that scope; an identical

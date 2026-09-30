@@ -31,6 +31,7 @@ from loom.execution_architecture import execution_cpu_arch
 from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
+from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.service_execution_backend import (
     NEBIUS_BACKEND,
     NEBIUS_LOGICAL_POOL_ID,
@@ -197,6 +198,8 @@ async def submit_trial(
     batch_usage_user_id: UUID | None = None
     batch_usage_actor: str | None = None
     batch_runtime_profile: dict[str, Any] | None = None
+    batch_pool_origin: dict[str, Any] | None = None
+    pool_origin: dict[str, Any] | None = None
     if batch_id is not None:
         async with request.app.state.session_factory() as session:
             batch_row = (
@@ -208,6 +211,7 @@ async def submit_trial(
                         Batch.usage_attributed_user_id,
                         Batch.usage_attributed_actor,
                         Batch.service_execution_runtime_profile,
+                        Batch.pool_origin,
                     ).where(Batch.id == batch_id),
                 )
             ).first()
@@ -222,6 +226,7 @@ async def submit_trial(
         batch_usage_user_id = batch_row.usage_attributed_user_id
         batch_usage_actor = batch_row.usage_attributed_actor
         batch_runtime_profile = batch_row.service_execution_runtime_profile
+        batch_pool_origin = batch_row.pool_origin
 
     if ctx.team_id is not None:
         if "submit" not in ctx.scopes:
@@ -244,6 +249,17 @@ async def submit_trial(
         submitter_user_id = batch_submitter_user_id
         usage_user_id = batch_usage_user_id
         usage_actor = batch_usage_actor
+        # Only authenticated internal fan-out inherits its immutable parent.
+        # A user naming a shared batch, or supplying a body/header origin, is
+        # not provenance. Direct public submissions need their own handoff.
+        if batch_pool_origin is not None:
+            try:
+                origin = PoolWorkOriginV1.model_validate(batch_pool_origin)
+                if str(origin.submission_id) != str(batch_id) or origin.kind == "personal_build":
+                    raise ValueError("invalid batch origin")
+                pool_origin = origin.model_dump(mode="json")
+            except ValueError:
+                raise HTTPException(status_code=409, detail="batch submission origin unavailable") from None
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
@@ -471,6 +487,7 @@ async def submit_trial(
             )
         insert_values: dict[str, Any] = {
             "id": trial_id,
+            "pool_origin": pool_origin,
             "team_id": submit_team_id,
             "task_id": task_id,
             "config": trial_config.model_dump(mode="json"),
