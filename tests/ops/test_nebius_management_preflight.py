@@ -218,7 +218,7 @@ def test_command_preserves_sanitized_failure_evidence(monkeypatch, tmp_path, cap
 def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environment():
     workflow = yaml.load((Path(__file__).parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == [
-        "rollout", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
+        "rollout", "recover", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
         "management-preflight", "management-install",
         "management-diagnostic-preflight", "management-diagnostic-install",
         "management-recovery-preflight", "management-recovery-install",
