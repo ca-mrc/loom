@@ -138,11 +138,51 @@ run "existing_system_defaults_are_preserved" {
   assert {
     condition = (
       nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["system"].template.max_pods == 64 &&
       nebius_mk8s_v1_node_group.integration["system"].strategy.max_surge.count == 0 &&
       nebius_mk8s_v1_node_group.integration["system"].strategy.max_unavailable.count == 1
     )
     error_message = "An unchanged configuration must not resize or replace the existing system node."
   }
+}
+run "system_pod_headroom_does_not_resize_execution_or_compute" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_max_pods = 110 } }
+  assert {
+    condition = (
+      nebius_mk8s_v1_node_group.integration["system"].template.max_pods == 110 &&
+      nebius_mk8s_v1_node_group.integration["system"].template.resources.preset == "4vcpu-16gb" &&
+      nebius_mk8s_v1_node_group.integration["system"].template.boot_disk.size_gibibytes == 80 &&
+      nebius_mk8s_v1_node_group.integration["system"].fixed_node_count == 1 &&
+      nebius_mk8s_v1_node_group.integration["execution"].template.max_pods == 64 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.min_node_count == 0 &&
+      nebius_mk8s_v1_node_group.integration["execution"].autoscaling.max_node_count == 100
+    )
+    error_message = "Explicit Pod headroom must affect only the system group's Pod limit, not compute or execution capacity."
+  }
+}
+run "minimum_system_pod_limit_is_supported" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_max_pods = 16 } }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.integration["system"].template.max_pods == 16
+    error_message = "The documented lower bound must be forwarded; live fit is qualified separately."
+  }
+}
+run "reject_undersized_system_pod_limit" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_max_pods = 15 } }
+  expect_failures = [var.integration_platform]
+}
+run "reject_oversized_system_pod_limit" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_max_pods = 111 } }
+  expect_failures = [var.integration_platform]
+}
+run "reject_fractional_system_pod_limit" {
+  command = plan
+  variables { integration_platform = { bucket_prefix = "loom-platform-test", system_max_pods = 64.5 } }
+  expect_failures = [var.integration_platform]
 }
 run "reject_undersized_system_disk" {
   command = plan

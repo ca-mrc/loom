@@ -27,12 +27,14 @@ run "root_preserves_explicit_system_capacity" {
       bucket_prefix              = "loom-platform-test"
       system_preset              = "8vcpu-32gb"
       system_disk_gib            = 200
+      system_max_pods            = 110
       system_create_before_drain = true
     }
   }
   assert {
     condition = (
       var.integration_platform.system_disk_gib == 200 &&
+      var.integration_platform.system_max_pods == 110 &&
       var.integration_platform.system_create_before_drain &&
       length(module.regional_execution) == 0
     )
