@@ -174,3 +174,35 @@ def test_operator_cli_requires_candidate_for_every_action(action, candidate_args
     )
     assert result.returncode == 2
     assert "--candidate" in result.stderr
+
+
+def test_operator_observation_reads_real_persisted_guard_without_service(isolated_migration_postgres_url):
+    import json
+
+    import psycopg
+    from scripts.ops.deploy_nebius_platform import rollout_guard
+    from sqlalchemy.engine import make_url
+
+    url = make_url(isolated_migration_postgres_url).set(drivername="postgresql")
+    with psycopg.connect(url.render_as_string(hide_password=False), autocommit=True) as database:
+        database.execute("INSERT INTO nebius_rollout_guard(id, owner, candidate_sha) VALUES (1, %s, %s)",
+                         ("test-persisted-owner", "a" * 40))
+
+        class DatabaseKubectl:
+            def run(self, *command):
+                assert "statefulset/loom-postgres" in command and "psql" in command
+                cursor = database.execute(command[-1])
+                result = None
+                while True:
+                    if cursor.description:
+                        result = cursor.fetchone()[0]
+                    if not cursor.nextset():
+                        break
+                return json.dumps(result)
+
+        kube = DatabaseKubectl()
+        assert rollout_guard(kube, "test-platform", "observe", "test-persisted-owner", "a" * 40) == {"status": "held"}
+        assert rollout_guard(kube, "test-platform", "observe", "test-persisted-owner", "b" * 40) == {"status": "skipped_locked"}
+        assert rollout_guard(kube, "test-platform", "observe", "another-owner", "a" * 40) == {"status": "skipped_locked"}
+        database.execute("DELETE FROM nebius_rollout_guard")
+        assert rollout_guard(kube, "test-platform", "observe", "test-persisted-owner", "a" * 40) == {"status": "open"}

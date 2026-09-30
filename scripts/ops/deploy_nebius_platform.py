@@ -523,13 +523,37 @@ def public_smoke(origin: str, environment: str) -> None:
 
 
 def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candidate: str) -> dict[str, Any]:
-    result: dict[str, Any] = json.loads(kube.run(
-        "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-m",
-        "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
-    ))
+    if action == "observe":
+        # The service being repaired may not have a running Pod. Read the
+        # durable database directly; observation never changes the guard.
+        owner_literal = "'" + owner.replace("'", "''") + "'"
+        candidate_literal = "'" + candidate.replace("'", "''") + "'"
+        query = ("BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; "
+                 "SELECT json_build_object('status', COALESCE((SELECT CASE WHEN owner = "
+                 + owner_literal + " AND candidate_sha = " + candidate_literal
+                 + " THEN 'held' ELSE 'skipped_locked' END FROM public.nebius_rollout_guard WHERE id = 1), 'open')); ROLLBACK;")
+        output = kube.run("exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql",
+                          "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query)
+    else:
+        output = kube.run(
+            "exec", "-n", namespace, "deployment/loom-control-plane", "--", "python", "-m",
+            "loom.nebius_rollout_guard", action, "--owner", owner, "--candidate", candidate,
+        )
+    result: dict[str, Any] = json.loads(output)
     if result.get("status") not in {"acquired", "released", "skipped_busy", "skipped_locked", "held", "open"}:
         raise DeploymentError("invalid rollout guard response")
     return result
+
+
+def observe_rollout_guard(kube: Kubectl, namespace: str, owner: str, candidate: str) -> dict[str, Any]:
+    """Read durable ownership after an ambiguous response without exposing errors."""
+    try:
+        result = rollout_guard(kube, namespace, "observe", owner, candidate)
+        if result.get("status") in {"held", "open", "skipped_locked"}:
+            return result
+    except Exception:
+        pass
+    return {"status": "unavailable"}
 
 
 def validate_target_replacement(
@@ -668,7 +692,11 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
     resume_owner = getattr(args, "resume_guard_owner", None)
     if resume_owner is not None and re.fullmatch(r"rollout-[0-9a-f]{32}", resume_owner) is None:
         raise DeploymentError("invalid recovery guard owner")
-    guard_owner = resume_owner or "rollout-" + uuid.uuid4().hex
+    guard_owner = resume_owner or getattr(args, "guard_owner", None) or "rollout-" + uuid.uuid4().hex
+    if re.fullmatch(r"rollout-[0-9a-f]{32}", guard_owner) is None:
+        raise DeploymentError("invalid rollout guard owner")
+    if resume_owner:
+        evidence["guard_owner"] = guard_owner
     guard_acquired = False
     mutation_started = False
 
@@ -702,6 +730,12 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
         validate_target_replacement(current, config, retire_target)
+        try:
+            previous_candidate = json.loads(current["data"]["profile.json"])["candidate_sha"]
+            if isinstance(previous_candidate, str) and re.fullmatch(r"[0-9a-f]{40}", previous_candidate):
+                evidence["previous_candidate_sha"] = previous_candidate
+        except (KeyError, ValueError, TypeError):
+            pass
         # Freeze data, not the mutable Kubernetes object returned by a caller.
         replacement_source = canonical(current.get("data", {}))
         if retire_target is not None:
@@ -862,15 +896,21 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         evidence["status"] = "complete"
         return evidence
     except Exception as exc:
-        # Before apply, a failed backup must not leave a healthy platform paused.
-        # After apply (or runner loss), retain the durable pause for recovery.
-        if guard_acquired and not mutation_started and kube is not None:
-            try:
-                rollout_guard(kube, ns, "release", guard_owner, manifest["candidate_sha"])
-                guard_acquired = False
-            except Exception:
-                pass
-        evidence["dispatch_paused"] = guard_acquired
+        # A command may commit in the database before its response is lost.
+        # Resolve ownership from the database, including before acquire returns.
+        observation = {"status": "unavailable" if "guard_owner" in evidence else "open"}
+        if kube is not None and "state" in locals() and state["database_exists"] and "guard_owner" in evidence:
+            observation = observe_rollout_guard(kube, config["namespace"], guard_owner, manifest["candidate_sha"])
+            # Only this attempt's confirmed, pre-mutation reservation can be
+            # released. An inherited recovery pause always stays with its owner.
+            if observation["status"] == "held" and not mutation_started and not resume_owner:
+                try:
+                    rollout_guard(kube, config["namespace"], "release", guard_owner, manifest["candidate_sha"])
+                except Exception:
+                    pass
+                observation = observe_rollout_guard(kube, config["namespace"], guard_owner, manifest["candidate_sha"])
+        evidence["guard_observation"] = observation
+        evidence["dispatch_paused"] = observation["status"] != "open"
         evidence["status"] = "failed"
         if kube is not None and "config" in locals():
             failures: list[dict[str, Any]] = []
@@ -925,7 +965,6 @@ def main() -> int:
     parser.add_argument("--expected-cluster-id", required=True)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--retry-failed-jobs", action="store_true")
-    parser.add_argument("--resume-guard-owner", help="resume only this already held candidate/owner")
     parser.add_argument("--retire-target", help="exact installed primary ID replaced by the reviewed render")
     args = parser.parse_args()
     try:

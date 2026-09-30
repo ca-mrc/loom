@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -162,7 +163,7 @@ def test_recovery_schema_head_comes_from_original_candidate_graph(monkeypatch):
 
 
 @pytest.mark.parametrize("field,value", [
-    ("candidate_sha", "c" * 40), ("status", "complete"), ("dispatch_paused", False),
+    ("candidate_sha", "c" * 40), ("status", "complete"),
     ("cluster_id", "another-cluster"), ("namespace", "another-platform"),
     ("execution_namespace", "another-execution"), ("target_replacement", {"target_id": "replacement"}),
     ("schema_version", "other-schema"), ("mode", "plan"), ("guard_owner", "another-owner"),
@@ -183,8 +184,174 @@ def test_recovery_rejects_evidence_binding_mismatch_before_deploy(monkeypatch, t
     args = SimpleNamespace(kubeconfig=tmp_path / "unused", namespace=config["namespace"],
                            publication_dir=tmp_path, candidate="a" * 40, evidence_dir=tmp_path,
                            recovery_evidence=evidence, github=False)
+    with pytest.raises(rollout.DeploymentError, match="recovery"):
+        rollout.rollout(args)
+
+
+def running_rollout_intent():
+    record = failed_rollout_record()
+    record.pop("dispatch_paused")
+    return {**record, "status": "running", "run_id": 91, "run_attempt": 3,
+            "previous_candidate_sha": "c" * 40}
+
+
+@pytest.mark.parametrize("conclusion", ["failure", "timed_out"])
+def test_runner_loss_recovers_server_intent_when_artifact_is_missing(monkeypatch, tmp_path, conclusion):
+    payload = {**running_rollout_intent(), "private_diagnostic": "must-not-be-copied"}
+
+    def api(path, data=None):
+        if path.startswith("deployments?"):
+            return [{"environment": "nebius-integration", "sha": "a" * 40, "payload": payload}]
+        response = recovery_api(path, data)
+        return {**response, "conclusion": conclusion} if path == "actions/runs/91" else response
+
+    def command(argv, **kwargs):
+        return SimpleNamespace(returncode=1 if argv[:3] == ["gh", "run", "download"] else 0)
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout.subprocess, "run", command)
+    result = rollout.select_recovery("91", tmp_path / "recovery")
+    record = json.loads(Path(result["recovery_evidence"]).read_text())
+    assert record == running_rollout_intent()
+    assert result["sha"] == "a" * 40
+
+
+@pytest.mark.parametrize("field,value", [
+    ("run_id", 92), ("run_attempt", 2), ("candidate_sha", "b" * 40),
+    ("status", "complete"), ("mode", "plan"), ("schema_version", "another-schema"),
+    ("previous_candidate_sha", "invalid"), ("guard_owner", "foreign-owner"),
+    ("target_replacement", {"target_id": "replacement"}),
+])
+def test_runner_loss_rejects_foreign_or_invalid_server_intent(monkeypatch, tmp_path, field, value):
+    payload = {**running_rollout_intent(), field: value}
+
+    def api(path, data=None):
+        if path.startswith("deployments?"):
+            return [{"environment": "nebius-integration", "sha": "a" * 40, "payload": payload}]
+        return recovery_api(path, data)
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    with pytest.raises(rollout.DeploymentError):
+        rollout.select_recovery("91", tmp_path / "recovery")
+
+
+@pytest.mark.parametrize("mutation", ["environment", "sha", "duplicate"])
+def test_runner_loss_requires_unique_matching_deployment_binding(monkeypatch, tmp_path, mutation):
+    row = {"environment": "nebius-integration", "sha": "a" * 40, "payload": running_rollout_intent()}
+    rows = [row, row] if mutation == "duplicate" else [{**row, mutation: "foreign-binding"}]
+
+    def api(path, data=None):
+        return rows if path.startswith("deployments?") else recovery_api(path, data)
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=1))
+    with pytest.raises(rollout.DeploymentError):
+        rollout.select_recovery("91", tmp_path / "recovery")
+
+
+def test_invalid_retained_artifact_cannot_be_hidden_by_server_intent_fallback(monkeypatch, tmp_path):
+    def api(path, data=None):
+        if path.startswith("deployments?"):
+            pytest.fail("available invalid artifact must not be replaced by fallback")
+        return recovery_api(path, data)
+
+    def command(argv, **kwargs):
+        (tmp_path / "recovery" / "deployment-test.json").write_text(json.dumps({
+            **failed_rollout_record(), "candidate_sha": "not-a-commit",
+        }))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout.subprocess, "run", command)
+    with pytest.raises(rollout.DeploymentError):
+        rollout.select_recovery("91", tmp_path / "recovery")
+
+
+def wrapper_inputs(monkeypatch, tmp_path, *, current="a" * 40, record=None, github=False):
+    (tmp_path / "candidate.json").write_text(json.dumps({"candidate_sha": "a" * 40}))
+    (tmp_path / "runtime-profile.json").write_text("{}")
+    config = {key: failed_rollout_record()[key] for key in ("cluster_id", "namespace", "execution_namespace")}
+    config["public_host"] = "platform.example.test"
+    data = {"environment.json": json.dumps(config), "profile.json": json.dumps({"candidate_sha": current}),
+            "keyring.json": "{}"}
+    monkeypatch.setattr(rollout, "Kubectl", lambda path: SimpleNamespace(get=lambda *args: {"data": data}))
+    monkeypatch.setattr(rollout, "build_platform", lambda *args, **kwargs: {})
+    monkeypatch.setattr(rollout, "write_platform", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rollout, "candidate_schema_head", lambda sha: "original_head")
+    args = SimpleNamespace(kubeconfig=tmp_path / "unused", namespace=config["namespace"],
+                           publication_dir=tmp_path, candidate="a" * 40, evidence_dir=tmp_path, github=github)
+    if record is not None:
+        args.recovery_evidence = tmp_path / "recovery.json"
+        args.recovery_evidence.write_text(json.dumps(record))
+    return args
+
+
+def test_runner_loss_before_first_manifest_recovers_original_previous_candidate(monkeypatch, tmp_path):
+    args = wrapper_inputs(monkeypatch, tmp_path, current="c" * 40, record=running_rollout_intent())
+    monkeypatch.setattr(rollout, "candidate_follows", lambda *args: pytest.fail("recovery uses its persisted binding"))
+
+    def deploy(args, **kwargs):
+        assert args.resume_guard_owner == running_rollout_intent()["guard_owner"]
+        assert args.expected_current_candidate == "c" * 40
+        assert args.retry_failed_jobs is True
+        assert args.migration_schema_head == "original_head"
+        return {"status": "complete"}
+
+    monkeypatch.setattr(rollout, "deploy", deploy)
+    assert rollout.rollout(args) == {"status": "complete"}
+
+
+@pytest.mark.parametrize("record,current", [
+    (running_rollout_intent(), "d" * 40), (failed_rollout_record(), "c" * 40),
+])
+def test_recovery_never_accepts_unrecorded_or_legacy_previous_candidate(monkeypatch, tmp_path, record, current):
+    args = wrapper_inputs(monkeypatch, tmp_path, current=current, record=record)
+    monkeypatch.setattr(rollout, "candidate_follows", lambda *args: pytest.fail("must not infer recovery authority"))
+    monkeypatch.setattr(rollout, "deploy", lambda *args, **kwargs: pytest.fail("must not deploy another candidate"))
     with pytest.raises(rollout.DeploymentError, match="recovery binding differs"):
         rollout.rollout(args)
+
+
+def test_wrapper_persists_exact_guard_intent_before_deployment_acquisition(monkeypatch, tmp_path):
+    args = wrapper_inputs(monkeypatch, tmp_path, current="c" * 40, github=True)
+    monkeypatch.setattr(rollout, "candidate_follows", lambda *args: True)
+    monkeypatch.setenv("GITHUB_RUN_ID", "91")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
+    persisted = {}
+
+    def api(path, payload):
+        if path == "deployments":
+            persisted.update(payload["payload"])
+            return {"id": 123}
+        return {}
+
+    def deploy(args, **kwargs):
+        assert persisted["guard_owner"] == args.guard_owner
+        assert persisted == {**running_rollout_intent(), "guard_owner": args.guard_owner}
+        return {"status": "complete"}
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout, "deploy", deploy)
+    assert rollout.rollout(args) == {"status": "complete"}
+
+
+def test_local_github_deployment_without_workflow_identity_still_works(monkeypatch, tmp_path):
+    args = wrapper_inputs(monkeypatch, tmp_path, github=True)
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+    monkeypatch.delenv("GITHUB_RUN_ATTEMPT", raising=False)
+
+    def api(path, payload):
+        if path == "deployments":
+            assert "run_id" not in payload["payload"]
+            assert "run_attempt" not in payload["payload"]
+            return {"id": 123}
+        assert "log_url" not in payload
+        return {}
+
+    monkeypatch.setattr(rollout, "github", api)
+    monkeypatch.setattr(rollout, "deploy", lambda *args, **kwargs: {"status": "complete"})
+    assert rollout.rollout(args) == {"status": "complete"}
 
 
 def test_busy_cli_explains_activity_without_exposing_raw_evidence(monkeypatch, tmp_path, capsys):

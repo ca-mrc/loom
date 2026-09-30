@@ -1442,12 +1442,18 @@ gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev \
   -f operation=recover -f recovery_run_id=FAILED_ROLLOUT_RUN_ID
 ```
 
-Recovery downloads the failed attempt's sanitized deployment record and the
-successful publication of its original candidate. The candidate SHA, image digests,
+Recovery reads the failed attempt's sanitized deployment record and the
+successful publication of its original candidate. Before acquiring the pause,
+the workflow persists its owner, candidate, previous configured candidate and
+run/attempt in a GitHub Deployment record. If runner loss prevents artifact
+upload, recovery can locate that server-side intent for the exact failed run.
+The database must still confirm the matching held owner/candidate; an intent
+record alone never grants ownership. The candidate SHA, image digests,
 guard owner, cluster and namespaces remain fixed. It uses the current merged
 recovery tooling and the original candidate's migration graph, without selecting
-the newest publication. The live configured
-candidate and held guard must still match; another owner/candidate, successful or
+the newest publication. The live configured candidate must match the original candidate or the
+persisted previous candidate when failure preceded configuration application.
+The held database guard must still match; another owner/candidate, successful or
 nonterminal run, missing evidence, or primary-target replacement blocks this path.
 The same protected Environment and workflow concurrency apply, and
 `NEBIUS_AUTO_ROLLOUT_ENABLED` must remain enabled. Failed candidate Jobs may be
@@ -1463,9 +1469,15 @@ or suspend applications itself. Never bypass the application schema guard, delet
 its credential records, stamp the migration revision, or clear the rollout guard
 directly. A new attempt blocked before mutation releases its own pause; an attempt
 recovering a partially applied candidate retains the original pause on failure.
+Failure reporting reads the persisted guard again, including when a database
+commit succeeds but the command response is lost. Unavailable observation records
+an unknown possible pause; it never treats a process-local flag as proof that
+dispatch is open. The recovery owner is loaded from the failed record, rather
+than supplied as a separate manual owner override.
 
-Recovery releases only the matching owner and candidate after HTTPS and workload
-readback succeed. Inspect the new sanitized deployment evidence and installed
+Recovery observes the guard directly through PostgreSQL, so a failed Control
+Plane Pod cannot prevent repair. It releases only the matching owner and
+candidate after HTTPS and workload readback succeed. Inspect the new sanitized deployment evidence and installed
 versions before resuming suspended applications. Repair forward or review a
 compatible restore separately; recovery does not authorize a database downgrade.
 

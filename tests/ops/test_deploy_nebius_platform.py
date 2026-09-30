@@ -338,6 +338,14 @@ def test_usage_cluster_resources_must_belong_to_target(rendered, kind):
         deploy.load_render(args.render_dir)
 
 
+def guard_action(command):
+    if "loom.nebius_rollout_guard" in command:
+        return command[command.index("loom.nebius_rollout_guard") + 1]
+    if "psql" in command and "FROM public.nebius_rollout_guard" in command[-1]:
+        return "observe"
+    return None
+
+
 class FakeKubectl(deploy.Kubectl):
     def __init__(self, config: dict, files: dict, *, database: bool = False):
         self.config = config
@@ -350,6 +358,7 @@ class FakeKubectl(deploy.Kubectl):
         self.schema_ready = True
         self.schema_current = True
         self.version_table = True
+        self.guard_identity = None
         if database:
             self.objects["statefulset", "loom-postgres"] = {"metadata": {"name": "loom-postgres"}}
             self.objects["cronjob", "loom-platform-backup"] = files["80-backup.yaml"][0]
@@ -362,6 +371,13 @@ class FakeKubectl(deploy.Kubectl):
         self.commands.append(args)
         if args[0] == "exec":
             if "psql" in args:
+                if guard_action(args) == "observe":
+                    import re
+                    owner = re.search(r"owner = '([^']+)'", args[-1])[1]
+                    candidate = re.search(r"candidate_sha = '([^']+)'", args[-1])[1]
+                    status = "open" if self.guard_identity is None else (
+                        "held" if self.guard_identity == (owner, candidate) else "skipped_locked")
+                    return json.dumps({"status": status})
                 if "migration_ready())" in args[-1]:
                     return json.dumps(self.schema_ready)
                 from loom.db.schema_startup import service_schema_head
@@ -369,7 +385,21 @@ class FakeKubectl(deploy.Kubectl):
                     return json.dumps(service_schema_head() if self.schema_current else "previous")
                 return json.dumps({"version_table": self.version_table,
                                    "access_schema": True, "access_guard": True})
-            return json.dumps({"status": "released" if "release" in args else "acquired"})
+            action = args[args.index("loom.nebius_rollout_guard") + 1]
+            identity = (args[args.index("--owner") + 1], args[args.index("--candidate") + 1])
+            if action == "observe":
+                status = "open" if self.guard_identity is None else (
+                    "held" if self.guard_identity == identity else "skipped_locked"
+                )
+            elif action == "acquire":
+                status = "skipped_locked" if self.guard_identity is not None else "acquired"
+                if status == "acquired":
+                    self.guard_identity = identity
+            else:
+                assert self.guard_identity == identity
+                self.guard_identity = None
+                status = "released"
+            return json.dumps({"status": status})
         if args[:2] == ("config", "view"):
             return json.dumps(
                 {
@@ -503,6 +533,7 @@ def test_target_replacement_rechecks_its_source_after_lock(rendered, monkeypatch
     args.retire_target = "previous-primary"
     kube = FakeKubectl(config, files, database=True)
     _current_primary(kube, config, files, "previous-primary")
+    original_guard = deploy.rollout_guard
 
     def interleave(_kube, _ns, action, _owner, _candidate):
         if action == "acquire":
@@ -510,7 +541,7 @@ def test_target_replacement_rechecks_its_source_after_lock(rendered, monkeypatch
             environment = json.loads(current["environment.json"])
             environment[changed] = "concurrent-change"
             current["environment.json"] = json.dumps(environment)
-        return {"status": "acquired" if action == "acquire" else "released"}
+        return original_guard(_kube, _ns, action, _owner, _candidate)
 
     monkeypatch.setattr(deploy, "rollout_guard", interleave)
     monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
@@ -582,10 +613,11 @@ def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendere
     kube = ReplacingKubectl(config, files, database=True)
     kube.fail_backup = failure == "backup"
     _current_primary(kube, config, files, "previous-primary")
+    original_guard = deploy.rollout_guard
 
     def guard(_kube, _ns, action, _owner, _candidate):
         calls.append(action)
-        return {"status": "acquired" if action == "acquire" else "released"}
+        return original_guard(_kube, _ns, action, _owner, _candidate)
 
     monkeypatch.setattr(deploy, "rollout_guard", guard)
     monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
@@ -602,9 +634,9 @@ def test_target_retirement_is_guarded_and_ambiguous_failure_stays_paused(rendere
             "previous_target_retired": True, "active_target_verified": True,
         }
     if failure == "freshness":
-        assert calls == ["acquire", "validate", "release"]
+        assert calls == ["acquire", "validate", "observe", "release", "observe"]
     elif failure == "backup":
-        assert calls == ["acquire", "validate", "backup", "release"]
+        assert calls == ["acquire", "validate", "backup", "observe", "release", "observe"]
     else:
         assert calls[:4] == ["acquire", "validate", "backup", "retire"]
         assert ("release" in calls) == (failure is None)
@@ -909,10 +941,11 @@ def test_failed_health_retains_pause_and_success_resumes_after_readback(rendered
     args, config, _, files = rendered
     args.apply = True
     calls = []
+    original_guard = deploy.rollout_guard
 
     def guard(_kube, _ns, action, _owner, _candidate):
         calls.append(action)
-        return {"status": "acquired" if action == "acquire" else "released"}
+        return original_guard(_kube, _ns, action, _owner, _candidate)
 
     def health(*_):
         raise deploy.DeploymentError("unhealthy")
@@ -921,7 +954,7 @@ def test_failed_health_retains_pause_and_success_resumes_after_readback(rendered
     monkeypatch.setattr(deploy, "public_smoke", health)
     with pytest.raises(deploy.DeploymentError, match="unhealthy"):
         deploy.deploy(args, kube=FakeKubectl(config, files, database=True))
-    assert calls == ["acquire"]
+    assert calls == ["acquire", "observe"]
     evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
     assert evidence["dispatch_paused"] is True
     calls.clear()
@@ -1001,7 +1034,7 @@ def test_resume_requires_saved_owner_and_candidate_without_reacquiring(rendered,
     else:
         with pytest.raises(deploy.DeploymentError, match='original candidate'):
             deploy.deploy(args, kube=FakeKubectl(config, files, database=True))
-        assert calls == ['observe']
+        assert calls == ['observe', 'observe']
 
 
 def test_owned_recovery_backup_failure_preserves_existing_pause(rendered, monkeypatch):
@@ -1014,7 +1047,7 @@ def test_owned_recovery_backup_failure_preserves_existing_pause(rendered, monkey
     kube.fail_backup = True
     with pytest.raises(deploy.DeploymentError):
         deploy.deploy(args, kube=kube)
-    assert calls == ['observe']
+    assert calls == ['observe', 'observe']
     evidence = json.loads(next(args.evidence_dir.glob('*.json')).read_text())
     assert evidence['dispatch_paused'] is True
 
@@ -1029,3 +1062,141 @@ def test_partial_first_install_without_version_table_can_resume(rendered, monkey
     assert result["status"] == "complete"
     assert result["preflight"]["migration_needed"] is True
     assert not any("version_num FROM public.alembic_version" in c[-1] for c in kube.commands if "psql" in c)
+
+
+@pytest.mark.parametrize("lost_action", ["acquire", "release"])
+def test_committed_guard_response_loss_reconciles_persisted_pause(rendered, lost_action):
+    args, config, _, files = rendered
+    args.apply = True
+
+    class ResponseLossKubectl(FakeKubectl):
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if "loom.nebius_rollout_guard" in command and lost_action in command:
+                raise deploy.DeploymentError("guard response lost after commit")
+            return result
+
+    kube = ResponseLossKubectl(config, files, database=True)
+    # A pre-mutation failure exercises cleanup of an existing reservation.
+    kube.fail_backup = lost_action == "release"
+    with pytest.raises(deploy.DeploymentError):
+        deploy.deploy(args, kube=kube)
+    actions = [guard_action(c) for c in kube.commands if guard_action(c)]
+    assert actions == ["acquire", "observe", "release", "observe"]
+    assert kube.guard_identity is None
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["dispatch_paused"] is False
+    assert evidence["guard_observation"] == {"status": "open"}
+    assert not any(c[0] == "apply" for c in kube.commands)
+
+
+@pytest.mark.parametrize("observation", ["unavailable", "skipped_locked"])
+def test_lost_acquire_response_never_releases_unconfirmed_owner(rendered, observation):
+    args, config, _, files = rendered
+    args.apply = True
+
+    class ResponseLossKubectl(FakeKubectl):
+        def run(self, *command, timeout=90):
+            if guard_action(command) == "observe":
+                self.commands.append(command)
+                if observation == "unavailable":
+                    raise deploy.DeploymentError("private transport error")
+                return json.dumps({"status": "skipped_locked"})
+            result = super().run(*command, timeout=timeout)
+            if "loom.nebius_rollout_guard" in command and "acquire" in command:
+                if observation == "skipped_locked":
+                    self.guard_identity = ("foreign-owner", "b" * 40)
+                raise deploy.DeploymentError("guard response lost after commit")
+            return result
+
+    kube = ResponseLossKubectl(config, files, database=True)
+    with pytest.raises(deploy.DeploymentError, match="guard response lost"):
+        deploy.deploy(args, kube=kube)
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["dispatch_paused"] is True
+    assert evidence["guard_observation"] == {"status": observation}
+    assert not any("release" in c for c in kube.commands)
+    assert not any(c[0] in {"apply", "create", "delete"} for c in kube.commands)
+    assert "private transport error" not in json.dumps(evidence)
+
+
+def test_recovery_preflight_failure_preserves_saved_owner_and_pause(rendered):
+    args, config, manifest, files = rendered
+    args.apply = True
+    args.resume_guard_owner = "rollout-" + "1" * 32
+    kube = FakeKubectl(config, files, database=True)
+    kube.guard_identity = (args.resume_guard_owner, manifest["candidate_sha"])
+    kube.wrong_server = True
+    with pytest.raises(deploy.DeploymentError):
+        deploy.deploy(args, kube=kube)
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["guard_owner"] == args.resume_guard_owner
+    assert evidence["candidate_sha"] == manifest["candidate_sha"]
+    assert evidence["dispatch_paused"] is True
+    # Failed cluster validation cannot authorize even an observation there.
+    assert evidence["guard_observation"] == {"status": "unavailable"}
+    assert not any("loom.nebius_rollout_guard" in c for c in kube.commands)
+
+
+@pytest.mark.parametrize("repeat_loss", [False, True])
+def test_recovery_observe_response_loss_preserves_inherited_pause(rendered, repeat_loss):
+    args, config, manifest, files = rendered
+    args.apply = True
+    args.resume_guard_owner = "rollout-" + "1" * 32
+
+    class ResponseLossKubectl(FakeKubectl):
+        observations = 0
+
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if guard_action(command) == "observe":
+                self.observations += 1
+                if repeat_loss or self.observations == 1:
+                    raise deploy.DeploymentError("guard observation response lost")
+            return result
+
+    kube = ResponseLossKubectl(config, files, database=True)
+    kube.guard_identity = (args.resume_guard_owner, manifest["candidate_sha"])
+    with pytest.raises(deploy.DeploymentError, match="observation response lost"):
+        deploy.deploy(args, kube=kube)
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["guard_owner"] == args.resume_guard_owner
+    assert evidence["dispatch_paused"] is True
+    assert evidence["guard_observation"] == {"status": "unavailable" if repeat_loss else "held"}
+    assert not any("release" in c or "acquire" in c for c in kube.commands)
+    assert not any(c[0] in {"apply", "create", "delete"} for c in kube.commands)
+
+
+def test_completed_rollout_release_response_loss_reads_open_database(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    monkeypatch.setattr(deploy, "public_smoke", lambda *_: None)
+
+    class ResponseLossKubectl(FakeKubectl):
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if "loom.nebius_rollout_guard" in command and "release" in command:
+                raise deploy.DeploymentError("release response lost after commit")
+            return result
+
+    kube = ResponseLossKubectl(config, files, database=True)
+    with pytest.raises(deploy.DeploymentError, match="release response lost"):
+        deploy.deploy(args, kube=kube)
+    evidence = json.loads(next(args.evidence_dir.glob("*.json")).read_text())
+    assert evidence["dispatch_paused"] is False
+    assert evidence["guard_observation"] == {"status": "open"}
+    assert kube.guard_identity is None
+    actions = [guard_action(c) for c in kube.commands if guard_action(c)]
+    assert actions == ["acquire", "release", "observe"]
+
+
+def test_recovery_observes_persisted_database_without_control_plane_pod(rendered):
+    _, config, manifest, files = rendered
+    kube = FakeKubectl(config, files, database=True)
+    owner = "rollout-" + "9" * 32
+    kube.guard_identity = (owner, manifest["candidate_sha"])
+    assert deploy.rollout_guard(kube, config["namespace"], "observe", owner, manifest["candidate_sha"]) == {"status": "held"}
+    command = kube.commands[-1]
+    assert "statefulset/loom-postgres" in command and "psql" in command
+    assert "BEGIN READ ONLY" in command[-1]
+    assert "deployment/loom-control-plane" not in command
