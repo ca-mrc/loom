@@ -1,4 +1,4 @@
-"""Fixed CREATE journal. Dispatch permission returns only AFTER its own commit.
+"""Fixed mutation journal. Dispatch permission returns only AFTER its own commit.
 
 This trusted internal interface receives identities, never caller manifests. It
 does not perform Kubernetes I/O, retry an uncertain write or release capacity.
@@ -51,6 +51,16 @@ class PoolGatewayEffect:
     requires_configmap: bool
 
 
+@dataclass(frozen=True)
+class PoolGatewayDeletion:
+    effect_id: UUID
+    phase: str
+    created: PoolGatewayEffect
+    document: dict[str, Any]
+    dispatch_id: UUID | None
+    rejection_status: int | None
+
+
 def _document(request: NebiusPoolRequest, effect_id: UUID, kind: CreateKind) -> dict[str, Any]:
     if kind not in {"Job", "ConfigMap"} or request.plan_json is None:
         raise PoolGatewayError
@@ -86,6 +96,27 @@ def _view(effect: NebiusPoolEffect, request: NebiusPoolRequest) -> PoolGatewayEf
     return PoolGatewayEffect(effect.effect_id, request.request_id, request.namespace_uid, effect.phase, document,
         effect.dispatch_id, effect.observed_uid, effect.observed_resource_version, effect.rejection_status,
         request.plan_json is not None and request.plan_json["configmap"] is not None)
+
+
+def _delete_document(created: PoolGatewayEffect) -> dict[str, Any]:
+    if created.phase != "observed" or created.observed_uid is None:
+        raise PoolGatewayError
+    return {"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background",
+            "preconditions": {"uid": str(created.observed_uid)}}
+
+
+def _delete_intent(created: PoolGatewayEffect) -> dict[str, Any]:
+    return _intent(created.document) | {"action": "delete", "uid": str(created.observed_uid),
+        "request_sha256": digest(_delete_document(created)), "create_effect_id": str(created.effect_id)}
+
+
+def _delete_view(effect: NebiusPoolEffect, request: NebiusPoolRequest, created: NebiusPoolEffect) -> PoolGatewayDeletion:
+    create_view = _view(created, request)
+    if (effect.intent_json != _delete_intent(create_view)
+            or (effect.plan_sha256, effect.namespace_uid) != (request.plan_sha256, request.namespace_uid)):
+        raise PoolGatewayError
+    return PoolGatewayDeletion(effect.effect_id, effect.phase, create_view, _delete_document(create_view),
+                               effect.dispatch_id, effect.rejection_status)
 
 
 class PoolGatewayJournal:
@@ -223,3 +254,92 @@ class PoolGatewayJournal:
             rejected = (await session.scalars(update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == effect_id).values(
                 phase="rejected", rejection_status=status_code).returning(NebiusPoolEffect).execution_options(populate_existing=True))).one()
             return _view(rejected, request)
+
+    async def _deletion(self, session: AsyncSession, pool: NebiusPoolBinding, effect_id: UUID) -> tuple[
+        NebiusPoolEffect, NebiusPoolRequest, NebiusPoolEffect,
+    ]:
+        reservation_id = await session.scalar(select(NebiusPoolEffect.request_id).where(NebiusPoolEffect.effect_id == effect_id))
+        if reservation_id is None:
+            raise PoolGatewayError
+        request = await self._request(session, pool, reservation_id)
+        effect = (await session.scalars(select(NebiusPoolEffect).where(
+            NebiusPoolEffect.effect_id == effect_id).with_for_update())).one()
+        created = await self._created(session, request, effect.intent_json["kind"])
+        _delete_view(effect, request, created)
+        return effect, request, created
+
+    async def _created(self, session: AsyncSession, request: NebiusPoolRequest, kind: CreateKind) -> NebiusPoolEffect:
+        if kind not in {"Job", "ConfigMap"}:
+            raise PoolGatewayError
+        created = await session.scalar(select(NebiusPoolEffect).where(
+            NebiusPoolEffect.request_id == request.request_id, NebiusPoolEffect.effect_key == "create:" + kind.lower()))
+        if created is None or created.phase != "observed":
+            raise PoolGatewayError
+        _view(created, request)
+        return created
+
+    async def prepare_delete(self, principal: PoolPrincipal, reservation_id: UUID, *, kind: CreateKind) -> PoolGatewayDeletion:
+        """Trusted internal cleanup only; no caller-supplied target or UID.
+
+        Entering cleanup_intent is a separate, output-drain-authorized operation.
+        Deletion observations NEVER release capacity or assert residual Pod absence.
+        """
+        async with self._transaction(principal) as (session, pool):
+            request = await self._request(session, pool, reservation_id)
+            created = await self._created(session, request, kind)
+            key = "delete:" + kind.lower()
+            existing = await session.scalar(select(NebiusPoolEffect).where(
+                NebiusPoolEffect.request_id == reservation_id, NebiusPoolEffect.effect_key == key))
+            if existing is not None:
+                return _delete_view(existing, request, created)
+            if request.phase != "cleanup_intent":
+                raise PoolGatewayError("pool_gateway_cleanup_not_authorized")
+            last = await session.scalar(select(func.max(NebiusPoolEffect.sequence)).where(NebiusPoolEffect.request_id == reservation_id))
+            effect = (await session.scalars(insert(NebiusPoolEffect).values(
+                effect_id=uuid4(), request_id=reservation_id, plan_sha256=request.plan_sha256,
+                namespace_uid=request.namespace_uid, effect_key=key, sequence=(last or 0) + 1,
+                intent_json=_delete_intent(_view(created, request)), phase="prepared").returning(NebiusPoolEffect))).one()
+            return _delete_view(effect, request, created)
+
+    async def get_delete(self, principal: PoolPrincipal, effect_id: UUID) -> PoolGatewayDeletion:
+        async with self._transaction(principal) as (session, pool):
+            effect, request, created = await self._deletion(session, pool, effect_id)
+            return _delete_view(effect, request, created)
+
+    async def dispatch_delete(self, principal: PoolPrincipal, effect_id: UUID) -> PoolGatewayDeletion | None:
+        async with self._transaction(principal) as (session, pool):
+            effect, request, created = await self._deletion(session, pool, effect_id)
+            if effect.phase != "prepared":
+                return None
+            if request.phase != "cleanup_intent":
+                raise PoolGatewayError("pool_gateway_cleanup_not_authorized")
+            dispatched = (await session.scalars(update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == effect_id).values(
+                phase="dispatched", dispatch_id=uuid4(), dispatch_machine_id=principal.machine_id,
+                dispatch_epoch=principal.credential_epoch).returning(NebiusPoolEffect).execution_options(populate_existing=True))).one()
+            result = _delete_view(dispatched, request, created)
+        return result
+
+    async def observe_delete(self, principal: PoolPrincipal, effect_id: UUID) -> PoolGatewayDeletion:
+        async with self._transaction(principal) as (session, pool):
+            effect, request, created = await self._deletion(session, pool, effect_id)
+            if effect.phase == "observed":
+                return _delete_view(effect, request, created)
+            if effect.phase != "dispatched" or request.phase != "cleanup_intent":
+                raise PoolGatewayError
+            observed = (await session.scalars(update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == effect_id).values(
+                phase="observed", observed_uid=created.observed_uid).returning(NebiusPoolEffect)
+                .execution_options(populate_existing=True))).one()
+            return _delete_view(observed, request, created)
+
+    async def reject_delete(self, principal: PoolPrincipal, effect_id: UUID, *, status_code: int) -> PoolGatewayDeletion:
+        if type(status_code) is not int or status_code not in {409, 422}:
+            raise PoolGatewayError
+        async with self._transaction(principal) as (session, pool):
+            effect, request, created = await self._deletion(session, pool, effect_id)
+            if effect.phase == "rejected" and effect.rejection_status == status_code:
+                return _delete_view(effect, request, created)
+            if effect.phase != "dispatched":
+                raise PoolGatewayError
+            rejected = (await session.scalars(update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == effect_id).values(
+                phase="rejected", rejection_status=status_code).returning(NebiusPoolEffect).execution_options(populate_existing=True))).one()
+            return _delete_view(rejected, request, created)

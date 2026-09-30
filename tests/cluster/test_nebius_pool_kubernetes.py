@@ -1,7 +1,7 @@
 """Fixed CREATE adapter with real API defaulting and restricted credentials.
 
 This is not the protected installer/migration acceptance: the fixture establishes
-the intended read/create-only roles in a fresh disposable cluster. No workload
+the intended fixed-resource roles in a fresh disposable cluster. No workload
 can schedule on its node (the frozen cloud node-group selector is unmatched).
 """
 from __future__ import annotations
@@ -9,13 +9,18 @@ from __future__ import annotations
 import asyncio
 import os
 import ssl
+import time
 from uuid import UUID
 
 import httpx
 import pytest
 
 from loom_service.pool_management.gateway_journal import PoolGatewayJournal
-from loom_service.pool_management.kubernetes import KubernetesPoolGateway, PoolKubernetesError
+from loom_service.pool_management.kubernetes import (
+    KubernetesPoolGateway,
+    PoolKubernetesError,
+    PoolKubernetesWaitingError,
+)
 from tests.integration.conftest import (
     isolated_migration_postgres_url as isolated_migration_postgres_url,
 )
@@ -24,6 +29,7 @@ from tests.integration.conftest import (
 )
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.integration.test_nebius_pool_build_admission import mixed_setup, prepare_build
+from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
 from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_registry import machine, prepare
 from tests.integration.test_nebius_pool_registry import sessions as sessions
@@ -70,8 +76,8 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
         for namespace in allowed:
             await asyncio.to_thread(rbac.create_namespaced_role, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "Role", "metadata": {"name": "pool-create"}, "rules": [
-                    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "create"]},
-                    {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create"]}]})
+                    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "create", "delete"]},
+                    {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "delete"]}]})
             await asyncio.to_thread(rbac.create_namespaced_role_binding, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "RoleBinding", "metadata": {"name": "pool-create"}, "subjects": [subject],
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "pool-create"}})
@@ -82,10 +88,18 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
         trust = ssl.create_default_context(cafile=config.ssl_ca_cert)
         issued = await asyncio.to_thread(core.create_namespaced_service_account_token, "gateway", "pool-management",
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
+        mutations = []
+
+        async def record(request):
+            if request.method in {"POST", "DELETE"}:
+                mutations.append((request.method, request.url.path))
+
         # Token only, no admin certificate and no ambient environment authority.
         async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
-                                     headers={"Authorization": "Bearer " + issued.status.token}) as http:
+                                     headers={"Authorization": "Bearer " + issued.status.token},
+                                     event_hooks={"request": [record]}) as http:
             gateway = KubernetesPoolGateway(journal, http)
+            receipts = []
             for body, preparing in [(executions[0], prepare), (builds[0], prepare_build)]:
                 await preparing(sessions, principals[0], body, profiles)
                 receipt = await operate(sessions, principals[0], action(body), profiles=profiles)
@@ -101,6 +115,7 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                     raise
                 assert observed.phase == "observed"
                 assert await gateway.create(principal, receipt.reservation_id, kind="Job") == observed
+                receipts.append((receipt, body.key.workload_kind))
             foreign = await http.post("/apis/batch/v1/namespaces/pool-test-execution-1/jobs", json=observed.document)
             assert foreign.status_code == 403
             secret = await http.post("/api/v1/namespaces/pool-test-build-0/secrets", json={
@@ -109,6 +124,20 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
             for namespace in allowed:
                 pods = await asyncio.to_thread(core.list_namespaced_pod, namespace)
                 assert all(pod.spec.node_name is None for pod in pods.items)
+            for receipt, workload_kind in receipts:
+                await begin_cleanup(sessions, receipt.reservation_id)
+                for kind in (["Job", "ConfigMap"] if workload_kind == "task_image_build" else ["Job"]):
+                    deadline = time.monotonic() + 20
+                    while True:
+                        try:
+                            deleted = await gateway.delete(principal, receipt.reservation_id, kind=kind)
+                            break
+                        except PoolKubernetesWaitingError:
+                            assert time.monotonic() < deadline, "fixed object deletion did not converge"
+                            await asyncio.sleep(0.1)
+                    assert deleted.phase == "observed"
+            deletes = [path for method, path in mutations if method == "DELETE"]
+            assert len(deletes) == len(set(deletes)) == 3
         legacy = await asyncio.to_thread(core.create_namespaced_service_account_token, "legacy", "pool-management",
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
         async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,

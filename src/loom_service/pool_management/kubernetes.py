@@ -1,4 +1,4 @@
-"""Fixed pool CREATE execution; no caller manifests, ambient kubeconfig or retries.
+"""Fixed pool mutations; no caller manifests, ambient kubeconfig or write retries.
 
 The journal commits one dispatch permit before HTTP. A timeout (even followed by
 404) can only be reconciled, never resent. Observed effects are history, so a
@@ -18,6 +18,7 @@ import httpx
 from loom_service.pool_management.auth import PoolPrincipal
 from loom_service.pool_management.gateway_journal import (
     CreateKind,
+    PoolGatewayDeletion,
     PoolGatewayEffect,
     PoolGatewayJournal,
 )
@@ -54,7 +55,7 @@ class KubernetesPoolGateway:
         try:
             async with asyncio.timeout(_TIMEOUT):
                 async with self.http.stream(method, path, json=body, follow_redirects=False, timeout=_TIMEOUT) as response:
-                    if response.status_code == 404 and method == "GET":
+                    if response.status_code == 404 and method in {"GET", "DELETE"}:
                         return None
                     if method != "GET" and response.status_code in {409, 422}:
                         raise PoolKubernetesRejectedError(response.status_code)
@@ -79,12 +80,13 @@ class KubernetesPoolGateway:
             raise PoolKubernetesError("pool_kubernetes_invalid_response") from None
 
     @staticmethod
-    def _identity(value: dict[str, Any]) -> tuple[UUID, str]:
+    def _identity(value: dict[str, Any], *, terminating: bool = False) -> tuple[UUID, str]:
         try:
             metadata = value["metadata"]
             uid, rv = UUID(metadata["uid"]), metadata["resourceVersion"]
             if (not uid.int or str(uid) != metadata["uid"] or not isinstance(rv, str)
-                    or re.fullmatch(r"[A-Za-z0-9._:-]{1,253}", rv) is None or metadata.get("deletionTimestamp")):
+                    or re.fullmatch(r"[A-Za-z0-9._:-]{1,253}", rv) is None
+                    or (metadata.get("deletionTimestamp") and not terminating)):
                 raise ValueError
             return uid, rv
         except (ValueError, TypeError, KeyError, AttributeError):
@@ -139,3 +141,49 @@ class KubernetesPoolGateway:
             assert current.rejection_status is not None
             raise PoolKubernetesRejectedError(current.rejection_status)
         return await self._observe(principal, current)
+
+    async def _delete_present(self, effect: PoolGatewayDeletion, *, qualify: bool = False) -> bool:
+        created = effect.created
+        path = self._collection(created) + "/" + created.document["metadata"]["name"]
+        value = await self._request("GET", path)
+        if value is None:
+            return False
+        if self._identity(value, terminating=True)[0] != created.observed_uid:
+            # A replacement is neither our delete target nor qualified absence.
+            raise PoolKubernetesError
+        if qualify:
+            value["metadata"].pop("deletionTimestamp", None)
+            value["metadata"].pop("deletionGracePeriodSeconds", None)
+            if not matches_frozen_workload(value, created.document):
+                raise PoolKubernetesError
+        return True
+
+    async def delete(self, principal: PoolPrincipal, reservation_id: UUID, *, kind: CreateKind) -> PoolGatewayDeletion:
+        """Retire an observed fixed object after separately authorized output drain.
+
+        Returning an observed deletion proves only this object's live absence,
+        never Pod absence, a fenced writer, task completion or capacity release.
+        """
+        effect = await self.journal.prepare_delete(principal, reservation_id, kind=kind)
+        if effect.phase == "rejected":
+            assert effect.rejection_status is not None
+            raise PoolKubernetesRejectedError(effect.rejection_status)
+        await self._namespace(effect.created)
+        if effect.phase == "prepared":
+            present = await self._delete_present(effect, qualify=True)
+            permit = await self.journal.dispatch_delete(principal, effect.effect_id)
+            if permit is not None and present:
+                path = self._collection(permit.created) + "/" + permit.created.document["metadata"]["name"]
+                try:
+                    await self._request("DELETE", path, permit.document)
+                except PoolKubernetesRejectedError as exc:
+                    await self.journal.reject_delete(principal, effect.effect_id, status_code=exc.status_code)
+                    raise
+        current = await self.journal.get_delete(principal, effect.effect_id)
+        if current.phase == "rejected":
+            assert current.rejection_status is not None
+            raise PoolKubernetesRejectedError(current.rejection_status)
+        if await self._delete_present(current):
+            raise PoolKubernetesWaitingError
+        await self._namespace(current.created)
+        return await self.journal.observe_delete(principal, effect.effect_id)
