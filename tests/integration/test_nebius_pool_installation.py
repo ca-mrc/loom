@@ -1,0 +1,138 @@
+"""Protected registration stages real dedicated identities with admission closed."""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import func, select
+
+from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
+from loom_service.pool_management.auth import resolve_pool_machine
+from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.unit.test_nebius_pool_profiles import document
+
+
+def installation():
+    participant, _, profiles = document()
+    participants, executions, builds = [], [], []
+    for index, environment in enumerate(("production", "staging", "development")):
+        profile_id = uuid4()
+        current = participant.model_copy(update={"participant_id": uuid4(), "environment_id": uuid4(),
+            "incarnation": uuid4(), "environment_class": environment,
+            "execution_namespace": participant.execution_namespace.model_copy(update={"name": f"loom-exec-{index}", "uid": uuid4()}),
+            "build_namespace": participant.build_namespace.model_copy(update={"name": f"loom-build-{index}", "uid": uuid4()}),
+            "targets": (participant.targets[0].model_copy(update={"profile_id": profile_id}),)})
+        execution, build = copy.deepcopy(profiles["execution"][0]), copy.deepcopy(profiles["task_images"][0])
+        execution["profile_id"] = build["profile_id"] = str(profile_id)
+        execution["runtime"]["namespace"] = current.execution_namespace.name
+        build["target"]["namespace"] = build["settings"]["namespace"] = current.build_namespace.name
+        participants.append(current.model_dump(mode="json"))
+        executions.append(execution)
+        builds.append(build)
+    profiles.update(execution=executions, task_images=builds)
+    credentials, raw = [], {}
+    for role, owner in [("gateway", None), ("observer", None), *(("participant", row["participant_id"]) for row in participants)]:
+        identity, secret = uuid4(), "pool_install_" + uuid4().hex
+        raw[identity] = secret
+        credentials.append({"machine_id": str(identity), "role": role, "participant_id": owner, "credential_epoch": 1,
+            "token_sha256": hashlib.sha256(secret.encode()).hexdigest(),
+            "issued_at": datetime.now(UTC).isoformat(), "expires_at": (datetime.now(UTC) + timedelta(days=30)).isoformat()})
+    return {"schema_version": "loom.pool-installation.v1", "operation_id": str(uuid4()),
+        "pool_id": str(participant.pool_id), "installation_id": str(participant.installation_id),
+        "cluster_id": "cluster-1", "node_group_id": "group-1", "admission_epoch": 2, "policy_revision": 1,
+        "node_selector": {"nebius.com/node-group-id": "group-1"},
+        "admission": {"observation_max_age_seconds": 60, "max_create_per_minute": 10, "max_pending_jobs": 10,
+            "max_unschedulable_jobs": 0, "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2},
+        "quota_identities": {name: ["parent", "eu-north1", "compute", name, unit]
+            for name, unit in (("nodes", "count"), ("vcpu", "milli-vcpu"), ("storage", "MiB"))},
+        "participants": participants, "machines": credentials, "profiles": profiles}, raw
+
+
+async def test_actual_registration_entrypoint_installs_closed_pool_and_exact_replay(sessions, tmp_path):
+    from loom_service.pool_management.installation import run_installation
+
+    config, raw = installation()
+    file = tmp_path / "installation.json"
+    file.write_text(json.dumps(config))
+    url = sessions.kw["bind"].url.render_as_string(hide_password=False)
+    first = await run_installation(file, db_url=url)
+    assert await run_installation(file, db_url=url) == first
+    assert first["mode"] == "closed" and first["participants"] == 3 and first["machines"] == 5
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 1
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolParticipant)) == 3
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolMachine)) == 5
+        for identity, secret in raw.items():
+            principal = await resolve_pool_machine(session, "Bearer " + secret)
+            assert principal is not None and principal.machine_id == identity and principal.pool_mode == "closed"
+    assert all(secret not in json.dumps(first) and secret not in file.read_text() for secret in raw.values())
+
+
+async def test_registration_rollback_has_no_partial_authority(sessions):
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, _ = installation()
+    async with sessions() as session:
+        await register_installation(session, PoolInstallation.model_validate(config))
+        await session.rollback()
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 0
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolMachine)) == 0
+
+
+@pytest.mark.parametrize("drift", ["credential", "profile", "namespace", "policy"])
+async def test_registration_replay_cannot_replace_existing_authority(sessions, drift):
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, _ = installation()
+    async with sessions.begin() as session:
+        original = await register_installation(session, PoolInstallation.model_validate(config))
+    changed = copy.deepcopy(config)
+    if drift == "credential":
+        changed["machines"][0]["token_sha256"] = "b" * 64
+    elif drift == "profile":
+        changed["profiles"]["execution"][0]["runtime_binary_sha256"] = "sha256:" + "d" * 64
+    elif drift == "namespace":
+        changed["participants"][0]["execution_namespace"]["uid"] = str(uuid4())
+    else:
+        changed["admission"]["max_create_per_minute"] += 1
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await register_installation(session, PoolInstallation.model_validate(changed))
+    async with sessions.begin() as session:
+        assert await register_installation(session, PoolInstallation.model_validate(config)) == original
+
+
+@pytest.mark.parametrize("damage", ["missing-observer", "missing-participant", "duplicate-token", "nil-machine",
+    "foreign-profile", "wrong-group", "missing-quota", "namespace-collision", "expired", "unsupported-build"])
+def test_installation_rejects_incomplete_or_cross_bound_inputs(damage):
+    from loom_service.pool_management.installation import PoolInstallation
+
+    config, _ = installation()
+    if damage == "missing-observer":
+        config["machines"] = [row for row in config["machines"] if row["role"] != "observer"]
+    elif damage == "missing-participant":
+        config["machines"].pop()
+    elif damage == "duplicate-token":
+        config["machines"][0]["token_sha256"] = config["machines"][1]["token_sha256"]
+    elif damage == "nil-machine":
+        config["machines"][0]["machine_id"] = "00000000-0000-0000-0000-000000000000"
+    elif damage == "foreign-profile":
+        config["profiles"]["task_images"][0]["target"]["namespace"] = "foreign-build"
+        config["profiles"]["task_images"][0]["settings"]["namespace"] = "foreign-build"
+    elif damage == "wrong-group":
+        config["node_selector"]["nebius.com/node-group-id"] = "other-group"
+    elif damage == "missing-quota":
+        del config["quota_identities"]["vcpu"]
+    elif damage == "namespace-collision":
+        config["participants"][1]["execution_namespace"] = config["participants"][0]["execution_namespace"]
+    elif damage == "expired":
+        config["machines"][0]["expires_at"] = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    else:
+        config["participants"][0]["targets"][0]["workload_kinds"].append("application_image_build")
+    with pytest.raises(ValueError):
+        PoolInstallation.model_validate(config)
