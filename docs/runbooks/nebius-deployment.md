@@ -1216,7 +1216,7 @@ the namespace-local `loom-platform-db` Secret to report URL-shape booleans. No
 credential, URL, raw log, exception message or configuration payload is exported.
 `current_url.status: observed_current` describes the credential currently stored,
 not necessarily the value used by the failed Pod. Missing or unqualified evidence
-is `unavailable`, not success. Inspection runs no SQL or Pod exec, creates no
+is `unavailable`, not success. This refresh-probe inspection runs no SQL or Pod exec, creates no
 resources, and grants no retry, journal reset or manager restart authority.
 
 ## Before the first application
