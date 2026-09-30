@@ -122,6 +122,18 @@ class MigrationError(RuntimeError):
             "migration_revision": revisions[-1] if revisions else "unknown",
             "database_error": errors[-1] if errors else "unknown",
         }
+        # These guard failures precede Alembic's revision log. Only accept an
+        # exact terminal exception line; traceback source and arbitrary driver
+        # messages can contain credentials and must never become diagnostics.
+        terminal = stderr.splitlines()[-1] if stderr else ""
+        reason = terminal.removeprefix("RuntimeError: ")
+        if terminal.startswith("RuntimeError: ") and reason in {
+            "application_database_access_active",
+            "application_database_schema_busy",
+            "application_database_schema_guard_not_installed",
+            "application_database_isolation",
+        }:
+            self.details["reason_code"] = reason
         super().__init__("migration failed")
 
 
