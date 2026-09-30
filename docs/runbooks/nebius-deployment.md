@@ -1169,6 +1169,14 @@ such as `refresh_resource_inventory`, `refresh_persistent_storage`,
 `refresh_shared_material`, `refresh_publication` or `refresh_cloud_identity`.
 Unknown details retain a coarse stage. These codes expose no resource contents or
 provider messages and do not authorize retrying a blocked installation.
+For `refresh_platform_capacity`, an optional closed `capacity` diagnostic
+distinguishes rendering, inventory, controller decoding/counting, placement and
+resource fit. For eligible nodes it reports only node UUIDs and numeric CPU,
+memory, ephemeral-storage and Pod-slot totals. No Pod configuration, credential,
+provider response or exception message is exported. A capacity-stage failure is
+not by itself proof that larger machines are needed: inspect this report before
+changing resources. Missing or invalid details stay coarse, and no qualification,
+write or retry behavior is relaxed.
 
 The operation retains Deployment and credential identities, storage, routes,
 permissions and budgets. It does not migrate the shared business database, create

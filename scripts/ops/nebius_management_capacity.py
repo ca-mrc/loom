@@ -26,6 +26,12 @@ class ManagementCapacityError(RuntimeError):
     """Inventory payloads and private Pod specifications are not diagnostics."""
 
 
+def capacity_error_type(error: Exception) -> str:
+    name = type(error).__name__
+    return name if name in {'ValueError', 'KeyError', 'TypeError', 'AttributeError',
+        'ManagementCapacityError', 'ManagementPrerequisiteError'} else 'OtherError'
+
+
 def _key(row: dict[str, Any]) -> _Key:
     return row["kind"], row["metadata"].get("namespace", ""), row["metadata"]["name"]
 
@@ -118,7 +124,8 @@ def _matches(pod: Any, node: Any) -> bool:
 
 
 def qualify_platform_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[str, Any]], controllers: list[dict[str, Any]],
-                              planned: list[dict[str, Any]], reserve: PlatformEnvelope, reserve_pods: int) -> dict[str, Any]:
+                              planned: list[dict[str, Any]], reserve: PlatformEnvelope, reserve_pods: int,
+                              diagnostic: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fit fixed management manifests plus child allowance beside live workloads.
 
     Existing and planned controllers with the same identity share one envelope;
@@ -130,6 +137,10 @@ def qualify_platform_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[st
     """
     from kubernetes import client
 
+    detail = diagnostic if diagnostic is not None else {}
+    detail.clear()
+    detail.update(schema='loom.nebius-platform-capacity-diagnostic.v1', stage='validation',
+        kind=None, error_type=None, nodes=[])
     try:
         nodes = [{"kind": "Node", "apiVersion": "v1", **row} for row in nodes]
         pods = [{"kind": "Pod", "apiVersion": "v1", **row} for row in pods]
@@ -141,11 +152,19 @@ def qualify_platform_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[st
                 or any(type(value) is not int or value < 0 for value in vars(reserve).values())):
             raise ValueError()
         by_uid = {row["metadata"]["uid"]: row for row in controllers}
-        samples = [(row, _pod(row), _count(row)) for row in controllers]
-        desired = [(row, _pod(row), _count(row)) for row in planned]
+        def sample(row: dict[str, Any]) -> tuple[dict[str, Any], Any, int]:
+            detail.update(stage='controller_decode', kind=row['kind'])
+            pod = _pod(row)
+            detail['stage'] = 'controller_count'
+            return row, pod, _count(row)
+        samples = [sample(row) for row in controllers]
+        desired = [sample(row) for row in planned]
+        detail.update(stage='pod_decode', kind='Pod')
         actual = [(row, _pod(row)) for row in pods if row.get("status", {}).get("phase") not in {"Succeeded", "Failed"}]
+        detail.update(stage='node_decode', kind='Node')
         with client.ApiClient() as decoder:
             decoded = decoder.deserialize(SimpleNamespace(data=json.dumps({"apiVersion": "v1", "kind": "NodeList", "items": nodes}).encode()), "V1NodeList").items
+        detail.update(stage='node_eligibility', kind=None)
         for node in decoded:
             if (not accounting._node_ready(node) or accounting._node_draining(node)
                     or node.metadata.labels.get("loom.nebius/node-role") != "system"
@@ -156,8 +175,12 @@ def qualify_platform_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[st
             if (not re.fullmatch(r"nebius://computeinstance-[a-z0-9]+", node.spec.provider_id or "")
                     or node.metadata.name != node.spec.provider_id.removeprefix("nebius://")):
                 raise ValueError()
+            detail['stage'] = 'placement'
             if any(not _matches(pod, node) for _, pod, _ in desired):
+                detail['nodes'].append({'node_uid': node.metadata.uid, 'placement_matches': False,
+                    'allocatable': None, 'required': None})
                 continue
+            detail['stage'] = 'accounting'
             allocation = accounting._required_node_resources(node.status.allocatable, name="platform")
             slots = accounting._positive_int(node.status.allocatable.get("pods"), name="platform Pod slots")
             requests: dict[_Key, list[ResourceTotals]] = defaultdict(list)
@@ -188,12 +211,19 @@ def qualify_platform_capacity(*, nodes: list[dict[str, Any]], pods: list[dict[st
                 used = accounting._add(used, ResourceTotals(cpu_millis=per_pod.cpu_millis * count,
                     memory_mib=per_pod.memory_mib * count, storage_mib=per_pod.storage_mib * count))
                 pod_slots += count
+            required = {'cpu_millis': used.cpu_millis, 'memory_mib': used.memory_mib,
+                'ephemeral_storage_mib': used.storage_mib, 'pods': pod_slots}
+            detail['nodes'].append({'node_uid': node.metadata.uid, 'placement_matches': True,
+                'allocatable': {'cpu_millis': allocation.cpu_millis, 'memory_mib': allocation.memory_mib,
+                    'ephemeral_storage_mib': allocation.storage_mib, 'pods': slots}, 'required': required})
+            detail['stage'] = 'capacity'
             if (slots >= pod_slots and allocation.cpu_millis >= used.cpu_millis
                     and allocation.memory_mib >= used.memory_mib and allocation.storage_mib >= used.storage_mib):
-                return {"node_uid": node.metadata.uid, "required": {"cpu_millis": used.cpu_millis,
-                    "memory_mib": used.memory_mib, "ephemeral_storage_mib": used.storage_mib, "pods": pod_slots}}
+                detail['stage'] = 'complete'
+                return {"node_uid": node.metadata.uid, "required": required}
         raise ManagementCapacityError("eligible platform cannot fit management and reserved child headroom")
-    except ManagementCapacityError:
-        raise
-    except Exception:
+    except Exception as error:
+        detail['error_type'] = capacity_error_type(error)
+        if isinstance(error, ManagementCapacityError):
+            raise
         raise ManagementCapacityError("complete management platform inventory unqualified") from None

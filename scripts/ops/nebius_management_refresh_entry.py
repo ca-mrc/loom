@@ -15,7 +15,11 @@ from scripts.ops.nebius_application_upgrade_prerequisites import (
     UpgradePrerequisiteSettings,
 )
 from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
-from scripts.ops.nebius_management_gateway import validate_operation
+from scripts.ops.nebius_management_gateway import (
+    GatewayError,
+    validate_capacity_report,
+    validate_operation,
+)
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
 from scripts.ops.nebius_management_refresh_install import (
@@ -131,4 +135,12 @@ def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: 
             stage = api.diagnostic_stage or stage
         if not isinstance(stage, str):
             stage = 'connection'
-        raise ManagementRefreshInstallError('refresh_' + stage.replace('-', '_')) from None
+        capacity = None
+        if stage == 'platform_capacity' and api is not None:
+            detail = getattr(api.checks, 'capacity_diagnostic', None)
+            if isinstance(detail, dict):
+                try:
+                    capacity = validate_capacity_report(detail)
+                except GatewayError:
+                    pass  # Invalid details stay coarse; never expose a provider payload.
+        raise ManagementRefreshInstallError('refresh_' + stage.replace('-', '_'), capacity=capacity) from None

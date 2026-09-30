@@ -44,9 +44,10 @@ class ManagementRefreshInstallRequest:
 
 
 class ManagementRefreshInstallError(RuntimeError):
-    def __init__(self, stage: str):
+    def __init__(self, stage: str, *, capacity: dict[str, Any] | None = None):
         super().__init__('management refresh incomplete; preserve recovery evidence')
         self.stage = stage
+        self.capacity = capacity
 
 
 class ManagementRefreshInstallAPI(Protocol):

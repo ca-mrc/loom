@@ -174,7 +174,10 @@ def test_unknown_daemonset_strategy_never_qualifies(platform, strategy):
 @pytest.mark.parametrize('resource,value', [('cpu', '799m'), ('memory', '1407Mi'),
     ('ephemeral-storage', '16383Mi'), ('pods', '6')])
 def test_capacity_failure_retains_numeric_fit_without_workload_details(platform, resource, value):
-    from scripts.ops.nebius_management_capacity import ManagementCapacityError, qualify_platform_capacity
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
 
     platform['nodes'][0]['status']['allocatable'][resource] = value
     diagnostic = {}
@@ -191,7 +194,10 @@ def test_capacity_failure_retains_numeric_fit_without_workload_details(platform,
 
 
 def test_inventory_decode_and_placement_have_distinct_closed_diagnostics(platform):
-    from scripts.ops.nebius_management_capacity import ManagementCapacityError, qualify_platform_capacity
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
 
     def fail():
         diagnostic = {}
@@ -219,3 +225,20 @@ def test_diagnostic_collection_does_not_change_successful_fit(platform):
     assert result == qualify(platform)
     assert diagnostic['stage'] == 'complete'
     assert diagnostic['error_type'] is None
+
+
+def test_nonmatching_planned_placement_is_not_reported_as_resource_shortage(platform):
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
+
+    planned = workload('Deployment', 'manager')
+    planned['spec']['template']['spec']['nodeSelector'] = {'foreign': 'true'}
+    diagnostic = {}
+    with pytest.raises(ManagementCapacityError):
+        qualify_platform_capacity(**platform, planned=[planned], reserve=PlatformEnvelope(0, 0, 0, 0),
+            reserve_pods=0, diagnostic=diagnostic)
+    assert diagnostic['stage'] == 'placement'
+    assert diagnostic['nodes'] == [{'node_uid': platform['nodes'][0]['metadata']['uid'],
+        'placement_matches': False, 'allocatable': None, 'required': None}]
