@@ -6,7 +6,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, text, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
@@ -172,3 +173,65 @@ async def test_missing_or_malformed_machine_credentials_fail_closed(pool_session
 
     async with pool_sessions() as session:
         assert await resolve_pool_machine(session, header) is None
+
+
+async def test_unbound_token_never_gains_machine_authority(pool_sessions):
+    from loom.db.schema import Token
+    from loom_service.pool_management.auth import resolve_pool_machine
+
+    raw = "loom_pool_" + uuid4().hex
+    async with pool_sessions.begin() as session:
+        await session.execute(insert(Token).values(token_hash=hashlib.sha256(raw.encode()).digest(),
+            type="pool_machine", scopes=[], issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1)))
+    async with pool_sessions() as session:
+        assert await resolve_pool_machine(session, "Bearer " + raw) is None
+
+
+@pytest.mark.parametrize("target", ["token", "machine", "pool", "participant"])
+async def test_final_authorization_holds_current_rows_until_callers_transaction_finishes(pool_sessions, target):
+    from loom.db.nebius_pool_schema import (
+        NebiusPoolBinding,
+        NebiusPoolMachine,
+        NebiusPoolParticipant,
+    )
+    from loom.db.schema import Token
+    from loom_service.pool_management.auth import authorize_pool_machine, resolve_pool_machine
+
+    raw, pool_id, participant_id, machine_id = await credential(pool_sessions)
+    statements = {
+        "token": update(Token).where(Token.token_hash == hashlib.sha256(raw.encode()).digest()).values(revoked_at=datetime.now(UTC)),
+        "machine": update(NebiusPoolMachine).where(NebiusPoolMachine.machine_id == machine_id).values(phase="revoked"),
+        "pool": update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == pool_id).values(mode="closed"),
+        "participant": update(NebiusPoolParticipant).where(NebiusPoolParticipant.participant_id == participant_id).values(phase="fenced"),
+    }
+    async with pool_sessions() as admission:
+        principal = await resolve_pool_machine(admission, "Bearer " + raw)
+        assert principal is not None
+        await authorize_pool_machine(admission, principal, role="participant", pool_id=pool_id, participant_id=participant_id)
+        with pytest.raises(DBAPIError) as blocked:
+            async with pool_sessions.begin() as writer:
+                await writer.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                await writer.execute(statements[target])
+        assert blocked.value.orig.sqlstate == "55P03"
+        await admission.rollback()
+    async with pool_sessions.begin() as writer:
+        await writer.execute(statements[target])
+
+
+@pytest.mark.parametrize("target", ["machine_scope", "credential_epoch", "credential_delete"])
+async def test_protected_machine_scope_and_historical_credential_binding_are_immutable(pool_sessions, target):
+    from sqlalchemy import delete
+
+    from loom.db.nebius_pool_schema import NebiusPoolMachine, NebiusPoolMachineCredential
+
+    raw, _, _, machine_id = await credential(pool_sessions)
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    statements = {
+        "machine_scope": update(NebiusPoolMachine).where(NebiusPoolMachine.machine_id == machine_id).values(role="gateway", participant_id=None),
+        "credential_epoch": update(NebiusPoolMachineCredential).where(NebiusPoolMachineCredential.token_hash == token_hash).values(credential_epoch=2),
+        "credential_delete": delete(NebiusPoolMachineCredential).where(NebiusPoolMachineCredential.token_hash == token_hash),
+    }
+    with pytest.raises(DBAPIError):
+        async with pool_sessions.begin() as writer:
+            await writer.execute(statements[target])

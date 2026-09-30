@@ -80,11 +80,14 @@ def test_migration_and_orm_have_the_same_pool_journal_columns(pool_database):
     from loom.db.nebius_pool_schema import (
         NebiusPoolBinding,
         NebiusPoolCleanupObservation,
+        NebiusPoolMachine,
+        NebiusPoolMachineCredential,
         NebiusPoolParticipant,
         NebiusPoolRequest,
     )
 
-    for model in (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest, NebiusPoolCleanupObservation):
+    for model in (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine,
+                  NebiusPoolMachineCredential, NebiusPoolRequest, NebiusPoolCleanupObservation):
         assert {column["name"] for column in inspect(pool_database).get_columns(model.__tablename__)} == set(model.__table__.columns.keys())
 
 

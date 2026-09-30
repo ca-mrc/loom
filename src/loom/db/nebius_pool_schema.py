@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     ForeignKeyConstraint,
+    LargeBinary,
     Text,
     UniqueConstraint,
     func,
@@ -68,6 +69,42 @@ class NebiusPoolParticipant(Base):
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     binding_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NebiusPoolMachine(Base):
+    """Protected stable identity; credential rotation cannot widen its scope."""
+
+    __tablename__ = "nebius_pool_machines"
+    __table_args__ = (
+        ForeignKeyConstraint(["participant_id", "pool_id"],
+                             ["nebius_pool_participants.participant_id", "nebius_pool_participants.pool_id"],
+                             ondelete="RESTRICT", name="nebius_pool_machine_participant_fk"),
+        CheckConstraint("machine_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "credential_epoch > 0 AND phase IN ('active','revoked')",
+                        name="nebius_pool_machine_state_check"),
+        CheckConstraint("(role = 'participant' AND participant_id IS NOT NULL) OR "
+                        "(role IN ('observer','gateway') AND participant_id IS NULL)",
+                        name="nebius_pool_machine_role_check"),
+    )
+    machine_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_bindings.pool_id", ondelete="RESTRICT"), nullable=False)
+    participant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NebiusPoolMachineCredential(Base):
+    """Hash-only token binding; old epochs cannot regain machine authority."""
+
+    __tablename__ = "nebius_pool_machine_credentials"
+    __table_args__ = (
+        CheckConstraint("octet_length(token_hash) = 32 AND credential_epoch > 0",
+                        name="nebius_pool_machine_credential_shape_check"),
+    )
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, ForeignKey("tokens.token_hash", ondelete="RESTRICT"), primary_key=True)
+    machine_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_machines.machine_id", ondelete="RESTRICT"), nullable=False)
+    credential_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class NebiusPoolRequest(Base):

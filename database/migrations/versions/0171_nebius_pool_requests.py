@@ -49,6 +49,29 @@ CREATE TABLE nebius_pool_participants (
 	CONSTRAINT nebius_pool_participant_payload_check CHECK (jsonb_typeof(binding_json) = 'object' AND binding_sha256 ~ '^[0-9a-f]{64}$'),
 	FOREIGN KEY(pool_id) REFERENCES nebius_pool_bindings (pool_id) ON DELETE RESTRICT
 );
+CREATE TABLE nebius_pool_machines (
+    machine_id UUID PRIMARY KEY,
+    pool_id UUID NOT NULL REFERENCES nebius_pool_bindings(pool_id) ON DELETE RESTRICT,
+    participant_id UUID,
+    role TEXT NOT NULL,
+    credential_epoch BIGINT NOT NULL,
+    phase TEXT NOT NULL,
+    CONSTRAINT nebius_pool_machine_participant_fk FOREIGN KEY(participant_id, pool_id)
+        REFERENCES nebius_pool_participants(participant_id, pool_id) ON DELETE RESTRICT,
+    CONSTRAINT nebius_pool_machine_state_check CHECK (
+        machine_id <> '00000000-0000-0000-0000-000000000000'::uuid AND
+        credential_epoch > 0 AND phase IN ('active','revoked')),
+    CONSTRAINT nebius_pool_machine_role_check CHECK (
+        (role = 'participant' AND participant_id IS NOT NULL) OR
+        (role IN ('observer','gateway') AND participant_id IS NULL))
+);
+CREATE TABLE nebius_pool_machine_credentials (
+    token_hash BYTEA PRIMARY KEY REFERENCES tokens(token_hash) ON DELETE RESTRICT,
+    machine_id UUID NOT NULL REFERENCES nebius_pool_machines(machine_id) ON DELETE RESTRICT,
+    credential_epoch BIGINT NOT NULL,
+    CONSTRAINT nebius_pool_machine_credential_shape_check CHECK (
+        octet_length(token_hash) = 32 AND credential_epoch > 0)
+);
 CREATE TABLE nebius_pool_requests (
 	request_id UUID NOT NULL,
 	pool_id UUID NOT NULL,
@@ -136,6 +159,33 @@ ALTER TABLE nebius_pool_requests ADD CONSTRAINT nebius_pool_request_cleanup_fk F
         BEFORE UPDATE ON nebius_pool_participants
         FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_registration_mutation();
 
+        CREATE FUNCTION validate_nebius_pool_machine_mutation() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF TG_OP = 'DELETE' THEN
+                RAISE EXCEPTION 'global pool machine history is retained';
+            END IF;
+            IF to_jsonb(NEW) = to_jsonb(OLD) THEN
+                RETURN NEW;
+            END IF;
+            IF TG_TABLE_NAME = 'nebius_pool_machine_credentials' THEN
+                RAISE EXCEPTION 'global pool machine credential is immutable';
+            END IF;
+            IF (to_jsonb(NEW) - ARRAY['credential_epoch','phase']::text[])
+                  IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['credential_epoch','phase']::text[])
+               OR OLD.phase = 'revoked' OR NEW.credential_epoch < OLD.credential_epoch THEN
+                RAISE EXCEPTION 'global pool machine identity is immutable';
+            END IF;
+            RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER nebius_pool_machine_mutation_guard
+        BEFORE UPDATE OR DELETE ON nebius_pool_machines
+        FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_machine_mutation();
+        CREATE TRIGGER nebius_pool_machine_credential_mutation_guard
+        BEFORE UPDATE OR DELETE ON nebius_pool_machine_credentials
+        FOR EACH ROW EXECUTE FUNCTION validate_nebius_pool_machine_mutation();
+
         CREATE FUNCTION validate_nebius_pool_request_mutation() RETURNS trigger
         LANGUAGE plpgsql AS $$
         BEGIN
@@ -209,7 +259,8 @@ ALTER TABLE nebius_pool_requests ADD CONSTRAINT nebius_pool_request_cleanup_fk F
 def downgrade() -> None:
     op.execute("""
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
-                   nebius_pool_cleanup_observations IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   nebius_pool_cleanup_observations, nebius_pool_machines,
+                   nebius_pool_machine_credentials IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)
@@ -221,9 +272,12 @@ def downgrade() -> None:
         ALTER TABLE nebius_pool_requests DROP CONSTRAINT nebius_pool_request_cleanup_fk;
         DROP TABLE nebius_pool_cleanup_observations;
         DROP TABLE nebius_pool_requests;
+        DROP TABLE nebius_pool_machine_credentials;
+        DROP TABLE nebius_pool_machines;
         DROP TABLE nebius_pool_participants;
         DROP TABLE nebius_pool_bindings;
         DROP FUNCTION retain_nebius_pool_cleanup_observation();
         DROP FUNCTION validate_nebius_pool_request_mutation();
         DROP FUNCTION validate_nebius_pool_registration_mutation();
+        DROP FUNCTION validate_nebius_pool_machine_mutation();
     """)
