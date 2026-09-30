@@ -42,7 +42,7 @@ def test_fixed_transport_invokes_real_idle_guard_and_retains_lost_commit(guard_r
             async with AsyncSession(engine) as session, session.begin():
                 opened = await admission_open(session)
                 if cleanup and not opened:
-                    await release(session, owner=owner)
+                    await release(session, owner=owner, candidate=state.request.registration.candidate["candidate_sha"])
                 return opened
         finally:
             await engine.dispose()
