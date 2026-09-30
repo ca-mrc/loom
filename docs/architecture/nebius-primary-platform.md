@@ -32,6 +32,16 @@ service remains responsible for those workers using their existing claims. An
 API-only process closes only its own database engine and HTTP/storage clients;
 stopping it does not cancel work owned by a different process.
 
+In `api_only` mode, authenticated `/api/v1/health/ready` checks PostgreSQL with
+`SELECT 1` and HEADs each distinct configured artifact/trajectory bucket using
+that API's own credentials. It returns 200 for healthy dependencies and 503 for
+unavailable dependencies or invalid bucket configuration, without provider error
+details. It does not query the legacy staging mutation/capacity tables or claim
+execution capacity, task readiness, or lifecycle cleanup. The staging application
+mode retains its separate capacity-evidence readiness contract. Database errors
+while authenticating a readiness caller return a secret-free 503; they never
+authorize the caller or bypass ordinary authentication/authorization failures.
+
 This setting is not a distributed singleton lock, an authorization boundary, or
 a read-only API: authorized requests can still mutate shared state. It does not
 bind sessions to a personal origin, select a per-task runtime, provision shared
