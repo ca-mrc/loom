@@ -38,7 +38,8 @@ def fixture():
     return runtime, job, pod, namespace
 
 
-@pytest.mark.parametrize("damage", [None, "namespace_before", "namespace_after", "job", "pod", "pod_during_log", "partial_list"])
+@pytest.mark.parametrize("damage", [None, "omitted_item_types", "wrong_list_kind", "wrong_pod_kind",
+    "namespace_before", "namespace_after", "job", "pod", "pod_during_log", "partial_list"])
 async def test_real_native_reader_binds_namespace_job_and_pod_before_returning_results(damage):
     runtime, job, pod, namespace = fixture()
     calls = []
@@ -64,7 +65,13 @@ async def test_real_native_reader_binds_namespace_job_and_pod_before_returning_r
         value = copy.deepcopy(pod)
         if damage == "pod":
             value["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
-        return {"items": [value], "metadata": {"continue": "more" if damage == "partial_list" else ""}}
+        elif damage == "omitted_item_types":
+            value.pop("apiVersion")
+            value.pop("kind")
+        elif damage == "wrong_pod_kind":
+            value["kind"] = "Secret"
+        return {"apiVersion": "v1", "kind": "SecretList" if damage == "wrong_list_kind" else "PodList",
+            "items": [value], "metadata": {"continue": "more" if damage == "partial_list" else ""}}
 
     def read_pod(name, namespace, **kwargs):
         calls.append("pod")
@@ -83,7 +90,7 @@ async def test_real_native_reader_binds_namespace_job_and_pod_before_returning_r
     api._batch = SimpleNamespace(read_namespaced_job=read_job)
     api._core = SimpleNamespace(read_namespace=read_namespace, list_namespaced_pod=list_pods,
         read_namespaced_pod=read_pod, read_namespaced_pod_log=read_log)
-    if damage is None:
+    if damage in {None, "omitted_item_types"}:
         result = await api.observe_pool(runtime)
         assert result["metadata"]["uid"] == str(runtime.receipt.job_uid)
         assert result["pods"] == [pod] and "compile output" in result["builder_log"]

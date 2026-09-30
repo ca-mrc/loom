@@ -63,7 +63,7 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
         for name in ["pool-management", *[f"pool-test-{kind}-{index}" for kind in ("execution", "build") for index in range(2)]]:
             created = await asyncio.to_thread(core.create_namespace, {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}})
             namespaces[name] = UUID(created.metadata.uid)
-        for name in ("gateway", "legacy"):
+        for name in ("gateway", "legacy", "native-reader"):
             await asyncio.to_thread(core.create_namespaced_service_account, "pool-management", {
                 "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": name}})
         allowed = ["pool-test-execution-0", "pool-test-build-0"]
@@ -72,8 +72,18 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
             "kind": "ClusterRole", "metadata": {"name": "pool-namespace-read"}, "rules": [
                 {"apiGroups": [""], "resources": ["namespaces"], "resourceNames": allowed, "verbs": ["get"]}]})
         await asyncio.to_thread(rbac.create_cluster_role_binding, {"apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": "ClusterRoleBinding", "metadata": {"name": "pool-namespace-read"}, "subjects": [subject],
+            "kind": "ClusterRoleBinding", "metadata": {"name": "pool-namespace-read"}, "subjects": [subject,
+                {"kind": "ServiceAccount", "name": "native-reader", "namespace": "pool-management"}],
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "pool-namespace-read"}})
+        await asyncio.to_thread(rbac.create_namespaced_role, "pool-test-build-0", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "native-read"}, "rules": [
+                {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}]})
+        await asyncio.to_thread(rbac.create_namespaced_role_binding, "pool-test-build-0", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "native-read"},
+            "subjects": [{"kind": "ServiceAccount", "name": "native-reader", "namespace": "pool-management"}],
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "native-read"}})
         for namespace in allowed:
             await asyncio.to_thread(rbac.create_namespaced_role, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "Role", "metadata": {"name": "pool-create"}, "rules": [
@@ -141,6 +151,35 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                     assert time.monotonic() < deadline, "real Job controller did not create its pending Pod"
                     await asyncio.sleep(0.1)
                 assert len(inventory.pods) == 1 and inventory.job_uid == observed.observed_uid
+                if body.key.workload_kind == "task_image_build":
+                    from loom_execution_actuator.task_image_controller import (
+                        NativeBuildKubernetesApi,
+                    )
+                    from loom_service.pool_management.native_runtime import native_build_runtime
+
+                    async with sessions.begin() as session:
+                        runtime = await native_build_runtime(session, principals[0], action(body))
+                    reader_token = await asyncio.to_thread(core.create_namespaced_service_account_token,
+                        "native-reader", "pool-management", client.AuthenticationV1TokenRequest(
+                            spec=client.V1TokenRequestSpec(audiences=[])))
+                    reader_config = client.Configuration()
+                    reader_config.host, reader_config.ssl_ca_cert = config.host, config.ssl_ca_cert
+                    reader_config.api_key = {"authorization": "Bearer " + reader_token.status.token}
+                    reader_api = client.ApiClient(reader_config)
+                    try:
+                        reader = NativeBuildKubernetesApi.__new__(NativeBuildKubernetesApi)
+                        reader._api, reader._credentials = reader_api, None
+                        reader._core, reader._batch = client.CoreV1Api(reader_api), client.BatchV1Api(reader_api)
+                        result = await reader.observe_pool(runtime)
+                        assert result["metadata"]["uid"] == str(observed.observed_uid)
+                        assert result["pods"][0]["metadata"]["uid"] == str(inventory.pods[0].uid)
+                        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
+                                headers={"Authorization": "Bearer " + reader_token.status.token}) as restricted:
+                            path = "/apis/batch/v1/namespaces/pool-test-build-0/jobs"
+                            assert (await restricted.post(path, json=observed.document)).status_code == 403
+                            assert (await restricted.delete(path + "/" + runtime.job_name)).status_code == 403
+                    finally:
+                        await asyncio.to_thread(reader_api.close)
                 receipts.append((receipt, body.key.workload_kind))
             foreign = await http.post("/apis/batch/v1/namespaces/pool-test-execution-1/jobs", json=observed.document)
             assert foreign.status_code == 403
