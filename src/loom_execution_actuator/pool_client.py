@@ -20,6 +20,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolWaitingV1,
 )
+from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
@@ -28,7 +29,7 @@ from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
 PoolResult = PoolReceiptV1 | PoolWaitingV1
-PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime"]
+PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime"]
 _RESULT: TypeAdapter[PoolResult] = TypeAdapter(Annotated[PoolResult, Field(discriminator="schema_version")])
 
 
@@ -143,6 +144,16 @@ class PoolClient:
         try:
             runtime = PoolNativeRuntimeV1.model_validate_json(
                 await self._exchange(action, "native-runtime", action.model_dump_json().encode()))
+            self._identity(action, runtime.receipt)
+            return runtime
+        except ValueError:
+            raise PoolRequestUnconfirmedError from None
+
+    async def execution_runtime(self, action: PoolRequestActionV1) -> PoolExecutionRuntimeV1:
+        action = PoolRequestActionV1.model_validate_json(action.model_dump_json())
+        try:
+            runtime = PoolExecutionRuntimeV1.model_validate_json(
+                await self._exchange(action, "execution-runtime", action.model_dump_json().encode()))
             self._identity(action, runtime.receipt)
             return runtime
         except ValueError:

@@ -1994,8 +1994,14 @@ cancellation that loses to activation becomes stop-pending, not a release.
 Only the exact never-started cancellation receipt closes an attached unstarted
 lease and releases its local cost/admission. It retains that lease and attempt
 number; execution attempts are immutable identities, unlike native build retry
-budget counters. Started execution observation/output recovery and the installed
-writer transition remain unconnected.
+budget counters. Participant-only execution runtime readback now returns the
+retained plan's namespace, Job, unit, generations, deadline and observed gateway
+effect identity, without manifests or credentials and without requiring current
+profiles. Its read-only Kubernetes adapter qualifies namespace UID before/after,
+the exact observed Job and sole controller-owned Pod before reusing existing
+execution normalization. A missing Job is only absence, never deletion or release
+authority. Controller/output recovery and the installed writer transition remain
+unconnected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

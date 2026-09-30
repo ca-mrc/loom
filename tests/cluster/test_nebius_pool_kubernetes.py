@@ -85,6 +85,14 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
             "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "native-read"},
             "subjects": [{"kind": "ServiceAccount", "name": "native-reader", "namespace": "pool-management"}],
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "native-read"}})
+        await asyncio.to_thread(rbac.create_namespaced_role, "pool-test-execution-0", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "execution-read"}, "rules": [
+                {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]}]})
+        await asyncio.to_thread(rbac.create_namespaced_role_binding, "pool-test-execution-0", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "execution-read"},
+            "subjects": [{"kind": "ServiceAccount", "name": "native-reader", "namespace": "pool-management"}],
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "execution-read"}})
         for namespace in allowed:
             await asyncio.to_thread(rbac.create_namespaced_role, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "Role", "metadata": {"name": "pool-create"}, "rules": [
@@ -152,6 +160,32 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                     assert time.monotonic() < deadline, "real Job controller did not create its pending Pod"
                     await asyncio.sleep(0.1)
                 assert len(inventory.pods) == 1 and inventory.job_uid == observed.observed_uid
+                if body.key.workload_kind == "trial":
+                    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+                    from loom_service.pool_management.execution_runtime import execution_runtime
+
+                    async with sessions.begin() as session:
+                        execution = await execution_runtime(session, principals[0], action(body))
+                    execution_token = await asyncio.to_thread(core.create_namespaced_service_account_token,
+                        "native-reader", "pool-management", client.AuthenticationV1TokenRequest(
+                            spec=client.V1TokenRequestSpec(audiences=[])))
+                    execution_config = client.Configuration()
+                    execution_config.host, execution_config.ssl_ca_cert = config.host, config.ssl_ca_cert
+                    execution_config.api_key = {"authorization": "Bearer " + execution_token.status.token}
+                    execution_api = client.ApiClient(execution_config)
+                    try:
+                        execution_reader = InClusterKubernetesJobApi(client_module=client,
+                            core_api=client.CoreV1Api(execution_api), batch_api=client.BatchV1Api(execution_api))
+                        observation = await execution_reader.observe_pool(execution)
+                        assert observation.job_uid == str(observed.observed_uid)
+                        assert observation.pod_uid == str(inventory.pods[0].uid)
+                        async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,
+                                headers={"Authorization": "Bearer " + execution_token.status.token}) as restricted:
+                            path = "/apis/batch/v1/namespaces/pool-test-execution-0/jobs"
+                            assert (await restricted.post(path, json=observed.document)).status_code == 403
+                            assert (await restricted.delete(path + "/" + execution.job_name)).status_code == 403
+                    finally:
+                        await asyncio.to_thread(execution_api.close)
                 if body.key.workload_kind == "task_image_build":
                     from loom_execution_actuator.task_image_controller import (
                         NativeBuildKubernetesApi,

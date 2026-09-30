@@ -15,6 +15,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolWaitingV1,
 )
+from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
@@ -31,6 +32,7 @@ from loom_service.pool_management.control import (
     cancel_unstarted_pool_request,
     pool_request_status,
 )
+from loom_service.pool_management.execution_runtime import execution_runtime
 from loom_service.pool_management.lifecycle import drain_pool_request, stop_pool_request
 from loom_service.pool_management.native_runtime import native_build_runtime
 from loom_service.pool_management.observations import (
@@ -108,7 +110,7 @@ async def publish_observation(request: Request, pool_id: UUID) -> Response:
 
 
 async def _participant(request: Request, pool_id: UUID,
-                       operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime"]) -> Response:
+                       operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime", "execution-runtime"]) -> Response:
     body = await request.body()
     if len(body) > MAX_POOL_REQUEST_BYTES:
         raise _error(413, "pool_request_too_large")
@@ -122,7 +124,7 @@ async def _participant(request: Request, pool_id: UUID,
                 raise _error(401, "pool_machine_authority_unavailable")
             if principal.pool_id != pool_id or principal.role != "participant" or principal.participant_id is None:
                 raise _error(403, "pool_participant_scope_unavailable")
-            result: PoolReceiptV1 | PoolWaitingV1 | PoolNativeRuntimeV1
+            result: PoolReceiptV1 | PoolWaitingV1 | PoolNativeRuntimeV1 | PoolExecutionRuntimeV1
             profiles = getattr(request.app.state, "pool_profiles", None)
             if operation == "prepare":
                 workload = _WORKLOAD.validate_json(body)
@@ -150,6 +152,8 @@ async def _participant(request: Request, pool_id: UUID,
                     result = await pool_request_status(session, principal, action)
                 elif operation == "native-runtime":
                     result = await native_build_runtime(session, principal, action)
+                elif operation == "execution-runtime":
+                    result = await execution_runtime(session, principal, action)
                 elif operation == "cancel-unstarted":
                     result = await cancel_unstarted_pool_request(session, principal, action)
                 else:
@@ -203,3 +207,8 @@ async def drain(request: Request, pool_id: UUID) -> Response:
 @router.post("/{pool_id}/native-runtime")
 async def native_runtime(request: Request, pool_id: UUID) -> Response:
     return await _participant(request, pool_id, "native-runtime")
+
+
+@router.post("/{pool_id}/execution-runtime")
+async def read_execution_runtime(request: Request, pool_id: UUID) -> Response:
+    return await _participant(request, pool_id, "execution-runtime")

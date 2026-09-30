@@ -11,6 +11,7 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesCredentials,
     create_api_client,
 )
+from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
 from loom.security.redaction import redact_text
 from loom_execution_actuator.contracts import (
     ContainerDiagnostic,
@@ -22,6 +23,7 @@ from loom_execution_actuator.contracts import (
     KubernetesJobObservation,
     NormalizedJobState,
 )
+from loom_execution_actuator.pool_execution_observation import qualify_execution_observation
 
 _LEASE_LABEL = "loom.openai.com/lease-id"
 _GENERATION_LABEL = "loom.openai.com/generation"
@@ -514,6 +516,48 @@ class InClusterKubernetesJobApi:
 
     async def get_job(self, *, namespace: str, job_name: str) -> KubernetesJobObservation | None:
         return await asyncio.to_thread(self._get_sync, namespace, job_name)
+
+    async def observe_pool(self, runtime: PoolExecutionRuntimeV1) -> KubernetesJobObservation | None:
+        """Read the exact gateway-observed task; absence is never release proof."""
+        runtime = PoolExecutionRuntimeV1.model_validate_json(runtime.model_dump_json())
+        if runtime.receipt.job_uid is None:
+            raise KubernetesApiError("pool execution Job is not observed", status_code=409)
+
+        def namespace() -> None:
+            value = self._core.read_namespace(runtime.namespace.name, _request_timeout=20)
+            if (value.api_version != "v1" or value.kind != "Namespace"
+                    or value.metadata.name != runtime.namespace.name
+                    or value.metadata.uid != str(runtime.namespace.uid)
+                    or value.metadata.deletion_timestamp is not None):
+                raise ValueError("pool_execution_namespace_changed")
+
+        def read() -> KubernetesJobObservation | None:
+            try:
+                namespace()
+                try:
+                    job = self._batch.read_namespaced_job(runtime.job_name, runtime.namespace.name, _request_timeout=20)
+                except Exception as exc:
+                    if getattr(exc, "status", None) != 404:
+                        raise
+                    namespace()
+                    return None
+                qualify_execution_observation(job, [], runtime)
+                listing = self._core.list_namespaced_pod(runtime.namespace.name,
+                    label_selector="job-name=" + runtime.job_name, limit=100, _request_timeout=20)
+                if (listing.api_version != "v1" or listing.kind != "PodList"
+                        or not isinstance(listing.items, list) or listing.metadata._continue):
+                    raise ValueError("pool_execution_partial_pod_list")
+                qualify_execution_observation(job, listing.items, runtime)
+                namespace()
+                return _normalize(job, listing.items)
+            except KubernetesApiError:
+                raise
+            except (ValueError, TypeError, AttributeError):
+                raise KubernetesApiError("pool execution observation identity conflict", status_code=409) from None
+            except Exception as exc:
+                raise self._translate(exc, "observe_pool") from exc
+
+        return await asyncio.to_thread(read)
 
     async def create_job(
         self, *, namespace: str, manifest: dict[str, Any]
