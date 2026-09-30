@@ -20,7 +20,7 @@ async def pool_sessions(isolated_migration_postgres_url):
         await engine.dispose()
 
 
-async def credential(sessions, *, role="participant", **token_changes):
+async def credential(sessions, *, role="participant", participant_config=None, cluster_id=None, **token_changes):
     from loom.db.nebius_pool_schema import (
         NebiusPoolBinding,
         NebiusPoolMachine,
@@ -28,20 +28,27 @@ async def credential(sessions, *, role="participant", **token_changes):
         NebiusPoolParticipant,
     )
     from loom.db.schema import Token
+    from loom.pipeline.keys import canonical_digest
 
     pool_id, participant_id, machine_id = uuid4(), uuid4(), uuid4()
+    if participant_config is not None:
+        pool_id, participant_id = participant_config.pool_id, participant_config.participant_id
     raw = "loom_pool_" + uuid4().hex + uuid4().hex
     token_hash = hashlib.sha256(raw.encode()).digest()
     now = datetime.now(UTC)
     async with sessions.begin() as session:
         await session.execute(insert(NebiusPoolBinding).values(
-            pool_id=pool_id, installation_id=uuid4(), cluster_id="cluster-" + uuid4().hex,
+            pool_id=pool_id, installation_id=participant_config.installation_id if participant_config else uuid4(),
+            cluster_id=cluster_id or "cluster-" + uuid4().hex,
             node_group_id="group-1", policy_revision=1, admission_epoch=1, mode="global",
             binding_json={"protected": True}, binding_sha256="a" * 64))
         await session.execute(insert(NebiusPoolParticipant).values(
-            participant_id=participant_id, pool_id=pool_id, environment_id=uuid4(),
-            incarnation=uuid4(), binding_revision=1, admission_epoch=1, phase="active",
-            binding_json={"protected": True}, binding_sha256="b" * 64))
+            participant_id=participant_id, pool_id=pool_id,
+            environment_id=participant_config.environment_id if participant_config else uuid4(),
+            incarnation=participant_config.incarnation if participant_config else uuid4(),
+            binding_revision=1, admission_epoch=1, phase="active",
+            binding_json=participant_config.model_dump(mode="json") if participant_config else {"protected": True},
+            binding_sha256=canonical_digest(participant_config).removeprefix("sha256:") if participant_config else "b" * 64))
         await session.execute(insert(NebiusPoolMachine).values(
             machine_id=machine_id, pool_id=pool_id,
             participant_id=participant_id if role == "participant" else None,
