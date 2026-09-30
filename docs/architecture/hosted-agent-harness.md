@@ -53,10 +53,12 @@ environment it actually needs:
 The private-solution row is forward-looking design guidance, not current
 runtime behavior.
 
-Unknown agent names must fail admission. They must not fall through to the
-direct-completion runner or be recorded as another harness. The current
-fail-closed rejection reason is the legacy name `direct_completion_required`;
-do not interpret that reason as a fallback or rewrite.
+Unknown agent names must fail before plan compilation or at its defense-in-depth
+admission boundary. They must not fall through to the direct-completion runner
+or be recorded as another harness. At the materializer boundary, the legacy
+rejection code remains `direct_completion_required`; do not interpret that code
+as a fallback or rewrite. Hosted APIs may reject the unsupported selection
+earlier with a user-facing availability message.
 
 The current workspace compiler is named `_compile_terminus_plan` because
 Terminus-2 is its only hosted caller. Keep it as the single private-sandbox
