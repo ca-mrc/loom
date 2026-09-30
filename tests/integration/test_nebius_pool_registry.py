@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -28,8 +29,10 @@ from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_nebius_pool_observation_registry import (
     capture_scope,
     publish,
-    sessions,  # noqa: F401 -- shared real PostgreSQL fixture
     snapshots,
+)
+from tests.integration.test_nebius_pool_observation_registry import (
+    sessions as sessions,  # shared real PostgreSQL fixture, explicit re-export
 )
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 from tests.unit.test_nebius_pool_execution_render import inputs
@@ -93,7 +96,8 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
         principals.append(await machine(sessions, first.pool_id, participant.participant_id))
         profiles[participant.targets[0].profile_id] = PoolExecutionProfile(
             profile_id=participant.targets[0].profile_id,
-            runtime=ExecutionTargetRuntime(target_id="native", namespace=participant.execution_namespace.name),
+            runtime=ExecutionTargetRuntime(target_id="native", namespace=participant.execution_namespace.name,
+                                           node_selector=binding["node_selector"]),
             candidate_sha="1" * 40, execution_class_id="linux-amd64-cpu-pod-v1",
             runtime_image_ref="registry.example/runtime@sha256:" + "b" * 64,
             runtime_binary_sha256="sha256:" + "c" * 64,
@@ -172,7 +176,8 @@ async def test_same_body_replay_returns_one_grant_and_changed_body_conflicts(ses
         assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 1
 
 
-@pytest.mark.parametrize("damage", ["closed", "fenced", "deadline", "profile", "foreign-owner", "missing-observation"])
+@pytest.mark.parametrize("damage", ["closed", "fenced", "deadline", "profile", "foreign-owner", "missing-observation",
+                                    "wrong-pool-profile", "unpinned-pool-profile"])
 async def test_prepare_has_no_grant_on_unqualified_authority_or_work(sessions, damage):
     from loom_service.pool_management.registry import PoolAdmissionError
 
@@ -194,6 +199,11 @@ async def test_prepare_has_no_grant_on_unqualified_authority_or_work(sessions, d
         profiles = {}
     elif damage == "foreign-owner":
         request = requests[1]
+    elif damage in {"wrong-pool-profile", "unpinned-pool-profile"}:
+        profile_id = participants[0].targets[0].profile_id
+        profile = profiles[profile_id]
+        profiles[profile_id] = replace(profile, runtime=replace(profile.runtime,
+            node_selector=None if damage == "unpinned-pool-profile" else {"loom.nebius/role": "unrelated"}))
     with pytest.raises(PoolAdmissionError):
         await prepare(sessions, principals[0], request, profiles)
     async with sessions() as session:
