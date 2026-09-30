@@ -99,7 +99,9 @@ def _run(args: argparse.Namespace) -> int:
     except (NotLoggedInError, HttpStatusError) as exc:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
-        print(f"Management request failed ({type(exc).__name__}); no automatic retry. Reuse the printed retry command.", file=sys.stderr)
+        hint = ("Run this read-only evidence command again." if args.application_command == "evidence"
+                else "Reuse the printed retry command.")
+        print(f"Management request failed ({type(exc).__name__}); no automatic retry. {hint}", file=sys.stderr)
     except OSError:
         print("Could not securely save personal credentials; management login is unchanged.", file=sys.stderr)
     except (ValueError, KeyError, TypeError):
