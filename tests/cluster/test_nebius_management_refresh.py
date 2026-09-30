@@ -23,12 +23,26 @@ from tests.integration.test_execution_actuator_k3s import _load_client, _start_k
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
 from tests.ops.test_nebius_management_refresh_predecessor import (
     application_material as application_material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     checks as checks,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     cloud as cloud,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     completed_upgrade as completed_upgrade,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     entry_inputs as entry_inputs,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     installation as installation,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     material as material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
     private_upgrade as private_upgrade,
 )
 from tests.unit.test_nebius_management_render import (
@@ -52,7 +66,12 @@ def test_completed_refresh_with_native_api_quantities_loads_as_next_predecessor(
     """Exercise the API quantity spelling across the real receipt/journal boundary."""
     from kubernetes import client
     from scripts.ops.nebius_ingress_stage import _snapshot
-    from tests.ops.test_nebius_management_refresh_predecessor import complete_refresh, load, load_refresh
+
+    from tests.ops.test_nebius_management_refresh_predecessor import (
+        complete_refresh,
+        load,
+        load_refresh,
+    )
     from tests.ops.test_nebius_management_refresh_switch import API
 
     root = load(completed_upgrade[0])

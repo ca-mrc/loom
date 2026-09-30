@@ -50,6 +50,7 @@ from scripts.ops.nebius_management_refresh_switch import (
     refresh_target,
 )
 from scripts.ops.nebius_management_stage import (
+    _canonical_quantities,
     _comparison_snapshot,
     _qualified_defaulted,
     _validate_record,
@@ -296,13 +297,17 @@ def load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complete
         switch = json.loads(read(state / 'switch/cutover.json', receipt['switch_sha256']))
         desired = refresh_target(resources.switch, 'activate')
         switch_identity = refresh_switch_identity(resources.switch, state / 'switch')
-        if (switch != {**switch_identity, 'original': refresh_initial(resources.switch), 'phase': 'active', 'active': receipt['active']}
-                or _qualified_defaulted(desired, receipt['active']) != receipt['active']):
+        # Completion freezes API spelling; cutover freezes canonical quantities.
+        # Normalize only quantities for comparison, never historical bytes or
+        # other fields: resource amounts and runtime authority must still match.
+        canonical_active = _canonical_quantities(receipt['active'])
+        if (switch != {**switch_identity, 'original': refresh_initial(resources.switch), 'phase': 'active', 'active': canonical_active}
+                or _qualified_defaulted(desired, receipt['active']) != canonical_active):
             raise ValueError
         # Independently qualify cumulative runtime/credential preservation against
         # the original upgrade, not a caller-rewritten before snapshot.
         rooted = replace(resources.switch, render=replace(render, before=original.deployment, active=original.active))
-        if _qualified_defaulted(refresh_target(rooted, 'activate'), receipt['active']) != receipt['active']:
+        if _qualified_defaulted(refresh_target(rooted, 'activate'), receipt['active']) != canonical_active:
             raise ValueError
         active = copy.deepcopy(receipt['active'])
         active['metadata']['uid'] = receipt['active_uid']
