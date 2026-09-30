@@ -153,6 +153,15 @@ async def test_management_api_authenticates_owner_and_never_exposes_private_plan
             assert status.json()['operation']['phase'] == 'pending'
             assert (await b.get(f'/api/v1/applications/{application_id}')).status_code == 403
             assert (await b.get(f'/api/v1/application-operations/{operation_id}')).status_code == 403
+            evidence_path = f'/api/v1/application-operations/{operation_id}/evidence'
+            assert (await b.get(evidence_path)).status_code == 403
+            evidence = await a.get(evidence_path)
+            assert evidence.status_code == 200
+            assert evidence.headers['cache-control'] == 'no-store'
+            assert evidence.json()['operation']['operation_id'] == operation_id
+            assert evidence.json()['kubernetes'] == evidence.json()['cloud'] == []
+            assert evidence.json()['lease_active'] is False
+            assert evidence.json()['completion_recorded'] is False
             assert (await b.get('/api/v1/applications')).json() == {'items': []}
             assert (await a.post('/api/v1/applications', json=payload | {'namespace': 'loom-prod'},
                 headers={'Idempotency-Key': 'unsafe'})).status_code == 422
@@ -174,3 +183,4 @@ async def test_application_routes_are_management_only():
     register_api_routes(app, management=False, include_local_execution=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://personal.example.com') as client:
         assert (await client.get('/api/v1/applications')).status_code == 404
+        assert (await client.get(f'/api/v1/application-operations/{uuid4()}/evidence')).status_code == 404
