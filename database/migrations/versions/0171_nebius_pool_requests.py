@@ -19,7 +19,7 @@ CREATE TABLE nebius_pool_execution_outbox (
     lease_id UUID PRIMARY KEY, trial_id UUID NOT NULL REFERENCES trials(id) ON DELETE RESTRICT,
     pool_id UUID NOT NULL, participant_id UUID NOT NULL, request_sha256 TEXT NOT NULL,
     request_json JSONB NOT NULL, selection_json JSONB NOT NULL, phase TEXT NOT NULL,
-    reservation_id UUID, receipt_json JSONB, cancelled_json JSONB,
+    reservation_id UUID, receipt_json JSONB, cancelled_json JSONB, activation_json JSONB, activated_json JSONB,
     attached_lease_id UUID REFERENCES execution_leases(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT nebius_pool_execution_outbox_grant_key UNIQUE (reservation_id),
@@ -30,14 +30,21 @@ CREATE TABLE nebius_pool_execution_outbox (
         request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json)='object' AND
         jsonb_typeof(selection_json)='object'),
     CONSTRAINT nebius_pool_execution_outbox_phase_check CHECK (
-        phase IN ('selected','grant_pending','attached','cancel_pending','cancelled') AND
+        phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled') AND
         (phase <> 'selected' OR reservation_id IS NULL) AND
         (phase NOT IN ('grant_pending','attached','cancelled') OR reservation_id IS NOT NULL) AND
         (reservation_id IS NULL) = (receipt_json IS NULL) AND
         (reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND
         (receipt_json IS NULL OR jsonb_typeof(receipt_json)='object') AND
         (attached_lease_id IS NULL OR attached_lease_id=lease_id) AND
-        (phase='attached') = (attached_lease_id IS NOT NULL) AND
+        (phase NOT IN ('attached','activation_pending','active','stop_pending') OR attached_lease_id IS NOT NULL) AND
+        (phase NOT IN ('selected','grant_pending') OR attached_lease_id IS NULL) AND
+        (attached_lease_id IS NULL OR reservation_id IS NOT NULL) AND
+        (activation_json IS NULL OR (jsonb_typeof(activation_json)='object' AND attached_lease_id IS NOT NULL AND
+            phase NOT IN ('selected','grant_pending','attached'))) AND
+        (phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND
+        (phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND
+        (activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND
         (phase='cancelled') = (cancelled_json IS NOT NULL) AND
         (cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object'))
 );
@@ -61,17 +68,22 @@ BEGIN
             RAISE EXCEPTION 'execution selection must start unclaimed' USING ERRCODE='23514';
         END IF;
     ELSE
-        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id']) IS DISTINCT FROM
-           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id']) OR
+        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json']) IS DISTINCT FROM
+           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json']) OR
            (OLD.reservation_id IS NOT NULL AND ROW(OLD.reservation_id,OLD.receipt_json) IS DISTINCT FROM
                                                ROW(NEW.reservation_id,NEW.receipt_json)) OR
            (OLD.attached_lease_id IS NOT NULL AND OLD.attached_lease_id IS DISTINCT FROM NEW.attached_lease_id) OR
-           (OLD.cancelled_json IS NOT NULL AND OLD.cancelled_json IS DISTINCT FROM NEW.cancelled_json) THEN
+           (OLD.cancelled_json IS NOT NULL AND OLD.cancelled_json IS DISTINCT FROM NEW.cancelled_json) OR
+           (OLD.activation_json IS NOT NULL AND OLD.activation_json IS DISTINCT FROM NEW.activation_json) OR
+           (OLD.activated_json IS NOT NULL AND OLD.activated_json IS DISTINCT FROM NEW.activated_json) THEN
             RAISE EXCEPTION 'execution selection evidence is immutable' USING ERRCODE='23514';
         END IF;
         IF NOT (OLD.phase=NEW.phase OR (OLD.phase='selected' AND NEW.phase IN ('grant_pending','cancel_pending')) OR
             (OLD.phase='grant_pending' AND NEW.phase IN ('attached','cancel_pending')) OR
-            (OLD.phase='cancel_pending' AND NEW.phase='cancelled')) THEN
+            (OLD.phase='attached' AND NEW.phase IN ('activation_pending','cancel_pending')) OR
+            (OLD.phase='activation_pending' AND NEW.phase IN ('active','stop_pending','cancel_pending')) OR
+            (OLD.phase='active' AND NEW.phase='stop_pending') OR
+            (OLD.phase='cancel_pending' AND NEW.phase IN ('cancelled','stop_pending'))) THEN
             RAISE EXCEPTION 'execution selection transition forbidden' USING ERRCODE='23514';
         END IF;
     END IF;
@@ -93,6 +105,24 @@ BEGIN
         NEW.cancelled_json->'request_key'=NEW.request_json->'key' AND
         NEW.cancelled_json->>'phase'='cancelled_unstarted') IS NOT TRUE THEN
         RAISE EXCEPTION 'execution cancellation identity differs' USING ERRCODE='23514';
+    END IF;
+    IF NEW.activation_json IS NOT NULL AND (
+        NEW.activation_json->'action'->>'pool_id'=NEW.pool_id::text AND
+        NEW.activation_json->'action'->>'admission_epoch'=NEW.request_json->>'admission_epoch' AND
+        NEW.activation_json->'action'->>'request_sha256'=NEW.request_sha256 AND
+        NEW.activation_json->'action'->'request_key'=NEW.request_json->'key' AND
+        (NEW.activation_json->>'not_after')::timestamptz <= (NEW.request_json->>'deadline_at')::timestamptz) IS NOT TRUE THEN
+        RAISE EXCEPTION 'execution activation consent differs' USING ERRCODE='23514';
+    END IF;
+    IF NEW.activated_json IS NOT NULL AND (
+        NEW.activated_json->>'reservation_id'=NEW.reservation_id::text AND
+        NEW.activated_json->>'pool_id'=NEW.pool_id::text AND
+        NEW.activated_json->>'request_sha256'=NEW.request_sha256 AND
+        NEW.activated_json->>'admission_epoch'=NEW.request_json->>'admission_epoch' AND
+        NEW.activated_json->'request_key'=NEW.request_json->'key' AND
+        NEW.activated_json->>'phase' IN ('create_intent','observed','cleanup_intent','released') AND
+        NEW.activated_json->>'plan_sha256' ~ '^[0-9a-f]{64}$') IS NOT TRUE THEN
+        RAISE EXCEPTION 'execution activated identity differs' USING ERRCODE='23514';
     END IF;
     IF NEW.attached_lease_id IS NOT NULL AND NOT EXISTS (
         SELECT 1 FROM execution_leases l WHERE l.id=NEW.attached_lease_id AND l.trial_id=NEW.trial_id AND

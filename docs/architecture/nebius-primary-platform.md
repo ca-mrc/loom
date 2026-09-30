@@ -1987,8 +1987,15 @@ cost checks; only physical provisioning uses the global reservation. The lease
 starts with its final reservation-qualified Job name. Claim and outbox attachment
 commit together, including a deferred database check. Stale input or local denial
 leaves an unclaimed cancellation intent; it cannot activate different work or
-silently acquire local capacity. Execution activation/output recovery and the
-installed writer transition remain unconnected.
+silently acquire local capacity. The execution driver persists a non-renewable
+activation consent, capped at 30 seconds and the original execution deadline,
+before HTTP. Status recovers an accepted activation before any retry; local
+cancellation that loses to activation becomes stop-pending, not a release.
+Only the exact never-started cancellation receipt closes an attached unstarted
+lease and releases its local cost/admission. It retains that lease and attempt
+number; execution attempts are immutable identities, unlike native build retry
+budget counters. Started execution observation/output recovery and the installed
+writer transition remain unconnected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

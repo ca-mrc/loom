@@ -1,7 +1,6 @@
 """Real execution claims, management HTTP and retained activation/cancellation."""
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -10,7 +9,12 @@ from sqlalchemy import func, select, text, update
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolRequest
-from loom.db.schema import ExecutionAdmissionReservation, ExecutionCostReservation, ServiceExecutionLease, Trial
+from loom.db.schema import (
+    ExecutionAdmissionReservation,
+    ExecutionCostReservation,
+    ServiceExecutionLease,
+    Trial,
+)
 from loom.execution_contract import nebius_cpu_execution_class
 from loom.pipeline.keys import canonical_digest
 from loom_execution_actuator.renderer import ExecutionTargetRuntime

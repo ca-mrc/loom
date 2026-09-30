@@ -56,14 +56,21 @@ class NebiusPoolExecutionOutbox(Base):
             "pool_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
             "request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json)='object' AND "
             "jsonb_typeof(selection_json)='object'", name="nebius_pool_execution_outbox_identity_check"),
-        CheckConstraint("phase IN ('selected','grant_pending','attached','cancel_pending','cancelled') AND "
+        CheckConstraint("phase IN ('selected','grant_pending','attached','activation_pending','active','stop_pending','cancel_pending','cancelled') AND "
             "(phase <> 'selected' OR reservation_id IS NULL) AND "
             "(phase NOT IN ('grant_pending','attached','cancelled') OR reservation_id IS NOT NULL) AND "
             "(reservation_id IS NULL) = (receipt_json IS NULL) AND "
             "(reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
             "(receipt_json IS NULL OR jsonb_typeof(receipt_json)='object') AND "
             "(attached_lease_id IS NULL OR attached_lease_id=lease_id) AND "
-            "(phase='attached') = (attached_lease_id IS NOT NULL) AND "
+            "(phase NOT IN ('attached','activation_pending','active','stop_pending') OR attached_lease_id IS NOT NULL) AND "
+            "(phase NOT IN ('selected','grant_pending') OR attached_lease_id IS NULL) AND "
+            "(attached_lease_id IS NULL OR reservation_id IS NOT NULL) AND "
+            "(activation_json IS NULL OR (jsonb_typeof(activation_json)='object' AND attached_lease_id IS NOT NULL AND "
+            "phase NOT IN ('selected','grant_pending','attached'))) AND "
+            "(phase NOT IN ('activation_pending','active','stop_pending') OR activation_json IS NOT NULL) AND "
+            "(phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND "
+            "(activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND "
             "(phase='cancelled') = (cancelled_json IS NOT NULL) AND "
             "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object')",
             name="nebius_pool_execution_outbox_phase_check"),
@@ -80,6 +87,8 @@ class NebiusPoolExecutionOutbox(Base):
     receipt_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     attached_lease_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="RESTRICT"))
     cancelled_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    activation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    activated_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
