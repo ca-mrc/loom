@@ -1,7 +1,8 @@
-"""Only explicit key rejection at the frozen object endpoint proves revocation."""
+"""Scoped object observations compose with mandatory exact IAM retirement."""
 from __future__ import annotations
 
 import copy
+import gzip
 import json
 
 import httpx
@@ -13,58 +14,52 @@ from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
-def plan():
-    return {"files": {"application": [{"kind": "Deployment", "metadata": {"name": "loom-service"},
-        "spec": {"template": {"spec": {"containers": [{"env": [
-            {"name": "LOOM_SVC_MINIO_ENDPOINT", "value": "https://storage.test"},
-            {"name": "LOOM_SVC_MINIO_REGION", "value": "eu-north1"},
-            {"name": "LOOM_SVC_ARTIFACTS_BUCKET", "value": "shared-data"},
-        ]}]}}}}]}}
+def scoped_verifier(http, protected_scope):
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation, shared, storage, _ = protected_scope
+    return ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
 
 
 @pytest.mark.parametrize("code,status", [("InvalidAccessKeyId", 403), ("AccessDenied", 403),
     ("SignatureDoesNotMatch", 403), ("InvalidAccessKeyId", 500), ("NoSuchBucket", 404), ("", 200)])
-async def test_only_explicit_invalid_key_denial_confirms_retirement(code, status):
-    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
-
+async def test_only_structured_denial_qualifies_scoped_retirement(protected_scope, code, status):
     requests = []
 
     def response(request):
         requests.append(request)
         return httpx.Response(status, text=f"<Error><Code>{code}</Code></Error>")
 
-    async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(response)) as http:
-        verifier = ApplicationObjectAccessVerifier(http)
-        if (code, status) == ("InvalidAccessKeyId", 403):
-            await verifier.verify_retired(plan(), {"access-key": "retired-access", "secret-key": "private-key"})
+    foundation, _, _, frozen = protected_scope
+    accepted = status == 403 and code in {"AccessDenied", "InvalidAccessKeyId"}
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"], transport=httpx.MockTransport(response)) as http:
+        verifier = scoped_verifier(http, protected_scope)
+        if accepted:
+            await verifier.verify_retired(frozen, {"access-key": "retired-access", "secret-key": "private-key"})
         else:
             with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
-                await verifier.verify_retired(plan(), {"access-key": "retired-access", "secret-key": "private-key"})
-    assert len(requests) == 1
+                await verifier.verify_retired(frozen, {"access-key": "retired-access", "secret-key": "private-key"})
+    assert len(requests) == (3 if accepted else 1)
     request = requests[0]
-    assert request.method == "GET" and request.url.path == "/shared-data"
+    assert request.method == "GET" and request.url.path == "/probe-artifacts"
     assert request.url.params["list-type"] == "2" and request.url.params["max-keys"] == "1"
     assert "Credential=retired-access/" in request.headers["Authorization"]
     assert "/eu-north1/s3/aws4_request" in request.headers["Authorization"]
     assert "private-key" not in str(request.headers)
 
 
-async def test_wrong_protected_origin_never_receives_retired_credentials():
-    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
-
+async def test_wrong_protected_origin_never_receives_retired_credentials(protected_scope):
     requests = []
     async with httpx.AsyncClient(base_url="https://foreign.test",
                                 transport=httpx.MockTransport(lambda request: requests.append(request))) as http:
         with pytest.raises(ProviderBlockedError, match="application_object_access_binding_conflict"):
-            await ApplicationObjectAccessVerifier(http).verify_retired(
-                plan(), {"access-key": "retired-access", "secret-key": "private-key"})
+            await scoped_verifier(http, protected_scope).verify_retired(
+                protected_scope[3], {"access-key": "retired-access", "secret-key": "private-key"})
     assert requests == []
 
 
 @pytest.mark.parametrize("failure", ["timeout", "redirect", "malformed", "encoding"])
-async def test_unknown_response_never_proves_revocation_or_retries(failure):
-    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
-
+async def test_unknown_response_never_proves_revocation_or_retries(protected_scope, failure):
     requests = []
 
     def response(request):
@@ -77,16 +72,14 @@ async def test_unknown_response_never_proves_revocation_or_retries(failure):
             return httpx.Response(403, text='<?xml version="1.0" encoding="invalid-encoding"?><Error/>')
         return httpx.Response(403, text="not XML")
 
-    async with httpx.AsyncClient(base_url="https://storage.test", transport=httpx.MockTransport(response)) as http:
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"], transport=httpx.MockTransport(response)) as http:
         with pytest.raises(ProviderWaitingError) as error:
-            await ApplicationObjectAccessVerifier(http).verify_retired(
-                plan(), {"access-key": "retired-access", "secret-key": "private-key"})
+            await scoped_verifier(http, protected_scope).verify_retired(
+                protected_scope[3], {"access-key": "retired-access", "secret-key": "private-key"})
     assert len(requests) == 1 and "private-key" not in str(error.value)
 
 
-async def test_client_auth_cannot_replace_the_original_key_probe():
-    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
-
+async def test_client_auth_cannot_replace_the_original_key_probe(protected_scope):
     class ForeignAuth(httpx.Auth):
         def auth_flow(self, request):
             request.headers["Authorization"] = "foreign missing key"
@@ -97,11 +90,11 @@ async def test_client_auth_cannot_replace_the_original_key_probe():
             return httpx.Response(200, text="<ListBucketResult/>")  # Original key still works.
         return httpx.Response(403, text="<Error><Code>InvalidAccessKeyId</Code></Error>")
 
-    async with httpx.AsyncClient(base_url="https://storage.test", auth=ForeignAuth(),
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"], auth=ForeignAuth(),
                                 transport=httpx.MockTransport(response)) as http:
         with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
-            await ApplicationObjectAccessVerifier(http).verify_retired(
-                plan(), {"access-key": "retired-access", "secret-key": "private-key"})
+            await scoped_verifier(http, protected_scope).verify_retired(
+                protected_scope[3], {"access-key": "retired-access", "secret-key": "private-key"})
 
 
 @pytest.fixture
@@ -191,3 +184,51 @@ async def test_invalid_positive_probe_never_qualifies_active_access(protected_sc
         verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
         with pytest.raises(ProviderWaitingError, match="application_object_access_not_ready"):
             await verifier.verify_active(frozen, {"access-key": "active-key", "secret-key": "active-secret"})
+
+
+@pytest.mark.parametrize("response_kind", ["compressed", "duplicate-code", "nested-code"])
+async def test_ambiguous_or_encoded_denial_is_not_retirement_evidence(protected_scope, response_kind):
+    def respond(request):
+        if response_kind == "compressed":
+            return httpx.Response(403, content=gzip.compress(b"<Error><Code>AccessDenied</Code></Error>"),
+                headers={"Content-Encoding": "gzip"})
+        body = ("<Error><Code>AccessDenied</Code><Code>SignatureDoesNotMatch</Code></Error>"
+                if response_kind == "duplicate-code" else "<Error><Code>AccessDenied<Unexpected/></Code></Error>")
+        return httpx.Response(403, text=body)
+
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"], transport=httpx.MockTransport(respond)) as http:
+        with pytest.raises(ProviderWaitingError, match="application_object_access_retirement_pending"):
+            await scoped_verifier(http, protected_scope).verify_retired(protected_scope[3],
+                {"access-key": "original-key", "secret-key": "original-secret"})
+
+
+@pytest.mark.parametrize("damage", ["row-data", "shared-data", "row-cluster", "shared-namespace",
+    "endpoint", "region", "artifacts", "trajectories", "duplicate-env"])
+async def test_scope_mismatch_fails_before_sending_any_original_credential(protected_scope, damage):
+    from uuid import uuid4
+
+    frozen = copy.deepcopy(protected_scope[3])
+    if damage in {"row-data", "shared-data"}:
+        frozen["registration" if damage == "row-data" else "shared"]["data_environment_id"] = str(uuid4())
+    elif damage == "row-cluster":
+        frozen["registration"]["cluster_id"] = "foreign-cluster"
+    elif damage == "shared-namespace":
+        frozen["shared"]["platform_namespace"] = "foreign-namespace"
+    else:
+        deployment = next(doc for docs in frozen["files"].values() for doc in docs
+            if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-service")
+        entries = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        if damage == "duplicate-env":
+            entries.append(copy.deepcopy(entries[0]))
+        else:
+            name, value = {"endpoint": ("LOOM_SVC_MINIO_ENDPOINT", "https://foreign.example.com"),
+                "region": ("LOOM_SVC_MINIO_REGION", "other-region"), "artifacts": ("LOOM_SVC_ARTIFACTS_BUCKET", "foreign-bucket"),
+                "trajectories": ("LOOM_SVC_TRAJECTORIES_BUCKET", "foreign-bucket")}[damage]
+            next(item for item in entries if item["name"] == name)["value"] = value
+    requests = []
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(lambda request: requests.append(request))) as http:
+        with pytest.raises(ProviderBlockedError, match="application_object_access_binding_conflict"):
+            await scoped_verifier(http, protected_scope).verify_retired(frozen,
+                {"access-key": "original-key", "secret-key": "original-secret"})
+    assert requests == []
