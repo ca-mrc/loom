@@ -108,6 +108,37 @@ def test_job_status_and_read_only_grants_are_not_reported_as_job_writers():
     assert observe(cluster)["job_write_bindings"] == []
 
 
+@pytest.mark.parametrize("order,explicit,expected", [
+    ("config-secret", False, {"value_withheld": True}),
+    ("secret-config", False, {"value": "native-cpu"}),
+    ("config-secret", True, {"value": "explicit-target"}),
+])
+def test_unread_secret_env_from_never_preserves_a_shadowed_config_target(order, explicit, expected):
+    cluster = Installed()
+    pod = cluster.lists["cronjobs"][0]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    container = pod["containers"][0]
+    source = container["envFrom"][0]
+    secret = {"secretRef": {"name": "collector-secrets"}}
+    container["envFrom"] = [source, secret] if order == "config-secret" else [secret, source]
+    name = "LOOM_EXECUTION_CAPACITY_COLLECTOR_TARGET_ID"
+    if explicit:
+        container["env"] = [{"name": name, "value": "explicit-target"}]
+    observed = next(row for row in observe(cluster)["controllers"] if row["name"] == "collector")["containers"][0]
+    assert observed["settings"][name] == expected
+    assert observed["unresolved_secret_env_from"] == [{"namespace": "execution", "name": "collector-secrets", "prefix": ""}]
+
+
+def test_cluster_role_reused_by_role_binding_keeps_its_namespace_scope():
+    cluster = Installed()
+    cluster.lists["clusterroles"] = [{"metadata": metadata("common"), "rules": [
+        {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]}]}]
+    cluster.lists["rolebindings"][0]["roleRef"].update(kind="ClusterRole", name="common")
+    writer, = observe(cluster)["job_write_bindings"]
+    assert writer["kind"] == "RoleBinding" and writer["namespace"] == "execution"
+    assert writer["role"] == {"kind": "ClusterRole", "name": "common", "uid": "common-uid"}
+    assert writer["rules"] == [{"verbs": ["create"], "resource_names": []}]
+
+
 @pytest.mark.parametrize("resource", ["deployments", "cronjobs", "roles", "rolebindings", "clusterroles", "clusterrolebindings"])
 def test_missing_controller_or_permission_list_is_never_an_empty_success(resource):
     class Broken(Installed):

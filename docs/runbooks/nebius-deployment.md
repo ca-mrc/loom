@@ -129,7 +129,7 @@ Download `nebius-inspect-RUN_ID-ATTEMPT` for the sanitized
 `management-preflight.json` artifact. It contains the configured candidate,
 namespace identities, node allocatable resources, declared Pod requests including
 init containers and overhead, services/ingress, PVC sizes and storage classes.
-It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
+It excludes Secret values, arbitrary Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
