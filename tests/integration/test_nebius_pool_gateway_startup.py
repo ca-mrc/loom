@@ -19,9 +19,7 @@ from tests.integration.test_nebius_pool_pod_inventory import InventoryAPI
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-async def settings(sessions, tmp_path, principal):
-    from loom_service.pool_management.__main__ import PoolGatewaySettings
-
+async def credential(sessions, tmp_path, principal):
     raw = "gateway_" + uuid4().hex
     hashed = hashlib.sha256(raw.encode()).digest()
     async with sessions.begin() as session:
@@ -33,6 +31,13 @@ async def settings(sessions, tmp_path, principal):
     file = tmp_path / "gateway-token"
     file.write_text(raw)
     file.chmod(0o600)
+    return file, hashed
+
+
+async def settings(sessions, tmp_path, principal):
+    from loom_service.pool_management.__main__ import PoolGatewaySettings
+
+    file, hashed = await credential(sessions, tmp_path, principal)
     return PoolGatewaySettings(_env_file=None, db_url=sessions.kw["bind"].url.render_as_string(hide_password=False),
         pool_id=principal.pool_id, installation_id=principal.installation_id, machine_id=principal.machine_id,
         admission_epoch=principal.pool_epoch, bearer_token_file=file, poll_seconds=0.1,
@@ -46,7 +51,7 @@ async def test_actual_gateway_entrypoint_creates_releases_and_stops_with_server(
 
     _, api, principal, receipt, original = await provider(sessions, build=build)
     await original.aclose()
-    configured, _ = await settings(sessions, tmp_path, principal)
+    configured, token_hash = await settings(sessions, tmp_path, principal)
     stopped, seen = asyncio.Event(), {}
     clients, credentials, auth_headers = [], [], []
     real_client = httpx.AsyncClient
@@ -104,7 +109,23 @@ async def test_actual_gateway_entrypoint_creates_releases_and_stops_with_server(
 
     try:
         await phase("observed")
-        await begin_cleanup(sessions, receipt.reservation_id)
+        if build:
+            from datetime import UTC, datetime
+
+            async with sessions.begin() as session:
+                await session.execute(update(Token).where(Token.token_hash == token_hash).values(revoked_at=datetime.now(UTC)))
+            async with real_client(transport=httpx.ASGITransport(app=seen["health"]), base_url="http://health") as health:
+                async with asyncio.timeout(5):
+                    while (await health.get("/readyz")).status_code != 503:
+                        await asyncio.sleep(0.02)
+            await begin_cleanup(sessions, receipt.reservation_id)
+            await asyncio.sleep(0.2)
+            assert not api.deletes
+            # A replacement credential for the same protected machine is loaded
+            # from its private file without a restart or an authority fallback.
+            await credential(sessions, tmp_path, principal)
+        else:
+            await begin_cleanup(sessions, receipt.reservation_id)
         await phase("released")
         async with real_client(transport=httpx.ASGITransport(app=seen["health"]), base_url="http://health") as health:
             assert (await health.get("/readyz")).status_code == 200

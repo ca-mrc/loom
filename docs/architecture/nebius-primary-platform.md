@@ -2054,6 +2054,20 @@ no owner API can replace the catalog. The file grants neither registration nor
 Kubernetes authority. Without it, prepare and activation remain unavailable;
 retained status and cleanup do not depend on current rendering profiles.
 
+The fixed gateway has a separate `python -m loom_service.pool_management` process.
+`LOOM_POOL_GATEWAY_` settings bind its management database, pool/installation/
+machine UUIDs, admission epoch, private machine-token file and explicit projected
+Kubernetes connection. Startup checks the schema and dedicated gateway identity
+before opening Kubernetes credentials; only closed/global pool modes qualify.
+Every pass reopens the machine token and resolves current authority; each journal
+mutation rechecks it under the existing locks. Kubernetes requests renew the
+projected service-account token, verify the explicit CA/origin, and neither follow
+redirects nor use ambient proxy credentials. The process runs the existing fixed
+gateway worker, not caller manifests. `/readyz` requires a recent successful pass;
+failed authorization or reconciliation clears readiness. Server termination stops
+and drains background work before its HTTP clients and database engine close.
+The entrypoint does not provision its own RBAC or bypass the protected migration.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
