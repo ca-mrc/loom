@@ -85,6 +85,7 @@ def cleanup(connection, row, **changes):
 def test_migration_and_orm_have_the_same_pool_journal_columns(pool_database):
     from loom.db.nebius_pool_schema import (
         NebiusPoolBinding,
+        NebiusPoolCancellation,
         NebiusPoolCapture,
         NebiusPoolCleanupObservation,
         NebiusPoolMachine,
@@ -94,7 +95,7 @@ def test_migration_and_orm_have_the_same_pool_journal_columns(pool_database):
         NebiusPoolRequest,
     )
 
-    for model in (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine,
+    for model in (NebiusPoolBinding, NebiusPoolCancellation, NebiusPoolParticipant, NebiusPoolMachine,
                   NebiusPoolMachineCredential, NebiusPoolRequest, NebiusPoolCleanupObservation,
                   NebiusPoolCapture, NebiusPoolObservation):
         assert {column["name"] for column in inspect(pool_database).get_columns(model.__tablename__)} == set(model.__table__.columns.keys())
@@ -303,3 +304,51 @@ def test_binding_changes_need_new_revision_and_epochs_cannot_go_backwards(pool_d
         for changes in ({revision: 1}, {"admission_epoch": 1}):
             with pytest.raises(DBAPIError), connection.begin_nested():
                 connection.execute(update(model).values(**changes))
+
+
+def early_cancel_values(pool_id, participant_id, local_work_id):
+    return dict(cancellation_id=uuid4(), pool_id=pool_id, participant_id=participant_id,
+                workload_kind="trial", local_work_id=local_work_id, generation=1,
+                admission_epoch=1, request_sha256="c" * 64)
+
+
+@pytest.mark.parametrize("operation", ["update", "delete"])
+def test_pre_prepare_cancellation_is_terminal_retained_history(pool_database, operation):
+    from loom.db.nebius_pool_schema import NebiusPoolCancellation
+
+    with pool_database.begin() as connection:
+        pool_id, participant_id = registered(connection)
+        values = early_cancel_values(pool_id, participant_id, uuid4())
+        connection.execute(insert(NebiusPoolCancellation).values(**values))
+        statement = delete(NebiusPoolCancellation) if operation == "delete" else update(NebiusPoolCancellation).values(request_sha256="e" * 64)
+        with pytest.raises(DBAPIError, match="cancellation history is retained"), connection.begin_nested():
+            connection.execute(statement)
+
+
+@pytest.mark.parametrize("cancellation_first", [True, False])
+def test_sql_cannot_create_both_request_and_early_cancellation_for_one_key(pool_database, cancellation_first):
+    from loom.db.nebius_pool_schema import NebiusPoolCancellation
+
+    with pool_database.begin() as connection:
+        pool_id, participant_id = registered(connection)
+        local_work_id = uuid4()
+        values = early_cancel_values(pool_id, participant_id, local_work_id)
+        if cancellation_first:
+            connection.execute(insert(NebiusPoolCancellation).values(**values))
+            with pytest.raises(DBAPIError, match="pool request identity already retained"), connection.begin_nested():
+                request(connection, pool_id, participant_id, local_work_id=local_work_id)
+        else:
+            request(connection, pool_id, participant_id, local_work_id=local_work_id)
+            with pytest.raises(DBAPIError, match="pool request identity already retained"), connection.begin_nested():
+                connection.execute(insert(NebiusPoolCancellation).values(**values))
+
+
+def test_equal_local_ids_in_other_participants_are_not_cancelled(pool_database):
+    from loom.db.nebius_pool_schema import NebiusPoolCancellation
+
+    with pool_database.begin() as connection:
+        pool_id, first = registered(connection)
+        _, second = registered(connection, pool_id)
+        local_work_id = uuid4()
+        connection.execute(insert(NebiusPoolCancellation).values(**early_cancel_values(pool_id, first, local_work_id)))
+        request(connection, pool_id, second, local_work_id=local_work_id)
