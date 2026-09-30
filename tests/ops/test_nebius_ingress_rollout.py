@@ -389,7 +389,7 @@ def test_actual_bundle_bootstraps_with_both_wheels_and_parent_death_cleanup(tmp_
 def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_key():
     workflow = yaml.load((Path(__file__).resolve().parents[2] / ".github/workflows/nebius-rollout.yml").read_text(), Loader=yaml.BaseLoader)
     assert workflow["on"]["workflow_dispatch"]["inputs"]["operation"]["options"] == [
-        "rollout", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
+        "rollout", "recover", "inspect", "certificate", "ingress", "ingress-rollback", "ingress-dns",
         "management-preflight", "management-install",
         "management-diagnostic-preflight", "management-diagnostic-install",
         "management-recovery-preflight", "management-recovery-install",

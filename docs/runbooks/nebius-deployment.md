@@ -1355,6 +1355,27 @@ Jobs belonging to this rendered candidate can then be replaced. The deployer nev
 deletes namespaces, PVCs, healthy Jobs, or unrelated resources. A retained database
 PVC without its StatefulSet blocks application and requires an explicit restore.
 
+For an existing platform, the deployer checks shared-schema migration readiness
+after acquiring or observing the exact rollout guard and before backup or manifest
+application. Valid personal application credentials can block a schema change even
+with no current database sessions. Resolve `application_database_access_active`
+through the authorized application suspend lifecycle, including access revocation
+and session drain. A missing application schema guard fails closed as
+`application_database_schema_guard_not_installed`; unavailable readiness cannot be
+treated as permission to migrate. Bootstrap diagnostics retain only fixed
+application-schema `reason_code` values, never raw traceback messages.
+
+To resume a terminal failed ordinary integration rollout with a retained pause,
+use protected `nebius-rollout` from `dev` with `operation=recover` and
+`recovery_run_id=FAILED_ROLLOUT_RUN_ID`. Follow the
+[candidate-bound recovery procedure](nebius-platform.md#automatic-rollout-when-idle).
+It retains the failed candidate's published image digests, observes its exact
+owner/candidate guard, and retries only its failed Jobs. Failure during recovery
+keeps the pause; successful HTTPS and workload readback permits release. Do not
+delete the guard, manually edit credential state, disable the schema fence, or
+stamp Alembic to make the retry pass. Primary-target replacement and database
+restore require their separate procedures.
+
 Every attempt leaves a separate sanitized JSON phase record, including the candidate version, target
 and failed phase. Evidence excludes kubeconfig material,
 API endpoint details and secret values. A failed attempt is not automatically
