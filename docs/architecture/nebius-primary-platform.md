@@ -2158,6 +2158,17 @@ all collector container states. Replay rechecks earlier stopped workloads withou
 writing. This stage neither changes RBAC nor activates a replacement writer;
 effective authority fencing and the connected protected installer remain required.
 
+An installed execution-only guest actuator belongs to its ordinary data
+participant, not another database, collector or builder. Retirement and runtime
+wiring require the complete registered target set. The supported guest sibling
+must retain its renderer-defined name, distinct UID, shared database references,
+ServiceAccount and ordinary Pod configuration, differing only in target identity,
+labels/affinity and absence of the native builder. Missing, duplicate or changed
+siblings reject the migration inputs. Its replacement remains stopped, receives
+the same participant credential and global binding, and does not acquire a build
+loop. Guest Pods must drain before retirement qualifies; replay checks them again.
+These checks do not replace installed database or effective writer qualification.
+
 The participant-role phase composes that retained retirement barrier with two
 fixed Role replacements per participant: the existing execution-actuator and
 task-image-builder roles in its namespaces. It preserves Role UIDs, bindings and

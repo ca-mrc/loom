@@ -16,6 +16,7 @@ from tests.ops.test_nebius_pool_retirement import initialize, retire
 from tests.ops.test_nebius_pool_retirement import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_retirement_live import Guards
 from tests.ops.test_nebius_pool_role_fencing import fencing_inputs as fencing_inputs
+from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(240)
-async def test_actual_controller_retirement_preserves_templates_waits_for_pods_and_replays_readonly(retirement_inputs, fencing_inputs, tmp_path):
+async def test_actual_controller_retirement_preserves_templates_waits_for_pods_and_replays_readonly(retirement_inputs, fencing_inputs, guest_runtime_inputs, tmp_path):
     from kubernetes import client
     from scripts.ops.nebius_pool_retirement import retirement_documents
     from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
@@ -34,7 +35,8 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
 
     from loom_service.pool_management.installation import PoolInstallation
 
-    request = retirement_inputs
+    migration, actuators, _, _, guest = guest_runtime_inputs
+    request = replace(retirement_inputs, migration=migration, actuators=(*actuators.values(), guest))
     container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
     try:
         _, core, batch = await asyncio.to_thread(_load_client, container)
@@ -58,6 +60,7 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 participant[field]["uid"] = namespaces[participant[field]["name"]]
 
         installed = {}
+        service_accounts = set()
         for key, document in retirement_documents(request).items():
             document = copy.deepcopy(document)
             for field in ("uid", "resourceVersion"):
@@ -68,8 +71,11 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 # Original Nebius node selectors keep fake candidate images
                 # unschedulable; real ReplicaSets and pending Pods still exist.
                 assert pod_spec["nodeSelector"]
-                await asyncio.to_thread(core.create_namespaced_service_account, namespace, {
-                    "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": pod_spec["serviceAccountName"]}})
+                service_account = (namespace, pod_spec["serviceAccountName"])
+                if service_account not in service_accounts:
+                    await asyncio.to_thread(core.create_namespaced_service_account, namespace, {
+                        "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": service_account[1]}})
+                    service_accounts.add(service_account)
                 result = await asyncio.to_thread(apps.create_namespaced_deployment, namespace, document)
             else:
                 document["spec"]["suspend"] = True
@@ -81,7 +87,7 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
             guards=tuple(replace(guard, namespace_uid=UUID(namespaces[guard.namespace]),
                 controller=by_identity[guard.namespace, "loom-control-plane"]) for guard in request.migration.guards))
         request = replace(request, migration=migration,
-            actuators=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-actuator"] for row in request.actuators),
+            actuators=tuple(by_identity[row["metadata"]["namespace"], row["metadata"]["name"]] for row in request.actuators),
             collectors=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-capacity-collector"] for row in request.collectors))
         roles = []
         for original in fencing_inputs.originals:
@@ -102,11 +108,11 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
 
         # Hold one real pending controller Pod in deletion so a scale-to-zero
         # response cannot be mistaken for observed process drain.
-        held_namespace = request.actuators[0]["metadata"]["namespace"]
+        held_namespace = guest["metadata"]["namespace"]
         deadline = time.monotonic() + 45
         while True:
             pods = await asyncio.to_thread(core.list_namespaced_pod, held_namespace,
-                label_selector="app.kubernetes.io/name=loom-execution-actuator")
+                label_selector="app.kubernetes.io/name=nebius-guest-fixture-actuator")
             if len(pods.items) == 1:
                 held_pod = pods.items[0]
                 break
@@ -145,7 +151,7 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                                 for pod in pods.items]}
                     pytest.fail("controller drain stalled: " + repr(diagnostics))
                 await asyncio.sleep(0.5)
-            assert methods.count("PATCH") == 9
+            assert methods.count("PATCH") == 10
             methods.clear()
             assert await asyncio.to_thread(retire, request, api, tmp_path) == result
             assert set(methods) == {"GET"}

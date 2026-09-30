@@ -21,6 +21,7 @@ from scripts.ops.nebius_pool_migration import (
     _proof,
     migration_contract,
 )
+from scripts.ops.nebius_pool_runtime import qualify_participant_actuators
 
 from loom.nebius_platform_render import digest
 
@@ -49,7 +50,15 @@ def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, 
         migration_contract(request.migration)
         participants = request.migration.registration.spec.participants
         namespaces = {row.execution_namespace.name for row in participants}
-        for documents, kind, name in ((request.actuators, "Deployment", "loom-execution-actuator"),
+        primary_actuators = tuple(row for row in request.actuators if row["metadata"]["name"] == "loom-execution-actuator")
+        if {row["metadata"]["namespace"] for row in request.actuators} != namespaces:
+            raise ValueError
+        for participant in participants:
+            actuator, = (row for row in primary_actuators if row["metadata"]["namespace"] == participant.execution_namespace.name)
+            guests = tuple(row for row in request.actuators if row["metadata"]["namespace"] == participant.execution_namespace.name
+                and row["metadata"]["name"] != "loom-execution-actuator")
+            qualify_participant_actuators(request=request.migration, participant_id=participant.participant_id, actuator=actuator, guests=guests)
+        for documents, kind, name in ((primary_actuators, "Deployment", "loom-execution-actuator"),
                 (request.collectors, "CronJob", "loom-execution-capacity-collector")):
             if len(documents) != len(participants) or {row["metadata"]["namespace"] for row in documents} != namespaces:
                 raise ValueError
