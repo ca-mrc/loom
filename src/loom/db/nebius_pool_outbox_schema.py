@@ -66,7 +66,9 @@ class NebiusPoolBuildOutbox(Base):
         CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object' AND "
             "jsonb_typeof(selection_json) = 'object'", name="nebius_pool_build_outbox_payload_check"),
         CheckConstraint("phase IN ('selected','attached','cancel_pending','cancelled') AND "
-            "(phase = 'attached') = (num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
+            "(phase <> 'attached' OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND "
+            "(phase <> 'selected' OR attempt_id IS NULL) AND "
+            "(attempt_id IS NULL OR reservation_id IS NOT NULL) AND "
             "num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND "
             "(phase NOT IN ('attached','cancelled') OR reservation_id IS NOT NULL) AND "
             "(phase <> 'selected' OR reservation_id IS NULL) AND "

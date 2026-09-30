@@ -77,7 +77,9 @@ CREATE TABLE nebius_pool_build_outbox (
         jsonb_typeof(selection_json) = 'object'),
     CONSTRAINT nebius_pool_build_outbox_phase_check CHECK (
         phase IN ('selected','attached','cancel_pending','cancelled') AND
-        (phase = 'attached') = (num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND
+        (phase <> 'attached' OR num_nonnulls(attempt_id, attempt_number, lease_epoch) = 3) AND
+        (phase <> 'selected' OR attempt_id IS NULL) AND
+        (attempt_id IS NULL OR reservation_id IS NOT NULL) AND
         num_nonnulls(attempt_id, attempt_number, lease_epoch) IN (0,3) AND
         (phase NOT IN ('attached','cancelled') OR reservation_id IS NOT NULL) AND
         (phase <> 'selected' OR reservation_id IS NULL) AND
@@ -118,6 +120,7 @@ BEGIN
             RAISE EXCEPTION 'pool local selection evidence is immutable' USING ERRCODE = '23514';
         END IF;
         IF NOT (NEW.phase = OLD.phase OR (OLD.phase = 'selected' AND NEW.phase IN ('attached','cancel_pending'))
+                OR (OLD.phase = 'attached' AND NEW.phase = 'cancel_pending')
                 OR (OLD.phase = 'cancel_pending' AND NEW.phase = 'cancelled')) THEN
             RAISE EXCEPTION 'pool local handoff transition forbidden' USING ERRCODE = '23514';
         END IF;
@@ -129,10 +132,10 @@ BEGIN
         NEW.receipt_json->>'request_sha256' = NEW.request_sha256 AND
         NEW.receipt_json->'request_key' = NEW.request_json->'key' AND
         NEW.receipt_json->>'phase' IN ('reserved','cancelled_unstarted') AND
-        (NEW.phase <> 'attached' OR NEW.receipt_json->>'phase' = 'reserved')) IS NOT TRUE THEN
+        (NEW.attempt_id IS NULL OR NEW.receipt_json->>'phase' = 'reserved')) IS NOT TRUE THEN
         RAISE EXCEPTION 'pool local grant identity differs' USING ERRCODE = '23514';
     END IF;
-    IF NEW.phase = 'attached' AND NEW.lease_epoch <> (NEW.request_json->'build'->>'expected_lease_epoch')::bigint + 1 THEN
+    IF NEW.attempt_id IS NOT NULL AND NEW.lease_epoch <> (NEW.request_json->'build'->>'expected_lease_epoch')::bigint + 1 THEN
         RAISE EXCEPTION 'pool local claim epoch differs' USING ERRCODE = '23514';
     END IF;
     IF NEW.cancelled_json IS NOT NULL AND (

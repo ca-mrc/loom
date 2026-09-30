@@ -239,12 +239,45 @@ class PoolBuildOutbox:
 
     async def request_cancel(self, key: PoolRequestKeyV1) -> PoolBuildHandoff:
         async with self._transaction(key) as (session, row):
-            if row is None or row.phase == "attached":
+            if row is None:
                 raise PoolHandoffError
-            if row.phase == "selected":
+            if row.phase in {"selected", "attached"}:
+                # Intent is not release: the manager may already have committed
+                # activation after a lost reply. Only its terminal cancellation
+                # receipt below can close/refund this retained local attempt.
                 row.phase = "cancel_pending"
                 await session.flush()
             return self._view(row)
+
+    async def _finish_unstarted_claim(self, session: AsyncSession, outbox: NebiusPoolBuildOutbox) -> None:
+        """Retain a no-Job result and refund only this still-current claim.
+
+        Called only with the exact manager cancelled_unstarted receipt, under
+        the outbox lock. Unlike a live-build failure this may finish an expired
+        lease; no native Job ever started, so do not invent publication evidence.
+        Epochs/attempt identity never go backwards, matching native cancellation
+        budget semantics. A superseding claim's budget belongs to that claim.
+        """
+        if outbox.attempt_id is None:
+            return
+        row = await session.get(TaskImageMaterialization, outbox.materialization_id, with_for_update=True)
+        attempt = await session.get(TaskImageMaterializationAttempt, outbox.attempt_id, with_for_update=True)
+        if row is None or attempt is None or attempt.native_build is not None or attempt.grant_id is not None:
+            raise PoolHandoffError
+        now: datetime = (await session.execute(select(func.clock_timestamp()))).scalar_one()
+        refundable = (row.lease_epoch == outbox.lease_epoch and row.claimed_by == self.builder_id
+            and row.state == "claimed" and row.attempt_count == outbox.attempt_number
+            and _snapshot(row) == outbox.selection_json)
+        if refundable:
+            row.attempt_count -= 1
+            row.state, row.claimed_by, row.lease_expires_at = "queued", None, None
+            row.next_attempt_at, row.finished_at = None, None
+            row.failure_reason, row.failure_message = "build_cancelled", "Cancelled before global build activation"
+            row.updated_at = now
+        attempt.native_build = {"state": "cancelled_unstarted", "failure_reason": "build_cancelled",
+            "failure_message": "Cancelled before global build activation",
+            "pool_reservation_id": str(outbox.reservation_id), "retry_budget_refunded": refundable,
+            "capacity_released_at": now.isoformat()}
 
     async def confirm_cancel(self, key: PoolRequestKeyV1, receipt: PoolReceiptV1) -> PoolBuildHandoff:
         async with self._transaction(key) as (session, row):
@@ -253,8 +286,15 @@ class PoolBuildOutbox:
             receipt = self._receipt(row, receipt)
             if receipt.phase != "cancelled_unstarted":
                 raise PoolHandoffError
+            if row.phase == "cancelled":
+                # Replay is evidence readback; never refund twice or modify a
+                # newer lease that began after this cancellation committed.
+                if row.cancelled_json != receipt.model_dump(mode="json"):
+                    raise PoolHandoffError
+                return self._view(row)
             if row.reservation_id is None:
                 row.reservation_id, row.receipt_json = receipt.reservation_id, receipt.model_dump(mode="json")
+            await self._finish_unstarted_claim(session, row)
             row.phase, row.cancelled_json = "cancelled", receipt.model_dump(mode="json")
             await session.flush()
             return self._view(row)

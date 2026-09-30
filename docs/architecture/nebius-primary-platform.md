@@ -1812,7 +1812,14 @@ obsolete grants remain recorded for cancellation. Concurrent workers and restart
 replay the same selection and grant. A newer admission epoch can recover old records
 for cancellation, but cannot use them for a new claim. SQL guards retain request,
 receipt and claim identity; local history has no foreign keys to the management
-database. This primitive does not yet implement controller activation, output drain,
+database. Attached claims can record cancellation intent without releasing capacity
+or refunding attempts. Only the exact manager `cancelled_unstarted` receipt permits
+the same still-current claim to return to queued and refund its attempt budget once.
+This retains its immutable attempt and lease epoch, records a truthful no-Job result,
+and commits the refund and terminal outbox evidence together. It cannot change a
+superseding claim or hide an existing native-build effect. If activation won the race,
+the grant remains charged and requires stop/drain reconciliation instead.
+This primitive does not yet implement controller activation, output drain,
 or release, and does not independently authorize an originating application.
 Database-backed HTTP tests connect this journal to real management prepare and
 activation; this is not evidence that installed controllers use it.

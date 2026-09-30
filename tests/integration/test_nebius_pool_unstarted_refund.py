@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
 import pytest
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
@@ -11,6 +12,7 @@ from sqlalchemy.exc import DBAPIError
 from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt
 from tests.integration.test_nebius_pool_build_outbox import counts, grant, local_setup, outbox
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
+from tests.integration.test_nebius_pool_participant_http import client, setup
 
 
 async def attached_setup(sessions):
@@ -109,3 +111,38 @@ async def test_cancellation_cannot_hide_already_recorded_native_effects(sessions
     assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
     async with sessions() as session:
         assert (await session.scalar(select(TaskImageMaterializationAttempt.native_build))) == {"state": "running", "job_uid": "must-not-hide"}
+
+
+@pytest.mark.parametrize("activated", [False, True])
+async def test_real_manager_decides_whether_attached_claim_can_be_refunded(sessions, tmp_path, activated):
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+
+    app, _, token, participants, _, _ = await setup(sessions, tmp_path)
+    participant = participants[0]
+    _, selected, _ = await local_setup(sessions, environment_id=participant.environment_id)
+    request = selected.model_copy(update={"pool_id": participant.pool_id,
+        "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
+        "key": selected.key.model_copy(update={"participant_id": participant.participant_id})})
+    journal = outbox(sessions, participant)
+    await journal.remember(request)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        management = client(http, token)
+        receipt = await management.prepare(request)
+        attached = await journal.accept_grant(request.key, receipt)
+        if activated:
+            await management.activate(attached.action)
+        pending = await journal.request_cancel(request.key)
+        if activated:
+            with pytest.raises(PoolRequestUnconfirmedError):
+                await management.cancel_unstarted(pending.action)
+            current = await management.status(pending.action)
+            assert current.phase == "create_intent" and current.capacity_charged
+            with pytest.raises(ValueError):
+                await journal.confirm_cancel(request.key, current)
+            assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
+            assert (await journal.get(request.key)).phase == "cancel_pending"
+        else:
+            cancelled = await management.cancel_unstarted(pending.action)
+            result = await outbox(sessions, participant).confirm_cancel(request.key, cancelled)
+            assert result.phase == "cancelled" and result.attempt_id == attached.attempt_id
+            assert await counts(sessions, request.key.local_work_id) == (1, 0, 1)
