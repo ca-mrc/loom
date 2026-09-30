@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 
 from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt, Team, Trial
 from loom.nebius_pool_contract import PoolReceiptV1
+from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom.task_image_materialization import task_image_materialization_key
@@ -19,13 +20,21 @@ from tests.integration.test_nebius_task_image_claims import POOL, _seed
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
 
 
-async def local_setup(sessions):
+async def local_setup(sessions, *, environment_id=None, origin_kind="environment"):
     participant, body, _ = build_inputs()
+    if environment_id is not None:
+        participant = participant.model_copy(update={"environment_id": environment_id})
+        body["origin"]["data_environment_id"] = environment_id
+    if origin_kind == "application":
+        body["origin"].update(kind="application", application={"application_id": uuid4(),
+            "incarnation": uuid4(), "deployment_generation": 1, "release_id": uuid4(),
+            "source_digest": "sha256:" + "a" * 64})
+    origin = None if origin_kind is None else PoolWorkOriginV1.model_validate(body["origin"]).model_dump(mode="json")
     team = uuid4()
     async with sessions.begin() as session:
         session.add(Team(id=team, name=str(team)))
         await session.flush()
-        identity, trial = await _seed(session, team)
+        identity, trial = await _seed(session, team, trial_values={"pool_origin": origin})
         row = await session.get(TaskImageMaterialization, identity)
         body["key"]["local_work_id"] = identity
         body["build"].update(task_id=row.task_id, expected_lease_epoch=0,

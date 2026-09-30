@@ -97,7 +97,7 @@ async def test_native_client_waits_without_attempt_then_cancels_exact_unstarted_
 
 async def test_durable_local_selection_through_real_management_http_claims_only_after_grant(sessions, tmp_path):
     app, _, token, participants, _, _ = await setup(sessions, tmp_path)
-    _, local_request, _ = await local_setup(sessions)
+    _, local_request, _ = await local_setup(sessions, environment_id=participants[0].environment_id)
     participant = participants[0]
     request = local_request.model_copy(update={"pool_id": participant.pool_id,
         "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
@@ -184,7 +184,7 @@ async def test_lost_committed_http_reply_recovers_the_same_grant_and_local_attem
     from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 
     app, _, token, participants, _, _ = await setup(sessions, tmp_path)
-    _, selected, _ = await local_setup(sessions)
+    _, selected, _ = await local_setup(sessions, environment_id=participants[0].environment_id)
     participant = participants[0]
     request = selected.model_copy(update={"pool_id": participant.pool_id,
         "admission_epoch": participant.admission_epoch, "participant_revision": participant.binding_revision,
