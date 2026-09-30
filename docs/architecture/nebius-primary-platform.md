@@ -1608,6 +1608,18 @@ gateway are integrated and qualified together.
 
 ## Global pool reservation journal
 
+The internal execution-prepare adapter accepts a typed runtime/requirements
+snapshot, not arbitrary Kubernetes documents or a caller's resource total. It
+qualifies the registered namespace/profile, execution-class compatibility and
+image signatures, then reuses the execution renderer and collector's scheduler
+arithmetic to measure the complete single-Pod envelope. Named RuntimeClasses need
+explicit protected overhead; absent requests cannot silently rely on API-server
+defaulting. The request digest retains origin and absolute deadline while the
+rendered remaining runtime changes with the time of activation. This adapter
+does not expose an endpoint, grant capacity, write a Job or establish installed
+global admission. The registry/gateway still must qualify current authority and
+freeze the first activation document before a Kubernetes write.
+
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
 do not identify the same request. A reservation receipt retains its request digest,

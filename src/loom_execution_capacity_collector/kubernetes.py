@@ -118,6 +118,30 @@ def _pod_request(pod: Any) -> ResourceTotals:
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
 
 
+def rendered_pod_resources(spec: dict[str, Any]) -> ResourceTotals:
+    """Apply the collector's scheduler arithmetic to a fixed, pre-admission Pod.
+
+    Renderers must explicitly request every resource; silently relying on API
+    limit-to-request defaulting could undercount a Job before its Pod appears.
+    RuntimeClass overhead must be supplied by the qualified protected profile.
+    """
+    def container(raw: dict[str, Any]) -> SimpleNamespace:
+        resources = raw.get("resources") or {}
+        requests = resources.get("requests")
+        if (not isinstance(requests, dict)
+                or any(requests.get(name) is None for name in ("cpu", "memory", "ephemeral-storage"))):
+            raise KubernetesObservationError("rendered Pod resource requests are incomplete")
+        return SimpleNamespace(resources=SimpleNamespace(requests=requests), restart_policy=raw.get("restartPolicy"))
+
+    if not spec.get("containers"):
+        raise KubernetesObservationError("rendered Pod has no containers")
+    return _pod_request(SimpleNamespace(spec=SimpleNamespace(
+        containers=[container(row) for row in spec["containers"]],
+        init_containers=[container(row) for row in spec.get("initContainers", [])],
+        resources=spec.get("resources"), overhead=spec.get("overhead"),
+    )))
+
+
 def _pool_resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -> bool:
     """Do not admit against freed spec resources while kubelet still holds them.
 
