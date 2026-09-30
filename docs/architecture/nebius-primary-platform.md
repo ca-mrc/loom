@@ -2140,6 +2140,14 @@ busy. A lost acquisition response requires exact owner/candidate observation; an
 open database after an uncertain acquisition does not authorize another command.
 The fixed command adapter qualifies the running Pod and ReplicaSet lineage and
 unchanged template before and after invoking the guard, with no release command.
+For recovery after controller retirement, a retained database binding selects the
+same namespace-local PostgreSQL StatefulSet and Service. The adapter verifies
+their identities and templates, the original controller's exact DB Secret
+UID/version and connection destination, and the ready StatefulSet Pod before and
+after the fixed read-only ownership query. Changed credentials, alternate database
+destinations or unqualified Pods fail closed. Acquisition still uses the original
+qualified controller; the database path never acquires or releases a guard. The
+protected parent must supply the binding before retiring that controller.
 An independent anchor and parent journal bind closure to registration; missing or
 changed recovery evidence cannot start another registration. Successful closure
 and registration explicitly leave writer migration incomplete. Controller

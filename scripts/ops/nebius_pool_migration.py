@@ -30,11 +30,20 @@ class PoolMigrationError(RuntimeError):
 
 
 @dataclass(frozen=True, repr=False)
+class PoolGuardDatabase:
+    statefulset: dict[str, Any]
+    service: dict[str, Any]
+    credential_uid: UUID
+    credential_resource_version: str
+
+
+@dataclass(frozen=True, repr=False)
 class PoolGuardTarget:
     participant_id: UUID
     namespace: str
     namespace_uid: UUID
     controller: dict[str, Any]
+    database: PoolGuardDatabase | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -80,6 +89,20 @@ def migration_contract(request: PoolMigrationRequest) -> dict[str, Any]:
             raise ValueError("pool migration controller differs")
         guards.append({"participant_id": str(target.participant_id), "namespace": target.namespace,
             "namespace_uid": str(target.namespace_uid), "controller_uid": _uid(controller), "controller": _snapshot(controller)})
+        if target.database is not None:
+            database = target.database
+            if (not database.credential_uid.int or not isinstance(database.credential_resource_version, str)
+                    or not database.credential_resource_version):
+                raise ValueError("pool migration database credential identity differs")
+            binding: dict[str, Any] = {"credential_uid": str(database.credential_uid),
+                "credential_resource_version": database.credential_resource_version}
+            for kind, version, document in (("StatefulSet", "apps/v1", database.statefulset), ("Service", "v1", database.service)):
+                if (document.get("apiVersion") != version or document.get("kind") != kind
+                        or document["metadata"].get("name") != "loom-postgres"
+                        or document["metadata"].get("namespace") != target.namespace):
+                    raise ValueError("pool migration database differs")
+                binding[kind] = {"uid": _uid(document), "document": _snapshot(document)}
+            guards[-1]["database"] = binding
     return {"installation": request.registration.spec.model_dump(mode="json"),
         "binding": asdict(request.registration.binding), "candidate": request.registration.candidate, "guards": guards}
 
