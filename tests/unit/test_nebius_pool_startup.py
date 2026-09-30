@@ -48,7 +48,8 @@ def test_global_actuator_configuration_rejects_cross_binding_before_startup(tmp_
                 "registry_repository": "registry.example/task-images"})
 
 
-async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_and_schedules_heartbeat(tmp_path, monkeypatch):
+@pytest.mark.parametrize("loop_failure", [False, True])
+async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_and_schedules_heartbeat(tmp_path, monkeypatch, loop_failure):
     from loom_execution_actuator import __main__ as entrypoint
     from loom_execution_actuator.config import ExecutionActuatorSettings
     from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
@@ -62,6 +63,7 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
             "storage_region": "eu-north1", "source_bucket": "source", "registry_repository": "registry.example/task-images"})
     observed, closed = {}, []
     started, stop = asyncio.Event(), asyncio.Event()
+    fail, cleanup_started, cleanup_allowed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     class ExternalResource:
         def __init__(self, name):
@@ -84,7 +86,15 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
             observed[name] = (controller, interval, health)
             if len(observed) == 4:
                 started.set()
-            await stop.wait()
+            try:
+                if loop_failure and name == "command":
+                    await fail.wait()
+                    raise RuntimeError("test controller loop failed")
+                await stop.wait()
+            finally:
+                if loop_failure and name != "command":
+                    cleanup_started.set()
+                    await cleanup_allowed.wait()
         return run
 
     async def forbidden_watch(*_args, **_kwargs):
@@ -115,7 +125,14 @@ async def test_actual_actuator_entrypoint_selects_global_readers_without_watch_a
         assert not health.ready()
         health.mark_success("build_heartbeat")
         assert health.ready()
+        if loop_failure:
+            fail.set()
+            await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(task), timeout=0.02)
+            assert not closed  # Shared clients must outlive every settling loop.
     finally:
+        cleanup_allowed.set()
         stop.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -161,7 +178,11 @@ def test_actual_control_plane_startup_selects_global_queue_and_closes_its_client
     async def background(**kwargs):
         if "global_selector" in kwargs:
             observed.update(kwargs)
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if kwargs.get("global_selector") is not None:
+                observed["closed_before_scheduler_stopped"] = kwargs["global_selector"].allocation_reader._closed
 
     monkeypatch.setattr(entrypoint, "_assert_schema_startup", schema)
     monkeypatch.setattr(entrypoint, "create_async_engine", lambda *_a, **_k: Engine())
@@ -180,6 +201,7 @@ def test_actual_control_plane_startup_selects_global_queue_and_closes_its_client
         assert selected.outbox.environment == "development" and selected.allocation_reader is not None
         assert not selected.allocation_reader._closed
     assert selected.allocation_reader._closed
+    assert not observed["closed_before_scheduler_stopped"]
 
 
 async def test_global_mode_rejects_direct_admin_reservation_before_local_admission(tmp_path, monkeypatch):
