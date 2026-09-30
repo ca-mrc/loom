@@ -121,7 +121,8 @@ async def test_actual_collector_combines_native_provider_and_one_physical_invent
     assert body["provider"]["quota_resources"]["vcpu"]["used"] == 4000
     assert body["kubernetes"]["active_nodes"] == 1
     assert body["kubernetes"]["allocatable"]["cpu_millis"] == 3500
-    assert body["kubernetes"]["requested"]["cpu_millis"] == 2000
+    assert body["kubernetes"]["requested"]["cpu_millis"] == 3000  # Includes foreign pending demand.
+    assert body["kubernetes"]["nodes"][0]["requested"]["cpu_millis"] == 2000
     assert len(body["kubernetes"]["nodes"][0]["managed_pods"]) == 2
     assert len(body["kubernetes"]["pending_pods"]) == 1
     assert not body["kubernetes"]["pending_pods"][0]["lease_id"].startswith("reservation:")
@@ -226,3 +227,39 @@ def test_pool_mode_requires_separate_management_identity_not_legacy_config(tmp_p
 
     with pytest.raises(ValueError):
         PoolCapacityCollectorSettings(**_settings(tmp_path).model_dump())
+
+
+@pytest.mark.parametrize("owned", [False, True])
+async def test_collector_closes_only_owned_kubernetes_connection_on_publication_failure(tmp_path, monkeypatch, owned):
+    from loom_execution_capacity_collector import pool_collector
+    from loom_execution_capacity_collector.pool_client import PoolPublicationError
+
+    client, http = transport(tmp_path, lambda request: httpx.Response(
+        200 if request.url.path.endswith("/captures") else 503, json=capture()))
+    config, reader = settings(tmp_path), cluster_reader([])
+    resource = httpx.Client()
+    reader._api_client = resource
+    monkeypatch.setattr(pool_collector, "InClusterKubernetesCapacityReader", lambda **kw: reader)
+    try:
+        async with http:
+            with pytest.raises(PoolPublicationError):
+                await pool_collector.collect_pool_observation(config, management=client,
+                    provider=native_reader(config), kubernetes=None if owned else reader)
+        assert resource.is_closed is owned
+    finally:
+        resource.close()
+
+
+@pytest.mark.parametrize("mode", ["pool", "invalid"])
+async def test_actual_command_does_not_select_legacy_collector_in_pool_mode(tmp_path, monkeypatch, mode):
+    from loom_execution_capacity_collector import __main__ as command
+
+    monkeypatch.setenv("LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE", mode)
+
+    def legacy_settings():
+        pytest.fail("pool or invalid mode fell back to target settings")
+
+    monkeypatch.setattr(command, "ExecutionCapacityCollectorSettings", legacy_settings)
+    # Missing protected pool configuration must fail before any collector runs.
+    with pytest.raises(ValueError):
+        await command._run()
