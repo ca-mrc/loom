@@ -98,6 +98,72 @@ def test_cutover_waits_for_drain_and_qualified_migration(refresh, tmp_path):
     assert json.loads((tmp_path / 'cutover.json').read_text())['original'] == before
 
 
+@pytest.mark.parametrize('failure', [None, 'conflict', 'before', 'after'])
+def test_successor_adopts_stopped_source_without_restarting_or_repeating_unknown_write(refresh, tmp_path, failure):
+    request, old = refresh
+    old.drained = True
+    assert run(refresh, tmp_path / 'old') is True
+    stopped = old.read()
+    successor = replace(request, operation_id=uuid4(), initial_stopped=stopped)
+    api = API(successor)
+    api.document = copy.deepcopy(stopped)
+    api.drained = True
+    api.failure = failure
+    case = successor, api
+    if failure == 'before':
+        for _ in range(2):
+            with pytest.raises(ValueError, match='unresolved'):
+                run(case, tmp_path / 'new')
+        assert api.calls == ['retire']
+        return
+    if failure == 'conflict':
+        assert run(case, tmp_path / 'new') is False
+        assert api.document == stopped
+        api.failure = None
+    assert run(case, tmp_path / 'new') is True
+    assert api.document['spec'] == stopped['spec']
+    assert api.document['spec']['replicas'] == 0
+    assert api.document['metadata']['uid'] == stopped['metadata']['uid']
+    assert api.document['metadata']['annotations']['loom.nebius/management-refresh-id'] == str(successor.operation_id)
+    assert run(case, tmp_path / 'new') is True
+    assert api.calls == (['retire', 'retire'] if failure == 'conflict' else ['retire'])
+    old.document = copy.deepcopy(api.document)
+    with pytest.raises(ValueError, match='unresolved'):
+        run(refresh, tmp_path / 'old')
+    assert old.calls == ['retire']
+    assert run(case, tmp_path / 'new', activate=True) is False
+    api.qualified = True
+    api.failure = None
+    assert run(case, tmp_path / 'new', activate=True) is True
+    assert api.document['spec']['replicas'] == 1
+
+
+@pytest.mark.parametrize('damage', ['uid', 'image', 'replicas', 'same_operation', 'nil_operation', 'missing_marker'])
+def test_initial_stopped_source_cannot_change_retained_runtime_or_scope(refresh, tmp_path, damage):
+    request, old = refresh
+    run(refresh, tmp_path / 'old')
+    stopped = old.read()
+    operation = uuid4()
+    if damage == 'uid':
+        stopped['metadata']['uid'] = str(uuid4())
+    elif damage == 'image':
+        stopped['spec']['template']['spec']['containers'][0]['image'] += '-foreign'
+    elif damage == 'replicas':
+        stopped['spec']['replicas'] = 1
+    elif damage == 'same_operation':
+        stopped['metadata']['annotations']['loom.nebius/management-refresh-id'] = str(operation)
+    elif damage == 'nil_operation':
+        stopped['metadata']['annotations']['loom.nebius/management-refresh-id'] = '00000000-0000-0000-0000-000000000000'
+    else:
+        del stopped['metadata']['annotations']['loom.nebius/management-refresh-id']
+    successor = replace(request, operation_id=operation, initial_stopped=stopped)
+    api = API(successor)
+    api.document = stopped
+    with pytest.raises(ValueError):
+        run((successor, api), tmp_path / 'new')
+    assert api.calls == []
+
+
 @pytest.mark.parametrize('action', ['retire', 'activate'])
 @pytest.mark.parametrize('failure', ['before', 'after'])
 def test_unknown_write_is_observed_but_never_resent(refresh, tmp_path, action, failure):

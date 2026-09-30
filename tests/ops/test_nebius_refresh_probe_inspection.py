@@ -147,6 +147,10 @@ def test_unqualified_url_material_does_not_hide_failed_job(resources_request, mu
     ('{"schema":"foreign","status":"unqualified"}', {"status": "unavailable"}),
     ('{"schema":"loom.nebius-management-refresh-probe.v1","status":"qualified"}', {"status": "unavailable"}),
     ('{"schema":"loom.nebius-management-refresh-probe.v1","status":[]}', {"status": "unavailable"}),
+    ('{"schema":"loom.nebius-management-refresh-probe.v1","status":"unqualified","stage":"schema","error_type":"ProgrammingError","error":"private-sql"}',
+        {"status": "unqualified", "stage": "schema", "error_type": "ProgrammingError"}),
+    ('{"schema":"loom.nebius-management-refresh-probe.v1","status":"unqualified","stage":"private-stage","error_type":"private-class"}',
+        {"status": "unqualified"}),
     ("private-traceback", {"status": "unavailable"}),
 ])
 def test_logs_are_closed_projection_not_raw_output(resources_request, log, expected):

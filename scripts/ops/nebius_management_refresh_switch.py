@@ -28,6 +28,7 @@ MARKER = 'loom.nebius/management-refresh-id'
 class ManagementRefreshSwitchRequest:
     render: ManagementRefreshRenderRequest
     operation_id: UUID
+    initial_stopped: dict[str, Any] | None = None
 
 
 class ManagementRefreshSwitchAPI(Protocol):
@@ -44,6 +45,42 @@ class ManagementRefreshSwitchAPI(Protocol):
     def activation_ready(self) -> bool:
         """Requalify this operation's config/runtime/backup/migration receipts."""
         ...
+
+
+def refresh_initial(request: ManagementRefreshSwitchRequest) -> dict[str, Any]:
+    """An explicit stopped source cannot change the retained runtime or its UID.
+
+    This shape check does not qualify failed history; the protected entry and
+    connected preflight must independently bind that history before adoption.
+    """
+    initial = request.initial_stopped
+    if initial is None:
+        return request.render.active
+    try:
+        marker = initial['metadata']['annotations'][MARKER]
+        operation = UUID(marker)
+        if not operation.int or str(operation) != marker or operation == request.operation_id:
+            raise ValueError
+        expected = _snapshot(request.render.active)
+        expected['metadata'].setdefault('annotations', {})[MARKER] = marker
+        expected['spec']['replicas'] = 0
+        if not _matches(initial, expected, _uid(request.render.active)):
+            raise ValueError
+        return initial
+    except Exception:
+        raise ValueError('management refresh initial stopped source differs') from None
+
+
+def refresh_switch_identity(request: ManagementRefreshSwitchRequest, state_dir: Path) -> dict[str, Any]:
+    """Preserve historical identities, binding an explicit stopped source if set."""
+    return {'schema': 'loom.nebius-management-refresh-switch.v1',
+        'operation_id': str(request.operation_id), 'state_dir': str(state_dir.absolute()),
+        'original_uid': _uid(request.render.active),
+        'input_digest': digest({'original': _stable(refresh_initial(request)),
+            'target': refresh_target(request, 'activate'),
+            'before': request.render.before.model_dump(mode='json'),
+            'after': request.render.after.model_dump(mode='json'),
+            'candidate': request.render.candidate, 'profile': request.render.profile})}
 
 
 def refresh_target(request: ManagementRefreshSwitchRequest, action: Literal['retire', 'activate']) -> dict[str, Any]:
@@ -127,13 +164,8 @@ def switch_refresh(*, request: ManagementRefreshSwitchRequest, api: ManagementRe
     try:
         stopped = refresh_target(request, 'retire')
         desired = refresh_target(request, 'activate')
-        original, uid = request.render.active, _uid(request.render.active)
-        identity = {'schema': 'loom.nebius-management-refresh-switch.v1',
-            'operation_id': str(request.operation_id), 'state_dir': str(state_dir.absolute()), 'original_uid': uid,
-            'input_digest': digest({'original': _stable(original), 'target': desired,
-                'before': request.render.before.model_dump(mode='json'),
-                'after': request.render.after.model_dump(mode='json'),
-                'candidate': request.render.candidate, 'profile': request.render.profile})}
+        original, uid = refresh_initial(request), _uid(request.render.active)
+        identity = refresh_switch_identity(request, state_dir)
         with private_state._locked_state(state_dir):
             path = state_dir / 'cutover.json'
             actual = api.read()

@@ -36,7 +36,7 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_refresh", "nebius_management_refresh_switch", "nebius_management_refresh_live",
     "nebius_management_refresh_resources", "nebius_management_refresh_evidence", "nebius_management_refresh_backup",
     "nebius_management_refresh_install", "nebius_management_refresh_predecessor", "nebius_management_refresh_connected",
-    "nebius_management_refresh_entry",
+    "nebius_management_refresh_entry", "nebius_management_refresh_supersession",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
@@ -66,7 +66,7 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "refresh_manager", "refresh_recovery", "refresh_prerequisites", "refresh_config", "refresh_retire",
     "refresh_manager_probe", "refresh_shared_probe", "refresh_backup", "refresh_migration",
     "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
-    "refresh_public_authentication", "refresh_completion",
+    "refresh_public_authentication", "refresh_completion", "refresh_supersession",
     *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES)})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 

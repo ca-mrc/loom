@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import socket
 from pathlib import Path
 from uuid import uuid4
 
@@ -35,6 +36,25 @@ def settings(prepared, *, mode='manager'):
     shared = prepared['shared']
     return RefreshProbeSettings(mode=mode, namespace='loom-nebius-management', expected_revision=CURRENT_REVISION,
         shared=shared)
+
+
+async def test_connection_refusal_is_classified_before_read_only_query(platform_inputs):
+    from sqlalchemy.engine import URL
+
+    from loom.nebius_management_refresh_probe import RefreshProbeError, database_snapshot
+    from tests.unit.test_nebius_management_refresh_probe import config
+
+    # Reserve a real local port without listening: no fixture database or mock
+    # may accidentally turn a failed connection into a query failure.
+    with socket.socket() as reserved:
+        reserved.bind(('127.0.0.1', 0))
+        url = URL.create('postgresql+psycopg', username='loom_service', password='disposable-only',
+            host='127.0.0.1', port=reserved.getsockname()[1], database='loom')
+        with pytest.raises(RefreshProbeError) as failure:
+            await database_snapshot(url, config(platform_inputs))
+    assert failure.value.stage == 'database'
+    assert failure.value.error_type == 'OperationalError'
+    assert str(failure.value) == 'refresh_probe_unqualified'
 
 
 @pytest.mark.parametrize('running', [False, True])
@@ -115,8 +135,10 @@ async def test_incompatible_retained_state_blocks_refresh_without_claims(applica
             else:
                 plan['unknown_contract'] = True
             row.plan_json = plan
-    with pytest.raises(ValueError, match='refresh_probe_unqualified'):
+    with pytest.raises(ValueError, match='refresh_probe_unqualified') as failure:
         await database_snapshot(factory.kw['bind'].url, config)
+    assert failure.value.stage == ('schema' if fault == 'schema' else 'operations')
+    assert failure.value.error_type == 'ValueError'
     async with factory() as session:
         row = await session.get(NebiusApplicationOperation, operation.operation_id)
         assert row.runner_epoch == 0 and row.lease_token is None and row.phase == 'pending'
