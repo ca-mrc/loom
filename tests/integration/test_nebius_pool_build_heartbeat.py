@@ -84,7 +84,7 @@ async def test_local_heartbeat_rechecks_current_attempt_and_demand(sessions, tmp
 
 
 @pytest.mark.parametrize("phase", ["attached", "activation_pending"])
-async def test_pre_activation_heartbeat_is_local_and_cannot_extend_original_cutoff(sessions, phase):
+async def test_pre_activation_heartbeat_is_local_and_cannot_extend_original_cutoff(sessions, tmp_path, phase):
     participant, original, _ = await local_setup(sessions)
     request = original.model_copy(update={"deadline_at": datetime.now(UTC) + timedelta(seconds=60)})
     journal = outbox(sessions, participant)
@@ -93,15 +93,44 @@ async def test_pre_activation_heartbeat_is_local_and_cannot_extend_original_cuto
     if phase == "activation_pending":
         await journal.begin_activation(request.key)
     consent = (await journal.get(request.key)).activation
+    token = tmp_path / "pool-token"
+    token.write_text("test-local-heartbeat-token")
+    token.chmod(0o600)
 
     async def deny_http(request):
         raise AssertionError("local heartbeat attempted external I/O")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(deny_http)) as http:
-        controller = PoolNativeBuildController(driver=PoolBuildDriver(outbox=journal, management=client(http, "unused")),
+        controller = PoolNativeBuildController(driver=PoolBuildDriver(outbox=journal, management=client(http, token)),
             kubernetes=Reader())
         await controller.heartbeat_once()
     row, _ = await local_rows(sessions, request)
     assert row.lease_expires_at == request.deadline_at
     assert row.attempt_count == 1 and (await journal.get(request.key)).phase == phase
     assert (await journal.get(request.key)).activation == consent
+
+
+async def test_absolute_expiry_is_a_deadline_even_when_local_lease_was_clamped(sessions, tmp_path, monkeypatch):
+    import loom_execution_actuator.pool_build_runtime as runtime_module
+
+    app, token, _, request, journal = await selected(sessions, tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        handoff = await driver.advance(request.key)
+        runtime = await driver.management.native_runtime(handoff.action)
+        async with sessions.begin() as session:
+            await session.execute(update(TaskImageMaterialization).values(lease_expires_at=request.deadline_at))
+
+        async def after_deadline(session):
+            return request.deadline_at + timedelta(seconds=1)
+
+        monkeypatch.setattr(runtime_module, "_clock", after_deadline)
+        controller = PoolNativeBuildController(driver=driver, kubernetes=Reader())
+        await controller.heartbeat_once()
+        row, _ = await local_rows(sessions, request)
+        assert row.lease_expires_at == request.deadline_at  # No renewal after cutoff.
+        assert not await controller._record(runtime)
+    row, attempt = await local_rows(sessions, request)
+    assert attempt.native_build["pool_stop"]["cause"] == "deadline"
+    assert (await journal.get(request.key)).phase == "stop_pending"
+    assert row.attempt_count == 1
