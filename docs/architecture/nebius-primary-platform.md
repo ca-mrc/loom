@@ -1980,6 +1980,15 @@ the Trial, consume an attempt, reserve admission/cost/capacity, or append a comm
 The legacy scheduler immediately reserves the compiled candidate. A global
 consumer must durably freeze its selected target and runtime before prepare, then
 recheck local authority when attaching the grant; compilation alone is not a lease.
+The execution outbox now retains that pre-claim proposal, including its prospective
+lease UUID, immutable request and Trial/source/target snapshot. Exact grant
+attachment rechecks eligibility and preserves existing local admission, image and
+cost checks; only physical provisioning uses the global reservation. The lease
+starts with its final reservation-qualified Job name. Claim and outbox attachment
+commit together, including a deferred database check. Stale input or local denial
+leaves an unclaimed cancellation intent; it cannot activate different work or
+silently acquire local capacity. Execution activation/output recovery and the
+installed writer transition remain unconnected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

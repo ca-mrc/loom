@@ -43,6 +43,46 @@ class NebiusPoolSubmission(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
+class NebiusPoolExecutionOutbox(Base):
+    """Pre-claim execution identity and the exact remote physical grant."""
+
+    __tablename__ = "nebius_pool_execution_outbox"
+    __table_args__ = (
+        UniqueConstraint("reservation_id", name="nebius_pool_execution_outbox_grant_key"),
+        Index("nebius_pool_execution_outbox_live_key", "trial_id", unique=True,
+              postgresql_where=text("phase <> 'cancelled'")),
+        CheckConstraint("lease_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "participant_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "pool_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json)='object' AND "
+            "jsonb_typeof(selection_json)='object'", name="nebius_pool_execution_outbox_identity_check"),
+        CheckConstraint("phase IN ('selected','grant_pending','attached','cancel_pending','cancelled') AND "
+            "(phase <> 'selected' OR reservation_id IS NULL) AND "
+            "(phase NOT IN ('grant_pending','attached','cancelled') OR reservation_id IS NOT NULL) AND "
+            "(reservation_id IS NULL) = (receipt_json IS NULL) AND "
+            "(reservation_id IS NULL OR reservation_id <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
+            "(receipt_json IS NULL OR jsonb_typeof(receipt_json)='object') AND "
+            "(attached_lease_id IS NULL OR attached_lease_id=lease_id) AND "
+            "(phase='attached') = (attached_lease_id IS NOT NULL) AND "
+            "(phase='cancelled') = (cancelled_json IS NOT NULL) AND "
+            "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object')",
+            name="nebius_pool_execution_outbox_phase_check"),
+    )
+    lease_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    trial_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("trials.id", ondelete="RESTRICT"), nullable=False)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    participant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    selection_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    reservation_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    receipt_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    attached_lease_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("execution_leases.id", ondelete="RESTRICT"))
+    cancelled_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
 class NebiusPoolBuildOutbox(Base):
     """A durable selection is not a claimed attempt or permission to write a Job."""
 

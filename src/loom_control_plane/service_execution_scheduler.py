@@ -68,7 +68,7 @@ class CompiledServiceExecution:
     image_mode: Literal["reused", "built", "unknown", "prebuilt"]
 
 
-_NEXT_SERVICE_TRIAL = text("""
+_SERVICE_TRIAL_SQL = """
 SELECT t.id,
        t.submitted_at,
        t.task_id,
@@ -100,12 +100,23 @@ SELECT t.id,
             AND lease.execution_role = 'attempt'
             AND (lease.revoked_at IS NULL OR lease.cleanup_state != 'complete')
        )
+"""
+
+_NEXT_SERVICE_TRIAL = text(_SERVICE_TRIAL_SQL + """
  ORDER BY (q.in_flight_count::double precision / q.fair_share_weight) ASC,
           t.submit_priority DESC,
           t.submitted_at ASC,
           t.id ASC
  FOR UPDATE OF t SKIP LOCKED
  LIMIT 1
+""")
+
+# The exact preselected candidate is reloaded under the same eligibility rules.
+# Hold source/profile rows too: compilation or post-grant recheck cannot race a
+# concurrent change to the task definition or batch runtime configuration.
+_SERVICE_TRIAL_BY_ID = text(_SERVICE_TRIAL_SQL + """
+   AND t.id = :trial_id
+ FOR UPDATE OF t, task_definition, b
 """)
 
 
