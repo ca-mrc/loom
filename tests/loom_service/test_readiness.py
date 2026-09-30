@@ -4,6 +4,8 @@ import asyncio
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
+
 from loom.data_lifecycle import StagingCapacity, staging_capacity_policy_digest
 from loom.data_lifecycle_capacity import CAPACITY_SOURCE
 from loom_service.readiness import probe_dependencies
@@ -140,3 +142,39 @@ def test_dependency_readiness_rejects_empty_bucket_authority() -> None:
         assert str(exc) == "readiness bucket authority is invalid"
     else:  # pragma: no cover - defensive
         raise AssertionError("empty bucket authority was accepted")
+
+
+@pytest.mark.parametrize("failure", [None, "postgres", "object-store", "unexpected-postgres"])
+def test_api_only_probe_checks_dependencies_without_staging_capacity(failure: str | None) -> None:
+    from loom_service.readiness import probe_api_dependencies
+
+    session = _Session(values=(0 if failure == "unexpected-postgres" else 1,),
+                       error=RuntimeError("private-db-url") if failure == "postgres" else None)
+    storage = _Minio(failing={"shared-data"} if failure == "object-store" else None)
+    result = asyncio.run(probe_api_dependencies(
+        session, minio_client=storage, buckets=("shared-data", "shared-data"),  # type: ignore[arg-type]
+    ))
+    assert result.ready is (failure is None)
+    assert session.statements == ["SELECT 1"]
+    assert storage.calls == [("HEAD", "shared-data")]
+    body = result.to_dict()
+    assert body["mode"] == "api_only"
+    assert "capacity_ready" not in body and "mutation_epoch" not in body
+    assert "private-db-url" not in str(body) and "provider detail" not in str(body)
+    if failure == "object-store":
+        assert body["postgres"] == "ready" and body["object_store"] == "not-ready"
+    elif failure in {"postgres", "unexpected-postgres"}:
+        assert body["postgres"] == "not-ready" and body["object_store"] == "ready"
+
+
+@pytest.mark.parametrize("buckets", [(), ("",), ("x" * 64,)])
+def test_api_only_probe_rejects_invalid_configuration_without_external_calls(buckets: tuple[str, ...]) -> None:
+    from loom_service.readiness import probe_api_dependencies
+
+    session, storage = _Session(), _Minio()
+    result = asyncio.run(probe_api_dependencies(
+        session, minio_client=storage, buckets=buckets,  # type: ignore[arg-type]
+    ))
+    assert not result.ready
+    assert result.to_dict()["blockers"] == ["object-store-configuration-invalid"]
+    assert session.statements == [] and storage.calls == []
