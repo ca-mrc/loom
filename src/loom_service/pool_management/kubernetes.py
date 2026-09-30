@@ -23,6 +23,7 @@ from loom_service.pool_management.gateway_journal import (
     PoolGatewayJournal,
 )
 from loom_service.pool_management.kubernetes_identity import matches_frozen_workload
+from loom_service.pool_management.pod_cleanup import PoolPodCleanupJournal, PoolPodDeletion
 from loom_service.pool_management.pod_inventory import PoolPodInventory, PoolPodReference, owned_pod
 
 _MAX_BODY = 2 * 1024 * 1024
@@ -51,6 +52,7 @@ class KubernetesPoolGateway:
         if url.scheme != "https" or url.path != "/" or url.query or url.fragment or url.userinfo:
             raise ValueError("pool Kubernetes endpoint must be an HTTPS origin")
         self.journal, self.http = journal, http
+        self.pod_cleanup = PoolPodCleanupJournal(journal)
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *,
                        params: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -202,6 +204,49 @@ class KubernetesPoolGateway:
             raise
         except (ValueError, TypeError, KeyError, AttributeError):
             raise PoolKubernetesError("pool_kubernetes_invalid_inventory") from None
+
+    @staticmethod
+    def _pod_path(effect: PoolPodDeletion) -> str:
+        namespace: str = effect.created.document["metadata"]["namespace"]
+        return "/api/v1/namespaces/" + namespace + "/pods/" + effect.pod.name
+
+    async def _pod_present(self, effect: PoolPodDeletion) -> bool:
+        value = await self._request("GET", self._pod_path(effect))
+        if value is None:
+            return False
+        try:
+            uid, rv = self._identity(value, terminating=True)
+            matched = owned_pod(value, effect.created, uid=uid, resource_version=rv)
+            if matched is None or matched.uid != effect.pod.uid or matched.name != effect.pod.name:
+                raise ValueError
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise PoolKubernetesError("pool_kubernetes_pod_identity_conflict") from None
+        return True
+
+    async def delete_pod(self, principal: PoolPrincipal, reservation_id: UUID, *, pod: PoolPodReference) -> PoolPodDeletion:
+        """Retire one drained residual of a deleted Job; never release capacity."""
+        effect = await self.pod_cleanup.prepare(principal, reservation_id, pod=pod)
+        if effect.phase == "rejected":
+            assert effect.rejection_status is not None
+            raise PoolKubernetesRejectedError(effect.rejection_status)
+        await self._namespace(effect.created)
+        if effect.phase == "prepared":
+            present = await self._pod_present(effect)
+            permit = await self.pod_cleanup.dispatch(principal, effect.effect_id)
+            if permit is not None and present:
+                try:
+                    await self._request("DELETE", self._pod_path(permit), permit.document)
+                except PoolKubernetesRejectedError as exc:
+                    await self.pod_cleanup.reject(principal, effect.effect_id, status_code=exc.status_code)
+                    raise
+        current = await self.pod_cleanup.get(principal, effect.effect_id)
+        if current.phase == "rejected":
+            assert current.rejection_status is not None
+            raise PoolKubernetesRejectedError(current.rejection_status)
+        if await self._pod_present(current):
+            raise PoolKubernetesWaitingError
+        await self._namespace(current.created)
+        return await self.pod_cleanup.observe(principal, effect.effect_id)
 
     async def _pod_inventory(self, created: PoolGatewayEffect) -> PoolPodInventory:
         await self._namespace(created)

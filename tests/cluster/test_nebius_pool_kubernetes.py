@@ -7,6 +7,7 @@ can schedule on its node (the frozen cloud node-group selector is unmatched).
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import ssl
 import time
@@ -89,7 +90,7 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                 "kind": "Role", "metadata": {"name": "pool-create"}, "rules": [
                     {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "create", "delete"]},
                     {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["get", "create", "delete"]},
-                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]})
+                    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "delete"]}]})
             await asyncio.to_thread(rbac.create_namespaced_role_binding, namespace, {"apiVersion": "rbac.authorization.k8s.io/v1",
                 "kind": "RoleBinding", "metadata": {"name": "pool-create"}, "subjects": [subject],
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "pool-create"}})
@@ -205,12 +206,45 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                         # Real foreground Job/Pod termination completes before
                         # output drain; only final auxiliaries require drain.
                         await accept_drain(sessions, owner, drain_input(stop))
+                        if workload_kind == "task_image_build":
+                            # A delayed controller write can leave a residual
+                            # after Job retirement. Hold this disposable Pod
+                            # with a test-owned finalizer to exercise the real
+                            # UID DELETE and prove it cannot clear finalizers.
+                            created = await journal.get_created(principal, receipt.reservation_id, kind="Job")
+                            template = copy.deepcopy(created.document["spec"]["template"])
+                            namespace = created.document["metadata"]["namespace"]
+                            name = created.document["metadata"]["name"] + "-late"
+                            template["metadata"].update(name=name, namespace=namespace,
+                                finalizers=["loom.test/hold-cleanup"], ownerReferences=[{
+                                    "apiVersion": "batch/v1", "kind": "Job", "controller": True,
+                                    "uid": str(created.observed_uid), "name": created.document["metadata"]["name"]}])
+                            await asyncio.to_thread(core.create_namespaced_pod, namespace,
+                                {"apiVersion": "v1", "kind": "Pod", **template})
+                            residual, = (await gateway.pod_inventory(principal, receipt.reservation_id)).pods
+                            with pytest.raises(PoolKubernetesWaitingError):
+                                await gateway.delete_pod(principal, receipt.reservation_id, pod=residual)
+                            held = await asyncio.to_thread(core.read_namespaced_pod, name, namespace)
+                            assert held.metadata.finalizers == ["loom.test/hold-cleanup"]
+                            unheld = await asyncio.to_thread(core.patch_namespaced_pod, name, namespace,
+                                [{"op": "test", "path": "/metadata/uid", "value": str(residual.uid)},
+                                 {"op": "test", "path": "/metadata/finalizers", "value": ["loom.test/hold-cleanup"]},
+                                 {"op": "remove", "path": "/metadata/finalizers"}])
+                            assert not unheld.metadata.finalizers, "test fixture did not remove its finalizer"
+                            deadline = time.monotonic() + 20
+                            while True:
+                                try:
+                                    assert (await gateway.delete_pod(principal, receipt.reservation_id, pod=residual)).phase == "observed"
+                                    break
+                                except PoolKubernetesWaitingError:
+                                    assert time.monotonic() < deadline, "test-owned residual did not retire"
+                                    await asyncio.sleep(0.1)
                 deadline = time.monotonic() + 20
                 while (await gateway.pod_inventory(principal, receipt.reservation_id)).pods:
                     assert time.monotonic() < deadline, "real residual Pod retirement did not converge"
                     await asyncio.sleep(0.1)
             deletes = [path for method, path in mutations if method == "DELETE"]
-            assert len(deletes) == len(set(deletes)) == 3
+            assert len(deletes) == len(set(deletes)) == 4
         legacy = await asyncio.to_thread(core.create_namespaced_service_account_token, "legacy", "pool-management",
             client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
         async with httpx.AsyncClient(base_url=config.host, verify=trust, trust_env=False,

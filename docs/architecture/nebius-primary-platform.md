@@ -1830,6 +1830,16 @@ adapter's disposable-cluster tests qualify real API defaulting, restricted write
 Job-created Pods and object retirement; they do not qualify the protected installer
 or a running global worker.
 
+Residual Pod retirement is a separate fixed write in the same effect journal,
+keyed by Pod UID and bound to the retained Job create effect, plan and namespace.
+It requires output drain and observed Job deletion before dispatch, so deleting a
+Pod cannot ask an active Job to replace it. The gateway rechecks live ownership
+and markers before one UID-preconditioned, zero-grace DELETE; response loss never
+resets permission or retries the mutation. Replaced identities block, and existing
+finalizers remain intact. An absent Pod completes only its deletion record, not
+the reservation. Complete namespace/object absence and write-fencing qualification
+still precede capacity release.
+
 The machine lifecycle API retains separate immutable stop and drain attestations
 bound to the exact request, reservation, frozen plan and native/execution lease
 generation. Stop fences new creates immediately and freezes termination grace,
@@ -1845,8 +1855,8 @@ existing runtime's actual state: signal cancellation while partial-output upload
 remain authorized, then confirm durable committed/unavailable output before final
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
-it does not qualify execution output. The execution runtime adapter, residual-Pod
-deletion, complete absence/release qualification and delayed-start absolute deadline
+it does not qualify execution output. The execution runtime adapter,
+complete absence/release qualification and delayed-start absolute deadline
 remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
