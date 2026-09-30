@@ -1835,6 +1835,11 @@ This primitive does not yet connect the installed controller, output drain,
 or release, and does not independently authorize an originating application.
 Database-backed HTTP tests connect this journal to real management prepare and
 activation; this is not evidence that installed controllers use it.
+The native handoff driver composes those committed steps with the participant
+client. It withdraws stale waiting demand before renewal, checks management status
+before activation, and recovers lost replies with the same selection/grant/attempt.
+It returns active or stop-pending work to the runtime reconciler; it never falls
+back to local capacity admission or direct Kubernetes writes.
 
 These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer

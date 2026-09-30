@@ -29,7 +29,6 @@ async def selected(sessions, tmp_path, **changes):
 @pytest.mark.parametrize("lost", [None, "prepare", "activate"])
 async def test_restart_recovers_one_grant_attempt_and_intent_after_lost_reply(sessions, tmp_path, lost):
     from loom_execution_actuator.pool_build_driver import PoolBuildDriver
-
     from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 
     app, token, participant, request, journal = await selected(sessions, tmp_path)

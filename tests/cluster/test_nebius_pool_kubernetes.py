@@ -108,7 +108,7 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
             receipts = []
             for body, preparing in [(executions[0], prepare), (builds[0], prepare_build)]:
                 await preparing(sessions, principals[0], body, profiles)
-                receipt = await operate(sessions, principals[0], action(body), profiles=profiles)
+                receipt = await operate(sessions, principals[0], action(body, activation=True), profiles=profiles)
                 if body.key.workload_kind == "task_image_build":
                     await gateway.create(principal, receipt.reservation_id, kind="ConfigMap")
                 try:

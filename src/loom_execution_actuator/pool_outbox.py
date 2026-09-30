@@ -201,6 +201,22 @@ class PoolBuildOutbox:
             await session.flush()
             return self._view(row)
 
+    async def refresh_selection(self, key: PoolRequestKeyV1) -> PoolBuildHandoff:
+        """Withdraw stale waiting demand even if management never grants it."""
+        async with self._transaction(key) as (session, row):
+            if row is None:
+                raise PoolHandoffError
+            if row.phase == "selected":
+                from loom.nebius_rollout_guard import admission_open
+
+                selected = await session.get(TaskImageMaterialization, row.materialization_id, with_for_update=True)
+                if (selected is None or _snapshot(selected) != row.selection_json
+                        or not await self._eligible(session, self._view(row).request, selected)
+                        or not await admission_open(session)):
+                    row.phase = "cancel_pending"
+                    await session.flush()
+            return self._view(row)
+
     def _receipt(self, row: NebiusPoolBuildOutbox, receipt: PoolReceiptV1) -> PoolReceiptV1:
         receipt = PoolReceiptV1.model_validate_json(receipt.model_dump_json())
         action = self._view(row).action

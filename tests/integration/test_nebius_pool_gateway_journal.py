@@ -24,7 +24,7 @@ async def setup(sessions, *, build=False, activate=True):
     body = builds[0] if build else executions[0]
     receipt = await (prepare_build if build else prepare)(sessions, principals[0], body, profiles)
     if activate:
-        receipt = await operate(sessions, principals[0], action(body), profiles=profiles)
+        receipt = await operate(sessions, principals[0], action(body, activation=True), profiles=profiles)
     gateway = await machine(sessions, participants[0].pool_id, role="gateway")
     return PoolGatewayJournal(sessions), gateway, receipt, principals[0]
 

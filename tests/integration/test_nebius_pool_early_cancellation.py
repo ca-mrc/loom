@@ -49,8 +49,9 @@ async def test_early_cancellation_rejects_changed_action_and_changed_prepare(ses
     receipt = await operate(sessions, principals[0], reference, operation="cancel")
     changed = reference.model_copy(update={"request_sha256": "f" * 64} if change == "digest" else {"admission_epoch": 99})
     for operation in ("status", "cancel", "activate"):
+        value = action(body, activation=True).model_copy(update={"action": changed}) if operation == "activate" else changed
         with pytest.raises(PoolControlError):
-            await operate(sessions, principals[0], changed, profiles=profiles, operation=operation)
+            await operate(sessions, principals[0], value, profiles=profiles, operation=operation)
     with pytest.raises(PoolAdmissionError):
         await prepare(sessions, principals[0], body.model_copy(update={"deadline_at": body.deadline_at + timedelta(seconds=1)}), profiles)
     assert await operate(sessions, principals[0], reference, operation="status") == receipt
