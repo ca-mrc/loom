@@ -85,6 +85,15 @@ def test_provider_quota_projection_rejects_invalid_unobserved_node_charges(count
         require_provider_quota_headroom(current, additional_nodes=count, peers=[])
 
 
+def test_provider_quota_projection_keeps_stable_failure_order_independent_of_json_key_order():
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", quota_nodes=0, used_nodes=0)
+    current["quota_resources"] = dict(reversed(list(current["quota_resources"].items())))
+    with pytest.raises(PlacementUnavailableError, match="provider_quota_nodes_exceeded"):
+        require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1, peers=[])
+
+
 def test_fragmented_nodes_cannot_combine_cpu_and_memory_holes():
     data = placement_fixture(target_id="a", nodes=2, node_cpu=4_000, node_memory=4_096)
     data["nodes"][0]["requested"].update(cpu_millis=3_500)
