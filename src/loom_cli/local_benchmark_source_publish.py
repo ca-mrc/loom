@@ -2,7 +2,7 @@
 
 Preparation owns short journal transactions; the final transaction alone owns
 benchmark, task, source and image admission. No storage call holds catalog locks.
-The CLI/default remains legacy until the other producers and retention converge.
+Existing local producers remain opt-in; native Harbor imports use this durable publisher.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from loom.task_bundle_source_publisher import TaskBundleSourcePublisher
 from loom.terminal_bench_normalize import normalize_terminal_bench_task_toml
 from loom.trajectory.storage import ObjectStore
 from loom_benchmark_tool.db_url import normalize_db_url
+from loom_cli.benchmark_types import PreparedAdapterBenchmark
 from loom_cli.local_benchmark_publish import (
     LocalBenchmarkPublishStats,
     _flatten_environment_subdir,
@@ -52,7 +53,7 @@ from loom_cli.local_benchmark_validate import (
 
 
 async def publish_versioned_local_benchmark(
-    result: LocalBenchmarkValidationResult,
+    result: LocalBenchmarkValidationResult | PreparedAdapterBenchmark,
     *,
     db_url: str,
     object_store: ObjectStore,
@@ -63,6 +64,7 @@ async def publish_versioned_local_benchmark(
     execution_profile: str | None = None,
 ) -> LocalBenchmarkPublishStats:
     entry = result.entry
+    adapter_tasks = {item["task_id"]: item for item in result.tasks.values()} if isinstance(result, PreparedAdapterBenchmark) else {}
     source_prefix = f"s3://{bucket}/{task_bundle_catalog_prefix(entry.id)}"
     engine = create_async_engine(normalize_db_url(db_url), isolation_level="READ COMMITTED")
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -77,7 +79,8 @@ async def publish_versioned_local_benchmark(
             await object_store.ensure_bucket(bucket)
         for task_toml in result.task_tomls:
             relative = task_toml.parent.relative_to(result.task_root)
-            task_id = entry.id if relative == Path(".") else f"{entry.id}/{relative.as_posix()}"
+            adapter_task = result.tasks[relative.as_posix()] if isinstance(result, PreparedAdapterBenchmark) else {}
+            task_id = adapter_task.get("task_id") or (entry.id if relative == Path(".") else f"{entry.id}/{relative.as_posix()}")
             with tempfile.TemporaryDirectory(prefix="loom-source-stage-") as stage_root:
                 staged = Path(stage_root) / "bundle"
                 shutil.copytree(task_toml.parent, staged, symlinks=False)
@@ -87,7 +90,10 @@ async def publish_versioned_local_benchmark(
                     issue for issue in collect_task_dir_compatibility_issues(staged)
                     if issue.severity == CompatibilitySeverity.ERROR
                 ]
-                if issues:
+                native_origin = (result.manifest.get("benchmark_profile_provenance", {}).get("upstream_origin")
+                                 if isinstance(result, PreparedAdapterBenchmark) else None)
+                declared = TaskConfig.model_validate(tomllib.loads((staged / "task.toml").read_text())).import_blockers
+                if issues and (native_origin is None or any(issue not in declared for issue in issues)):
                     raise LocalBenchmarkValidationError(
                         f"task bundle compatibility preflight failed for {task_id}:\n"
                         + format_compatibility_issues(issues),
@@ -126,6 +132,7 @@ async def publish_versioned_local_benchmark(
         async with sessions.begin() as session:
             await _upsert_benchmark(
                 session, entry=entry, source_prefix=source_prefix, imported_by=imported_by,
+                adapter_manifest=result.manifest if isinstance(result, PreparedAdapterBenchmark) else None,
             )
             tasks = []
             for task_id, (spec, _) in sorted(prepared.items()):
@@ -136,9 +143,10 @@ async def publish_versioned_local_benchmark(
                     checksum=spec.manifest.task_checksum,
                     config=spec.task_config,
                     source=spec.source_uri,
-                    source_provenance=spec.provenance,
+                    source_provenance={**adapter_tasks.get(task_id, {}).get("source_provenance", {}), **spec.provenance},
                     license=entry.license_spdx,
                     benchmark_id=entry.id,
+                    **({"tags": adapter_tasks[task_id]["tags"]} if task_id in adapter_tasks else {}),
                 )
                 if existing is None:
                     inserted += 1
@@ -167,4 +175,5 @@ async def publish_versioned_local_benchmark(
         compat_flattened_files=compat_flattened_files, bucket=bucket,
         source_prefix=source_prefix, execution_profile=execution_profile,
         profile_stats=profile_stats if execution_profile else None,
+        warnings=result.warnings if isinstance(result, PreparedAdapterBenchmark) else (),
     )

@@ -83,3 +83,11 @@ execution. Task-bundle fixtures live under `tests/fixtures/tasks/`.
 For third-party adapter authoring, see
 [Benchmark adapter](benchmark-adapter.md). For operator command examples, see
 the [operator runbook](../runbooks/operator-runbook.md).
+
+## Native Harbor packages
+
+Pinned native packages use `loom datasets prepare-harbor SPEC.json --output DIR`
+for local preservation/diagnostics and `loom datasets publish --harbor-source
+SPEC.json` for journaled, versioned catalog publication. Source descriptors,
+typed requirements, immutable origin binding and current runtime blockers are
+specified in [Shared Harbor-native intake](harbor-native-intake.md).

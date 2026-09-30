@@ -386,4 +386,18 @@ def test_harbor_projection_cannot_hide_timeouts_capabilities_or_artifact_require
     report = payload["compatibility_report"]["tasks"][0]
     assert report["original_requirements"]["artifacts"] == ["/var/log/task.log"]
     codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
-    assert {"unmapped_agent_requirement", "unmapped_artifact_requirement", "agent_capabilities_unsupported"} <= codes
+    assert "invalid_task_config" in codes
+    assert any("agent.max_timeout_sec" in item["reason"] for item in report["diagnostics"])
+
+    (bundle / "task.toml").write_text(tomli_w.dumps({
+        "task": {"name": "native"},
+        "required_agent_capabilities": ["nested-containers"],
+        "artifacts": ["/var/log/task.log"],
+        "agent": {"timeout_sec": 17},
+    }))
+    rc, payload = _report(tmp_path, capsys)
+    assert rc == 1
+    report = payload["compatibility_report"]["tasks"][0]
+    codes = {diagnostic["code"] for diagnostic in report["diagnostics"]}
+    assert {"structured_artifact_collection_runtime_unavailable", "agent_capabilities_unsupported"} <= codes
+    assert "unmapped_artifact_requirement" not in codes

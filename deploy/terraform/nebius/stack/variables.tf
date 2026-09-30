@@ -39,6 +39,11 @@ variable "target" {
     execution_preset           = string
     system_disk_gib            = number
     execution_disk_gib         = number
+    h100_pool = optional(object({
+      max_nodes      = number
+      disk_gib       = number
+      drivers_preset = string
+    }))
   })
 }
 
