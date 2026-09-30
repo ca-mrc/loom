@@ -1727,9 +1727,10 @@ registry, Secret, resource and runtime settings come only from its protected
 profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
 attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
-not its separate selection generation. Admission HTTP, actual
-caller outboxes, the gateway worker and protected writer migration are still
-required. Application-image builds remain a later consumer of the same ledger.
+not its separate selection generation. Admission HTTP and the native outbox are
+connected locally. Execution outbox integration, installed gateway startup and
+protected writer migration are still required. Application-image builds remain a
+later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
@@ -1758,9 +1759,9 @@ bound to that pool and participant; ordinary users, administrators, generic
 workers and observer/gateway credentials cannot substitute. Prepare and first
 activation require the protected runtime-profile catalog. The participant client
 uses bounded HTTPS requests, checks exact response identity, and never redirects
-or automatically retries uncertain writes. Connected controller/gateway workers,
-output-drain qualification and complete cleanup remain required before installation
-can enable global admission.
+or automatically retries uncertain writes. Execution-controller/output-drain
+integration and protected controller/gateway installation remain required before
+global admission can be enabled in the installation.
 
 Native runtime readback derives a bounded description from the retained activated
 plan, even when current profiles are unavailable. It returns the receipt, target,
@@ -1787,7 +1788,7 @@ before management HTTP. Published images come from that attempt's append-only
 publication rows, not the materialization's combined history. Valid successful
 publication is committed; failed, cancelled or lost-lease output is unavailable.
 Restart replays the saved evidence, grace and cause after a lost stop/drain reply.
-This consumer is not yet installed: queue selection, local release recovery and protected writer
+This consumer is not yet installed: protected startup and writer
 migration remain required.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
@@ -1860,6 +1861,16 @@ CREATE uncertainty remains charged until qualified observation or protected
 writer-fencing recovery; the latter and installed gateway orchestration remain
 separate boundaries.
 
+The local gateway worker now orchestrates these same fixed operations. Its
+pool-scoped keyset scan rechecks current gateway authority and closes SQL before
+Kubernetes I/O. Creation orders the optional ConfigMap before the Job. Cleanup
+recovers dispatched creates by observation only, signals an observed Job before
+output drain, then retires the observed auxiliary and owned residual Pods and
+runs the qualified absence verifier. It never dispatches a prepared create during
+cleanup or resets an uncertain effect. A waiting or failed request cannot prevent
+later retained requests from being reconciled. Completed requests leave the scan.
+This worker is not yet connected to protected installed startup.
+
 The machine lifecycle API retains separate immutable stop and drain attestations
 bound to the exact request, reservation, frozen plan and native/execution lease
 generation. Stop fences new creates immediately and freezes termination grace,
@@ -1876,7 +1887,7 @@ remain authorized, then confirm durable committed/unavailable output before fina
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
 it does not qualify execution output. The execution runtime adapter,
-gateway orchestration and delayed-start absolute deadline
+installed gateway startup and delayed-start absolute deadline
 remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
