@@ -106,6 +106,52 @@ def db_bundle(material):
     return next(value for name, value in material.items() if name.startswith("loom-application-db-"))
 
 
+def object_verifier(http, provider, platform_inputs, frozen):
+    from loom.nebius_application_contract import SharedDevelopmentBindingV1
+    from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
+
+    foundation = inputs(platform_inputs)[3]
+    return ApplicationObjectAccessVerifier(http, foundation=foundation,
+        shared=SharedDevelopmentBindingV1.model_validate(frozen["shared"]), storage=provider.storage)
+
+
+def object_success(request):
+    return httpx.Response(200, text=("<ListBucketResult xmlns='http://s3.amazonaws.com/doc/2006-03-01/'>"
+        f"<Name>{request.url.path[1:]}</Name><Prefix>loom-application-access-probe/</Prefix>"
+        "<KeyCount>0</KeyCount><MaxKeys>1</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>"))
+
+
+async def test_active_qualification_requires_read_only_access_to_all_storage_scopes(
+    applications, platform_inputs, database_access, shared_ca,
+):
+    provider, registry, _, _, _, lease, cloud, _ = await setup(applications, platform_inputs, database_access, shared_ca)
+    await provider.prepare(lease)
+    frozen = await registry.frozen_plan(lease)
+    foundation = inputs(platform_inputs)[3]
+    source_bucket = foundation.platform_config["buckets"]["source"]
+    denied = True
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if denied and request.url.path == "/" + source_bucket:
+            return httpx.Response(403, text="<Error><Code>AccessDenied</Code></Error>")
+        return object_success(request)
+
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"], transport=httpx.MockTransport(respond)) as http:
+        verifier = object_verifier(http, provider, platform_inputs, frozen)
+        with pytest.raises(ProviderWaitingError, match="application_object_access_not_ready"):
+            await provider.qualify(lease, verifier)
+        denied = False
+        requests.clear()
+        proof = await provider.qualify(lease, verifier)
+        assert proof.identity.operation_id == lease.operation_id
+    assert {r.url.path for r in requests} == {"/" + foundation.platform_config["buckets"][name]
+        for name in ("artifacts", "trajectories", "source")}
+    assert all(r.method == "GET" and "Credential=test-access-key/" in r.headers["Authorization"] for r in requests)
+    assert len(cloud.mutations) == 4  # Qualification never provisions or retries IAM.
+
+
 async def test_prepare_commits_real_revocable_login_and_reuses_shared_material(
     applications, platform_inputs, database_access, shared_ca,
 ):
