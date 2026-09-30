@@ -1207,6 +1207,18 @@ Any rollback after migration needs a qualified compatible candidate and a new
 operation. Personal HTTPS/login/lifecycle and concurrent-owner acceptance remain
 separate checks after a successful refresh.
 
+For a failed compatibility probe, protected `inspect` adds
+`failed_refresh_probes` for at most three recent failed probe Pods. It binds the
+Job owner UID, operation marker, installation, namespace, image and command before
+projecting exit status and allowlisted log diagnostics. After validating the
+immutable probe settings and fixed service-credential reference, it reads only
+the namespace-local `loom-platform-db` Secret to report URL-shape booleans. No
+credential, URL, raw log, exception message or configuration payload is exported.
+`current_url.status: observed_current` describes the credential currently stored,
+not necessarily the value used by the failed Pod. Missing or unqualified evidence
+is `unavailable`, not success. Inspection runs no SQL or Pod exec, creates no
+resources, and grants no retry, journal reset or manager restart authority.
+
 ## Before the first application
 
 Use the independently configured Terraform platform state and its cluster ID/API
