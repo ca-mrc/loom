@@ -169,3 +169,76 @@ def test_unknown_daemonset_strategy_never_qualifies(platform, strategy):
     platform["controllers"] = [ds]
     with pytest.raises(ManagementCapacityError):
         qualify(platform)
+
+
+@pytest.mark.parametrize('resource,value', [('cpu', '799m'), ('memory', '1407Mi'),
+    ('ephemeral-storage', '16383Mi'), ('pods', '6')])
+def test_capacity_failure_retains_numeric_fit_without_workload_details(platform, resource, value):
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
+
+    platform['nodes'][0]['status']['allocatable'][resource] = value
+    diagnostic = {}
+    with pytest.raises(ManagementCapacityError):
+        qualify_platform_capacity(**platform, planned=[], reserve=PlatformEnvelope(500, 1024, 0, 4096),
+            reserve_pods=4, diagnostic=diagnostic)
+    assert diagnostic['stage'] == 'capacity'
+    node, = diagnostic['nodes']
+    assert node['required'] == {'cpu_millis': 800, 'memory_mib': 1408,
+        'ephemeral_storage_mib': 16384, 'pods': 7}
+    assert node['placement_matches'] is True
+    assert set(diagnostic) == {'schema', 'stage', 'kind', 'error_type', 'nodes'}
+    assert 'containers' not in str(diagnostic) and 'backup' not in str(diagnostic)
+
+
+def test_inventory_decode_and_placement_have_distinct_closed_diagnostics(platform):
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
+
+    def fail():
+        diagnostic = {}
+        with pytest.raises(ManagementCapacityError):
+            qualify_platform_capacity(**platform, planned=[], reserve=PlatformEnvelope(0, 0, 0, 0),
+                reserve_pods=0, diagnostic=diagnostic)
+        return diagnostic
+
+    platform['controllers'][1]['spec']['concurrencyPolicy'] = 'Allow'
+    report = fail()
+    assert report['stage'] == 'controller_count' and report['kind'] == 'CronJob'
+    assert report['error_type'] == 'ValueError' and report['nodes'] == []
+    platform['controllers'][1]['spec']['concurrencyPolicy'] = 'Forbid'
+    platform['nodes'][0]['metadata']['labels']['loom.nebius/platform'] = 'foreign'
+    report = fail()
+    assert report['stage'] == 'node_eligibility' and report['nodes'] == []
+
+
+def test_diagnostic_collection_does_not_change_successful_fit(platform):
+    from scripts.ops.nebius_management_capacity import qualify_platform_capacity
+
+    diagnostic = {}
+    result = qualify_platform_capacity(**platform, planned=[], reserve=PlatformEnvelope(500, 1024, 0, 4096),
+        reserve_pods=4, diagnostic=diagnostic)
+    assert result == qualify(platform)
+    assert diagnostic['stage'] == 'complete'
+    assert diagnostic['error_type'] is None
+
+
+def test_nonmatching_planned_placement_is_not_reported_as_resource_shortage(platform):
+    from scripts.ops.nebius_management_capacity import (
+        ManagementCapacityError,
+        qualify_platform_capacity,
+    )
+
+    planned = workload('Deployment', 'manager')
+    planned['spec']['template']['spec']['nodeSelector'] = {'foreign': 'true'}
+    diagnostic = {}
+    with pytest.raises(ManagementCapacityError):
+        qualify_platform_capacity(**platform, planned=[planned], reserve=PlatformEnvelope(0, 0, 0, 0),
+            reserve_pods=0, diagnostic=diagnostic)
+    assert diagnostic['stage'] == 'placement'
+    assert diagnostic['nodes'] == [{'node_uid': platform['nodes'][0]['metadata']['uid'],
+        'placement_matches': False, 'allocatable': None, 'required': None}]

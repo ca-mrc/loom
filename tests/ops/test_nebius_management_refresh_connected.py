@@ -12,6 +12,7 @@ import json
 import ssl
 import tomllib
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import uuid4
@@ -334,6 +335,31 @@ def test_preflight_keeps_only_closed_prerequisite_stages(connected_refresh, monk
         api.preflight(state.request)
     assert error.value.stage == expected
     assert 'private-provider-payload' not in str(error.value)
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
+def test_actual_capacity_failure_survives_retained_and_refresh_wrappers(connected_refresh, monkeypatch):
+    from scripts.ops import nebius_management_refresh_entry as entry
+    from scripts.ops.nebius_application_upgrade_prerequisites import ApplicationUpgradePrerequisites
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+    checks = ApplicationUpgradePrerequisites(base=SimpleNamespace(inventory=lambda *args: []),
+        settings=state.root.inputs.prerequisites)
+    def preflight(request):
+        checks.diagnostic_stage = 'platform_capacity'
+        checks.platform_capacity(request)
+    monkeypatch.setattr(checks, 'preflight', preflight)
+    api.checks = checks
+    @contextmanager
+    def connected(_context, _operation):
+        yield api
+    monkeypatch.setattr(entry, 'connected_refresh_api', connected)
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        entry.execute_refresh(SimpleNamespace(request=state.request), {'operation_id': str(uuid4())}, 'preflight')
+    assert error.value.stage == 'refresh_platform_capacity'
+    assert error.value.capacity == {'schema': 'loom.nebius-platform-capacity-diagnostic.v1',
+        'stage': 'node_eligibility', 'kind': None, 'error_type': 'ManagementCapacityError', 'nodes': []}
     assert not writes(state) and not state.storage_calls and not state.public_calls
 
 

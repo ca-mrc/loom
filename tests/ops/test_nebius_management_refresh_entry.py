@@ -5,6 +5,7 @@ import hashlib
 import json
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -166,3 +167,32 @@ def test_blocked_refresh_entry_reports_only_bound_phase_not_provider_payload(com
     assert report == {'status': 'blocked', 'stage': 'refresh_' + stage, **{key: metadata[key]
         for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
     assert 'private-provider-payload' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('damage', [False, True])
+def test_refresh_entry_carries_only_valid_capacity_failure_details(completed_upgrade, monkeypatch, capsys, damage):
+    from scripts.ops import nebius_management_entry as entry
+    from scripts.ops import nebius_management_refresh_entry as refresh
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+    from tests.ops.test_nebius_management_gateway import capacity_report
+
+    root = load(completed_upgrade[0])
+    metadata, _, path = private_refresh(root)
+    detail = capacity_report()
+    if damage:
+        detail['provider_message'] = 'private-secret'
+    def preflight(_request):
+        raise ManagementRefreshInstallError('platform_capacity')
+    @contextmanager
+    def connected(_context, _operation):
+        yield SimpleNamespace(preflight=preflight, checks=SimpleNamespace(capacity_diagnostic=detail))
+    monkeypatch.setattr(refresh, 'connected_refresh_api', connected)
+    assert entry.main(str(path), 'preflight') == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['stage'] == 'refresh_platform_capacity'
+    if damage:
+        assert 'capacity' not in report
+    else:
+        assert report['capacity'] == detail
+    assert 'private-secret' not in json.dumps(report)
+    assert not Path(metadata['state_dir']).exists()

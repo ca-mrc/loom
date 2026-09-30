@@ -313,6 +313,9 @@ def main(operation_path: str, action: str) -> int:
                        **{key: qualified[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
             if qualified['schema'] == 'loom.nebius-management-refresh-operation.v1':
                 failure['operation_id'] = qualified['operation_id']
+                capacity = getattr(error, 'capacity', None)
+                if stage == 'refresh_platform_capacity' and isinstance(capacity, dict):
+                    failure['capacity'] = capacity
             print(json.dumps(safe_report(json.dumps(failure).encode(), qualified), sort_keys=True))
             # Zero here means a bound protocol response was delivered. Only the
             # outer rollout CLI decides success, and blocked always exits one.

@@ -293,6 +293,42 @@ def validate_recovery_report(value: dict[str, Any]) -> dict[str, Any]:
         raise GatewayError("invalid retirement recovery report") from None
 
 
+def validate_capacity_report(value: dict[str, Any]) -> dict[str, Any]:
+    """Only closed failure phases and scheduler totals, never Pod configuration."""
+    try:
+        if (set(value) != {'schema', 'stage', 'kind', 'error_type', 'nodes'}
+                or value['schema'] != 'loom.nebius-platform-capacity-diagnostic.v1'
+                or value['stage'] not in {'render', 'inventory', 'autoscaling', 'validation',
+                    'controller_decode', 'controller_count', 'pod_decode', 'node_decode',
+                    'node_eligibility', 'placement', 'accounting', 'capacity'}
+                or value['kind'] not in {None, 'Deployment', 'StatefulSet', 'ReplicaSet', 'DaemonSet',
+                    'Job', 'CronJob', 'Pod', 'Node', 'HorizontalPodAutoscaler'}
+                or value['error_type'] not in {'ValueError', 'KeyError', 'TypeError', 'AttributeError',
+                    'ManagementCapacityError', 'ManagementPrerequisiteError', 'OtherError'}
+                or not isinstance(value['nodes'], list) or len(value['nodes']) > 64):
+            raise ValueError
+        seen = set()
+        for node in value['nodes']:
+            uid = node['node_uid']
+            if (set(node) != {'node_uid', 'placement_matches', 'allocatable', 'required'}
+                    or str(UUID(uid)) != uid or not UUID(uid).int or uid in seen
+                    or type(node['placement_matches']) is not bool):
+                raise ValueError
+            seen.add(uid)
+            for key in ('allocatable', 'required'):
+                totals = node[key]
+                if not node['placement_matches']:
+                    if totals is not None:
+                        raise ValueError
+                elif (not isinstance(totals, dict)
+                        or set(totals) != {'cpu_millis', 'memory_mib', 'ephemeral_storage_mib', 'pods'}
+                        or any(type(number) is not int or not 0 <= number < 2**63 for number in totals.values())):
+                    raise ValueError
+        return value
+    except Exception:
+        raise GatewayError('invalid platform capacity diagnostic') from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -322,6 +358,10 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
             result["stage"] = value["stage"]
+        if 'capacity' in value:
+            if not refresh or status != 'blocked' or value['stage'] != 'refresh_platform_capacity':
+                raise ValueError()
+            result['capacity'] = validate_capacity_report(value['capacity'])
         if status in {"pending", success}:
             uid, revision = value["namespace_uid"], value["revision"]
             if str(UUID(uid)) != uid or UUID(uid).int == 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", revision):
