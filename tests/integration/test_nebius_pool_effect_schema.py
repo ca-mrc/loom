@@ -1,6 +1,7 @@
 """The gateway cannot erase or replay a dispatched external write in PostgreSQL."""
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -11,11 +12,17 @@ from tests.integration.test_nebius_pool_schema import advance, registered, reque
 from tests.integration.test_nebius_pool_schema import pool_database as pool_database
 
 
-def prepared(connection, **changes):
-    from loom.db.nebius_pool_schema import NebiusPoolEffect
+def prepared(connection, *, request_changes=None, **changes):
+    from loom.db.nebius_pool_schema import (
+        NebiusPoolBinding,
+        NebiusPoolEffect,
+        NebiusPoolParticipant,
+    )
 
     pool, participant = registered(connection)
-    row = request(connection, pool, participant)
+    connection.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == pool).values(mode="global"))
+    connection.execute(update(NebiusPoolParticipant).where(NebiusPoolParticipant.participant_id == participant).values(phase="active"))
+    row = request(connection, pool, participant, **(request_changes or {}))
     advance(connection, row, "create_intent", plan_sha256="d" * 64, plan_json={"fixed": True})
     effect = dict(effect_id=uuid4(), request_id=row["request_id"], plan_sha256=row["plan_sha256"],
         namespace_uid=row["namespace_uid"], effect_key="create:job", sequence=1,
@@ -84,3 +91,27 @@ def test_new_effect_must_bind_the_existing_frozen_plan_and_begin_prepared(pool_d
     with pool_database.begin() as connection:
         with pytest.raises(DBAPIError), connection.begin_nested():
             prepared(connection, **changes)
+
+
+@pytest.mark.parametrize("fence", ["closed", "epoch", "participant", "cleanup", "expired"])
+def test_prepared_create_cannot_dispatch_after_intake_or_request_is_fenced(pool_database, fence):
+    from loom.db.nebius_pool_schema import (
+        NebiusPoolBinding,
+        NebiusPoolEffect,
+        NebiusPoolParticipant,
+    )
+
+    with pool_database.begin() as connection:
+        row, effect = prepared(connection, request_changes={"deadline_at": datetime.now(UTC) - timedelta(seconds=1)}
+                               if fence == "expired" else None)
+        if fence in {"closed", "epoch"}:
+            connection.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == row["pool_id"]).values(
+                **({"mode": "closed"} if fence == "closed" else {"admission_epoch": 2})))
+        elif fence == "participant":
+            connection.execute(update(NebiusPoolParticipant).where(
+                NebiusPoolParticipant.participant_id == row["participant_id"]).values(phase="fenced"))
+        elif fence == "cleanup":
+            advance(connection, row, "cleanup_intent")
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            dispatch(connection, effect)
+        assert connection.execute(select(NebiusPoolEffect.phase).where(NebiusPoolEffect.effect_id == effect["effect_id"])).scalar_one() == "prepared"
