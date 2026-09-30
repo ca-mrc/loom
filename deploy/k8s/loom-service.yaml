@@ -72,16 +72,8 @@ spec:
           value: 'False'
         - name: LOOM_SVC_GATEWAY_URL
           value: http://loom-llm-gateway:9100
-        - name: HF_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: loom-secrets
-              key: huggingface-api-key
-              optional: true
         - name: LOOM_SVC_K8S_WORKER_ENABLED
           value: 'True'
-        - name: LOOM_SVC_LOCAL_SERVERS_JSON
-          value: '{}'
         - name: LOOM_SVC_LOG_LEVEL
           value: info
         - name: LOOM_SVC_MANAGEMENT_HTTP_BODY_TIMEOUT_SEC

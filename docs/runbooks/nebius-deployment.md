@@ -129,9 +129,22 @@ Download `nebius-inspect-RUN_ID-ATTEMPT` for the sanitized
 `management-preflight.json` artifact. It contains the configured candidate,
 namespace identities, node allocatable resources, declared Pod requests including
 init containers and overhead, services/ingress, PVC sizes and storage classes.
-It excludes Secret values, Pod environment/commands, annotations, kubeconfig and
+It excludes Secret values, arbitrary Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
+
+`controller_inventory` adds Deployment/CronJob identities, declared ServiceAccounts,
+selected execution target/pool/group identifiers and database Secret references.
+Referenced `envFrom` ConfigMaps are projected through the same field allowlist;
+It never fetches Secret resources; inline database URLs are redacted from the
+Deployment/ConfigMap responses and never exported. The report
+also lists RoleBinding/ClusterRoleBinding grants for Job-write verbs, including
+wildcards and group subjects, and explicitly identifies unresolved role references.
+This discovers guest controllers and target aliases without assuming one controller
+per environment. It does not resolve database identities, prove running Pods match
+templates, cover every possible workload writer, or establish effective fencing.
+Use it to prepare exact migration inputs, not as permission to stop foreign work.
+An unreadable or partially paginated resource list fails inspection.
 
 The `kube-system/coredns` Service entry also includes fixed `dns_checks`
 booleans for deletion/ownership, native or legacy selector matching, a usable
