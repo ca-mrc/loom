@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from uuid import UUID
 import httpx
 import uvicorn
 from fastapi import FastAPI, Response
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -44,6 +45,15 @@ class PoolGatewaySettings(BaseSettings):
     poll_seconds: float = Field(default=2, ge=0.1, le=60, allow_inf_nan=False)
     health_host: str = "0.0.0.0"
     health_port: int = Field(default=9120, ge=1, le=65535)
+
+    @field_validator("admission_epoch", mode="before")
+    @classmethod
+    def environment_epoch(cls, value: object) -> object:
+        # Environment settings are strings; retain strict integer validation for
+        # direct inputs and reject booleans, decimals and noncanonical spellings.
+        if isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,18}", value):
+            return int(value)
+        return value
 
     @model_validator(mode="after")
     def bound(self) -> PoolGatewaySettings:

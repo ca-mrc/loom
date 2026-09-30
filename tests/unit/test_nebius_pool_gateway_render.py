@@ -85,3 +85,19 @@ def test_gateway_renderer_rejects_unqualified_kubernetes_origin(endpoint):
     with pytest.raises(ValueError):
         render_gateway(PoolInstallation.model_validate(config), namespace="loom-nebius-management",
             service_image="registry.example/service@sha256:" + "a" * 64, kubernetes_endpoint=endpoint)
+
+
+@pytest.mark.parametrize("epoch", [True, "true", "2.0", "0", "-1", " 2", "02"])
+def test_epoch_environment_normalization_keeps_noncanonical_values_invalid(epoch):
+    from loom_service.pool_management.__main__ import PoolGatewaySettings
+
+    spec, _, documents = rendered()
+    container, = documents["workload"][0]["spec"]["template"]["spec"]["containers"]
+    values = {row["name"].removeprefix("LOOM_POOL_GATEWAY_").lower(): row.get("value", "postgresql+psycopg://test:test@localhost/test")
+        for row in container["env"]}
+    values["kubernetes"] = json.loads(values["kubernetes"])
+    values["admission_epoch"] = spec.admission_epoch
+    PoolGatewaySettings(_env_file=None, **values)
+    values["admission_epoch"] = epoch
+    with pytest.raises(ValueError):
+        PoolGatewaySettings(_env_file=None, **values)

@@ -2068,6 +2068,17 @@ failed authorization or reconciliation clears readiness. Server termination stop
 and drains background work before its HTTP clients and database engine close.
 The entrypoint does not provision its own RBAC or bypass the protected migration.
 
+Its fixed installation renderer separates configuration, gateway authority and
+workload phases. It renders the gateway Deployment with zero replicas and a
+dedicated ServiceAccount, projected rotating Kubernetes token/CA, and a distinct
+owner-only machine token copied by a non-root initializer. The machine token has
+no Kubernetes authority; the projected token is not a management API credential.
+Only the registered execution/build namespaces receive Job/ConfigMap create and
+delete plus Pod observation/cleanup rights. Cluster scope permits exact namespace
+identity reads, not namespace listing, Secrets or RBAC access. The protected
+migration still owns Secret delivery, old-writer fencing, manager catalog wiring,
+startup and admission activation; rendering these documents performs none of them.
+
 Initial registration uses the fixed `loom_service.pool_management.installation`
 Job and a versioned `loom.pool-installation.v1` configuration. It binds physical
 pool identity, exact participant namespaces/targets, the renderer catalog and
