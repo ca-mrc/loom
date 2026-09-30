@@ -8,6 +8,7 @@ import boto3
 import httpx
 import pytest
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.minio import MinioContainer
@@ -30,6 +31,13 @@ async def test_readiness_without_staging_tables_and_missing_bucket(
     buckets = ("readiness-artifacts", "readiness-trajectories")
     for bucket in buckets:
         s3.create_bucket(Bucket=bucket)
+    # Keep real MinIO object operations while reproducing Nebius object-editor's
+    # refusal of bucket metadata. Readiness must work even for empty buckets.
+    def denied_bucket_metadata(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "private-provider-secret"},
+                           "ResponseMetadata": {"HTTPStatusCode": 403}}, "HeadBucket")
+
+    monkeypatch.setattr(s3, "head_bucket", denied_bucket_metadata)
     # A database with no Loom tables makes accidental staging SQL observable.
     with PostgresContainer("postgres:16") as pg:
         engine = create_async_engine(pg.get_connection_url().replace(
@@ -75,6 +83,7 @@ async def test_readiness_without_staging_tables_and_missing_bucket(
                     assert all(bucket not in response.text for bucket in buckets)
                 assert token not in response.text
                 assert cfg["secret_key"] not in response.text
+                assert "private-provider-secret" not in response.text
                 assert (await client.get("/api/v1/health")).status_code == 200
         finally:
             await engine.dispose()

@@ -313,15 +313,16 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
         await session.commit()
 
     transport = httpx.ASGITransport(app=app)
-    head_buckets: list[str] = []
+    listed_buckets: list[tuple[str, int]] = []
 
-    def _head_bucket(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
-        head_buckets.append(Bucket)
+    def _list_objects(*, Bucket: str, MaxKeys: int) -> dict[str, object]:  # noqa: N803 - boto3 API
+        listed_buckets.append((Bucket, MaxKeys))
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}, "KeyCount": 0}
 
     monkeypatch.setattr(
         app.state.minio_client,
-        "head_bucket",
-        _head_bucket,
+        "list_objects_v2",
+        _list_objects,
     )
     async with httpx.AsyncClient(
         transport=transport, base_url="http://svc",
@@ -354,7 +355,7 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     assert readiness.status_code == 200, readiness.text
     assert readiness.json()["status"] == "ready"
     assert readiness.json()["blockers"] == []
-    assert head_buckets == ["artifacts", "trajectories"]
+    assert listed_buckets == [("artifacts", 1), ("trajectories", 1)]
     async with app.state.session_factory() as session:
         usage = (await session.execute(
             select(Token.last_seen_at, Token.last_used_at).where(
@@ -373,14 +374,15 @@ async def test_api_only_readiness_uses_own_dependencies_and_retains_authenticati
     app.state.settings = app.state.settings.model_copy(update={"service_mode": "api_only"})
     monkeypatch.setenv("LOOM_ENV", "development")
     monkeypatch.setenv("LOOM_NAMESPACE", "loom-dev-personal-readiness")
-    calls: list[str] = []
+    calls: list[tuple[str, int]] = []
 
-    def head_bucket(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
-        calls.append(Bucket)
+    def list_objects(*, Bucket: str, MaxKeys: int) -> dict[str, object]:  # noqa: N803 - boto3 API
+        calls.append((Bucket, MaxKeys))
         if not storage_available:
             raise RuntimeError("private-provider-secret")
+        return {"ResponseMetadata": {"HTTPStatusCode": 200}, "KeyCount": 0}
 
-    monkeypatch.setattr(app.state.minio_client, "head_bucket", head_bucket)
+    monkeypatch.setattr(app.state.minio_client, "list_objects_v2", list_objects)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
         anonymous = await client.get("/api/v1/health/ready")
         assert anonymous.status_code == 401
@@ -392,7 +394,7 @@ async def test_api_only_readiness_uses_own_dependencies_and_retains_authenticati
     assert body["object_store"] == ("ready" if storage_available else "not-ready")
     assert "capacity_ready" not in body and "mutation_epoch" not in body
     assert "private-provider-secret" not in response.text
-    assert calls == ["artifacts", "trajectories"]
+    assert calls == [("artifacts", 1), ("trajectories", 1)]
 
 
 async def test_api_only_readiness_handles_database_failure_during_authentication(
