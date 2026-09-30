@@ -848,12 +848,19 @@ Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode, Claude Code,
 Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
 but new submissions are rejected with the reason.
 
-On hosted (Nebius) deployments, native execution currently runs only
-`direct-completion` (and its `litellm` alias) and `terminus-2`. OpenHands, Codex
-and Oracle are supported product entries but are not yet connected to native
-execution: `/api/v1/agents` reports them as `unavailable` with that reason, and
-hosted submissions naming them are rejected before admission. Local Docker
-execution is unaffected. Tracking: #2054.
+On hosted (Nebius) deployments, native execution currently runs
+`direct-completion` (and its `litellm` alias), `terminus-2` and `oracle`.
+OpenHands and Codex are supported product entries but are not yet connected to
+native execution: `/api/v1/agents` reports them as `unavailable` with that
+reason, and hosted submissions naming them are rejected before admission. Local
+Docker execution is unaffected. Tracking: #2054.
+
+Hosted Oracle runs in the same private task sandbox as Terminus-2, so it needs a
+task image (or a Dockerfile the platform prepares), and the task must have a
+script verifier under `verifier/`. Only Oracle's sandbox receives `solution/`;
+it is removed again before the workspace snapshot and grading, and model agents
+never see it. Oracle makes no model calls: its accounting records zero calls,
+and a Gateway call during an Oracle attempt fails materialization.
 
 A response-only task for `direct-completion`/`litellm` should leave
 `environment.docker_image` (and `dockerfile`) unset. It then runs in the
@@ -866,6 +873,17 @@ with only `323`) is built with:
 ```bash
 uv run python scripts/ops/build_agent_model_acceptance_taskset.py --output /tmp/ts-2054
 loom tasksets submit /tmp/ts-2054
+```
+
+The workspace acceptance TaskSet (`agent-model-2054/workspace-csv-summary`)
+exercises a real read/write/execute loop for OpenHands, Terminus-2 and Codex, and
+Oracle's reference solution. Its image is prepared from the task's Dockerfile.
+The verifier reports `report` (exact integer totals) and `reproduced` (the
+generated `summarize.py` recreates them from the task input):
+
+```bash
+uv run python scripts/ops/build_agent_model_acceptance_taskset.py --task workspace --output /tmp/ts-2054-ws
+loom tasksets submit /tmp/ts-2054-ws
 ```
 
 Every model-backed selection needs an explicitly selected, authorized

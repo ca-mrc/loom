@@ -1,4 +1,5 @@
-"""Trusted phase entry points for Harbor against private native Pod sandboxes.
+"""Trusted phase entry points for Harbor (Terminus-2) and Oracle against
+private native Pod sandboxes.
 
 Only the controller sees the immutable task bundle and durable outputs. The
 agent task and fresh verifier receive their inputs over different Unix sockets.
@@ -33,6 +34,12 @@ from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
+from loom.service_execution_oracle import (
+    ORACLE_SOLUTION_PATHS,
+    oracle_usage,
+    remove_oracle_solution,
+    run_oracle,
+)
 from loom.service_execution_task import (
     ServiceExecutionTaskError,
     _safe_workspace_path,
@@ -173,6 +180,8 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     services_retained = False
     driver_started = False
     lifecycle = task.environment.service_lifecycle
+    oracle = trial.agent_name == "oracle"
+    solution_staged = False
     timed_out = False
     finalizing = False
     termination_signals = 0
@@ -197,9 +206,12 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                 trial_id, team_id = await _execution_identity(gateway)
                 await driver.start()
                 driver_started = True
+                # Only Oracle's own sandbox receives the reference solution.
+                solution_staged = oracle
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=_agent_input_exclusions(task),
+                    trusted_private_paths=ORACLE_SOLUTION_PATHS if oracle else (),
                 )
                 if task.environment.preserve_acls:
                     from loom.trial.workspace_acls import require_acl_support
@@ -225,11 +237,17 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     workspace, str(task.steps[0].instruction_file),
                 ).read_text()
                 agent_entered = True
-                await run_terminus2(
-                    driver=driver, workspace=output, task_config=task, trial_config=trial,
-                    trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
-                    deadline=deadline,
-                )
+                if oracle:
+                    await run_oracle(
+                        driver=driver, task_dir=workspace, workspace=output, task_config=task,
+                        trial_config=trial, trial_id=trial_id, deadline=deadline,
+                    )
+                else:
+                    await run_terminus2(
+                        driver=driver, workspace=output, task_config=task, trial_config=trial,
+                        trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
+                        deadline=deadline,
+                    )
                 handoff_allowed = True
         except (TimeoutError, asyncio.CancelledError):
             if deadline is None or not deadline.reached or not agent_entered:
@@ -249,7 +267,9 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     if agent_entered:
                         try:
                             trace = output / "trajectory.jsonl"
-                            if trace.exists() and trial_id is not None:
+                            if oracle:
+                                _write_json_atomic(output / "usage.json", oracle_usage())
+                            elif trace.exists() and trial_id is not None:
                                 events = parse_terminus_events(
                                     trace.read_bytes(), trial=trial, trial_id=trial_id,
                                 )
@@ -272,6 +292,11 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 await driver.pause_processes()
                             else:
                                 await driver.stop_processes()
+                    if solution_staged and driver_started:
+                        # Before the snapshot, and before an in-place verifier
+                        # refuses planted private paths.
+                        await remove_oracle_solution(driver, task.environment.workdir)
+                    if agent_entered:
                         archive = workspace / ".loom/workspace.tar"
                         await _export_workspace_archive(
                             driver, task.environment.workdir, archive,
@@ -515,7 +540,7 @@ async def _run_verifier(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("terminus-2", "verify-sandbox"))
+    parser.add_argument("phase", choices=("terminus-2", "oracle", "verify-sandbox"))
     parser.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args()
     workspace = args.workspace
@@ -526,13 +551,16 @@ def main() -> None:
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
-    phase = run_agent if args.phase == "terminus-2" else run_verifier
+    agent_phase = args.phase != "verify-sandbox"
+    if agent_phase and args.phase != trial.agent_name:
+        raise ServiceExecutionTaskError("execution phase does not match the selected agent")
+    phase = run_agent if agent_phase else run_verifier
     try:
         asyncio.run(phase(workspace, task, trial))
     except AgentTimeoutFinalizedError:
         raise
     except Exception as exc:
-        directory = "agent" if args.phase == "terminus-2" else "verifier"
+        directory = "agent" if agent_phase else "verifier"
         path = workspace / ".loom" / directory / "exception.json"
         # An agent failure is captured before cleanup, which can also fail.
         # Keep that original identity instead of replacing it during unwinding.

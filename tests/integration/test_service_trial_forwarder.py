@@ -711,20 +711,28 @@ async def test_cancel_cross_team_403(
 async def test_hosted_trial_rejects_agent_without_native_execution(
     fwd_setup: tuple[FastAPI, str, UUID, dict[str, list[dict[str, str]]]],
     monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
 ) -> None:
     """#2054: hosted single trials run natively on Nebius, which cannot run
-    Oracle yet; say so instead of forwarding a doomed trial."""
+    Codex yet; say so instead of forwarding a doomed trial."""
     monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
-    app, raw, _team_id, captured = fwd_setup
+    app, raw, team_id, captured = fwd_setup
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://svc",
     ) as ac:
         r = await ac.post(
             "/api/v1/trials",
             headers={"Authorization": f"Bearer {raw}"},
-            json={"task_id": "local/task-1", "config": {"agent_name": "oracle", "agent_model": None}},
+            json={
+                "task_id": "local/task-1",
+                "config": {
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
+                },
+                "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
+            },
         )
 
     assert r.status_code == 400, r.text
-    assert "agent 'oracle' is not yet runnable on hosted (Nebius) execution" in r.json()["detail"]
+    assert "agent 'codex' is not yet runnable on hosted (Nebius) execution" in r.json()["detail"]
     assert captured["reqs"] == []
