@@ -14,6 +14,7 @@ def participant(**changes):
         "participant_id": "10000000-0000-4000-8000-000000000001",
         "installation_id": "20000000-0000-4000-8000-000000000001",
         "environment_id": "30000000-0000-4000-8000-000000000001",
+        "environment_class": "development",
         "incarnation": "40000000-0000-4000-8000-000000000001",
         "pool_id": "50000000-0000-4000-8000-000000000001",
         "binding_revision": 1,

@@ -12,6 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PoolWorkloadKind = Literal["trial", "verifier", "task_image_build", "application_image_build"]
+PoolEnvironmentClass = Literal["production", "staging", "development"]
 _Generation = Annotated[int, Field(gt=0, le=2**63 - 1, strict=True)]
 _NAMESPACE = r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$"
 _TARGET = r"^[a-z0-9][a-z0-9-]{0,79}$"
@@ -58,6 +59,7 @@ class PoolParticipantV1(_PoolContract):
     participant_id: UUID
     installation_id: UUID
     environment_id: UUID
+    environment_class: PoolEnvironmentClass
     incarnation: UUID
     pool_id: UUID
     binding_revision: _Generation
