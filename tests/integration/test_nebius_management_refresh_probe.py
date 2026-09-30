@@ -115,8 +115,10 @@ async def test_incompatible_retained_state_blocks_refresh_without_claims(applica
             else:
                 plan['unknown_contract'] = True
             row.plan_json = plan
-    with pytest.raises(ValueError, match='refresh_probe_unqualified'):
+    with pytest.raises(ValueError, match='refresh_probe_unqualified') as failure:
         await database_snapshot(factory.kw['bind'].url, config)
+    assert failure.value.stage == ('schema' if fault == 'schema' else 'operations')
+    assert failure.value.error_type == 'ValueError'
     async with factory() as session:
         row = await session.get(NebiusApplicationOperation, operation.operation_id)
         assert row.runner_epoch == 0 and row.lease_token is None and row.phase == 'pending'

@@ -227,6 +227,10 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
             core.create_namespaced_service_account(ns, {'metadata': {'name': 'loom-platform'},
                 'automountServiceAccountToken': False})
             for name, values in generate_management_material(namespace=ns).items():
+                if ns == shared and name == 'loom-platform-db':
+                    # The installed shared platform uses the explicit psycopg
+                    # spelling; exercise both accepted forms in actual Jobs.
+                    values['service-url'] = values['service-url'].replace('postgresql://', 'postgresql+psycopg://', 1)
                 secret = core.create_namespaced_secret(ns, {'metadata': {'name': name}, 'immutable': True,
                     'stringData': values})
                 retained[(ns, name)] = secret.metadata.uid

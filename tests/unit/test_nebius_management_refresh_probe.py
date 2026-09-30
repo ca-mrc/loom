@@ -25,12 +25,13 @@ def db_url(settings):
 
 
 @pytest.mark.parametrize('mode', ['manager', 'shared'])
-def test_bound_service_url_requires_exact_database_role_route_and_tls(platform_inputs, mode):
+@pytest.mark.parametrize('driver', ['postgresql', 'postgresql+psycopg'])
+def test_bound_service_url_requires_exact_database_role_route_and_tls(platform_inputs, mode, driver):
     settings = config(platform_inputs, mode)
-    url = db_url(settings)
+    url = db_url(settings).set(drivername=driver)
     assert probe.refresh_database_url(url.render_as_string(hide_password=False), settings) == url.set(drivername='postgresql+psycopg')
     for key, value in [('host', 'external.example'), ('username', 'loom_admin'), ('database', 'postgres'),
-                       ('port', 5433), ('drivername', 'postgresql+psycopg'), ('password', ''),
+                       ('port', 5433), ('drivername', 'postgresql+asyncpg'), ('drivername', 'mysql'), ('password', ''),
                        ('query', {'sslmode': 'require'}), ('query', dict(url.query) | {'options': '-c search_path=other'})]:
         with pytest.raises(ValueError, match='refresh_probe_unqualified'):
             probe.refresh_database_url(url.set(**{key: value}).render_as_string(hide_password=False), settings)
@@ -77,5 +78,7 @@ def test_fixed_entry_sanitizes_configuration_and_database_errors(platform_inputs
 
     monkeypatch.setattr(probe, 'database_snapshot', snapshot)
     assert probe.main() == 1
-    assert json.loads(capsys.readouterr().out) == {'schema': probe.SCHEMA, 'status': 'unqualified'}
+    assert json.loads(capsys.readouterr().out) == {'schema': probe.SCHEMA, 'status': 'unqualified',
+        'stage': 'settings' if fault in ('oversize', 'extra_setting') else 'database_url' if fault == 'url' else 'database',
+        'error_type': 'ValidationError' if fault == 'extra_setting' else 'OtherError' if fault == 'database' else 'ValueError'}
     assert calls == ([True] if fault == 'database' else [])
