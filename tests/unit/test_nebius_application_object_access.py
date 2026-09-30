@@ -58,7 +58,7 @@ async def test_wrong_protected_origin_never_receives_retired_credentials(protect
     assert requests == []
 
 
-@pytest.mark.parametrize("failure", ["timeout", "redirect", "malformed", "encoding"])
+@pytest.mark.parametrize("failure", ["timeout", "redirect", "malformed", "encoding", "multibyte-encoding"])
 async def test_unknown_response_never_proves_revocation_or_retries(protected_scope, failure):
     requests = []
 
@@ -70,6 +70,8 @@ async def test_unknown_response_never_proves_revocation_or_retries(protected_sco
             return httpx.Response(307, headers={"Location": "https://foreign.test/"})
         if failure == "encoding":
             return httpx.Response(403, text='<?xml version="1.0" encoding="invalid-encoding"?><Error/>')
+        if failure == "multibyte-encoding":
+            return httpx.Response(403, text='<?xml version="1.0" encoding="UTF-32"?><Error/>')
         return httpx.Response(403, text="not XML")
 
     async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"], transport=httpx.MockTransport(response)) as http:
@@ -173,17 +175,60 @@ async def test_active_key_qualifies_identical_read_only_probes_in_every_scope(pr
     assert all("Credential=active-key/" in request.headers["Authorization"] for request in requests)
 
 
+@pytest.mark.parametrize("bad_bucket", ["probe-artifacts", "probe-trajectories", "probe-source"])
 @pytest.mark.parametrize("status,body", [(403, "<Error><Code>AccessDenied</Code></Error>"),
     (200, "<html>ok</html>"), (200, "<ListBucketResult><Name>foreign</Name></ListBucketResult>")])
-async def test_invalid_positive_probe_never_qualifies_active_access(protected_scope, status, body):
+async def test_invalid_positive_probe_never_qualifies_active_access(protected_scope, bad_bucket, status, body):
     from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 
     foundation, shared, storage, frozen = protected_scope
+
+    def respond(request):
+        if request.url.path == "/" + bad_bucket:
+            return httpx.Response(status, text=body)
+        return httpx.Response(200, text=(f"<ListBucketResult><Name>{request.url.path[1:]}</Name>"
+            "<Prefix>loom-application-access-probe/</Prefix><MaxKeys>1</MaxKeys>"
+            "<KeyCount>0</KeyCount><IsTruncated>false</IsTruncated></ListBucketResult>"))
+
     async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"],
-            transport=httpx.MockTransport(lambda request: httpx.Response(status, text=body))) as http:
+            transport=httpx.MockTransport(respond)) as http:
         verifier = ApplicationObjectAccessVerifier(http, foundation=foundation, shared=shared, storage=storage)
         with pytest.raises(ProviderWaitingError, match="application_object_access_not_ready"):
             await verifier.verify_active(frozen, {"access-key": "active-key", "secret-key": "active-secret"})
+
+
+@pytest.mark.parametrize("fields", [
+    "", "<KeyCount>0</KeyCount><IsTruncated>invalid</IsTruncated>",
+    "<KeyCount>2</KeyCount><IsTruncated>false</IsTruncated>",
+    "<KeyCount>1</KeyCount><IsTruncated>false</IsTruncated>",
+    "<KeyCount>0</KeyCount><KeyCount>1</KeyCount><IsTruncated>false</IsTruncated>",
+    "<KeyCount>1</KeyCount><IsTruncated>false</IsTruncated><Contents><Key>foreign/key</Key></Contents>",
+    "<KeyCount>0</KeyCount><IsTruncated>false</IsTruncated><CommonPrefixes><Prefix>foreign/</Prefix></CommonPrefixes>",
+])
+async def test_contradictory_list_result_never_qualifies_positive_access(protected_scope, fields):
+    def respond(request):
+        return httpx.Response(200, text=(f"<ListBucketResult><Name>{request.url.path[1:]}</Name>"
+            f"<Prefix>loom-application-access-probe/</Prefix><MaxKeys>1</MaxKeys>{fields}</ListBucketResult>"))
+
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(respond)) as http:
+        with pytest.raises(ProviderWaitingError, match="application_object_access_not_ready"):
+            await scoped_verifier(http, protected_scope).verify_active(protected_scope[3],
+                {"access-key": "active-key", "secret-key": "active-secret"})
+
+
+@pytest.mark.parametrize("truncated", ["true", "false"])
+async def test_valid_nonempty_prefix_probe_qualifies_positive_access(protected_scope, truncated):
+    def respond(request):
+        return httpx.Response(200, text=(f"<ListBucketResult><Name>{request.url.path[1:]}</Name>"
+            "<Prefix>loom-application-access-probe/</Prefix><MaxKeys>1</MaxKeys><KeyCount>1</KeyCount>"
+            f"<IsTruncated>{truncated}</IsTruncated><Contents><Key>loom-application-access-probe/file</Key>"
+            "<Size>0</Size></Contents></ListBucketResult>"))
+
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(respond)) as http:
+        await scoped_verifier(http, protected_scope).verify_active(protected_scope[3],
+            {"access-key": "active-key", "secret-key": "active-secret"})
 
 
 @pytest.mark.parametrize("response_kind", ["compressed", "duplicate-code", "nested-code"])
@@ -232,3 +277,28 @@ async def test_scope_mismatch_fails_before_sending_any_original_credential(prote
             await scoped_verifier(http, protected_scope).verify_retired(frozen,
                 {"access-key": "original-key", "secret-key": "original-secret"})
     assert requests == []
+
+
+@pytest.mark.parametrize("active", [False, True])
+async def test_oversized_response_stops_reading_and_never_qualifies_access(protected_scope, active):
+    class OversizedStream(httpx.AsyncByteStream):
+        def __init__(self):
+            self.reads = 0
+            self.closed = False
+
+        async def __aiter__(self):
+            for _ in range(4):
+                self.reads += 1
+                yield b" " * 16384
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = OversizedStream()
+    async with httpx.AsyncClient(base_url=protected_scope[0].platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(lambda request: httpx.Response(200 if active else 403, stream=stream))) as http:
+        verifier = scoped_verifier(http, protected_scope)
+        verify = verifier.verify_active if active else verifier.verify_retired
+        with pytest.raises(ProviderWaitingError):
+            await verify(protected_scope[3], {"access-key": "original-key", "secret-key": "original-secret"})
+    assert stream.reads == 2 and stream.closed
