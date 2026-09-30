@@ -196,7 +196,6 @@ const PROVIDER_CONNECTIONS_RESPONSE = {
   ],
 };
 
-const LOCAL_SERVERS_RESPONSE = { items: [] };
 
 const BENCHMARKS_RESPONSE = {
   items: [
@@ -482,7 +481,6 @@ function mockEndpoints(opts: {
       }
       if (url.includes("/api/v1/models?view=raw")) return json(RAW_MODELS_RESPONSE);
       if (url.includes("/api/v1/models")) return json(MODELS_RESPONSE);
-      if (url.includes("/api/v1/local-servers")) return json(LOCAL_SERVERS_RESPONSE);
       if (url.includes("/api/v1/benchmarks/discover")) {
         const ids = (JSON.parse(String(init?.body)) as { benchmark_ids: string[] }).benchmark_ids;
         const merged = new Map<string, Set<string>>();

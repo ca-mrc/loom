@@ -442,6 +442,10 @@ describe("AdminAccess", () => {
   });
 
   it("approves username accounts and password resets with manual links", async () => {
+    let resolveRegistrationRequests!: () => void;
+    const registrationRequestsGate = new Promise<void>((resolve) => {
+      resolveRegistrationRequests = resolve;
+    });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -503,6 +507,7 @@ describe("AdminAccess", () => {
           });
         }
         if (url.includes("/api/v1/admin/registration-requests")) {
+          await registrationRequestsGate;
           return jsonResponse({
             items: [
               {
@@ -546,7 +551,9 @@ describe("AdminAccess", () => {
     await screen.findByRole("tab", { name: "Requests" });
 
     expect(await screen.findByText("Account requests")).toBeInTheDocument();
-    expect(screen.getByText("Ada")).toBeInTheDocument();
+    expect(screen.queryByText("Ada")).not.toBeInTheDocument();
+    resolveRegistrationRequests();
+    expect(await screen.findByText("Ada")).toBeInTheDocument();
     expect(screen.getByText("Dev")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Approve account Ada" }));

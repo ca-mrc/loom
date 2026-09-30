@@ -15,7 +15,11 @@ from scripts.ops.nebius_application_cloud_scope import (
     ApplicationCloudScope,
     qualify_application_cloud,
 )
-from scripts.ops.nebius_management_capacity import _count, qualify_platform_capacity
+from scripts.ops.nebius_management_capacity import (
+    _count,
+    capacity_error_type,
+    qualify_platform_capacity,
+)
 from scripts.ops.nebius_management_prerequisites import (
     HTTPSManagementPrerequisites,
     ManagementPrerequisiteError,
@@ -159,6 +163,17 @@ class ApplicationUpgradePrerequisites:
 
     def platform_capacity(self, request: ManagementUpgradeRequest) -> None:
         """Use existing scheduler-fit proof, but reserve only application workloads."""
+        self.capacity_diagnostic: dict[str, Any] = {
+            'schema': 'loom.nebius-platform-capacity-diagnostic.v1', 'stage': 'render',
+            'kind': None, 'error_type': None, 'nodes': []}
+        try:
+            self._platform_capacity(request)
+        except Exception as error:
+            if self.capacity_diagnostic['error_type'] is None:
+                self.capacity_diagnostic['error_type'] = capacity_error_type(error)
+            raise
+
+    def _platform_capacity(self, request: ManagementUpgradeRequest) -> None:
         setup = request.setup
         installation = setup.deployment.installation
         application = installation.applications
@@ -183,22 +198,30 @@ class ApplicationUpgradePrerequisites:
         for api, resource, kind in (('apps/v1', 'deployments', 'Deployment'), ('apps/v1', 'statefulsets', 'StatefulSet'),
                 ('apps/v1', 'replicasets', 'ReplicaSet'), ('apps/v1', 'daemonsets', 'DaemonSet'),
                 ('batch/v1', 'jobs', 'Job'), ('batch/v1', 'cronjobs', 'CronJob')):
+            self.capacity_diagnostic.update(stage='inventory', kind=kind)
             controllers.extend(self.base.inventory(api, resource, kind))
         by_key = {(row['kind'], row['metadata']['namespace'], row['metadata']['name']): row for row in controllers}
+        self.capacity_diagnostic.update(stage='inventory', kind='HorizontalPodAutoscaler')
         for hpa in self.base.inventory('autoscaling/v2', 'horizontalpodautoscalers', 'HorizontalPodAutoscaler'):
+            self.capacity_diagnostic['stage'] = 'autoscaling'
             target = hpa['spec']['scaleTargetRef']
             maximum = hpa['spec']['maxReplicas']
             if target['kind'] not in {'Deployment', 'StatefulSet', 'ReplicaSet'} or type(maximum) is not int or maximum <= 0:
                 raise ManagementPrerequisiteError('unqualified platform autoscaling inventory')
             row = by_key[target['kind'], hpa['metadata']['namespace'], target['name']]
             row['spec']['replicas'] = max(row['spec'].get('replicas', 1), maximum)
+        self.capacity_diagnostic.update(stage='render', kind=None)
         rendered = render_management(setup.deployment, candidate=setup.candidate, profile=setup.profile, repo_root=setup.repo_root)
         phases = render_application_setup(setup.deployment, candidate=setup.candidate, profile=setup.profile, repo_root=setup.repo_root)
         planned = [row for row in rendered.files['40-services.yaml'] if row['kind'] == 'Deployment']
         planned += [row for phase in ('database', 'migration') for row in phases[phase] if row['kind'] == 'Job']
-        qualify_platform_capacity(nodes=self.base.inventory('v1', 'nodes', 'Node'), pods=self.base.inventory('v1', 'pods', 'Pod'),
+        self.capacity_diagnostic.update(stage='inventory', kind='Node')
+        nodes = self.base.inventory('v1', 'nodes', 'Node')
+        self.capacity_diagnostic['kind'] = 'Pod'
+        pods = self.base.inventory('v1', 'pods', 'Pod')
+        qualify_platform_capacity(nodes=nodes, pods=pods,
             controllers=controllers, planned=planned, reserve=PlatformEnvelope(budget.cpu_millis, budget.memory_mib, 0,
-                budget.ephemeral_storage_mib), reserve_pods=children * slots)
+                budget.ephemeral_storage_mib), reserve_pods=children * slots, diagnostic=self.capacity_diagnostic)
 
     async def publications(self, request: ManagementUpgradeRequest, http: httpx.AsyncClient) -> None:
         """Use authenticated publication bytes, not a caller-supplied source label."""

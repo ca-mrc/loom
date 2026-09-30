@@ -15,7 +15,11 @@ from scripts.ops.nebius_application_upgrade_prerequisites import (
     UpgradePrerequisiteSettings,
 )
 from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
-from scripts.ops.nebius_management_gateway import validate_operation
+from scripts.ops.nebius_management_gateway import (
+    GatewayError,
+    validate_capacity_report,
+    validate_operation,
+)
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
 from scripts.ops.nebius_management_refresh_install import (
@@ -32,6 +36,11 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_upgrade,
 )
 from scripts.ops.nebius_management_refresh_resources import ManagementRefreshResourcesRequest
+from scripts.ops.nebius_management_refresh_supersession import (
+    FailedRefreshProof,
+    SupersededRefreshV1,
+    load_failed_refresh,
+)
 from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
 
 from loom_service.environment_management.deployment import ManagementDeployment
@@ -50,6 +59,7 @@ class RefreshPrivateInputs(BaseModel):
     target_manager_revision: str = Field(pattern=r'^[a-zA-Z0-9_]{1,64}$')
     prerequisites: UpgradePrerequisiteSettings
     foundation_candidate: str = Field(pattern=r'^[0-9a-f]{40}$')
+    supersedes: SupersededRefreshV1 | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -58,12 +68,18 @@ class RefreshContext:
     original: CompletedUpgrade
     predecessor: CompletedUpgrade | CompletedRefresh
     request: ManagementRefreshInstallRequest
+    superseded: FailedRefreshProof | None = None
 
 
 def load_refresh_inputs(operation: dict[str, Any]) -> RefreshContext:
+    return _load_refresh_inputs(operation, (), ())
+
+
+def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], configurations: tuple[str, ...]) -> RefreshContext:
     try:
         validate_operation(operation)
-        if operation['schema'] != 'loom.nebius-management-refresh-operation.v1':
+        if (operation['schema'] != 'loom.nebius-management-refresh-operation.v1'
+                or operation['operation_id'] in ancestors or len(ancestors) > 8):
             raise ValueError
         path = Path(operation['inputs_path'])
         raw = _private(path, 4 * 1024**2)
@@ -90,12 +106,32 @@ def load_refresh_inputs(operation: dict[str, Any]) -> RefreshContext:
             predecessor = load_completed_refresh(inputs.predecessor, original=original)
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,
             inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2])
-        render_refresh(render)
-        resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id),
+        config_name = render_refresh(render).config['metadata']['name']
+        # Refresh resources are create-only. Never admit a successor that would
+        # require adopting or replacing an ancestor's immutable configuration.
+        if config_name in configurations:
+            raise ValueError
+        superseded = None
+        history = {**predecessor.history, path: operation['inputs_sha256']}
+        if inputs.supersedes is not None:
+            previous = _load_refresh_inputs(inputs.supersedes.operation, (*ancestors, str(operation_id)),
+                (*configurations, config_name))
+            if (previous.inputs.original_upgrade != inputs.original_upgrade
+                    or previous.inputs.predecessor != inputs.predecessor
+                    or previous.inputs.manager_revision != inputs.manager_revision
+                    or previous.request.installation_anchor != original.upgrade.original_anchor):
+                raise ValueError
+            superseded = load_failed_refresh(previous.request, inputs.supersedes)
+            if any(path in history and history[path] != checksum for path, checksum in superseded.history.items()):
+                raise ValueError
+            history.update(superseded.history)
+        if len(history) > 128:
+            raise ValueError
+        resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id,
+            superseded.stopped if superseded is not None else None),
             setup.binding, setup.shared_namespace_uid, inputs.manager_revision, inputs.target_manager_revision)
-        request = ManagementRefreshInstallRequest(resources, {**predecessor.history, path: operation['inputs_sha256']},
-            original.upgrade.original_anchor)
-        return RefreshContext(inputs, original, predecessor, request)
+        request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor)
+        return RefreshContext(inputs, original, predecessor, request, superseded)
     except Exception:
         raise EntryError('management private refresh inputs unqualified') from None
 
@@ -108,6 +144,7 @@ def connected_refresh_api(context: RefreshContext, operation: dict[str, Any]) ->
         connection = original.original_inputs.operator_connection
         checks = ApplicationUpgradePrerequisites(base=base, settings=context.inputs.prerequisites)
         with HTTPSManagementRefreshInstaller(request=context.request, original=original, predecessor=context.predecessor,
+            superseded=context.superseded,
             state_dir=Path(operation['state_dir']), api_server=connection.endpoint, ssl_context=trust, token=token,
             runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks) as api:
             yield api
@@ -131,4 +168,12 @@ def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: 
             stage = api.diagnostic_stage or stage
         if not isinstance(stage, str):
             stage = 'connection'
-        raise ManagementRefreshInstallError('refresh_' + stage.replace('-', '_')) from None
+        capacity = None
+        if stage == 'platform_capacity' and api is not None:
+            detail = getattr(api.checks, 'capacity_diagnostic', None)
+            if isinstance(detail, dict):
+                try:
+                    capacity = validate_capacity_report(detail)
+                except GatewayError:
+                    pass  # Invalid details stay coarse; never expose a provider payload.
+        raise ManagementRefreshInstallError('refresh_' + stage.replace('-', '_'), capacity=capacity) from None

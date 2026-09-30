@@ -44,9 +44,10 @@ class ManagementRefreshInstallRequest:
 
 
 class ManagementRefreshInstallError(RuntimeError):
-    def __init__(self, stage: str):
+    def __init__(self, stage: str, *, capacity: dict[str, Any] | None = None):
         super().__init__('management refresh incomplete; preserve recovery evidence')
         self.stage = stage
+        self.capacity = capacity
 
 
 class ManagementRefreshInstallAPI(Protocol):
@@ -86,10 +87,13 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
     """Retain the hashed input contract so a completion is a bounded predecessor."""
     resources = request.resources
     render = resources.switch.render
-    return {'before': render.before.model_dump(mode='json'), 'after': render.after.model_dump(mode='json'),
+    contract = {'before': render.before.model_dump(mode='json'), 'after': render.after.model_dump(mode='json'),
         'active': render.active, 'candidate': render.candidate, 'profile': render.profile,
         'shared_namespace_uid': resources.shared_namespace_uid, 'manager_revision': resources.manager_revision,
         'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
+    if resources.switch.initial_stopped is not None:
+        contract['initial_stopped'] = resources.switch.initial_stopped
+    return contract
 
 
 def _identity(request: ManagementRefreshInstallRequest, state: Path, history: dict[str, str]) -> dict[str, Any]:

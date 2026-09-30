@@ -176,23 +176,26 @@ def create_app(
         # Register teardown before spawning: partial startup must drain work
         # before the signer and either database engine can be disposed.
         resources.push_async_callback(stop_background)
-        crash_detector_task = asyncio.create_task(
-            run_crash_detector_loop(
-                session_factory=session_factory,
-                expiry_sec=settings.worker_heartbeat_expiry_sec,
-                interval_sec=settings.worker_reclaim_sweep_interval_sec,
-                claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
-                running_stale_timeout_multiplier=(
-                    settings.stale_running_trial_timeout_multiplier
-                    if settings.stale_running_trial_reclaim_enabled
-                    else None
+        # Worker heartbeat recovery belongs to the explicitly enabled local
+        # execution path. Hosted executions are reconciled through their leases.
+        if local_execution_enabled():
+            crash_detector_task = asyncio.create_task(
+                run_crash_detector_loop(
+                    session_factory=session_factory,
+                    expiry_sec=settings.worker_heartbeat_expiry_sec,
+                    interval_sec=settings.worker_reclaim_sweep_interval_sec,
+                    claimed_without_start_expiry_sec=(settings.claimed_without_start_expiry_sec),
+                    running_stale_timeout_multiplier=(
+                        settings.stale_running_trial_timeout_multiplier
+                        if settings.stale_running_trial_reclaim_enabled
+                        else None
+                    ),
+                    running_stale_grace_sec=settings.stale_running_trial_grace_sec,
+                    running_stale_silence_sec=settings.stale_running_trial_silence_sec,
                 ),
-                running_stale_grace_sec=settings.stale_running_trial_grace_sec,
-                running_stale_silence_sec=settings.stale_running_trial_silence_sec,
-            ),
-            name="loom-cp-crash-detector",
-        )
-        background_tasks.append(crash_detector_task)
+                name="loom-cp-crash-detector",
+            )
+            background_tasks.append(crash_detector_task)
         # Background refresher for gauge metrics (workers_active,
         # queue_depth, trials_inflight). See metrics_refresher.py
         # for the cadence rationale.
@@ -207,8 +210,8 @@ def create_app(
         background_tasks.append(metrics_refresher_task)
         # Background sweep that transitions queued trials with
         # attempt_count >= team_quotas.max_attempts_ceiling to state='failed' with
-        # failure_reason='retry_exhausted'. Runs at the same cadence
-        # as the crash detector so the two sweeps are in lock-step.
+        # failure_reason='retry_exhausted'. This also serves native executions
+        # and remains active when local worker recovery is disabled.
         retry_exhausted_task = asyncio.create_task(
             run_retry_exhausted_sweeper_loop(
                 session_factory=session_factory,

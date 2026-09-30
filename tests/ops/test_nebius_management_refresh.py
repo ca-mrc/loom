@@ -80,6 +80,7 @@ def test_refresh_changes_only_image_config_and_revision(refresh_request):
     (('installation', 'platform_budget', 'cpu_millis'), 3000),
     (('installation', 'applications', 'runtime', 'poll_seconds'), 6),
     (('installation', 'applications', 'storage', 'data_group_id'), 'group-other'),
+    (('installation', 'applications', 'storage', 'source_group_id'), 'group-other'),
     (('installation', 'registry_prefix'), 'cr.eu-north1.nebius.cloud/other'),
 ])
 def test_refresh_rejects_non_release_configuration_changes(refresh_request, path, value):
@@ -92,6 +93,29 @@ def test_refresh_rejects_non_release_configuration_changes(refresh_request, path
     node[path[-1]] = value
     with pytest.raises(ValueError, match='refresh'):
         build(replace(refresh_request, after=ManagementDeployment.model_validate(raw)))
+
+
+@pytest.mark.parametrize('field', ['storage_origin', 'artifacts', 'trajectories', 'source', 'project'])
+def test_refresh_preserves_original_object_probe_scope(refresh_request, field):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = refresh_request.after.model_dump(mode='json')
+    foundation = raw['installation']['foundation']
+    config = json.loads(foundation['platform_config_json'])
+    if field in {'artifacts', 'trajectories', 'source'}:
+        config['buckets'][field] = 'foreign-probe-bucket'
+    elif field == 'project':
+        foundation['provisioning_project_id'] = 'project-other'
+        raw['installation']['applications']['storage']['project_id'] = 'project-other'
+    else:
+        config.update(region='eu-west1', storage_endpoint='https://storage.eu-west1.nebius.cloud')
+        config['execution_price']['region'] = 'eu-west1'
+    foundation['platform_config_json'] = json.dumps(config)
+    # Independently valid installation inputs must still be rejected as a
+    # refresh: legacy frozen plans rely on the original bucket/endpoint scope.
+    changed = ManagementDeployment.model_validate(raw)
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(refresh_request, after=changed))
 
 
 @pytest.mark.parametrize('damage', ['nil_uid', 'legacy', 'namespace', 'installation', 'replicas',

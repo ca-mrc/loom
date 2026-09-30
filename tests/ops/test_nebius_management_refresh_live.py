@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import ssl
+from dataclasses import replace
 from uuid import uuid4
 
 import httpx
@@ -113,6 +114,23 @@ def test_connected_cutover_requires_exact_drain_and_activation_evidence(refresh,
     writes = [row for row in state['calls'] if row.method == 'PATCH' and not row.url.query]
     assert len(writes) == 2
     assert not any(row.method not in {'GET', 'PATCH'} for row in state['calls'])
+
+
+def test_connected_stopped_adoption_patches_only_marker_without_starting_runtime(connected):
+    from scripts.ops.nebius_management_refresh_switch import MARKER
+
+    api, state, fake = connected
+    stopped = copy.deepcopy(fake.document)
+    stopped['spec']['replicas'] = 0
+    stopped['metadata'].setdefault('annotations', {})[MARKER] = str(uuid4())
+    api.refresh = replace(api.refresh, initial_stopped=stopped)
+    fake.document = copy.deepcopy(stopped)
+    assert api.patch(fake.document, 'retire', str(api.refresh.operation_id)) is True
+    patches, = [json.loads(message.content) for message in state['calls'] if message.method == 'PATCH']
+    assert len(patches) == 5 and patches[-1]['value'] == 0
+    assert fake.document['spec'] == stopped['spec']
+    assert fake.document['metadata']['uid'] == stopped['metadata']['uid']
+    assert fake.document['metadata']['annotations'][MARKER] == str(api.refresh.operation_id)
 
 
 @pytest.fixture

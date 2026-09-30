@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 
+import httpx
 import pytest
 from psycopg import sql
 from sqlalchemy.engine import make_url
@@ -14,6 +15,8 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_credentials import database_access as database_access
 from tests.integration.test_nebius_application_credentials import (
     db_bundle,
+    object_success,
+    object_verifier,
     setup,
 )
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
@@ -22,7 +25,15 @@ from tests.integration.test_nebius_application_operations import applications as
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.unit.test_nebius_application_render import inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+
+
+async def qualified_access(provider, lease, platform_inputs):
+    frozen = await provider.registry.frozen_plan(lease)
+    async with httpx.AsyncClient(base_url=inputs(platform_inputs)[3].platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(object_success)) as http:
+        return await provider.qualify(lease, object_verifier(http, provider, platform_inputs, frozen))
 
 
 @pytest.fixture
@@ -32,13 +43,13 @@ async def prepared_access(applications, platform_inputs, database_access, shared
     return context, material
 
 
-async def test_qualification_preserves_material_shared_profile_and_actual_role(prepared_access, database_access):
+async def test_qualification_preserves_material_shared_profile_and_actual_role(prepared_access, database_access, platform_inputs):
     (provider, registry, _, _, row, lease, cloud, _), material = prepared_access
     admin = database_access[0]
     admin.execute("UPDATE public.team_memberships SET role='viewer' WHERE user_id=%s AND team_id=%s", (row.owner_user_id, row.owner_team_id))
     admin.execute("UPDATE public.users SET display_name='Shared profile',password_hash='retained' WHERE id=%s", (row.owner_user_id,))
     before = admin.execute("SELECT (SELECT count(*) FROM public.users),(SELECT count(*) FROM public.teams)").fetchone()
-    proof = await provider.qualify(lease)
+    proof = await qualified_access(provider, lease, platform_inputs)
     assert proof.identity.operation_id == lease.operation_id and proof.identity.data_environment_id == row.data_environment_id
     assert proof.schema_revision == service_schema_head() and proof.database_role == f"lap_{row.incarnation.hex}_g1"
     assert (proof.user_id, proof.team_id, proof.membership_role) == (row.owner_user_id, row.owner_team_id, "viewer")
@@ -54,7 +65,7 @@ async def test_qualification_preserves_material_shared_profile_and_actual_role(p
 async def test_qualification_cannot_initialize_unprepared_access(applications, platform_inputs, database_access, shared_ca):
     provider, registry, _, _, _, lease, cloud, _ = await setup(applications, platform_inputs, database_access, shared_ca)
     with pytest.raises((ManagementError, ProviderBlockedError)):
-        await provider.qualify(lease)
+        await qualified_access(provider, lease, platform_inputs)
     assert cloud.mutations == []
     assert await registry.cloud_history(lease) == []
     assert database_access[0].execute("SELECT count(*) FROM loom_application_access.generations").fetchone() == (0,)
@@ -76,12 +87,12 @@ async def test_qualification_does_not_finish_interrupted_membership_creation(
         with pytest.raises(InterruptedError):
             await provider.prepare(lease)
     with pytest.raises(ProviderBlockedError, match="application_access_not_prepared"):
-        await provider.qualify(lease)
+        await qualified_access(provider, lease, platform_inputs)
     assert len(cloud.mutations) == 2
 
 
 @pytest.mark.parametrize("damage", ["schema", "source-disabled", "shared-disabled", "membership-removed", "cloud-deleted", "sql-retired", "changed-key"])
-async def test_qualification_rejects_current_access_drift(prepared_access, database_access, monkeypatch, damage):
+async def test_qualification_rejects_current_access_drift(prepared_access, database_access, monkeypatch, damage, platform_inputs):
     (provider, _, factory, _, row, lease, cloud, _), _ = prepared_access
     admin = database_access[0]
     if damage == "schema":
@@ -103,7 +114,7 @@ async def test_qualification_rejects_current_access_drift(prepared_access, datab
             return {"access-key": "changed", "secret-key": "changed"}
         monkeypatch.setattr(cloud, "access_key_secret", changed)
     with pytest.raises(ProviderBlockedError):
-        await provider.qualify(lease)
+        await qualified_access(provider, lease, platform_inputs)
     assert len(cloud.mutations) == 4
 
 
@@ -112,20 +123,20 @@ async def test_qualification_rejects_current_access_drift(prepared_access, datab
     ("UPDATE", "TABLE public.shared_records"), ("DELETE", "TABLE public.shared_records"),
     ("USAGE", "SEQUENCE public.shared_records_id_seq"), ("SELECT", "SEQUENCE public.shared_records_id_seq"),
 ])
-async def test_qualification_requires_every_runtime_privilege_without_repair(prepared_access, database_access, privilege, target):
+async def test_qualification_requires_every_runtime_privilege_without_repair(prepared_access, database_access, privilege, target, platform_inputs):
     (provider, _, _, _, row, lease, cloud, _), _ = prepared_access
     admin = database_access[0]
     runtime = "loom_app_runtime_" + row.data_environment_id.hex
     admin.execute(sql.SQL("REVOKE {} ON {} FROM {}").format(sql.SQL(privilege), sql.SQL(target), sql.Identifier(runtime)))
     with pytest.raises(ProviderBlockedError, match="application_database_runtime_grants"):
-        await provider.qualify(lease)
+        await qualified_access(provider, lease, platform_inputs)
     function = "has_sequence_privilege" if target.startswith("SEQUENCE") else "has_table_privilege"
     assert admin.execute(sql.SQL("SELECT pg_catalog.{}(%s,%s,%s)").format(sql.Identifier(function)),
                          (runtime, target.split()[1], privilege)).fetchone() == (False,)
     assert len(cloud.mutations) == 4
 
 
-async def test_qualification_cannot_return_evidence_after_database_await_supersession(prepared_access, monkeypatch):
+async def test_qualification_cannot_return_evidence_after_database_await_supersession(prepared_access, monkeypatch, platform_inputs):
     (provider, registry, _, alice, row, lease, cloud, _), _ = prepared_access
     qualify = provider.database.qualify
 
@@ -137,5 +148,5 @@ async def test_qualification_cannot_return_evidence_after_database_await_superse
 
     monkeypatch.setattr(provider.database, "qualify", stop_after_read)
     with pytest.raises(ManagementError, match="stale_operation_lease"):
-        await provider.qualify(lease)
+        await qualified_access(provider, lease, platform_inputs)
     assert len(cloud.mutations) == 4

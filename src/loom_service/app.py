@@ -68,7 +68,6 @@ from loom_service.routes import (
     environments,
     health,
     invites,
-    local_servers,
     managed_child,
     management_health,
     models,
@@ -168,7 +167,7 @@ def register_api_routes(
             trials.router, trajectory.router, atif.router, tasks.router, benchmarks.router,
             tasksets.router, terminalgen_corpora.router, batches.router, delivery_exports.router,
             run_library.router, rate_cards.router, usage.router, agents.router, models.router,
-            monitor.router, overview.router, pipeline.router, backends.router, local_servers.router,
+            monitor.router, overview.router, pipeline.router, backends.router,
             provider_connections.router, secret_store_admin.router,
         ):
             app.include_router(workload_router, prefix="/api/v1")

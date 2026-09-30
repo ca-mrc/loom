@@ -120,3 +120,7 @@ the source archive. Generated coverage and orphan fleet fixtures were deleted.
 No cleanup migration drops historical rows. Worker/job evidence, signed image
 provenance and protected grant records remain part of qualified restores; deleting
 them without a retention decision would exceed this repository-only retirement.
+
+The follow-up [legacy structure inventory](../architecture/legacy-structure-cleanup.md)
+tracks residual runtime consumers, grants and table dependencies under #2231.
+It distinguishes source retirement from pending live data disposition.

@@ -13,8 +13,10 @@ from loom.nebius_application_contract import (
     ApplicationRegistrationV1,
     ApplicationStatusV1,
 )
+from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
 from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
+from loom_service.application_management.operation_evidence import read_operation_evidence
 from loom_service.environment_management.registry import ManagementError
 from loom_service.routes.environments import ManagementPrincipal
 
@@ -70,3 +72,11 @@ async def operation_status(request: Request, operation_id: UUID, principal: Mana
 @router.post("/application-operations/{operation_id}/retry", status_code=202)
 async def retry_operation(request: Request, operation_id: UUID, principal: ManagementPrincipal) -> ApplicationOperationV1:
     return await manager(request).registry.retry(operation_id, principal=principal)
+
+
+@router.get("/application-operations/{operation_id}/evidence")
+async def operation_evidence(request: Request, response: Response, operation_id: UUID,
+                             principal: ManagementPrincipal) -> ApplicationOperationEvidenceV1:
+    result = await read_operation_evidence(manager(request).registry.session_factory, operation_id, principal=principal)
+    response.headers["Cache-Control"] = "no-store"
+    return result

@@ -45,9 +45,12 @@ from scripts.ops.nebius_management_refresh_resources import (
 )
 from scripts.ops.nebius_management_refresh_switch import (
     ManagementRefreshSwitchRequest,
+    refresh_initial,
+    refresh_switch_identity,
     refresh_target,
 )
 from scripts.ops.nebius_management_stage import (
+    _canonical_quantities,
     _comparison_snapshot,
     _qualified_defaulted,
     _validate_record,
@@ -242,7 +245,8 @@ def load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complete
         render = ManagementRefreshRenderRequest(ManagementDeployment.model_validate(contract['before']),
             ManagementDeployment.model_validate(contract['after']), contract['active'],
             contract['candidate'], contract['profile'], setup.repo_root)
-        resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id),
+        resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id,
+            contract.get('initial_stopped')),
             setup.binding, setup.shared_namespace_uid, contract['manager_revision'], contract['target_manager_revision'])
         request = ManagementRefreshInstallRequest(resources, {}, original.upgrade.original_anchor)
         if (refresh_contract(request) != contract or _uid(render.active) != _uid(original.active)
@@ -292,18 +296,18 @@ def load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complete
                 raise ValueError
         switch = json.loads(read(state / 'switch/cutover.json', receipt['switch_sha256']))
         desired = refresh_target(resources.switch, 'activate')
-        switch_identity = {'schema': 'loom.nebius-management-refresh-switch.v1', 'operation_id': operation,
-            'state_dir': str(state / 'switch'), 'original_uid': _uid(original.active),
-            'input_digest': digest({'original': _stable(render.active), 'target': desired,
-                'before': render.before.model_dump(mode='json'), 'after': render.after.model_dump(mode='json'),
-                'candidate': render.candidate, 'profile': render.profile})}
-        if (switch != {**switch_identity, 'original': render.active, 'phase': 'active', 'active': receipt['active']}
-                or _qualified_defaulted(desired, receipt['active']) != receipt['active']):
+        switch_identity = refresh_switch_identity(resources.switch, state / 'switch')
+        # Completion freezes API spelling; cutover freezes canonical quantities.
+        # Normalize only quantities for comparison, never historical bytes or
+        # other fields: resource amounts and runtime authority must still match.
+        canonical_active = _canonical_quantities(receipt['active'])
+        if (switch != {**switch_identity, 'original': refresh_initial(resources.switch), 'phase': 'active', 'active': canonical_active}
+                or _qualified_defaulted(desired, receipt['active']) != canonical_active):
             raise ValueError
         # Independently qualify cumulative runtime/credential preservation against
         # the original upgrade, not a caller-rewritten before snapshot.
         rooted = replace(resources.switch, render=replace(render, before=original.deployment, active=original.active))
-        if _qualified_defaulted(refresh_target(rooted, 'activate'), receipt['active']) != receipt['active']:
+        if _qualified_defaulted(refresh_target(rooted, 'activate'), receipt['active']) != canonical_active:
             raise ValueError
         active = copy.deepcopy(receipt['active'])
         active['metadata']['uid'] = receipt['active_uid']

@@ -1,21 +1,39 @@
 """GET /api/v1/health — unauthenticated liveness probe.
 
 Used by the docker-compose healthcheck + k8s readinessProbe. Does NOT
-hit the DB — Plan 18 will add `/health/ready` for a deeper check; this
-endpoint only proves the FastAPI process is alive."""
+hit the DB; authenticated `/health/ready` checks PostgreSQL and configured
+object-store buckets. This endpoint only proves the FastAPI process is alive."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Annotated
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from loom.auth import AuthContext
 from loom_service import wire_responses as wire
 from loom_service.build_info import read_build_revision, read_build_time
-from loom_service.dependencies import SessionAndCtx
-from loom_service.readiness import probe_dependencies
+from loom_service.dependencies import authed_session
+from loom_service.readiness import probe_api_dependencies, probe_dependencies
 
 router = APIRouter()
+
+
+async def _readiness_session(
+    request: Request,
+    authorization: Annotated[str | None, Header()] = None,
+) -> AsyncIterator[tuple[AsyncSession, AuthContext]]:
+    """Retain authentication, but classify DB unavailability before the probe."""
+    try:
+        async with asynccontextmanager(authed_session)(request, authorization) as value:
+            yield value
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="readiness database unavailable") from None
 
 
 @router.get("/health", response_model=wire.GetHealthResponse, response_model_exclude_unset=True)
@@ -40,15 +58,11 @@ async def version(response: Response) -> dict[str, str | None]:
     }
 
 
-
-
-
-
 @router.get("/health/ready")
 async def dependency_readiness(
     request: Request,
     response: Response,
-    sc: SessionAndCtx,
+    sc: Annotated[tuple[AsyncSession, AuthContext], Depends(_readiness_session)],
 ) -> dict[str, object]:
     """Authenticated read-only PostgreSQL and object-store readiness.
 
@@ -57,6 +71,15 @@ async def dependency_readiness(
     """
     session, _ctx = sc
     settings = request.app.state.settings
+    if settings.service_mode == "api_only":
+        api_result = await probe_api_dependencies(
+            session,
+            minio_client=request.app.state.minio_client,
+            buckets=(settings.artifacts_bucket, settings.trajectories_bucket),
+        )
+        if not api_result.ready:
+            response.status_code = 503
+        return api_result.to_dict()
     result = await probe_dependencies(
         session,
         minio_client=request.app.state.minio_client,

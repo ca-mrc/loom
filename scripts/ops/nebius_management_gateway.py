@@ -36,12 +36,16 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_refresh", "nebius_management_refresh_switch", "nebius_management_refresh_live",
     "nebius_management_refresh_resources", "nebius_management_refresh_evidence", "nebius_management_refresh_backup",
     "nebius_management_refresh_install", "nebius_management_refresh_predecessor", "nebius_management_refresh_connected",
-    "nebius_management_refresh_entry",
+    "nebius_management_refresh_entry", "nebius_management_refresh_supersession",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install"}
+REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
+    "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
+    "foundation", "shared_material", "platform_capacity", "publication", "cloud_identity", "public_route",
+})
 DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
     "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
     "publication", "cloud_identity", "provider_quota", "backup_access", "public_route",
@@ -62,7 +66,8 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "refresh_manager", "refresh_recovery", "refresh_prerequisites", "refresh_config", "refresh_retire",
     "refresh_manager_probe", "refresh_shared_probe", "refresh_backup", "refresh_migration",
     "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
-    "refresh_public_authentication", "refresh_completion"})
+    "refresh_public_authentication", "refresh_completion", "refresh_supersession",
+    *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES)})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -288,6 +293,42 @@ def validate_recovery_report(value: dict[str, Any]) -> dict[str, Any]:
         raise GatewayError("invalid retirement recovery report") from None
 
 
+def validate_capacity_report(value: dict[str, Any]) -> dict[str, Any]:
+    """Only closed failure phases and scheduler totals, never Pod configuration."""
+    try:
+        if (set(value) != {'schema', 'stage', 'kind', 'error_type', 'nodes'}
+                or value['schema'] != 'loom.nebius-platform-capacity-diagnostic.v1'
+                or value['stage'] not in {'render', 'inventory', 'autoscaling', 'validation',
+                    'controller_decode', 'controller_count', 'pod_decode', 'node_decode',
+                    'node_eligibility', 'placement', 'accounting', 'capacity'}
+                or value['kind'] not in {None, 'Deployment', 'StatefulSet', 'ReplicaSet', 'DaemonSet',
+                    'Job', 'CronJob', 'Pod', 'Node', 'HorizontalPodAutoscaler'}
+                or value['error_type'] not in {'ValueError', 'KeyError', 'TypeError', 'AttributeError',
+                    'ManagementCapacityError', 'ManagementPrerequisiteError', 'OtherError'}
+                or not isinstance(value['nodes'], list) or len(value['nodes']) > 64):
+            raise ValueError
+        seen = set()
+        for node in value['nodes']:
+            uid = node['node_uid']
+            if (set(node) != {'node_uid', 'placement_matches', 'allocatable', 'required'}
+                    or str(UUID(uid)) != uid or not UUID(uid).int or uid in seen
+                    or type(node['placement_matches']) is not bool):
+                raise ValueError
+            seen.add(uid)
+            for key in ('allocatable', 'required'):
+                totals = node[key]
+                if not node['placement_matches']:
+                    if totals is not None:
+                        raise ValueError
+                elif (not isinstance(totals, dict)
+                        or set(totals) != {'cpu_millis', 'memory_mib', 'ephemeral_storage_mib', 'pods'}
+                        or any(type(number) is not int or not 0 <= number < 2**63 for number in totals.values())):
+                    raise ValueError
+        return value
+    except Exception:
+        raise GatewayError('invalid platform capacity diagnostic') from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -317,6 +358,10 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
             result["stage"] = value["stage"]
+        if 'capacity' in value:
+            if not refresh or status != 'blocked' or value['stage'] != 'refresh_platform_capacity':
+                raise ValueError()
+            result['capacity'] = validate_capacity_report(value['capacity'])
         if status in {"pending", success}:
             uid, revision = value["namespace_uid"], value["revision"]
             if str(UUID(uid)) != uid or UUID(uid).int == 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", revision):

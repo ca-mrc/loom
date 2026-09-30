@@ -12,7 +12,9 @@ import json
 import ssl
 import tomllib
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -23,10 +25,11 @@ from tests.ops.test_nebius_management_cloud_scope import cloud as cloud
 from tests.ops.test_nebius_management_entry import entry_inputs as entry_inputs
 from tests.ops.test_nebius_management_install import installation as installation
 from tests.ops.test_nebius_management_prerequisites import checks as checks
+from tests.ops.test_nebius_management_refresh_entry import context, private_refresh
+from tests.ops.test_nebius_management_refresh_predecessor import checksum, load
 from tests.ops.test_nebius_management_refresh_predecessor import (
     completed_upgrade as completed_upgrade,
 )
-from tests.ops.test_nebius_management_refresh_predecessor import load, refresh_case
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.ops.test_nebius_management_upgrade_entry import private_upgrade as private_upgrade
@@ -46,7 +49,9 @@ def connected_refresh(completed_upgrade, monkeypatch):
     from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
     root = load(completed_upgrade[0])
-    request, _, directory, anchor = refresh_case(root)
+    operation, _, _ = private_refresh(root)
+    request = context(operation).request
+    directory, anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
     binding = request.resources.binding
     app = request.resources.switch.render.after.installation.applications
     values = {_key(doc): copy.deepcopy(doc) for doc in completed_upgrade[2].store.resources.values()}
@@ -67,7 +72,8 @@ def connected_refresh(completed_upgrade, monkeypatch):
         'sha256': checksum, 'bytes': len(payload)}
     state = SimpleNamespace(root=root, request=request, directory=directory, anchor=anchor, values=values,
         manager=manager, namespaces=namespaces, calls=[], storage_calls=[], storage_options=[], public_calls=[],
-        pods={}, logs=Counter(), fail_backup=False, fail_public=False, activation_probe_drift=False)
+        pods={}, logs=Counter(), fail_backup=False, fail_public=False, activation_probe_drift=False,
+        operation=operation, fail_probe=None)
     kinds = {'configmaps': 'ConfigMap', 'secrets': 'Secret', 'serviceaccounts': 'ServiceAccount',
         'networkpolicies': 'NetworkPolicy', 'roles': 'Role', 'rolebindings': 'RoleBinding',
         'clusterroles': 'ClusterRole', 'clusterrolebindings': 'ClusterRoleBinding',
@@ -151,6 +157,8 @@ def connected_refresh(completed_upgrade, monkeypatch):
             if not message.url.params:
                 if document['kind'] == 'Job':
                     observed['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+                    if state.fail_probe and ('loom-refresh-' + state.fail_probe + '-') in document['metadata']['name']:
+                        observed['status'] = {'conditions': [{'type': 'Failed', 'status': 'True'}], 'failed': 1}
                 values[_key(observed)] = observed
             return httpx.Response(201, json=observed)
         assert message.method == 'GET'
@@ -237,8 +245,8 @@ def connected_refresh(completed_upgrade, monkeypatch):
 
     class Checks:
         def preflight(self, current):
-            assert current.setup.deployment == request.resources.switch.render.after
-            assert current.setup.candidate == request.resources.switch.render.candidate
+            assert current.setup.deployment == state.request.resources.switch.render.after
+            assert current.setup.candidate == state.request.resources.switch.render.candidate
 
         def public_route(self, current):
             assert current.setup.deployment.public_host == root.deployment.public_host
@@ -259,6 +267,85 @@ def run(connected):
 def writes(state):
     return [(message.method, message.url.path) for message in state.calls
         if message.method != 'GET' and not message.url.params]
+
+
+@contextmanager
+def successor_api(connected):
+    from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+    from tests.ops.test_nebius_management_refresh_supersession import successor
+
+    old_api, state = connected
+    state.fail_probe = 'shared-probe'
+    with pytest.raises(ManagementRefreshInstallError):
+        run(connected)
+    selector = {'operation': state.operation, 'refresh_sha256': checksum(state.directory / 'refresh.json'),
+        'switch_sha256': checksum(state.directory / 'switch/cutover.json')}
+    operation, _ = successor(state.root, selector)
+    bound = context(operation)
+    state.request, state.operation = bound.request, operation
+    state.directory, state.anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
+    state.fail_probe = None
+    with HTTPSManagementRefreshInstaller(request=bound.request, original=bound.original, predecessor=bound.predecessor,
+        superseded=bound.superseded, state_dir=state.directory, api_server=old_api.api_server,
+        ssl_context=old_api.ssl_context, token=old_api.token, runtime_ca_pem=None, checks=old_api.checks) as api:
+        yield api, state, bound
+
+
+def test_connected_successor_requalifies_failed_job_and_completes_new_barriers(connected_refresh):
+    with successor_api(connected_refresh) as (api, state, bound):
+        frozen = {path: path.read_bytes() for path in bound.superseded.history}
+        previous_calls = len(state.calls)
+        api.preflight(state.request)
+        assert all(message.method == 'GET' for message in state.calls[previous_calls:])
+        assert run((api, state))['status'] == 'management_refreshed'
+        assert state.manager['spec']['replicas'] == 1
+        assert state.manager['metadata']['uid'] == bound.superseded.stopped['metadata']['uid']
+        patches = [json.loads(row.content) for row in state.calls[previous_calls:]
+            if row.method == 'PATCH' and not row.url.params]
+        assert [row[4]['value'] for row in patches] == [0, 1]
+        assert len(patches[0]) == 5
+        assert {path: path.read_bytes() for path in frozen} == frozen
+        recorded = writes(state)
+        assert run((api, state))['status'] == 'management_refreshed'
+        assert writes(state) == recorded
+
+
+@pytest.mark.parametrize('damage', ['job_uid', 'pending', 'active', 'succeeded', 'terminating', 'status_type',
+    'job_spec', 'config', 'old_history', 'stopped_marker', 'prerequisites'])
+def test_connected_successor_rejects_unqualified_old_state_without_new_writes(connected_refresh, damage, monkeypatch):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    with successor_api(connected_refresh) as (api, state, bound):
+        job = next(doc for doc in state.values.values()
+            if doc['kind'] == 'Job' and doc['metadata']['uid'] == bound.superseded.failed_job_uid)
+        if damage == 'job_uid':
+            job['metadata']['uid'] = str(uuid4())
+        elif damage == 'pending':
+            job['status'] = {}
+        elif damage in {'active', 'succeeded'}:
+            job['status'][damage] = 1
+        elif damage == 'terminating':
+            job['metadata']['deletionTimestamp'] = '2026-09-30T04:00:00Z'
+        elif damage == 'status_type':
+            job['status']['active'] = False
+        elif damage == 'job_spec':
+            job['spec']['backoffLimit'] = 1
+        elif damage == 'config':
+            state.values['ConfigMap:' + job['metadata']['namespace'] + ':' + job['metadata']['name']]['data'] = {}
+        elif damage == 'old_history':
+            Path(bound.superseded.selector.operation['state_dir'], 'refresh.json').write_text('{}')
+        elif damage == 'stopped_marker':
+            state.manager['metadata']['annotations']['loom.nebius/management-refresh-id'] = str(uuid4())
+        else:
+            def fail(_request):
+                raise ValueError('private-provider-payload')
+            monkeypatch.setattr(api.checks, 'preflight', fail)
+        prior = len(state.calls)
+        with pytest.raises(ManagementRefreshInstallError):
+            run((api, state))
+        assert all(message.method == 'GET' for message in state.calls[prior:])
+        assert not state.directory.exists()
 
 
 def test_real_connected_parent_completes_and_replay_preserves_all_effects(connected_refresh):
@@ -296,6 +383,69 @@ def test_preflight_rejects_drift_before_any_refresh_write(connected_refresh, dri
         row['metadata']['uid'] = str(uuid4())
     with pytest.raises(ManagementRefreshInstallError):
         run(connected_refresh)
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
+@pytest.mark.parametrize('kind,stage', [('Secret', 'resource_inventory'), ('PersistentVolume', 'persistent_storage')])
+def test_preflight_reports_the_failed_retained_check_without_writes(connected_refresh, kind, stage):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+    document = next(row for row in state.values.values() if row['kind'] == kind)
+    document['metadata']['uid'] = str(uuid4())
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        api.preflight(state.request)
+    assert error.value.stage == stage
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
+@pytest.mark.parametrize('detail,expected', [
+    ('foundation', 'foundation'), ('shared_material', 'shared_material'),
+    ('platform_capacity', 'platform_capacity'), ('publication', 'publication'),
+    ('cloud_identity', 'cloud_identity'), ('public_route', 'public_route'),
+    ('private-provider-payload', 'prerequisites'), (None, 'prerequisites'),
+    (['private-provider-payload'], 'prerequisites'),
+])
+def test_preflight_keeps_only_closed_prerequisite_stages(connected_refresh, monkeypatch, detail, expected):
+    from scripts.ops.nebius_management_prerequisites import ManagementPrerequisiteError
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+
+    def unavailable(_request):
+        api.checks.diagnostic_stage = detail
+        raise ManagementPrerequisiteError('private-provider-payload')
+
+    monkeypatch.setattr(api.checks, 'preflight', unavailable)
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        api.preflight(state.request)
+    assert error.value.stage == expected
+    assert 'private-provider-payload' not in str(error.value)
+    assert not writes(state) and not state.storage_calls and not state.public_calls
+
+
+def test_actual_capacity_failure_survives_retained_and_refresh_wrappers(connected_refresh, monkeypatch):
+    from scripts.ops import nebius_management_refresh_entry as entry
+    from scripts.ops.nebius_application_upgrade_prerequisites import ApplicationUpgradePrerequisites
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    api, state = connected_refresh
+    checks = ApplicationUpgradePrerequisites(base=SimpleNamespace(inventory=lambda *args: []),
+        settings=state.root.inputs.prerequisites)
+    def preflight(request):
+        checks.diagnostic_stage = 'platform_capacity'
+        checks.platform_capacity(request)
+    monkeypatch.setattr(checks, 'preflight', preflight)
+    api.checks = checks
+    @contextmanager
+    def connected(_context, _operation):
+        yield api
+    monkeypatch.setattr(entry, 'connected_refresh_api', connected)
+    with pytest.raises(ManagementRefreshInstallError) as error:
+        entry.execute_refresh(SimpleNamespace(request=state.request), {'operation_id': str(uuid4())}, 'preflight')
+    assert error.value.stage == 'refresh_platform_capacity'
+    assert error.value.capacity == {'schema': 'loom.nebius-platform-capacity-diagnostic.v1',
+        'stage': 'node_eligibility', 'kind': None, 'error_type': 'ManagementCapacityError', 'nodes': []}
     assert not writes(state) and not state.storage_calls and not state.public_calls
 
 

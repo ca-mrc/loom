@@ -20,6 +20,7 @@ def test_0123_creates_exact_native_builder_agent_and_grant_schema(
 ) -> None:
     """Dropping a fence, identity, evidence column, or index must break migration parity."""
     engine = create_engine(isolated_migration_postgres_url)
+    command.downgrade(_config(isolated_migration_postgres_url), "0166")
     try:
         inspector = inspect(engine)
         tables = set(inspector.get_table_names(schema="public"))

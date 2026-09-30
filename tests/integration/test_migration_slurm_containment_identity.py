@@ -44,6 +44,8 @@ def test_slurm_containment_migration_downgrade_and_reupgrade(
     isolated_migration_postgres_url: str,
 ) -> None:
     config = _config(isolated_migration_postgres_url)
+    # Qualify the historical Slurm schema before its explicit 0167 retirement.
+    command.downgrade(config, "0074")
 
     columns, indexes = _schema_state(isolated_migration_postgres_url)
     assert _ADDED_COLUMNS <= columns

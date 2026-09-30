@@ -11,6 +11,7 @@ from typing import Any
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_application_setup import _PATHS, HTTPSApplicationSetupAPI
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_gateway import REFRESH_RETAINED_PREFLIGHT_STAGES
 from scripts.ops.nebius_management_live import backup_client
 from scripts.ops.nebius_management_proofs import ManagementPublicProbe
 from scripts.ops.nebius_management_refresh import render_refresh
@@ -32,13 +33,20 @@ from scripts.ops.nebius_management_refresh_predecessor import (
 from scripts.ops.nebius_management_refresh_resources import (
     HTTPSManagementRefreshResourcesAPI,
     ManagementRefreshResourcesRequest,
+    refresh_documents,
+)
+from scripts.ops.nebius_management_refresh_supersession import (
+    FailedRefreshProof,
+    load_failed_refresh,
 )
 from scripts.ops.nebius_management_refresh_switch import (
     ManagementRefreshSwitchRequest,
+    refresh_initial,
     refresh_target,
 )
 from scripts.ops.nebius_management_stage import ManagementStageError
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_management_upgrade import ManagementUpgradeError
 from scripts.ops.nebius_management_upgrade_live import (
     HTTPSManagementUpgradeAPI,
     ManagementUpgradePrerequisites,
@@ -56,8 +64,10 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
     def __init__(self, *, request: ManagementRefreshInstallRequest, original: CompletedUpgrade,
                  predecessor: CompletedUpgrade | CompletedRefresh, state_dir: Path, api_server: str,
                  ssl_context: ssl.SSLContext, runtime_ca_pem: str | None,
-                 checks: ManagementUpgradePrerequisites, token: str | None = None):
+                 checks: ManagementUpgradePrerequisites, token: str | None = None,
+                 superseded: FailedRefreshProof | None = None):
         self.request, self.original, self.predecessor = request, original, predecessor
+        self.superseded = superseded
         self.state_dir = state_dir
         self.ssl_context, self.runtime_ca_pem, self.token, self.checks = ssl_context, runtime_ca_pem, token, checks
         self.diagnostic_stage: str | None = None
@@ -79,6 +89,50 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
                 or any(request.history.get(path) != checksum for path, checksum in self.predecessor.history.items())):
             raise ManagementStageError('refresh request or completed predecessor binding differs')
         render_refresh(render)
+        failed = self.superseded
+        if failed is None:
+            if request.resources.switch.initial_stopped is not None:
+                raise ManagementStageError('refresh stopped source requires qualified failed history')
+        elif (request.resources.switch.initial_stopped != failed.stopped
+                or failed.request.resources.switch.operation_id == request.resources.switch.operation_id
+                or failed.request.installation_anchor != request.installation_anchor
+                or failed.request.resources.binding != request.resources.binding
+                or failed.request.resources.shared_namespace_uid != request.resources.shared_namespace_uid
+                or failed.request.resources.manager_revision != request.resources.manager_revision
+                or failed.request.resources.switch.render.active != render.active
+                or failed.request.resources.switch.render.before != render.before
+                or any(request.history.get(path) != checksum for path, checksum in failed.history.items())):
+            raise ManagementStageError('refresh failed history binding differs')
+        refresh_initial(request.resources.switch)
+
+    def _supersession(self) -> None:
+        """Read only fixed old resources; preserve terminal Jobs and old journals."""
+        proof = self.superseded
+        if proof is None:
+            return
+        if load_failed_refresh(proof.request, proof.selector) != proof:
+            raise ValueError
+        for phase, recorded in proof.documents.items():
+            with HTTPSManagementRefreshResourcesAPI(request=proof.request.resources, phase=phase,
+                api_server=self.api_server, ssl_context=self.ssl_context, token=self.token) as api:
+                desired = refresh_documents(proof.request.resources, phase)
+                by_uid = {_uid(document): document for document in recorded}
+                for document in desired.values():
+                    api.verify_identity(self.binding)
+                    actual = api.get_resource(document)
+                    if actual is None or _uid(actual) not in by_uid or _snapshot(actual) != _snapshot(by_uid[_uid(actual)]):
+                        raise ValueError
+                    if document['kind'] == 'Job' and phase == proof.failed_phase:
+                        status = actual.get('status', {})
+                        conditions = status.get('conditions', [])
+                        counters = [status.get(key, 0) for key in ('active', 'succeeded', 'terminating', 'failed')]
+                        if (_uid(actual) != proof.failed_job_uid
+                                or any(type(value) is not int or value < 0 for value in counters)
+                                or any(counters[:3]) or not isinstance(conditions, list)
+                                or sum(row.get('type') == 'Failed' and row.get('status') == 'True' for row in conditions) != 1
+                                or any(row.get('type') in {'Complete', 'SuccessCriteriaMet'} and row.get('status') == 'True'
+                                    for row in conditions)):
+                            raise ValueError
 
     def _approved(self, document: dict[str, Any], *, writing: bool = False) -> str:
         raise ManagementStageError('connected refresh has no general resource route')
@@ -122,15 +176,29 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
                 if isinstance(self.predecessor, CompletedRefresh) else original)
             if predecessor != self.predecessor:
                 raise ValueError
+            self.diagnostic_stage = 'supersession'
+            self._supersession()
             self.diagnostic_stage = 'retained_installation'
             with self._retained() as retained:
-                retained.preflight(self.upgrade)
+                try:
+                    retained.preflight(self.upgrade)
+                except ManagementUpgradeError as error:
+                    # Preserve the existing check's closed stage, not its raw
+                    # exception or provider payload. Unknown details stay coarse.
+                    stage = error.stage
+                    if stage == 'prerequisites':
+                        detail = getattr(self.checks, 'diagnostic_stage', None)
+                        if isinstance(detail, str) and detail in REFRESH_RETAINED_PREFLIGHT_STAGES:
+                            stage = detail
+                    if isinstance(stage, str) and stage in REFRESH_RETAINED_PREFLIGHT_STAGES:
+                        self.diagnostic_stage = stage
+                    raise
             self.diagnostic_stage = 'retained_application'
             self._retained_setup()
             self.diagnostic_stage = 'manager'
             with self.switch_api(request.resources.switch) as switch:
                 actual = switch.read()
-            allowed = [self.predecessor.active]
+            allowed = [refresh_initial(request.resources.switch)]
             if (self.state_dir / 'switch/cutover.json').exists():
                 allowed.extend((refresh_target(request.resources.switch, 'retire'), refresh_target(request.resources.switch, 'activate')))
             if not any(_matches(actual, target, _uid(self.predecessor.active)) for target in allowed):

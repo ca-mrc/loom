@@ -140,9 +140,6 @@ function mockPickerEndpoints(
           ],
         });
       }
-      if (url.includes("/api/v1/local-servers")) {
-        return json({ items: [] });
-      }
       return Promise.reject(new Error(`unexpected fetch ${url}`));
     });
 }
@@ -208,6 +205,11 @@ describe("AgentModelPicker copy", () => {
     expect(screen.queryByRole("tab", { name: "Local server" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "HuggingFace" })).not.toBeInTheDocument();
     expect(screen.getByLabelText(/^Model$/i)).toBeDisabled();
+    expect(screen.queryByLabelText("Local model")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("HuggingFace model")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([input]) =>
+      String(input).includes("/api/v1/local-servers"),
+    )).toBe(false);
   });
 
   it("warns before submit when a selected provider model failed preflight", async () => {

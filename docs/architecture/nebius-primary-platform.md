@@ -32,6 +32,16 @@ service remains responsible for those workers using their existing claims. An
 API-only process closes only its own database engine and HTTP/storage clients;
 stopping it does not cancel work owned by a different process.
 
+In `api_only` mode, authenticated `/api/v1/health/ready` checks PostgreSQL with
+`SELECT 1` and HEADs each distinct configured artifact/trajectory bucket using
+that API's own credentials. It returns 200 for healthy dependencies and 503 for
+unavailable dependencies or invalid bucket configuration, without provider error
+details. It does not query the legacy staging mutation/capacity tables or claim
+execution capacity, task readiness, or lifecycle cleanup. The staging application
+mode retains its separate capacity-evidence readiness contract. Database errors
+while authenticating a readiness caller return a secret-free 503; they never
+authorize the caller or bypass ordinary authentication/authorization failures.
+
 This setting is not a distributed singleton lock, an authorization boundary, or
 a read-only API: authorized requests can still mutate shared state. It does not
 bind sessions to a personal origin, select a per-task runtime, provision shared
@@ -583,11 +593,25 @@ Cloud retirement separately reconciles prior-generation grants and deletes exact
 owned memberships, keys and accounts in dependency order. Prepared predecessor
 creates are never sent; uncertain deletion intents survive suspend-to-destroy
 without another request. Shared groups, buckets and policies remain untouched.
-Retained encrypted material supplies a signed, read-only object-service probe
-after IAM retirement. The protected HTTPS client must match the original frozen
-endpoint. Only an explicit HTTP403 `InvalidAccessKeyId` response proves key
-rejection; generic access denial, successful reads, redirects, malformed responses
-and transport failures keep retirement pending. An interrupted permissionless key
+Retained encrypted material supplies signed, read-only `ListObjectsV2` probes
+after fresh provider readback confirms exact IAM retirement, including on replay.
+Every distinct artifacts, trajectories and source bucket must return a bounded,
+well-formed HTTP403 `InvalidAccessKeyId` or `AccessDenied` response. This is a
+**composite access-retirement attestation**, not a claim that `AccessDenied` alone
+proves universal key invalidity or that list denial tests every read/write action.
+Successful reads, other errors, redirects, encoded or ambiguous XML responses and
+transport failures keep retirement pending; no probe independently releases capacity.
+
+The verifier's scope comes from the protected installation. Supported refreshes
+preserve its endpoint, region, buckets, groups/project and shared data identity,
+rooted to the original completed upgrade. Historical plans must match its
+registration/shared data and cluster, shared namespace, endpoint/region and data
+buckets; historical IAM parents must match its recorded groups/project. This
+immutable installation boundary supplies legacy source-bucket scope without
+rewriting a frozen plan. A data UUID alone cannot establish that boundary.
+The HTTP origin must match the original frozen endpoint, and the signer uses the
+original encrypted key with redirects and ambient client authentication disabled.
+An interrupted permissionless key
 with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
@@ -595,7 +619,9 @@ permission to release capacity.
 Before startup, credential `qualify` requires retained material and the four
 already-observed current IAM grants. It reconciles their live identities without
 new cloud mutations, validates the protected CA/keyring and original object key,
-and requalifies schema, SQL login and actual shared membership under the current
+and requires positive responses to the identical read-only probe in every scoped
+bucket. Only the expected bucket/prefix-bounded list response qualifies; ordinary
+denial is not readiness. It then requalifies schema, SQL login and actual shared membership under the current
 source/lease checks. Positive catalog checks require every individual runtime
 table/sequence privilege; missing grants are never repaired here. Qualification
 reuses bounded grant/enrollment replay, not a new administrative SQL interface.
@@ -698,6 +724,16 @@ Mutation requests use idempotency keys. Exact replay returns the same operation'
 current status, including when a peer commits it during request planning.
 `/application-operations/{id}/retry` retries a blocked current operation.
 
+The additive owner-scoped `GET /application-operations/{id}/evidence` returns a
+bounded journal projection: operation state, runner epoch, boolean lease activity
+and completion-record presence, and grouped Kubernetes/cloud effect counts by
+fixed kind, action and journal phase. A read-only repeatable-read transaction
+keeps the projection in one snapshot. It returns no frozen plan, resource identity,
+intent, credential, lease token or raw provider error, and uses `Cache-Control:
+no-store`. Existing operation/status response schemas are unchanged. These counts
+do not prove current provider state, process absence, access revocation or readiness;
+even every effect being observed does not authorize completion or a retry.
+
 `ApplicationManager` uses protected installation-pinned release records, foundation,
 shared-development binding and namespace authority. Owners cannot supply images,
 provider authority, storage ownership or readiness assertions through these APIs.
@@ -794,7 +830,7 @@ scrubbed fragment and requires an explicit sign-in click. Management login respo
 use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
 
 `loom dev app` invokes the application API for create, list, status, update,
-suspend, resume, retained destroy, operation retry/wait and login. Create/update
+suspend, resume, retained destroy, operation retry/wait/evidence and login. Create/update
 require a qualified application `--release` UUID, not a legacy candidate ID or a
 local source path. Generation-fenced mutations print their exact retry command,
 including the selected management context, before submission. A timeout never
@@ -1115,9 +1151,22 @@ is an unauthenticated, bounded, read-only database probe returning only componen
 status, with HTTP 503 on failure. When the optional provisioner is configured,
 its supervised-loop health is included; a dead or recovering worker is not ready.
 It reports no identities, credentials or database errors and has no dependency on
-child availability. Application-mode readiness
-and its authentication contract are unchanged. Hosted sessions retain secure
-host-only cookies and sibling-origin rejection in either mode.
+child availability. In application mode, the authenticated `/api/v1/health/ready`
+checks PostgreSQL with `SELECT 1` and each configured artifacts/trajectories bucket
+with `HEAD`, returning HTTP 503 if either dependency is unavailable. It works in
+all application environments; environment and namespace are descriptive metadata.
+It does not query staging mutation epochs or staging capacity evidence. The JSON
+response contains `status`, `postgres`, `object_store`, `environment`, `namespace`
+and `blockers`; the former staging-only `mutation_epoch`, `capacity`,
+`capacity_ready` and `resource_digest` fields have been removed. This probe does
+not certify storage capacity or admit destructive lifecycle operations; those
+retain their own policy checks. Hosted sessions retain secure host-only cookies
+and sibling-origin rejection in either mode.
+
+The Control Plane starts legacy Worker heartbeat recovery only when
+`LOOM_ENV=development` and `LOOM_LOCAL_EXECUTION=1`, matching its local Worker
+routes. Native execution reconciliation, retry-exhaustion handling, metrics and
+expired live-preview cleanup remain independent of that opt-in.
 
 The optional provider worker can provision an execution-disabled child and perform
 retained teardown. These are implementation capabilities, **not installed Nebius
@@ -1247,6 +1296,13 @@ management-only migration; activation rechecks those barriers. Completion requir
 the actual current manager Pod/controller and authenticated public application
 runtime health. Uncertain writes remain readback-only, failed migration does not
 restart the old manager, and completed receipts retain bounded predecessor evidence.
+An explicitly selected pre-migration probe failure may be superseded by a new
+protected refresh. Its frozen history and terminal Job must qualify, and the new
+operation adopts only the old stopped Deployment marker under the installation
+lock. It preserves the retained runtime at zero replicas, fences old replay, and
+repeats every normal probe, backup, migration and activation barrier. It cannot
+reset uncertain history or recover a failed migration. Ordinary refresh histories
+remain compatible; explicit supersession ancestry is bounded.
 This source contract does not itself prove an installed refresh or owner acceptance.
 
 The returned `platform_envelope` includes database PVC, rollout/migration overhead

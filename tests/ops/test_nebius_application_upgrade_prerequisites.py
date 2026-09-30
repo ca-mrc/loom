@@ -144,6 +144,21 @@ def test_upgrade_fit_cannot_report_capacity_without_an_eligible_platform_node(sh
     client.base.inventory = lambda *args: []
     with pytest.raises(ManagementCapacityError):
         client.platform_capacity(request)
+    assert client.capacity_diagnostic['stage'] == 'node_eligibility'
+    assert client.capacity_diagnostic['nodes'] == []
+
+
+def test_capacity_inventory_transport_failure_has_no_provider_payload(shared_checks):
+    client, request, _, _, _ = shared_checks
+    def unavailable(*args):
+        raise ValueError('private-api-response')
+    client.base.inventory = unavailable
+    with pytest.raises(ValueError):
+        client.platform_capacity(request)
+    assert client.capacity_diagnostic['stage'] == 'inventory'
+    assert client.capacity_diagnostic['kind'] == 'Deployment'
+    assert client.capacity_diagnostic['error_type'] == 'ValueError'
+    assert 'private' not in str(client.capacity_diagnostic)
 
 
 @pytest.mark.parametrize('failure', [None, 'shared_material', 'platform_capacity', 'provider', 'public_route'])

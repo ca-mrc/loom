@@ -92,7 +92,8 @@ class ApplicationServiceRuntime:
             access = ApplicationCredentialProvider(registry, ApplicationCloudProvider(registry, NebiusSdkEnvironmentApi(sdk)),
                 AsyncApplicationDatabaseAccess(dsn, installation.shared.data_environment_id),
                 storage_binding=installation.storage.model_dump(mode="json"), shared=shared_credentials)
-            coordinator = ApplicationLifecycleCoordinator(registry, provider, access, ApplicationObjectAccessVerifier(objects))
+            coordinator = ApplicationLifecycleCoordinator(registry, provider, access, ApplicationObjectAccessVerifier(objects,
+                foundation=manager.foundation, shared=installation.shared, storage=installation.storage))
             login = ApplicationLogin(registry, shared=installation.shared, credentials=shared_credentials,
                 ca_file=Path(str(conninfo_to_dict(dsn)["sslrootcert"])))
             runtime = cls(ApplicationWorker(registry, coordinator), installation, login)

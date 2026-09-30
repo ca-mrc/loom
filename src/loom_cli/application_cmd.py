@@ -84,6 +84,8 @@ def _run(args: argparse.Namespace) -> int:
                     print("Browser login opened; confirm sign-in before the short-lived proof expires.")
             elif command == "retry":
                 print(client.retry(UUID(args.operation_id)).model_dump_json())
+            elif command == "evidence":
+                print(client.evidence(UUID(args.operation_id)).model_dump_json())
             elif command == "wait":
                 operation, terminal = client.wait(UUID(args.operation_id), timeout=args.timeout)
                 print(operation.model_dump_json())
@@ -97,7 +99,9 @@ def _run(args: argparse.Namespace) -> int:
     except (NotLoggedInError, HttpStatusError) as exc:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
-        print(f"Management request failed ({type(exc).__name__}); no automatic retry. Reuse the printed retry command.", file=sys.stderr)
+        hint = ("Run this read-only evidence command again." if args.application_command == "evidence"
+                else "Reuse the printed retry command.")
+        print(f"Management request failed ({type(exc).__name__}); no automatic retry. {hint}", file=sys.stderr)
     except OSError:
         print("Could not securely save personal credentials; management login is unchanged.", file=sys.stderr)
     except (ValueError, KeyError, TypeError):
@@ -128,6 +132,8 @@ def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # 
             child.add_argument("--release", required=True, help="Qualified application release UUID")
     retry = sub.add_parser("retry", help="Explicitly retry a blocked current application operation")
     retry.add_argument("operation_id")
+    evidence = sub.add_parser("evidence", help="Read owner-scoped journal counts; not live readiness or retry authority")
+    evidence.add_argument("operation_id")
     wait = sub.add_parser("wait", help="Wait without cancelling; exits 2 on timeout, 1 when blocked or superseded")
     wait.add_argument("operation_id")
     wait.add_argument("--timeout", type=float, default=300)

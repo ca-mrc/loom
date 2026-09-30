@@ -5,7 +5,6 @@ import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from loom.db.schema_startup import service_schema_head
 from tests.integration.test_nebius_application_effect_migration import operation
 from tests.integration.test_nebius_application_registry import (
     application_database as application_database,
@@ -39,14 +38,18 @@ def test_empty_completion_downgrade_roundtrip_preserves_frozen_operation(applica
         assert connection.execute(text('SELECT * FROM nebius_application_operations')).mappings().all() == before
 
 
-def test_completion_receipt_blocks_lossy_downgrade(application_database):
+@pytest.mark.parametrize("revision", ["0166", "head"])
+def test_completion_receipt_blocks_lossy_downgrade(application_database, revision):
+    if revision != "head":
+        migrate(application_database, 'downgrade', revision)
     with application_database.begin() as connection:
         operation(connection)
         connection.execute(text("UPDATE nebius_application_operations SET phase='completed', "
             "completion_json='{}'::jsonb, completed_at=now()"))
         before = connection.execute(text('SELECT * FROM nebius_application_operations')).mappings().all()
+        original_revision = connection.scalar(text('SELECT version_num FROM alembic_version'))
     with pytest.raises(DBAPIError, match='cannot remove application completion evidence'):
         migrate(application_database, 'downgrade', '0165')
     with application_database.connect() as connection:
-        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == service_schema_head()
+        assert connection.scalar(text('SELECT version_num FROM alembic_version')) == original_revision
         assert connection.execute(text('SELECT * FROM nebius_application_operations')).mappings().all() == before

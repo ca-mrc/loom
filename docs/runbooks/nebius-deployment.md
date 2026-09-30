@@ -79,6 +79,7 @@ loom --context management-alice dev app suspend APPLICATION_UUID
 loom --context management-alice dev app resume APPLICATION_UUID
 loom --context management-alice dev app destroy APPLICATION_UUID
 loom --context management-alice dev app retry BLOCKED_OPERATION_UUID
+loom --context management-alice dev app evidence OPERATION_UUID
 ```
 
 Each mutation prints a replay key and exact retry command before its POST. After a
@@ -89,6 +90,14 @@ fence the request to that observed generation. `wait` exits 0 only for completed
 1 for blocked/superseded or request errors, and 2 for a local timeout. A timeout
 does not cancel remote work. Retry of a blocked operation is an explicit action,
 not a substitute for reconciling uncertain writes.
+
+`evidence` is read-only and owner-scoped. It shows saved Kubernetes/cloud effect
+counts by resource kind, action and journal phase, alongside lease activity and
+whether completion was recorded. It exposes no credentials or resource contents.
+The snapshot can distinguish unconfirmed mutations from observed journal entries,
+but is not live provider or credential-revocation proof. Do not resume, release
+capacity or retry a blocked operation merely because all displayed effects are
+observed; the lifecycle's normal completion barriers still apply.
 
 Destroy stops only the owned application and retains shared development data and
 its identity claims; it is not a shared database, bucket or namespace purge.
@@ -719,6 +728,20 @@ capacity. Include existing maintenance scratch as well as management, concurrent
 children, rollout surge, system daemons and images; undeclared Pod requests do
 not mean the workload uses no disk.
 
+`integration_platform.system_max_pods` separately configures the primary system
+node's Pod limit (integer 16–110, default 64); execution and regional groups are
+unchanged. A platform can have free CPU, memory and disk but insufficient Pod
+slots. Compare the protected preflight's numeric `required.pods` with
+`allocatable.pods`, including maintenance, rollout surge and the full child
+allowance. Do not lower the reservation or bypass admission just to pass the check.
+The [pinned Nebius provider's node-group contract](https://github.com/nebius/terraform-provider-nebius/blob/v0.6.46/docs/resources/mk8s_v1_node_group.md#nestedatt--template)
+documents 110 as the native default and derives the per-node Pod CIDR as
+`32 - ceil(log2(2 * max_pods))`. Increasing 64 to 110 therefore changes /25 to
+/24. Check cluster Pod-address availability, including temporary surge nodes;
+do not assume VM subnet free addresses alone prove Pod-address availability.
+The larger Pod limit adds no compute or persistent storage but must be treated
+as a node-replacement operation with the same retained-data protections below.
+
 For a planned system-node replacement, `system_create_before_drain: true` selects
 one temporary surge node and zero unavailable nodes; the steady count remains
 one. The default remains the existing drain-first strategy. These inputs do not
@@ -1114,6 +1137,29 @@ effects and investigate; do not reset state or automatically create another Job.
 Only proven release permits retrying the recorded first-application intent;
 personal HTTPS/login/suspend-resume remains a separate acceptance gate.
 
+### Qualify personal object-access retirement
+
+Before accepting a provider's retirement protocol, use an ordinary application
+create to establish successful signed read-only probes for all protected data and
+source buckets, then suspend that generation and verify its original-key denials
+after exact IAM absence. Check that a sibling application and shared data remain
+available. The active-start qualification runs those positive probes without
+additional object permissions, new buckets, policy changes or secret export.
+
+Nebius can return structured `AccessDenied` for a nonexistent key. That response
+alone is not retirement proof: completion requires the existing exact account,
+key and membership deletion readbacks plus signed denials in every original scope,
+SQL retirement and stopped-workload evidence. Do not substitute HTML/generic403,
+transport failure, a synthetic missing-key experiment or a successful Job.
+
+For an already-deleted historical key, retain its encrypted material and immutable
+operation history. The installation's original-upgrade-rooted, unchanged storage
+scope supplies legacy source-bucket binding; never invent a new frozen plan or
+recreate a deleted key. Complete a separate ordinary application's positive-create,
+suspend and original-key denial cycle before explicitly retrying the historical
+blocked retirement. Missing
+material, incompatible scope or unresolved provider effects remain blocked.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
@@ -1131,6 +1177,9 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
 - `predecessor`: that same upgrade selector, or the immediately preceding completed
   refresh selector. A refresh selector binds its operation UUID, private-input
   digest and completion receipt digest; it does not accumulate an unbounded chain.
+  Receipt qualification compares Kubernetes resource quantities numerically
+  (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
+  accepting changed resource amounts or other runtime configuration.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
@@ -1138,6 +1187,9 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   shared-development schema in the selected application configuration.
 - `prerequisites` and `foundation_candidate`: the existing current-shared-runtime
   prerequisite contract and its protected publication source.
+- Optional `supersedes`: the failed pre-migration refresh's complete `operation`
+  metadata plus `refresh_sha256` and `switch_sha256`, binding its parent and
+  cutover journals. Omit this for an ordinary refresh.
 
 Prepare the exact integrated source bundle and install its dedicated forced-SSH
 grant with `install_nebius_management_entrypoint.py`, as for the original manager.
@@ -1164,6 +1216,20 @@ installation lock, stages only fixed operation resources, and proceeds through:
    verify the actual current Pod/controller plus authenticated public HTTPS and
    application-provisioner readiness.
 
+When retained preflight fails, the closed `stage` field preserves the failed check,
+such as `refresh_resource_inventory`, `refresh_persistent_storage`,
+`refresh_shared_material`, `refresh_publication` or `refresh_cloud_identity`.
+Unknown details retain a coarse stage. These codes expose no resource contents or
+provider messages and do not authorize retrying a blocked installation.
+For `refresh_platform_capacity`, an optional closed `capacity` diagnostic
+distinguishes rendering, inventory, controller decoding/counting, placement and
+resource fit. For eligible nodes it reports only node UUIDs and numeric CPU,
+memory, ephemeral-storage and Pod-slot totals. No Pod configuration, credential,
+provider response or exception message is exported. A capacity-stage failure is
+not by itself proof that larger machines are needed: inspect this report before
+changing resources. Missing or invalid details stay coarse, and no qualification,
+write or retry behavior is relaxed.
+
 The operation retains Deployment and credential identities, storage, routes,
 permissions and budgets. It does not migrate the shared business database, create
 IAM/RBAC/network grants, or admit arbitrary manifests or commands. A candidate
@@ -1178,6 +1244,45 @@ leaves the manager stopped: there is no automatic rollback onto a changed schema
 Any rollback after migration needs a qualified compatible candidate and a new
 operation. Personal HTTPS/login/lifecycle and concurrent-owner acceptance remain
 separate checks after a successful refresh.
+
+A terminal failed **manager or shared compatibility probe**, before any backup or
+migration intent, can be replaced by an explicit successor refresh. Use a new UUID,
+private input path, current integrated source/candidate publication and dedicated
+grant; retain the same last successful `predecessor` and original upgrade. Set
+`supersedes` to the exact failed operation and journal hashes. Do not edit its
+inputs, credentials or receipts, delete its Jobs, or retry its frozen candidate.
+The new target must render a different immutable configuration name from every
+failed ancestor: the create-only installer cannot reuse their ConfigMaps. An
+unchanged target is rejected during input loading, before creating new state.
+The successor requalifies the full failed prefix, immutable resource identities,
+terminal failed Job and exact stopped manager. Missing journals, uncertain creates,
+activation intent or any backup/migration/post-probe evidence make it ineligible.
+`refresh_supersession` identifies failure of this qualification, not retry authority.
+
+Under the original installation lock, the successor changes only the stopped
+Deployment's operation marker: its UID, image, configuration and zero replicas
+remain unchanged. This fences replay of the old operation. It then observes native
+drain and repeats **all** ordinary compatibility, backup, migration, activation
+and authenticated readiness barriers. A lost write response never permits a blind
+second PATCH. Repeated eligible failures require explicit successors, with at most
+eight failed ancestors and 128 retained history files; no journal is reset. This
+path does not recover a failed migration or restore a manager onto an older schema.
+
+For a failed compatibility probe, protected `inspect` adds
+`failed_refresh_probes` for at most three recent failed probe Pods. It binds the
+Job owner UID, operation marker, installation, namespace, image and command before
+projecting exit status and allowlisted log diagnostics. After validating the
+immutable probe settings and fixed service-credential reference, it reads only
+the namespace-local `loom-platform-db` Secret to report URL-shape booleans. No
+credential, URL, raw log, exception message or configuration payload is exported.
+`current_url.status: observed_current` describes the credential currently stored,
+not necessarily the value used by the failed Pod. Missing or unqualified evidence
+is `unavailable`, not success. This refresh-probe inspection runs no SQL or Pod exec, creates no
+resources, and grants no retry, journal reset or manager restart authority.
+New probe failures also report only a closed `stage` and `error_type`, separating
+settings, database URL, connection, read-only, schema and retained-operation checks.
+Both `postgresql://` and `postgresql+psycopg://` service URLs are accepted; exact
+role, host, port, database and TLS restrictions remain unchanged.
 
 ## Before the first application
 

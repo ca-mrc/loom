@@ -5,7 +5,6 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine, inspect
 
-from loom.db.schema import PipelineInputMaterializationEvidence
 from loom.pipeline.keys import canonical_document, digest_bytes
 from loom.pipeline.work_protocol import (
     PipelineInputMaterializationEvidenceRefV1,
@@ -46,16 +45,18 @@ def test_evidence_document_and_reference_are_exact_and_immutable_shaped() -> Non
         "lease_epoch",
         "evidence_sha256",
     }
-    assert PipelineInputMaterializationEvidence.__table__.primary_key.columns.keys() == [
-        "execution_attempt_id"
-    ]
-    assert "updated_at" not in PipelineInputMaterializationEvidence.__table__.columns
 
 
 def test_evidence_migration_has_exact_attempt_pk_fk_and_no_cleanup_fields(
-    postgres_url: str,
+    isolated_migration_postgres_url: str,
 ) -> None:
-    engine = create_engine(postgres_url)
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config("database/migrations/alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
+    command.downgrade(cfg, "0166")
+    engine = create_engine(isolated_migration_postgres_url)
     try:
         inspector = inspect(engine)
         columns = {

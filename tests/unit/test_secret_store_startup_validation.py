@@ -348,13 +348,17 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
     from loom_control_plane import app as control_plane_app
     from loom_control_plane.config import ControlPlaneSettings
 
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "0")
     calls: list[str] = []
 
     async def _validate_schema(_engine: object) -> None:
         calls.append("schema")
 
     async def _run_background_loop(**_kwargs: object) -> None:
-        calls.append("background")
+        task = asyncio.current_task()
+        assert task is not None
+        calls.append(task.get_name())
         await asyncio.Event().wait()
 
     monkeypatch.setattr(
@@ -373,21 +377,12 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
         "build_s3_client",
         lambda **_: object(),
     )
-    monkeypatch.setattr(
-        control_plane_app,
-        "run_crash_detector_loop",
-        _run_background_loop,
-    )
-    monkeypatch.setattr(
-        control_plane_app,
-        "run_metrics_refresher_loop",
-        _run_background_loop,
-    )
-    monkeypatch.setattr(
-        control_plane_app,
-        "run_retry_exhausted_sweeper_loop",
-        _run_background_loop,
-    )
+    for name in (
+        "run_crash_detector_loop", "run_metrics_refresher_loop",
+        "run_retry_exhausted_sweeper_loop", "run_live_preview_reconciler_loop",
+        "run_service_execution_scheduler_loop", "run_service_execution_materializer_loop",
+    ):
+        monkeypatch.setattr(control_plane_app, name, _run_background_loop)
 
     app = control_plane_app.create_app(
         ControlPlaneSettings(
@@ -397,6 +392,8 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
             minio_access_key="minio-access",
             minio_secret_key="minio-secret",
             step_jwt_signing_key="test-step-jwt-signing-key",
+            service_execution_scheduler_enabled=True,
+            service_execution_materializer_enabled=True,
         ),
     )
 
@@ -404,4 +401,8 @@ def test_control_plane_lifespan_validates_schema_before_background_tasks(
         assert client.get("/healthz").status_code == 200
 
     assert calls[0] == "schema"
-    assert calls.count("background") == 3
+    assert set(calls[1:]) == {
+        "loom-cp-metrics-refresher", "loom-cp-retry-exhausted-sweeper",
+        "loom-cp-live-preview-reconciler", "loom-cp-service-execution-scheduler",
+        "loom-cp-service-execution-materializer",
+    }

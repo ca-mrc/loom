@@ -29,7 +29,6 @@ _REFERENCED_SQL = """
     SELECT EXISTS (
         SELECT 1 FROM provider_connections
         WHERE encrypted_api_key_ref = :ref AND deleted_at IS NULL
-        UNION ALL SELECT 1 FROM dev_instances WHERE secret_ref = :ref
         UNION ALL SELECT 1 FROM task_image_build_projections
         WHERE bootstrap_secret_ref = :ref OR session_secret_ref = :ref
         UNION ALL SELECT 1 FROM task_image_build_session_generations

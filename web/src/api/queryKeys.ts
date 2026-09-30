@@ -25,7 +25,6 @@ export const queryKeys = {
   "build-version": buildVersionKey,
   invite: key("invite"),
   invites: key("invites"),
-  "local-servers": key("local-servers"),
   models: key("models"),
   "monitor-placement": key("monitor-placement"),
   "monitor-summary": key("monitor-summary"),

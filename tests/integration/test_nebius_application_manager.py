@@ -105,10 +105,14 @@ async def test_update_from_actual_ready_completion_preserves_identity_and_freeze
 
 async def test_resume_uses_same_release_after_real_stopped_completion(stopped_context, platform_inputs):
     from loom.nebius_application_contract import ApplicationOperationRequestV1
+    from loom_service.application_management.operation_evidence import read_operation_evidence
 
     registry, _, alice, lease, runtime, *_ = stopped_context
     plan = await registry.frozen_plan(lease)
     await registry.complete_stopped(lease, await evidence(stopped_context))
+    report = await read_operation_evidence(registry.session_factory, lease.operation_id, principal=alice)
+    assert report.completion_recorded is True and report.lease_active is False
+    assert report.operation.phase == 'completed'
     service, release = manager(registry, platform_inputs, plan=plan, authority=runtime.authority)
     operation = await service.transition(alice, lease.application_id,
         ApplicationOperationRequestV1(action='resume', expected_generation=2), idempotency_key='resume')
@@ -138,6 +142,7 @@ async def test_management_api_authenticates_owner_and_never_exposes_private_plan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://management.example.com') as a, \
                 httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://management.example.com') as b:
             assert (await a.get('/api/v1/applications')).status_code == 401
+            assert (await a.get(f'/api/v1/application-operations/{uuid4()}/evidence')).status_code == 401
             for client, name in ((a, 'alice'), (b, 'bob')):
                 login = await client.post('/api/v1/auth/login', json={'username': name, 'password': name + '-owner-passphrase'})
                 assert login.status_code == 200
@@ -153,6 +158,15 @@ async def test_management_api_authenticates_owner_and_never_exposes_private_plan
             assert status.json()['operation']['phase'] == 'pending'
             assert (await b.get(f'/api/v1/applications/{application_id}')).status_code == 403
             assert (await b.get(f'/api/v1/application-operations/{operation_id}')).status_code == 403
+            evidence_path = f'/api/v1/application-operations/{operation_id}/evidence'
+            assert (await b.get(evidence_path)).status_code == 403
+            evidence = await a.get(evidence_path)
+            assert evidence.status_code == 200
+            assert evidence.headers['cache-control'] == 'no-store'
+            assert evidence.json()['operation']['operation_id'] == operation_id
+            assert evidence.json()['kubernetes'] == evidence.json()['cloud'] == []
+            assert evidence.json()['lease_active'] is False
+            assert evidence.json()['completion_recorded'] is False
             assert (await b.get('/api/v1/applications')).json() == {'items': []}
             assert (await a.post('/api/v1/applications', json=payload | {'namespace': 'loom-prod'},
                 headers={'Idempotency-Key': 'unsafe'})).status_code == 422
@@ -174,3 +188,4 @@ async def test_application_routes_are_management_only():
     register_api_routes(app, management=False, include_local_execution=False)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://personal.example.com') as client:
         assert (await client.get('/api/v1/applications')).status_code == 404
+        assert (await client.get(f'/api/v1/application-operations/{uuid4()}/evidence')).status_code == 404

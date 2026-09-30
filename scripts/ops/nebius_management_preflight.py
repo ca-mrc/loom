@@ -25,6 +25,7 @@ from scripts.ops.deploy_nebius_platform import (  # noqa: E402
     verify_cluster_identity,
 )
 from scripts.ops.nebius_ingress_preflight import inspect_ingress  # noqa: E402
+from scripts.ops.nebius_refresh_probe_inspection import failed_refresh_probes  # noqa: E402
 
 RESOURCE_KEYS = ("cpu", "memory", "ephemeral-storage", "pods")
 _BOOTSTRAP_ERRORS = {"ConfigurationRequestError", "MigrationError", "ValueError", "KeyError",
@@ -386,6 +387,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "cluster_id": expected_cluster_id, "namespace": namespace,
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
+        "failed_refresh_probes": failed_refresh_probes(kube, pods, namespace),
         "failed_retirement_jobs": _failed_retirement_jobs(kube, pods,
             {row["metadata"]["name"]: row["metadata"]["uid"] for row in namespaces}),
         "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
