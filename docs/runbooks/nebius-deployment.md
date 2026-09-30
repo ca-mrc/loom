@@ -1152,6 +1152,9 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
   shared-development schema in the selected application configuration.
 - `prerequisites` and `foundation_candidate`: the existing current-shared-runtime
   prerequisite contract and its protected publication source.
+- Optional `supersedes`: the failed pre-migration refresh's complete `operation`
+  metadata plus `refresh_sha256` and `switch_sha256`, binding its parent and
+  cutover journals. Omit this for an ordinary refresh.
 
 Prepare the exact integrated source bundle and install its dedicated forced-SSH
 grant with `install_nebius_management_entrypoint.py`, as for the original manager.
@@ -1207,6 +1210,29 @@ Any rollback after migration needs a qualified compatible candidate and a new
 operation. Personal HTTPS/login/lifecycle and concurrent-owner acceptance remain
 separate checks after a successful refresh.
 
+A terminal failed **manager or shared compatibility probe**, before any backup or
+migration intent, can be replaced by an explicit successor refresh. Use a new UUID,
+private input path, current integrated source/candidate publication and dedicated
+grant; retain the same last successful `predecessor` and original upgrade. Set
+`supersedes` to the exact failed operation and journal hashes. Do not edit its
+inputs, credentials or receipts, delete its Jobs, or retry its frozen candidate.
+The new target must render a different immutable configuration name from every
+failed ancestor: the create-only installer cannot reuse their ConfigMaps. An
+unchanged target is rejected during input loading, before creating new state.
+The successor requalifies the full failed prefix, immutable resource identities,
+terminal failed Job and exact stopped manager. Missing journals, uncertain creates,
+activation intent or any backup/migration/post-probe evidence make it ineligible.
+`refresh_supersession` identifies failure of this qualification, not retry authority.
+
+Under the original installation lock, the successor changes only the stopped
+Deployment's operation marker: its UID, image, configuration and zero replicas
+remain unchanged. This fences replay of the old operation. It then observes native
+drain and repeats **all** ordinary compatibility, backup, migration, activation
+and authenticated readiness barriers. A lost write response never permits a blind
+second PATCH. Repeated eligible failures require explicit successors, with at most
+eight failed ancestors and 128 retained history files; no journal is reset. This
+path does not recover a failed migration or restore a manager onto an older schema.
+
 For a failed compatibility probe, protected `inspect` adds
 `failed_refresh_probes` for at most three recent failed probe Pods. It binds the
 Job owner UID, operation marker, installation, namespace, image and command before
@@ -1218,6 +1244,10 @@ credential, URL, raw log, exception message or configuration payload is exported
 not necessarily the value used by the failed Pod. Missing or unqualified evidence
 is `unavailable`, not success. This refresh-probe inspection runs no SQL or Pod exec, creates no
 resources, and grants no retry, journal reset or manager restart authority.
+New probe failures also report only a closed `stage` and `error_type`, separating
+settings, database URL, connection, read-only, schema and retained-operation checks.
+Both `postgresql://` and `postgresql+psycopg://` service URLs are accepted; exact
+role, host, port, database and TLS restrictions remain unchanged.
 
 ## Before the first application
 

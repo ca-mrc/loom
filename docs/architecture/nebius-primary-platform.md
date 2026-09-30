@@ -1247,6 +1247,13 @@ management-only migration; activation rechecks those barriers. Completion requir
 the actual current manager Pod/controller and authenticated public application
 runtime health. Uncertain writes remain readback-only, failed migration does not
 restart the old manager, and completed receipts retain bounded predecessor evidence.
+An explicitly selected pre-migration probe failure may be superseded by a new
+protected refresh. Its frozen history and terminal Job must qualify, and the new
+operation adopts only the old stopped Deployment marker under the installation
+lock. It preserves the retained runtime at zero replicas, fences old replay, and
+repeats every normal probe, backup, migration and activation barrier. It cannot
+reset uncertain history or recover a failed migration. Ordinary refresh histories
+remain compatible; explicit supersession ancestry is bounded.
 This source contract does not itself prove an installed refresh or owner acceptance.
 
 The returned `platform_envelope` includes database PVC, rollout/migration overhead

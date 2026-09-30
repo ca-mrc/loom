@@ -13,6 +13,7 @@ from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_refresh_switch import (
     ManagementRefreshSwitchRequest,
     qualify_refresh_drain,
+    refresh_initial,
     refresh_target,
 )
 from scripts.ops.nebius_management_stage import ManagementStageError
@@ -54,7 +55,7 @@ class HTTPSManagementRefreshSwitchAPI(HTTPSApplicationSetupAPI):
             if (operation_id != str(self.refresh.operation_id) or action not in {'retire', 'activate'}
                     or (preview and action != 'activate')):
                 raise ValueError
-            expected = self.refresh.render.active if action == 'retire' else refresh_target(self.refresh, 'retire')
+            expected = refresh_initial(self.refresh) if action == 'retire' else refresh_target(self.refresh, 'retire')
             desired = refresh_target(self.refresh, 'activate' if action == 'activate' else 'retire')
             version = before['metadata']['resourceVersion']
             if (not _matches(before, expected, _uid(self.refresh.render.active))

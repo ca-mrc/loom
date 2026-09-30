@@ -114,6 +114,9 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
                 raise ValueError
             factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
             async with factory.begin() as session:
+                # AsyncSession begins lazily: establish TLS/authentication before
+                # classifying failures of the read-only enforcement query.
+                await session.connection()
                 stage = "read_only"
                 if await session.scalar(text("SHOW transaction_read_only")) != "on":
                     raise ValueError
