@@ -147,6 +147,53 @@ def test_successive_completed_refreshes_have_bounded_read_only_history(completed
     assert len(set(sizes)) == 1 and max(sizes) < 100
 
 
+@pytest.mark.parametrize('resource,native,canonical', [
+    ('cpu', '100m', '0.1'), ('memory', '256Mi', '268435456'),
+])
+def test_completed_native_quantity_receipt_is_reusable_without_rewriting_history(
+        completed_upgrade, monkeypatch, resource, native, canonical):
+    from decimal import Decimal
+
+    from tests.ops.test_nebius_management_refresh_switch import API
+
+    root = load(completed_upgrade[0])
+    desired = API.desired
+
+    def native_desired(self, action):
+        document = desired(self, action)
+        requests = document['spec']['template']['spec']['containers'][0]['resources']['requests']
+        assert Decimal(requests[resource]) == Decimal(canonical)
+        requests[resource] = native
+        return document
+
+    monkeypatch.setattr(API, 'desired', native_desired)
+    selector, case = complete_refresh(root)
+    receipt_path = case[2] / 'completion.json'
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt['active']['spec']['template']['spec']['containers'][0]['resources']['requests'][resource] == native
+    before = {path: path.read_bytes() for path in case[2].parent.rglob('*.json')}
+    predecessor = load_refresh(selector, root)
+    assert predecessor.active['metadata']['uid'] == root.active['metadata']['uid']
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize('resource,changed', [('cpu', '101m'), ('memory', '257Mi')])
+def test_quantity_comparison_still_rejects_actual_resource_change(completed_upgrade, resource, changed):
+    root = load(completed_upgrade[0])
+    selector, case = complete_refresh(root)
+    path = case[2] / 'completion.json'
+    receipt = json.loads(path.read_text())
+    receipt['active']['spec']['template']['spec']['containers'][0]['resources']['requests'][resource] = changed
+    path.write_text(json.dumps(receipt))
+    selector['completion_sha256'] = checksum(path)
+    parent_path = case[2] / 'refresh.json'
+    parent = json.loads(parent_path.read_text())
+    parent['completion_sha256'] = selector['completion_sha256']
+    parent_path.write_text(json.dumps(parent))
+    with pytest.raises(ValueError, match='refresh_predecessor_unqualified'):
+        load_refresh(selector, root)
+
+
 @pytest.mark.parametrize('damage', ['completion_hash', 'lost_anchor', 'lost_phase', 'lost_input',
     'changed_input', 'contract', 'pending', 'active_uid', 'active_material', 'probe_proof', 'phase_hash', 'switch_hash', 'layout'])
 def test_incomplete_or_rebound_refresh_cannot_be_a_predecessor(completed_upgrade, damage):

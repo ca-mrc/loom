@@ -21,6 +21,30 @@ from alembic.script import ScriptDirectory
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_management_refresh import refresh_request as refresh_request
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    application_material as application_material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    checks as checks,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    cloud as cloud,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    completed_upgrade as completed_upgrade,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    entry_inputs as entry_inputs,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    installation as installation,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    material as material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    private_upgrade as private_upgrade,
+)
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
@@ -35,6 +59,54 @@ assert CURRENT_REVISION is not None
 
 pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
     reason='requires explicitly disposable Kubernetes')
+
+
+@pytest.mark.timeout(240)
+def test_completed_refresh_with_native_api_quantities_loads_as_next_predecessor(completed_upgrade, monkeypatch):
+    """Exercise the API quantity spelling across the real receipt/journal boundary."""
+    from kubernetes import client
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    from tests.ops.test_nebius_management_refresh_predecessor import (
+        complete_refresh,
+        load,
+        load_refresh,
+    )
+    from tests.ops.test_nebius_management_refresh_switch import API
+
+    root = load(completed_upgrade[0])
+    cluster = _start_k3s(ephemeral_storage_floor='2Gi')
+    try:
+        _, core, _ = _load_client(cluster)
+        apps = client.AppsV1Api(core.api_client)
+        core.create_namespace({'metadata': {'name': root.deployment.namespace}})
+        desired = API.desired
+
+        def native_desired(self, action):
+            document = desired(self, action)
+            observed = core.api_client.sanitize_for_serialization(apps.create_namespaced_deployment(
+                root.deployment.namespace, _snapshot(document), dry_run='All'))
+            # The fixture's initial installation is synthetic; retain its
+            # defaults and use only the actual API's resource serialization.
+            for field in ('containers', 'initContainers'):
+                for target, source in zip(document['spec']['template']['spec'].get(field, []),
+                        observed['spec']['template']['spec'].get(field, []), strict=True):
+                    target['resources'] = source['resources']
+            return document
+
+        monkeypatch.setattr(API, 'desired', native_desired)
+        selector, case = complete_refresh(root)
+        receipt = json.loads((case[2] / 'completion.json').read_text())
+        requests = receipt['active']['spec']['template']['spec']['containers'][0]['resources']['requests']
+        assert requests['cpu'] == '100m'
+        assert requests['memory'] == '268435456'
+        before = {path: path.read_bytes() for path in case[2].parent.rglob('*.json')}
+        predecessor = load_refresh(selector, root)
+        assert predecessor.active['metadata']['uid'] == root.active['metadata']['uid']
+        assert {path: path.read_bytes() for path in before} == before
+        assert not apps.list_namespaced_deployment(root.deployment.namespace).items
+    finally:
+        cluster.stop()
 
 
 @pytest.mark.timeout(240)

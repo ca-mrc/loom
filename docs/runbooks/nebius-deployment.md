@@ -1177,6 +1177,9 @@ schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
 - `predecessor`: that same upgrade selector, or the immediately preceding completed
   refresh selector. A refresh selector binds its operation UUID, private-input
   digest and completion receipt digest; it does not accumulate an unbounded chain.
+  Receipt qualification compares Kubernetes resource quantities numerically
+  (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
+  accepting changed resource amounts or other runtime configuration.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
