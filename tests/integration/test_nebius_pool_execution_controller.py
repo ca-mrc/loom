@@ -1,11 +1,12 @@
 """Actual actuator + local SQL + management HTTP + gateway, with external K8s doubled."""
 from __future__ import annotations
 
+import asyncio
 import copy
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -20,6 +21,11 @@ from loom.db.schema import (
     Trial,
 )
 from loom_control_plane.service_execution import enqueue_execution_transition
+from loom_control_plane.service_execution_output import (
+    ServiceExecutionOutputFileV1,
+    ServiceExecutionOutputPrepareV1,
+    ServiceExecutionOutputRouteService,
+)
 from loom_execution_actuator.contracts import ActuatorContractError, KubernetesApiError
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
@@ -34,6 +40,7 @@ from tests.integration.test_nebius_pool_observation_registry import sessions as 
 from tests.integration.test_nebius_pool_participant_http import client
 from tests.integration.test_nebius_pool_pod_inventory import InventoryAPI, pod
 from tests.integration.test_nebius_pool_registry import machine
+from tests.integration.test_service_execution_leases import _runtime_result_payload
 
 
 class SDKBoundary:
@@ -100,6 +107,18 @@ async def lease(sessions, case):
         return await session.get(ServiceExecutionLease, case.proposal.request.key.local_work_id)
 
 
+async def another_trial(sessions, original_id, **changes):
+    async with sessions.begin() as session:
+        original = await session.get(Trial, original_id)
+        trial = Trial(id=uuid4(), team_id=original.team_id, task_id=original.task_id,
+            batch_id=original.batch_id, config=original.config, requires_caps=original.requires_caps,
+            pool_origin={**original.pool_origin, "submission_id": str(uuid4())}, state="queued", attempt_count=0)
+        for key, value in changes.items():
+            setattr(trial, key, value)
+        session.add(trial)
+        return trial.id
+
+
 async def start(sessions, case):
     await case.actuator.reconcile_full_once()
     active = await case.outbox.get(case.proposal.request.key)
@@ -150,7 +169,7 @@ async def test_real_actuator_runs_global_execution_and_cancels_before_output_dra
         assert (await lease(sessions, case)).output_commit_state == "unavailable"
         assert (await lease(sessions, case)).deleted_at is None
         await case.worker.run_once()
-        await case.actuator.reconcile_full_once()
+        await case.actuator.reconcile_full_once(now=current.cleanup_deadline_at + timedelta(seconds=2))
         done = await lease(sessions, case)
         assert done.desired_state == "deleted" and done.cleanup_state == "complete"
         assert (await case.outbox.get(case.proposal.request.key)).phase == "released"
@@ -173,7 +192,7 @@ async def test_global_controller_reuses_native_terminal_failure_projection(sessi
         assert (await lease(sessions, case)).output_commit_state == "unavailable"
         case.sdk.pods.clear()
         await case.worker.run_once()
-        await case.actuator.reconcile_full_once()
+        await case.actuator.reconcile_full_once(now=observed_at + timedelta(minutes=7))
         assert (await lease(sessions, case)).cleanup_state == "complete"
 
 
@@ -217,3 +236,98 @@ async def test_stale_accepted_activation_is_locally_revoked_before_global_stop(s
             remote = await session.get(NebiusPoolRequest, active.reservation_id)
             assert remote.phase == "cleanup_intent" and remote.stop_json is not None and remote.drain_json is None
         assert not case.api.writes and current.output_commit_state == "not_started"
+
+
+async def test_committed_success_survives_concurrent_commands_reconciliation_and_pool_release(sessions, tmp_path):
+    from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
+    from loom.pipeline.keys import canonical_document, digest_bytes
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_control_plane.artifact_commit_runtime import SqlArtifactCommitRepository
+
+    async with connected(sessions, tmp_path) as case:
+        await start(sessions, case)
+        current = await lease(sessions, case)
+        result = _runtime_result_payload(current, started_at=datetime.now(UTC))
+        files = {}
+        for phase in result["phases"]:
+            for stream in ("stdout", "stderr"):
+                body = b"ok\n" if stream == "stdout" else b""
+                phase[stream].update(sha256=digest_bytes(body), bytes_seen=len(body), bytes_saved=len(body))
+                files[phase[stream]["path"]] = body
+        files = {"result.json": canonical_document(result), **dict(sorted(files.items()))}
+        store = FakeObjectStore()
+        route = ServiceExecutionOutputRouteService(session_factory=sessions, service=ArtifactCommitService(
+            store=store, bucket="artifacts", repository=SqlArtifactCommitRepository(
+                session_factory=sessions, store=store, bucket="artifacts")))
+        grant = await route.prepare(lease=current, request=ServiceExecutionOutputPrepareV1(
+            schema_version="loom.service-execution-output-prepare.v1", request_id=uuid4(),
+            lease_id=current.id, generation=current.resource_generation, execution_role="attempt",
+            files=tuple(ServiceExecutionOutputFileV1(relative_path=path, media_type=(
+                "application/json" if path == "result.json" else "text/plain; charset=utf-8"),
+                size_bytes=len(body), sha256=digest_bytes(body)) for path, body in files.items())))
+        upload_id, token = UUID(grant["upload_session_id"]), grant["upload_token"]
+        for index, body in enumerate(files.values()):
+            async def stream(body=body):
+                yield body
+
+            receipt = PartReceiptV1.model_validate(await route.put_part(lease=current, session_id=upload_id,
+                file_index=index, part_number=1, content_length=len(body), content_sha256=digest_bytes(body),
+                upload_token=token, body=stream()))
+            await route.complete_file(lease=current, session_id=upload_id, file_index=index,
+                ordered_parts=(receipt,), upload_token=token)
+        committed = await route.commit(lease=current, session_id=upload_id, upload_token=token)
+        case.sdk.pods[0]["status"] = {"phase": "Succeeded"}
+        now = datetime.now(UTC)
+        await asyncio.wait_for(asyncio.gather(case.actuator.run_commands_once(now=now),
+            case.actuator.reconcile_full_once(now=now)), timeout=15)
+        await case.actuator.reconcile_full_once()
+        current = await lease(sessions, case)
+        assert current.desired_state == "delete_pending" and current.output_commit_state == "committed"
+        async with sessions() as session:
+            trial = await session.get(Trial, case.trial_id)
+            assert trial.state == "materializing" and trial.result["runtime_result"]["status"] == "succeeded"
+            assert trial.result["output_manifest_sha256"] == committed["manifest_sha256"]
+        await case.worker.run_once()
+        case.sdk.pods.clear()
+        await case.worker.run_once()
+        await case.actuator.reconcile_full_once()
+        current = await lease(sessions, case)
+        assert current.cleanup_state == "complete" and current.output_upload_session_id == upload_id
+        assert current.output_manifest_sha256 == committed["manifest_sha256"]
+        assert (await case.outbox.get(case.proposal.request.key)).phase == "released"
+        assert len(case.api.writes) == len(case.api.deletes) == 1
+
+
+async def test_foreign_job_uid_cannot_finalize_or_delete_the_selected_execution(sessions, tmp_path):
+    async with connected(sessions, tmp_path) as case:
+        await start(sessions, case)
+        job, = case.api.objects.values()
+        job["metadata"]["uid"] = str(uuid4())
+        case.sdk.pods[0]["status"] = {"phase": "Succeeded"}
+        next_trial = await another_trial(sessions, case.trial_id)
+        following = await case.outbox.propose(trial_id=next_trial, target_id=case.target.target_id)
+        assert await case.actuator.reconcile_full_once() == 2  # Foreign Job plus the new, not-yet-observed intent.
+        current = await lease(sessions, case)
+        assert current.observed_state == "running" and current.deleted_at is None
+        async with sessions() as session:
+            assert (await session.get(Trial, case.trial_id)).state == "running"
+        assert (await case.outbox.get(following.request.key)).phase == "active"
+        assert len(case.api.writes) == 1 and not case.api.deletes
+
+
+async def test_execution_scan_crosses_pages_after_removal_and_defers_new_rows(sessions, tmp_path):
+    async with connected(sessions, tmp_path, occupied_cpu=3000) as case:
+        async def propose():
+            trial_id = await another_trial(sessions, case.trial_id)
+            return await case.outbox.propose(trial_id=trial_id, target_id=case.target.target_id)
+
+        second, third = await propose(), await propose()
+        scan = case.outbox.iter_pending(target_id=case.target.target_id, page_size=1)
+        assert (await anext(scan)).request.key == case.proposal.request.key
+        for saved in (case.proposal, second):
+            await case.outbox.request_cancel(saved.request.key)
+            await case.driver.advance(saved.request.key)
+        later = await propose()
+        assert [item.request.key async for item in scan] == [third.request.key]
+        assert [item.request.key async for item in case.outbox.iter_pending(
+            target_id=case.target.target_id, page_size=1)] == [third.request.key, later.request.key]

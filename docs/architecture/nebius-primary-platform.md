@@ -2011,8 +2011,15 @@ permits the local outbox to project deletion through the existing execution even
 handler. The receipt, local deletion and outbox completion commit atomically;
 a deferred database guard rejects global-lease deletion without retained release
 or never-started cancellation evidence. Replays preserve the old lease/attempt,
-and release permits the next queued attempt's distinct selection. The controller
-hookup and installed writer transition remain unconnected.
+and release permits the next queued attempt's distinct selection. The existing
+execution actuator now accepts this global resource adapter: bounded pending
+scans advance durable handoffs, qualify namespace/Job/Pod observations, and reuse
+the existing result finalization and usage recording. It sends stop before output
+drain, preserves the output deadline even without a locally observed Pod, and
+projects deletion only from the retained manager release. A missing Job never
+authorizes a new create. Global mode rejects legacy namespace watches and has no
+local provisioning or Kubernetes write fallback. The actual scheduler selection,
+protected startup and installed writer transition still require connection.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

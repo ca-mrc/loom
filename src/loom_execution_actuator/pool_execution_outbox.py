@@ -5,12 +5,13 @@ between these operations; no method can create a Kubernetes resource.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
@@ -108,6 +109,38 @@ class PoolExecutionOutbox:
     async def get(self, key: PoolRequestKeyV1) -> PoolExecutionHandoff:
         async with self.sessions.begin() as session:
             return self._view(await self._load(session, key))
+
+    async def iter_pending(self, *, target_id: str, page_size: int = 100) -> AsyncIterator[PoolExecutionHandoff]:
+        """Bounded keyset scan; no transaction remains open across reconciliation."""
+        self.participant.target(target_id, "trial")
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            raise PoolHandoffError
+        created, identity = NebiusPoolExecutionOutbox.created_at, NebiusPoolExecutionOutbox.lease_id
+        pending = select(NebiusPoolExecutionOutbox).where(
+            NebiusPoolExecutionOutbox.participant_id == self.participant.participant_id,
+            NebiusPoolExecutionOutbox.request_json["target_id"].astext == target_id,
+            NebiusPoolExecutionOutbox.phase.not_in(("cancelled", "released")),
+        ).order_by(created, identity)
+        async with self.sessions() as session:
+            last = (await session.execute(pending.with_only_columns(created, identity)
+                .order_by(None).order_by(created.desc(), identity.desc()).limit(1))).first()
+        if last is None:
+            return
+        ceiling = (last[0], last[1])
+        after: tuple[datetime, UUID] | None = None
+        while True:
+            query = pending.where(tuple_(created, identity) <= ceiling).limit(page_size)
+            if after is not None:
+                query = query.where(tuple_(created, identity) > after)
+            async with self.sessions() as session:
+                rows = list(await session.scalars(query))
+            if not rows:
+                return
+            after = (rows[-1].created_at, rows[-1].lease_id)
+            for row in rows:
+                yield self._view(row)
+            if after == ceiling:
+                return
 
     def _current_binding(self, request: PoolExecutionPrepareV1) -> bool:
         return (request.admission_epoch == self.participant.admission_epoch
@@ -296,6 +329,26 @@ class PoolExecutionOutbox:
                 or lease.job_name != "loom-pool-" + saved.activated.reservation_id.hex):
             raise PoolHandoffError
         return lease
+
+    async def revoke_stopped(self, key: PoolRequestKeyV1) -> None:
+        """An accepted activation that lost its claim follows existing fenced cleanup."""
+        async with self.sessions.begin() as session:
+            row = await self._load(session, key)
+            if row.phase != "stop_pending":
+                return
+            lease = await self._cleanup_lease(session, row)
+            if lease.desired_state not in {"create", "start", "finalize"}:
+                return
+            trial = await session.get(Trial, row.trial_id, with_for_update=True, populate_existing=True)
+            if lease.desired_state == "finalize":
+                desired = "delete_pending"  # Existing transition requires durable output.
+            elif (trial is not None and trial.attempt_count == lease.attempt
+                    and trial.state in {"claimed", "running"} and trial.cancellation_requested_at is None):
+                desired = "retry"
+            else:
+                desired = "cancel"
+            await enqueue_execution_transition(session, lease_id=lease.id, expected_generation=lease.generation,
+                desired_state=desired, now=await _clock(session))
 
     async def begin_stop(self, key: PoolRequestKeyV1) -> PoolStopV1 | None:
         """Retain cleanup consent from local revocation, before waiting for output."""
