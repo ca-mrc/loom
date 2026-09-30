@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError
 
 from loom.db.nebius_pool_schema import NebiusPoolRequest
@@ -29,13 +29,14 @@ async def stop_input(sessions, receipt, **changes):
         cause="cancelled", grace_deadline_at=datetime.now(UTC) + timedelta(minutes=5), **changes)
 
 
-def drain_input(stop, **changes):
+def drain_input(stop):
     from loom.nebius_pool_lifecycle import PoolDrainV1
 
     return PoolDrainV1(action=stop.action, reservation_id=stop.reservation_id,
         plan_sha256=stop.plan_sha256, lease_generation=stop.lease_generation,
         stop_sha256=canonical_digest(stop.model_dump(mode="json")).removeprefix("sha256:"),
-        output_generation=1, output_state="unavailable", evidence_sha256="d" * 64, **changes)
+        output_generation=stop.lease_generation if stop.action.request_key.workload_kind == "task_image_build" else 1,
+        output_state="unavailable", evidence_sha256="d" * 64)
 
 
 async def accept_stop(sessions, principal, body):
@@ -131,6 +132,27 @@ async def test_stop_and_drain_evidence_are_immutable_in_sql_and_on_replay(sessio
             with pytest.raises(DBAPIError):
                 async with session.begin_nested():
                     await session.execute(update(NebiusPoolRequest).values(**values))
+
+
+async def test_native_drain_cannot_attest_another_attempts_output_generation(sessions):
+    _, _, receipt, owner = await setup(sessions, build=True)
+    stop = await stop_input(sessions, receipt)
+    await accept_stop(sessions, owner, stop)
+    with pytest.raises(ValueError):
+        await accept_drain(sessions, owner, drain_input(stop).model_copy(update={"output_generation": stop.lease_generation + 1}))
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolRequest, receipt.reservation_id)).drain_json is None
+
+
+async def test_stop_fences_an_already_prepared_but_undispatched_create(sessions):
+    from loom_service.pool_management.gateway_journal import PoolGatewayError
+
+    journal, gateway, receipt, owner = await setup(sessions)
+    effect = await journal.prepare_create(gateway, receipt.reservation_id, kind="Job")
+    await accept_stop(sessions, owner, await stop_input(sessions, receipt))
+    with pytest.raises(PoolGatewayError):
+        await journal.dispatch_create(gateway, effect.effect_id)
+    assert (await journal.get_effect(gateway, effect.effect_id)).phase == "prepared"
 
 
 async def test_real_participant_transport_retains_stop_then_drain(sessions, tmp_path):
