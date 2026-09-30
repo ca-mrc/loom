@@ -56,10 +56,9 @@ async def credential(sessions, *, role="participant", **token_changes):
 
 @pytest.mark.parametrize("role", ["participant", "observer", "gateway"])
 async def test_dedicated_machine_auth_is_bound_and_does_not_commit_or_touch_token(pool_sessions, role):
-    from loom_service.pool_management.auth import authorize_pool_machine, resolve_pool_machine
-
     from loom.auth import validate_bearer_token
     from loom.db.schema import Token
+    from loom_service.pool_management.auth import authorize_pool_machine, resolve_pool_machine
 
     raw, pool_id, participant_id, _ = await credential(pool_sessions, role=role)
     token_hash = hashlib.sha256(raw.encode()).digest()
@@ -95,20 +94,37 @@ async def test_token_row_without_current_dedicated_authority_is_denied(pool_sess
         assert await resolve_pool_machine(session, "Bearer " + raw) is None
 
 
+async def test_authentication_does_not_erase_or_flush_pending_credential_revocation(pool_sessions):
+    from loom.db.schema import Token
+    from loom_service.pool_management.auth import resolve_pool_machine
+
+    raw, _, _, _ = await credential(pool_sessions)
+    token_hash = hashlib.sha256(raw.encode()).digest()
+    async with pool_sessions() as session:
+        row = await session.get(Token, token_hash)
+        pending_revocation = datetime.now(UTC)
+        row.revoked_at = pending_revocation
+        assert await resolve_pool_machine(session, "Bearer " + raw) is None
+        assert row.revoked_at == pending_revocation
+        assert row in session.dirty
+        async with pool_sessions() as observer:
+            assert (await observer.get(Token, token_hash)).revoked_at is None
+        await session.rollback()
+
+
 @pytest.mark.parametrize("damage", ["token_revoked", "machine_revoked", "rotation", "pool_epoch", "participant_epoch", "binding"])
 async def test_admission_rechecks_current_authority_not_cached_orm_objects(pool_sessions, damage):
-    from loom_service.pool_management.auth import (
-        PoolAuthenticationError,
-        authorize_pool_machine,
-        resolve_pool_machine,
-    )
-
     from loom.db.nebius_pool_schema import (
         NebiusPoolBinding,
         NebiusPoolMachine,
         NebiusPoolParticipant,
     )
     from loom.db.schema import Token
+    from loom_service.pool_management.auth import (
+        PoolAuthenticationError,
+        authorize_pool_machine,
+        resolve_pool_machine,
+    )
 
     raw, pool_id, participant_id, machine_id = await credential(pool_sessions)
     async with pool_sessions() as session:
