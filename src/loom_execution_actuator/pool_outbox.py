@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text
+from sqlalchemy import Select, func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
@@ -146,15 +146,49 @@ class PoolBuildOutbox:
                 raise PoolHandoffError
             return self._view(row)
 
+    def _pending_query(self) -> Select[tuple[NebiusPoolBuildOutbox]]:
+        return select(NebiusPoolBuildOutbox).where(
+            NebiusPoolBuildOutbox.participant_id == self.participant.participant_id,
+            NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released")),
+        ).order_by(NebiusPoolBuildOutbox.created_at, NebiusPoolBuildOutbox.outbox_id)
+
     async def pending(self, *, limit: int = 100) -> tuple[PoolBuildHandoff, ...]:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise PoolHandoffError
         async with self.sessions() as session:
-            rows = await session.scalars(select(NebiusPoolBuildOutbox).where(
-                NebiusPoolBuildOutbox.participant_id == self.participant.participant_id,
-                NebiusPoolBuildOutbox.phase.not_in(("cancelled", "released")),
-            ).order_by(NebiusPoolBuildOutbox.created_at, NebiusPoolBuildOutbox.outbox_id).limit(limit))
+            rows = await session.scalars(self._pending_query().limit(limit))
             return tuple(self._view(row) for row in rows)
+
+    async def iter_pending(self, *, page_size: int = 100) -> AsyncIterator[PoolBuildHandoff]:
+        """Scan through a fixed high-water key with no transaction across I/O.
+
+        Keyset pages survive entries becoming terminal during the pass. Newer
+        selections wait for the next pass; persistent first-page errors cannot
+        prevent already selected later work from being reconciled.
+        """
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            raise PoolHandoffError
+        created, identity = NebiusPoolBuildOutbox.created_at, NebiusPoolBuildOutbox.outbox_id
+        async with self.sessions() as session:
+            last = (await session.execute(self._pending_query().with_only_columns(created, identity)
+                .order_by(None).order_by(created.desc(), identity.desc()).limit(1))).first()
+        if last is None:
+            return
+        ceiling = (last[0], last[1])
+        after: tuple[datetime, UUID] | None = None
+        while True:
+            query = self._pending_query().where(tuple_(created, identity) <= ceiling).limit(page_size)
+            if after is not None:
+                query = query.where(tuple_(created, identity) > after)
+            async with self.sessions() as session:
+                rows = list(await session.scalars(query))
+            if not rows:
+                return
+            after = (rows[-1].created_at, rows[-1].outbox_id)
+            for row in rows:
+                yield self._view(row)
+            if after == ceiling:
+                return
 
     async def _eligible(self, session: AsyncSession, request: PoolTaskImagePrepareV1,
                         row: TaskImageMaterialization) -> bool:

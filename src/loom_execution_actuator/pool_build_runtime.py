@@ -177,7 +177,7 @@ class PoolNativeBuildController:
 
     async def run_once(self) -> None:
         first_error: Exception | None = None
-        for pending in await self.driver.outbox.pending():
+        async for pending in self.driver.outbox.iter_pending():
             try:
                 await self._reconcile(pending.request.key)
             except Exception as error:

@@ -1911,6 +1911,11 @@ result, retry budget or a newer claim. Exact replay preserves the receipt and fi
 release timestamp. Released selections no longer occupy the local live-selection
 key or pending scan, so a later eligible retry can proceed with a new generation.
 SQL retains both the original activation and terminal release receipt.
+Reconciliation uses bounded keyset pages through the pass's initial high-water
+key, closing each database session before external work. Terminal entries cannot
+shift offsets and skip later builds, and a full first page of failing requests
+does not prevent later entries from being reconciled. Newer selections wait for
+the next pass.
 This primitive does not yet connect the installed controller and does not
 independently authorize an originating application.
 Database-backed HTTP tests connect this journal to real management prepare and
