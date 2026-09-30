@@ -34,9 +34,11 @@ def inputs():
 
 
 def render(participant, body, *, now=None, profile_changes=None):
+    from loom.execution_contract import nebius_cpu_execution_class
     from loom.nebius_pool_workload import PoolExecutionPrepareV1
     from loom_execution_actuator.renderer import ExecutionTargetRuntime
     from loom_service.pool_management.render import PoolExecutionProfile, prepare_pool_execution
+    from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
     profile = {
         "profile_id": participant.targets[0].profile_id,
@@ -45,6 +47,8 @@ def render(participant, body, *, now=None, profile_changes=None):
         "candidate_sha": "1" * 40, "execution_class_id": "linux-amd64-cpu-pod-v1",
         "runtime_image_ref": "registry.example/runtime@sha256:" + "b" * 64,
         "runtime_binary_sha256": "sha256:" + "c" * 64,
+        "execution_class": nebius_cpu_execution_class(),
+        "image_admission_keyring": IMAGE_ADMISSION_KEYRING,
     } | (profile_changes or {})
     return prepare_pool_execution(PoolExecutionPrepareV1.model_validate(body), participant=participant,
         profile=PoolExecutionProfile(**profile), reservation_id=UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
@@ -159,6 +163,46 @@ def test_execution_prepare_charges_qualified_runtime_overhead():
 
 def test_execution_prepare_rejects_changed_signed_image_bundle():
     participant, body = inputs()
-    body["execution"]["runtime"]["image_admission"]["admissions"][0]["signature_base64"] = "forged"
+    body["execution"]["runtime"]["image_admission"]["admissions"][0]["signature_base64"] = "AA=="
     with pytest.raises(ValueError):
         render(participant, body)
+
+
+@pytest.mark.parametrize("damage", ["architecture", "privileged", "foreign-origin", "foreign-participant"])
+def test_execution_prepare_requires_compatible_work_and_bound_identity(damage):
+    participant, body = inputs()
+    if damage == "architecture":
+        body["execution"]["requirements"]["cpu_architecture"] = "arm64"
+    elif damage == "privileged":
+        body["execution"]["requirements"]["privileged"] = True
+    elif damage == "foreign-origin":
+        body["origin"]["data_environment_id"] = uuid4()
+    else:
+        body["key"]["participant_id"] = uuid4()
+    with pytest.raises(ValueError):
+        render(participant, body)
+
+
+def test_rendered_pod_accounting_includes_init_peak_sidecars_and_pod_requests():
+    from loom_execution_capacity_collector.kubernetes import rendered_pod_resources
+
+    def resources(cpu, memory, storage):
+        return {"requests": {"cpu": cpu, "memory": memory, "ephemeral-storage": storage}}
+
+    pod = {
+        "containers": [{"resources": resources("100m", "64Mi", "32Mi")}],
+        "initContainers": [
+            {"restartPolicy": "Always", "resources": resources("50m", "32Mi", "16Mi")},
+            {"resources": resources("500m", "64Mi", "64Mi")},
+        ],
+        "resources": resources("200m", "128Mi", "32Mi"),
+        "overhead": {"cpu": "5m", "memory": "4Mi", "ephemeral-storage": "8Mi"},
+    }
+    assert rendered_pod_resources(pod).model_dump() == {"cpu_millis": 555, "memory_mib": 132, "storage_mib": 88}
+
+
+def test_rendered_pod_accounting_rejects_unqualified_api_defaulting():
+    from loom_execution_capacity_collector.kubernetes import KubernetesObservationError, rendered_pod_resources
+
+    with pytest.raises(KubernetesObservationError):
+        rendered_pod_resources({"containers": [{"resources": {"limits": {"cpu": "1"}}}]})
