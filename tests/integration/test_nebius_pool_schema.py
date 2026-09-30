@@ -233,7 +233,7 @@ def test_downgrade_refuses_to_erase_retained_pool_history(pool_database):
     config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", pool_database.url.render_as_string(hide_password=False).replace("%", "%%"))
     with pytest.raises(DBAPIError, match="cannot remove global pool history"):
-        command.downgrade(config, "0170")
+        command.downgrade(config, "0171")
 
 
 def test_cleanup_observation_cannot_be_rewritten_or_removed_before_release(pool_database):
@@ -266,9 +266,12 @@ def test_cleanup_observation_cannot_precede_the_irreversible_cleanup_state(pool_
 def test_empty_pool_journal_can_downgrade_and_upgrade_without_schema_drift(pool_database):
     config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", pool_database.url.render_as_string(hide_password=False).replace("%", "%%"))
-    command.downgrade(config, "0170")
+    command.downgrade(config, "0171")
     assert "nebius_pool_requests" not in inspect(pool_database).get_table_names()
-    command.upgrade(config, "0171")
+    # Removing an empty unpublished pool layer must not undo the already
+    # published legacy retirement or recreate its obsolete tables.
+    assert "personal_dev_candidates" not in inspect(pool_database).get_table_names()
+    command.upgrade(config, "0172")
     assert "nebius_pool_requests" in inspect(pool_database).get_table_names()
 
 

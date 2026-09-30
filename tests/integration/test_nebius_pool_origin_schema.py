@@ -50,7 +50,7 @@ def test_downgrade_refuses_to_drop_submission_provenance(isolated_migration_post
         config = Config("database/migrations/alembic.ini")
         config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
         with pytest.raises(DBAPIError, match="cannot remove global pool history"):
-            command.downgrade(config, "0170")
+            command.downgrade(config, "0171")
     finally:
         engine.dispose()
 
@@ -90,6 +90,6 @@ def test_downgrade_refuses_unconsumed_direct_handoff(isolated_migration_postgres
         config = Config("database/migrations/alembic.ini")
         config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
         with pytest.raises(DBAPIError, match="cannot remove global pool history"):
-            command.downgrade(config, "0170")
+            command.downgrade(config, "0171")
     finally:
         engine.dispose()
