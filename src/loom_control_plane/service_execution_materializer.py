@@ -40,6 +40,7 @@ from loom.db.schema import (
     TrialEvent,
 )
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.hosted_harness import TraceFormat, hosted_harness
 from loom.llm_call_ledger import read_service_execution_llm_calls
 from loom.models.result import ExceptionInfo
 from loom.models.task import TaskConfig
@@ -191,6 +192,13 @@ def read_exception_info(
         raise MaterializationIntegrityError("exception_info_invalid") from exc
 
 
+def _trace_format(agent_name: str | None) -> TraceFormat:
+    """The harness spec decides trace validation; unknown names keep the
+    historical completion-call format (#2288)."""
+    spec = hosted_harness(agent_name)
+    return spec.trace_format if spec is not None else "completion-calls"
+
+
 def _model_matches(source: str, trial_config: TrialConfig) -> bool:
     model = trial_config.agent_model
     return model is not None and source == model.to_gateway_model_string()
@@ -237,7 +245,8 @@ def validate_usage_accounting(
         document = json.loads(usage_body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MaterializationIntegrityError("usage_output_invalid") from exc
-    if trial_config.agent_name == "oracle":
+    trace_format = _trace_format(trial_config.agent_name)
+    if trace_format == "oracle":
         try:
             # A successful Oracle attempt must show the solver actually ran.
             if not parse_oracle_events(trace_body):
@@ -247,7 +256,7 @@ def validate_usage_accounting(
         if document != oracle_usage():
             raise MaterializationIntegrityError("usage_output_identity_drift")
         return
-    if trial_config.agent_name == "terminus-2":
+    if trace_format == "terminus":
         try:
             events = parse_terminus_events(trace_body, trial=trial_config)
         except ValueError as exc:
@@ -328,8 +337,9 @@ def build_canonical_events(
 ) -> tuple[TrajectoryEvent, ...]:
     """Validate the lossless source trace and project it to Loom event rows."""
 
-    terminus = trial_config.agent_name == "terminus-2"
-    oracle = trial_config.agent_name == "oracle"
+    trace_format = _trace_format(trial_config.agent_name)
+    terminus = trace_format == "terminus"
+    oracle = trace_format == "oracle"
     calls = [] if terminus or oracle else _parse_trace_calls(trace_body)
     if oracle and gateway_calls:
         # A no-model solver that reached the Gateway is not an Oracle run.
@@ -518,7 +528,7 @@ def build_canonical_atif(
     generic = project_to_atif(
         events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
     )
-    if agent_name != "terminus-2":
+    if _trace_format(agent_name) != "terminus":
         return generic.model_dump_json(indent=2).encode("utf-8")
     if generic.metadata.final_state == "succeeded":
         if (
@@ -837,7 +847,7 @@ class ServiceExecutionMaterializer:
             }
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
-            )) if trial.config.get("agent_name") in {"terminus-2", "oracle"} else None
+            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle"} else None
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
@@ -1044,7 +1054,7 @@ class ServiceExecutionMaterializer:
             gateway_calls=gateway_calls,
             exception_info=exception_info,
         )
-        if gateway_calls is not None and trial_config.agent_name == "terminus-2":
+        if gateway_calls is not None and _trace_format(trial_config.agent_name) == "terminus":
             # Preserve the immutable runtime projection as source evidence. The
             # canonical accounting is independently derived from the DB ledger.
             corrected = {
