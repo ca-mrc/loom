@@ -39,7 +39,7 @@ def guard_runtime(monkeypatch, tmp_path):
     kubeconfig.chmod(0o600)
     state = SimpleNamespace(request=request, target=target, controller=controller, replica=replica, pod=pod, kubeconfig=kubeconfig,
         calls=[], status="held", raw=None, extra_pod=False, namespace_drift=False, continuation=False,
-        final_drift=False, executed=False)
+        final_drift=False, executed=False, exec_hook=None, subprocess_run=subprocess.run)
 
     def run(command, **kwargs):
         state.calls.append(command)
@@ -52,6 +52,8 @@ def guard_runtime(monkeypatch, tmp_path):
                 "python", "-m", "loom.nebius_rollout_guard", args[-5], "--owner", str(request.registration.spec.operation_id),
                 "--candidate", request.registration.candidate["candidate_sha"]]
             state.executed = True
+            if state.exec_hook is not None:
+                return state.exec_hook(args)
             return SimpleNamespace(returncode=0, stdout=state.raw if state.raw is not None else json.dumps({"status": state.status}).encode())
         if args[1] == "namespace":
             name = args[2]

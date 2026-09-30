@@ -2087,6 +2087,19 @@ final readback cannot qualify. Staging alone proves neither database registratio
 the parent migration must qualify candidate publication, namespace ownership,
 successful runtime execution and the no-dual-writer barrier before opening intake.
 
+The migration's initial closure stage binds all three data participants and their
+retained control-plane Deployment/namespace identities. It uses the existing
+`nebius_rollout_guard`, retaining earlier idle guards while another environment is
+busy. A lost acquisition response requires exact owner/candidate observation; an
+open database after an uncertain acquisition does not authorize another command.
+The fixed command adapter qualifies the running Pod and ReplicaSet lineage and
+unchanged template before and after invoking the guard, with no release command.
+An independent anchor and parent journal bind closure to registration; missing or
+changed recovery evidence cannot start another registration. Successful closure
+and registration explicitly leave writer migration incomplete. Controller
+retirement, RBAC changes, global runtime installation and activation remain later
+barriers; none is implied by a closed-registration receipt.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
