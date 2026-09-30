@@ -95,12 +95,18 @@ CREATE TABLE nebius_pool_requests (
 	job_uid UUID,
 	cleanup_observation_id UUID,
 	created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    renewed_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    granted_at TIMESTAMPTZ,
+    priority BIGINT NOT NULL,
 	PRIMARY KEY (request_id),
 	CONSTRAINT nebius_pool_request_participant_fk FOREIGN KEY(participant_id, pool_id) REFERENCES nebius_pool_participants (participant_id, pool_id) ON DELETE RESTRICT,
 	CONSTRAINT nebius_pool_request_replay_key UNIQUE (participant_id, workload_kind, local_work_id, generation),
 	CONSTRAINT nebius_pool_request_plan_key UNIQUE (request_id, plan_sha256, namespace_uid),
 	CONSTRAINT nebius_pool_request_identity_check CHECK (generation > 0 AND admission_epoch > 0 AND request_id <> '00000000-0000-0000-0000-000000000000'::uuid AND namespace_uid <> '00000000-0000-0000-0000-000000000000'::uuid AND local_work_id <> '00000000-0000-0000-0000-000000000000'::uuid AND workload_kind IN ('trial','verifier','task_image_build','application_image_build') AND target_id ~ '^[a-z0-9][a-z0-9-]{0,79}$'),
 	CONSTRAINT nebius_pool_request_envelope_check CHECK (cpu_millis > 0 AND memory_mib > 0 AND ephemeral_storage_mib >= 0 AND pod_slots > 0),
+    CONSTRAINT nebius_pool_request_admission_check CHECK (priority BETWEEN 0 AND 3 AND renewed_at >= created_at AND
+        (granted_at IS NULL OR granted_at >= created_at) AND (phase <> 'waiting' OR granted_at IS NULL) AND
+        (phase IN ('waiting','cancelled_unstarted') OR granted_at IS NOT NULL)),
 	CONSTRAINT nebius_pool_request_payload_check CHECK (request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object'),
 	CONSTRAINT nebius_pool_request_plan_check CHECK (phase IN ('waiting','reserved','create_intent','observed','cleanup_intent','released','cancelled_unstarted') AND ((phase IN ('waiting','reserved','cancelled_unstarted')) = (plan_sha256 IS NULL)) AND ((plan_sha256 IS NULL) = (plan_json IS NULL)) AND (plan_sha256 IS NULL OR (plan_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(plan_json) = 'object'))),
 	CONSTRAINT nebius_pool_request_evidence_check CHECK ((phase NOT IN ('waiting','reserved','cancelled_unstarted','create_intent') OR job_uid IS NULL) AND (phase <> 'observed' OR job_uid IS NOT NULL) AND (job_uid IS NULL OR job_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((phase = 'released') = (cleanup_observation_id IS NOT NULL)))
@@ -240,10 +246,16 @@ CREATE TABLE nebius_pool_observations (
                 END IF;
                 RETURN NEW;
             END IF;
-            IF (to_jsonb(NEW) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id']::text[])
+            IF (to_jsonb(NEW) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at']::text[])
                IS DISTINCT FROM
-               (to_jsonb(OLD) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id']::text[]) THEN
+               (to_jsonb(OLD) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at']::text[]) THEN
                 RAISE EXCEPTION 'global pool request identity is immutable';
+            END IF;
+            IF NEW.renewed_at < OLD.renewed_at OR
+               (OLD.phase <> 'waiting' AND NEW.renewed_at IS DISTINCT FROM OLD.renewed_at) OR
+               (NEW.granted_at IS DISTINCT FROM OLD.granted_at AND NOT
+                 (OLD.phase = 'waiting' AND NEW.phase = 'reserved' AND OLD.granted_at IS NULL)) THEN
+                RAISE EXCEPTION 'global pool grant and renewal history is immutable';
             END IF;
             IF (OLD.plan_sha256 IS NOT NULL AND
                 (NEW.plan_sha256 IS DISTINCT FROM OLD.plan_sha256 OR NEW.plan_json IS DISTINCT FROM OLD.plan_json))
@@ -253,6 +265,9 @@ CREATE TABLE nebius_pool_observations (
                 RAISE EXCEPTION 'global pool request evidence is immutable';
             END IF;
             IF to_jsonb(NEW) = to_jsonb(OLD) THEN
+                RETURN NEW;
+            END IF;
+            IF OLD.phase = 'waiting' AND NEW.phase = 'waiting' THEN
                 RETURN NEW;
             END IF;
             IF OLD.phase = 'cleanup_intent' AND NEW.phase = 'cleanup_intent'

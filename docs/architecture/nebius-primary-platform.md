@@ -1623,7 +1623,8 @@ credentials, registration or physical node-group identity fail closed. New
 reservations do not invalidate an in-flight capture and cannot be inserted into
 its represented-Job list. Capture/observation rows are immutable and do not alter
 request phases or release capacity. Collection runs outside SQL transactions.
-This internal registry is not yet connected to public routes or global grants.
+This internal observation registry now feeds transactional execution prepare; it
+is not yet connected to production collection or public routes.
 
 The internal execution-prepare adapter accepts a typed runtime/requirements
 snapshot, not arbitrary Kubernetes documents or a caller's resource total. It
@@ -1636,6 +1637,27 @@ rendered remaining runtime changes with the time of activation. This adapter
 does not expose an endpoint, grant capacity, write a Job or establish installed
 global admission. The registry/gateway still must qualify current authority and
 freeze the first activation document before a Kubernetes write.
+
+The internal `pool_management.registry.prepare_execution` combines that adapter
+with current machine/origin qualification and retained physical observations. One
+management-wide advisory transaction lock serializes grants across physical pools
+and shared provider quotas; callers must use READ COMMITTED and own the commit.
+No network call or Job creation occurs in this transaction. The rendered selector
+must match the protected physical pool, including its Nebius node-group ID.
+Provider account usage and distinct native groups remain quota floors. Observed
+Jobs discount only their exact captured reservation; later grants, foreign Pods,
+expired callers and cleanup-pending work remain charged.
+
+Fitting renewed waiting demand is ordered by trusted production, staging, shared
+development and personal-development class, then age. Waiters protect headroom
+without acquiring a reservation or consuming an attempt. Their original creation
+time stays fixed; renewal is fresh for 120 seconds, while the first actual grant
+has a separate timestamp for create-rate accounting. Impossible/stale waits do not
+block fitting work. Exact admitted replay returns its retained receipt without
+rerendering, refreshing a deadline or depending on currently free capacity.
+This is execution-only internal admission, not an activated global execution/build
+service: the build adapter, HTTP boundary, actual collector/caller outboxes, fixed
+gateway and protected writer migration are still required.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
@@ -1659,7 +1681,7 @@ These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer
 fencing, Job/Pod/auxiliary absence and environment-owned output drain before
 recording cleanup. The registry must authenticate dedicated machine identities,
-validate typed workload inputs and serialize physical-pool admission. The current
+validate all workload kinds and serialize physical-pool admission. The current
 single-environment controllers do not switch writers merely because these tables
 exist; connected admission, the production pool collector, durable local handoff
 and protected no-dual-writer migration remain required before activation.

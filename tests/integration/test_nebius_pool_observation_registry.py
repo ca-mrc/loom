@@ -113,6 +113,7 @@ async def test_new_unobserved_request_does_not_invalidate_capture_or_release_its
             generation=1, admission_epoch=1, target_id="native", request_sha256="c" * 64,
             request_json={"typed": True}, deadline_at=datetime.now(UTC) + timedelta(minutes=10),
             phase="reserved", cpu_millis=1000, memory_mib=1024, ephemeral_storage_mib=1024, pod_slots=1,
+            granted_at=func.clock_timestamp(), priority=2,
         ))
     await publish(sessions, principal, capture)
     async with sessions() as session:
@@ -202,6 +203,7 @@ async def observed_request(sessions, participant):
             generation=1, admission_epoch=1, target_id="native", request_sha256="d" * 64,
             request_json={"typed": True}, deadline_at=datetime.now(UTC) + timedelta(minutes=10),
             phase="reserved", cpu_millis=1000, memory_mib=1024, ephemeral_storage_mib=1024, pod_slots=1,
+            granted_at=func.clock_timestamp(), priority=2,
         ))
         await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == request_id).values(
             phase="create_intent", plan_json=plan, plan_sha256=canonical_digest(plan).removeprefix("sha256:")))

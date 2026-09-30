@@ -127,6 +127,11 @@ class NebiusPoolRequest(Base):
                         name="nebius_pool_request_identity_check"),
         CheckConstraint("cpu_millis > 0 AND memory_mib > 0 AND ephemeral_storage_mib >= 0 AND pod_slots > 0",
                         name="nebius_pool_request_envelope_check"),
+        CheckConstraint("priority BETWEEN 0 AND 3 AND renewed_at >= created_at AND "
+                        "(granted_at IS NULL OR granted_at >= created_at) AND "
+                        "(phase <> 'waiting' OR granted_at IS NULL) AND "
+                        "(phase IN ('waiting','cancelled_unstarted') OR granted_at IS NOT NULL)",
+                        name="nebius_pool_request_admission_check"),
         CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object'",
                         name="nebius_pool_request_payload_check"),
         CheckConstraint("phase IN ('waiting','reserved','create_intent','observed','cleanup_intent','released','cancelled_unstarted') AND "
@@ -162,6 +167,9 @@ class NebiusPoolRequest(Base):
     job_uid: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     cleanup_observation_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    renewed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    granted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
+    priority: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
 
 class NebiusPoolCleanupObservation(Base):

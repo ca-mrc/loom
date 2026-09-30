@@ -1,7 +1,7 @@
 """Dedicated hash-only machine authentication, without hidden commits or writes.
 
 Resolution is not mutation authority. Admission must reauthorize inside its own
-transaction, after locking any shared provider quotas in canonical order. This
+transaction, after acquiring the management-wide pool mutation lock. This
 module then holds pool, participant, machine, credential and token read locks
 until the caller commits/rolls back. No network operation belongs in that window.
 The operation itself enforces closed/fenced intake and workload policy.

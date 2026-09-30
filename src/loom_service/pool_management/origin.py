@@ -29,7 +29,7 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
                               target_id: str, workload_kind: PoolWorkloadKind) -> int:
     """Return class for a new request after locked current-authority readback.
 
-    Call after any shared quota locks, before persisting the immutable request.
+    Call after the pool mutation lock, before persisting the immutable request.
     Closed/fenced cleanup must use its separate reconciliation path, not this intake
     qualifier. Historical source generations remain valid after lifecycle changes.
     """

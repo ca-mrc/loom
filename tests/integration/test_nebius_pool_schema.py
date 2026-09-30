@@ -40,6 +40,7 @@ def registered(connection, pool_id=None):
 def request(connection, pool_id, participant_id, **changes):
     from loom.db.nebius_pool_schema import NebiusPoolRequest
 
+    timestamp = datetime.now(UTC)
     values = dict(
         request_id=uuid4(), pool_id=pool_id, participant_id=participant_id,
         namespace_uid=uuid4(),
@@ -47,6 +48,8 @@ def request(connection, pool_id, participant_id, **changes):
         target_id="nebius-default", request_sha256="c" * 64, request_json={"typed": True},
         deadline_at=datetime.now(UTC) + timedelta(minutes=10), phase="reserved",
         cpu_millis=1000, memory_mib=1024, ephemeral_storage_mib=1024, pod_slots=1,
+        created_at=timestamp, renewed_at=timestamp,
+        granted_at=None if changes.get("phase") == "waiting" else timestamp, priority=2,
     ) | changes
     connection.execute(insert(NebiusPoolRequest).values(**values))
     return values
@@ -55,8 +58,11 @@ def request(connection, pool_id, participant_id, **changes):
 def advance(connection, row, phase, **values):
     from loom.db.nebius_pool_schema import NebiusPoolRequest
 
+    if row["phase"] == "waiting" and phase == "reserved":
+        values.setdefault("granted_at", datetime.now(UTC))
     connection.execute(update(NebiusPoolRequest).where(
         NebiusPoolRequest.request_id == row["request_id"]).values(phase=phase, **values))
+    row.update(phase=phase, **values)
 
 
 def cleanup_intent(connection, row):
@@ -179,6 +185,9 @@ def test_release_requires_this_request_and_plan_cleanup_observation(pool_databas
     {"deadline_at": datetime(2100, 1, 1, tzinfo=UTC)},
     {"plan_sha256": "e" * 64}, {"plan_json": {"changed": True}},
     {"namespace_uid": uuid4()},
+    {"priority": 0}, {"created_at": datetime(2100, 1, 1, tzinfo=UTC)},
+    {"granted_at": datetime(2100, 1, 1, tzinfo=UTC)},
+    {"renewed_at": datetime(2100, 1, 1, tzinfo=UTC)},
 ])
 def test_journal_rejects_mutating_identity_workload_envelope_deadline_or_plan(pool_database, changes):
     with pool_database.begin() as connection:
@@ -187,6 +196,22 @@ def test_journal_rejects_mutating_identity_workload_envelope_deadline_or_plan(po
         cleanup_intent(connection, row)
         with pytest.raises(DBAPIError), connection.begin_nested():
             advance(connection, row, "cleanup_intent", **changes)
+
+
+def test_waiting_renewal_cannot_fabricate_a_grant_or_erase_age(pool_database):
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        row = request(connection, pool, participant, phase="waiting")
+        created = row["created_at"]
+        advance(connection, row, "waiting", renewed_at=created + timedelta(seconds=1))
+        for changes in ({"renewed_at": created}, {"granted_at": created}, {"priority": 0}):
+            with pytest.raises(DBAPIError), connection.begin_nested():
+                advance(connection, row, "waiting", **changes)
+        advance(connection, row, "reserved", granted_at=created + timedelta(seconds=2))
+        stored = connection.execute(select(NebiusPoolRequest.created_at, NebiusPoolRequest.granted_at)).one()
+        assert stored == (created, created + timedelta(seconds=2))
 
 
 def test_late_job_uid_is_monotonic_while_cleanup_remains_pending(pool_database):

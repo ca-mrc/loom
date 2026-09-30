@@ -22,7 +22,11 @@ from loom.execution_contract import nebius_cpu_execution_class
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
-from loom_execution_capacity_collector.contracts import CapacityPlacement, ManagedPodPlacement, ResourceTotals
+from loom_execution_capacity_collector.contracts import (
+    CapacityPlacement,
+    ManagedPodPlacement,
+    ResourceTotals,
+)
 from loom_service.pool_management.auth import resolve_pool_machine
 from loom_service.pool_management.render import PoolExecutionProfile
 from tests.execution_placement_fixtures import placement_fixture
@@ -128,8 +132,6 @@ async def publish_placement(sessions, observer, placement):
         "ready_node_count": sum(node.ready for node in placement.nodes), "quota_resources": placement.quota_resources,
         **{f"{prefix}_{totals[name]}": getattr(quota, attr) for name, quota in placement.quota_resources.items()
            for prefix, attr in (("quota", "limit"), ("used", "used"))}})
-    from loom_execution_capacity_collector.contracts import ResourceTotals
-
     def total(field):
         return ResourceTotals(**{key: sum(getattr(getattr(node, field), key) for node in placement.nodes)
                                  for key in ("cpu_millis", "memory_mib", "storage_mib")})
@@ -350,3 +352,64 @@ async def test_impossible_earlier_wait_does_not_starve_a_fitting_request(session
     })})
     assert (await prepare(sessions, principals[0], larger, profiles)).phase == "waiting"
     assert (await prepare(sessions, principals[1], requests[1], profiles)).phase == "reserved"
+
+
+async def seed_historical_request(sessions, participant, request, *, phase, age, expired=False):
+    """Retained clock states without sleeping or weakening immutable SQL guards."""
+    request_id = uuid4()
+    now = datetime.now(UTC)
+    timestamp = now - timedelta(seconds=age)
+    if expired:
+        request = request.model_copy(update={"deadline_at": now - timedelta(seconds=30)})
+    payload = request.model_dump(mode="json")
+    async with sessions.begin() as session:
+        await session.execute(insert(NebiusPoolRequest).values(
+            request_id=request_id, pool_id=participant.pool_id, participant_id=participant.participant_id,
+            namespace_uid=participant.execution_namespace.uid, workload_kind=request.key.workload_kind,
+            local_work_id=request.key.local_work_id, generation=request.key.generation,
+            admission_epoch=request.admission_epoch, target_id=request.target_id,
+            request_sha256=canonical_digest(payload).removeprefix("sha256:"), request_json=payload,
+            deadline_at=request.deadline_at, cpu_millis=1500, memory_mib=2048, ephemeral_storage_mib=4096,
+            pod_slots=1, priority=2, created_at=timestamp, renewed_at=timestamp,
+            phase="waiting" if phase == "waiting" else "reserved", granted_at=None if phase == "waiting" else timestamp))
+        if phase in {"create_intent", "cleanup_intent"}:
+            plan = {"job": {"metadata": {"name": f"loom-pool-{request_id.hex}", "namespace": participant.execution_namespace.name}}}
+            await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == request_id).values(
+                phase="create_intent", plan_json=plan, plan_sha256=canonical_digest(plan).removeprefix("sha256:")))
+            if phase == "cleanup_intent":
+                await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == request_id).values(phase=phase))
+    return request_id
+
+
+@pytest.mark.parametrize("phase", ["reserved", "create_intent", "cleanup_intent"])
+async def test_expired_or_fenced_caller_does_not_free_an_unobserved_grant(sessions, phase):
+    participants, principals, requests, profiles, observer = await setup(sessions, occupied_cpu=1500)
+    retained = await seed_historical_request(sessions, participants[0], requests[0], phase=phase, age=180, expired=True)
+    async with sessions.begin() as session:
+        await session.execute(update(NebiusPoolParticipant).where(
+            NebiusPoolParticipant.participant_id == participants[0].participant_id).values(phase="fenced"))
+    # Requalify the changed registration while retaining the old reservation.
+    await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement_fixture(
+        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
+        requested_cpu=1500, quota_nodes=1)))
+    assert (await prepare(sessions, principals[1], requests[1], profiles)).phase == "waiting"
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolRequest, retained)).phase == phase
+
+
+@pytest.mark.parametrize("age,expected", [(90, "waiting"), (180, "reserved")])
+async def test_only_renewed_fitting_waits_protect_capacity(sessions, age, expected):
+    participants, principals, requests, profiles, _ = await setup(sessions, occupied_cpu=1500)
+    await seed_historical_request(sessions, participants[0], requests[0], phase="waiting", age=age)
+    assert (await prepare(sessions, principals[1], requests[1], profiles)).phase == expected
+
+
+async def test_long_scale_zero_retains_the_last_compatible_measured_template(sessions):
+    _, principals, requests, profiles, observer = await setup(sessions)
+    empty = placement_fixture(target_id="pool-test", node_cpu=3000, node_memory=8192,
+                               node_storage=32768, nodes=0, used_nodes=0, quota_nodes=1)
+    empty["template_samples"] = []
+    placement = CapacityPlacement.model_validate(empty)
+    for _ in range(105):
+        await publish_placement(sessions, observer, placement)
+    assert (await prepare(sessions, principals[0], requests[0], profiles)).phase == "reserved"

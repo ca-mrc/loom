@@ -35,6 +35,7 @@ from loom_execution_capacity_collector.pool import (
     PoolPodClassifier,
 )
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
+from loom_service.pool_management.locks import acquire_pool_mutation_lock
 
 _CAPTURE_MAX_AGE = timedelta(minutes=5)
 
@@ -69,15 +70,24 @@ async def _registration(session: AsyncSession, principal: PoolPrincipal) -> tupl
     NebiusPoolBinding, tuple[PoolParticipantV1, ...], str,
 ]:
     # Take the exclusive pool lock before auth's read lock; upgrading concurrent
-    # read locks later would deadlock. Quota-admission callers lock quotas first.
+    # read locks later would deadlock. All pool writers take the mutation lock first.
     if any(isinstance(row, (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest,
                             NebiusPoolCapture, NebiusPoolObservation))
            for row in session.new | session.dirty | session.deleted):
         raise PoolObservationError
+    await acquire_pool_mutation_lock(session)
     pool = (await session.scalars(select(NebiusPoolBinding).where(
         NebiusPoolBinding.pool_id == principal.pool_id,
     ).with_for_update().execution_options(populate_existing=True))).one_or_none()
     await authorize_pool_machine(session, principal, role="observer", pool_id=principal.pool_id)
+    if pool is None:
+        raise PoolObservationError
+    bindings, digest = await read_pool_registration(session, pool)
+    return pool, bindings, digest
+
+
+async def read_pool_registration(session: AsyncSession, pool: NebiusPoolBinding) -> tuple[tuple[PoolParticipantV1, ...], str]:
+    """Read exact registration under the caller's mutation/pool locks."""
     if pool is None or pool.mode not in {"closed", "global"} or _digest(pool.binding_json) != pool.binding_sha256:
         raise PoolObservationError
     rows = list((await session.scalars(select(NebiusPoolParticipant).where(
@@ -104,7 +114,7 @@ async def _registration(session: AsyncSession, principal: PoolPrincipal) -> tupl
         "cluster_id": pool.cluster_id, "node_group_id": pool.node_group_id,
         "admission_epoch": pool.admission_epoch, "policy_revision": pool.policy_revision,
         "binding_sha256": pool.binding_sha256, "participants": identities})
-    return pool, tuple(bindings), digest
+    return tuple(bindings), digest
 
 
 async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) -> IssuedPoolCapture:
