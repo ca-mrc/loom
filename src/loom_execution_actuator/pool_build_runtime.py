@@ -54,6 +54,59 @@ class PoolNativeBuildController:
         self.driver, self.kubernetes = driver, kubernetes
         self.selector = selector
 
+    def _current_attempt(self, saved: NebiusPoolBuildOutbox, row: TaskImageMaterialization,
+                         attempt: TaskImageMaterializationAttempt, *, now: datetime) -> bool:
+        outbox = self.driver.outbox
+        request = outbox._view(saved).request
+        return (attempt.grant_id is None and attempt.builder_id == outbox.builder_id
+            and attempt.lease_epoch == request.build.expected_lease_epoch + 1
+            and row.lease_epoch == attempt.lease_epoch and row.claimed_by == outbox.builder_id
+            and row.state in {"claimed", "running"} and row.lease_expires_at is not None
+            and row.lease_expires_at > now and row.attempt_count == attempt.attempt_number
+            and _snapshot(row) == saved.selection_json and _source_matches(request, row))
+
+    async def _renew(self, session: AsyncSession, row: TaskImageMaterialization,
+                     attempt: TaskImageMaterializationAttempt, *, deadline: datetime) -> None:
+        await heartbeat_task_image_materialization(session, materialization_id=row.id,
+            builder_id=self.driver.outbox.builder_id, lease_epoch=attempt.lease_epoch)
+        assert row.lease_expires_at is not None
+        row.lease_expires_at = min(row.lease_expires_at, deadline)
+        await session.flush()
+
+    async def heartbeat_once(self) -> None:
+        """Local maintenance, scheduled independently from all admission/runtime I/O.
+
+        Neither a stalled management reply nor a large waiting queue should let
+        an owned active attempt expire. This never renews activation consent or
+        revives an expired/replaced claim, and cannot extend the workload cutoff.
+        """
+        outbox = self.driver.outbox
+        first_error: Exception | None = None
+        async for pending in outbox.iter_pending(claimed_only=True):
+            try:
+                async with outbox._transaction(pending.request.key) as (session, saved):
+                    if saved is None or saved.phase not in {"attached", "activation_pending", "active"}:
+                        continue
+                    row = await session.get(TaskImageMaterialization, saved.materialization_id, with_for_update=True)
+                    attempt = await session.get(TaskImageMaterializationAttempt, saved.attempt_id, with_for_update=True)
+                    now = await _clock(session)
+                    if (row is None or attempt is None
+                            or not self._current_attempt(saved, row, attempt, now=now)):
+                        continue
+                    request = outbox._view(saved).request
+                    if (request.deadline_at <= now or await preferred_task_image_origin(session,
+                            materialization_id=row.id, participant=outbox.participant,
+                            logical_pool_id=outbox.logical_pool_id) is None):
+                        continue
+                    await self._renew(session, row, attempt, deadline=request.deadline_at)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+                _LOG.warning("Global native heartbeat deferred materialization=%s error=%s",
+                    pending.request.key.local_work_id, type(error).__name__)
+        if first_error is not None:
+            raise first_error
+
     async def _finish(self, session: AsyncSession, saved: NebiusPoolBuildOutbox,
                        attempt: TaskImageMaterializationAttempt, runtime: PoolNativeRuntimeV1, *,
                        now: datetime, cause: StopCause) -> None:
@@ -132,15 +185,12 @@ class PoolNativeBuildController:
             native.setdefault("state", "pending")
             attempt.native_build = native
             now = await _clock(session)
-            current = (row.lease_epoch == attempt.lease_epoch and row.claimed_by == outbox.builder_id
-                and row.state in {"claimed", "running"} and row.lease_expires_at is not None
-                and row.lease_expires_at > now and row.attempt_count == attempt.attempt_number
-                and _snapshot(row) == saved.selection_json and _source_matches(request, row))
+            current = self._current_attempt(saved, row, attempt, now=now)
             demand = current and await preferred_task_image_origin(session, materialization_id=row.id,
                 participant=outbox.participant, logical_pool_id=outbox.logical_pool_id) is not None
             if (saved.phase == "stop_pending" or not current or not demand or runtime.deadline_at <= now
                     or runtime.receipt.phase not in {"create_intent", "observed"}):
-                cause: StopCause = "lease_lost" if not current else "deadline" if runtime.deadline_at <= now else "cancelled"
+                cause: StopCause = "deadline" if runtime.deadline_at <= now else "lease_lost" if not current else "cancelled"
                 if "pool_stop" not in native and current:
                     await session.flush()
                     await fail_native_build(session, row,
@@ -150,8 +200,7 @@ class PoolNativeBuildController:
                 await session.flush()
                 return False
             await session.flush()
-            await heartbeat_task_image_materialization(session, materialization_id=row.id,
-                builder_id=outbox.builder_id, lease_epoch=attempt.lease_epoch)
+            await self._renew(session, row, attempt, deadline=runtime.deadline_at)
             if observed is not None:
                 qualify_native_observation(observed, runtime)
                 await record_native_build_result(session, row, attempt, builder_id=outbox.builder_id,

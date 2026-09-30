@@ -159,7 +159,7 @@ class PoolBuildOutbox:
             rows = await session.scalars(self._pending_query().limit(limit))
             return tuple(self._view(row) for row in rows)
 
-    async def iter_pending(self, *, page_size: int = 100) -> AsyncIterator[PoolBuildHandoff]:
+    async def iter_pending(self, *, page_size: int = 100, claimed_only: bool = False) -> AsyncIterator[PoolBuildHandoff]:
         """Scan through a fixed high-water key with no transaction across I/O.
 
         Keyset pages survive entries becoming terminal during the pass. Newer
@@ -168,16 +168,19 @@ class PoolBuildOutbox:
         """
         if type(page_size) is not int or not 1 <= page_size <= 100:
             raise PoolHandoffError
+        pending = self._pending_query()
+        if claimed_only:
+            pending = pending.where(NebiusPoolBuildOutbox.attempt_id.is_not(None))
         created, identity = NebiusPoolBuildOutbox.created_at, NebiusPoolBuildOutbox.outbox_id
         async with self.sessions() as session:
-            last = (await session.execute(self._pending_query().with_only_columns(created, identity)
+            last = (await session.execute(pending.with_only_columns(created, identity)
                 .order_by(None).order_by(created.desc(), identity.desc()).limit(1))).first()
         if last is None:
             return
         ceiling = (last[0], last[1])
         after: tuple[datetime, UUID] | None = None
         while True:
-            query = self._pending_query().where(tuple_(created, identity) <= ceiling).limit(page_size)
+            query = pending.where(tuple_(created, identity) <= ceiling).limit(page_size)
             if after is not None:
                 query = query.where(tuple_(created, identity) > after)
             async with self.sessions() as session:

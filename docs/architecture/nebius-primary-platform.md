@@ -1910,6 +1910,14 @@ is a result/stop condition, never proof that global capacity has been released.
 The native-build local outbox commits an immutable typed selection before contacting
 management. It keeps selection generation separate from build lease epoch and permits
 only one live selection per materialization, including across participant changes.
+The local native controller exposes a separate database-only heartbeat pass for
+attached, activation-pending and active attempts. It uses claimed-only keyset pages
+and the same current-owner/source/demand checks as runtime reconciliation, with no
+management or Kubernetes I/O. Slow admission cannot block this maintenance when
+scheduled independently by protected startup. Renewal cannot revive an expired
+claim, change saved activation consent or extend the original workload deadline;
+stopped, cancelled and superseded work is excluded. Installed scheduling remains
+part of the pending protected startup integration.
 Receipt acceptance rechecks the exact source snapshot, current demand, deadline,
 rollout guard and lease epoch, then atomically commits the existing build attempt
 and global reservation link. Waiting and stale selections consume no attempt;
