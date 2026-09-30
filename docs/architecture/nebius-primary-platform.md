@@ -2080,7 +2080,10 @@ after commit and receives no Kubernetes token or write role.
 
 The protected registration stage retains exact ConfigMap/Job identities and
 uncertain-create evidence. A missing response followed by absence does not permit
-another CREATE. Staging proves neither database registration nor writer retirement;
+another CREATE. Its read-only execution verifier requires the recorded Job and
+unique, unrestarted successful Pod, exact runtime/configuration, and matching
+closed-registration commit receipt. Changed identities, configuration, logs or
+final readback cannot qualify. Staging alone proves neither database registration nor writer retirement;
 the parent migration must qualify candidate publication, namespace ownership,
 successful runtime execution and the no-dual-writer barrier before opening intake.
 
