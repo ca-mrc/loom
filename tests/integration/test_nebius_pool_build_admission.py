@@ -11,13 +11,19 @@ from sqlalchemy import func, select, update
 
 from loom.db.nebius_pool_schema import NebiusPoolRequest
 from loom.db.schema import TaskImageMaterializationAttempt
+from loom.nebius_pool_priority import PoolWorkOriginV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.contracts import CapacityPlacement
 from tests.execution_placement_fixtures import placement_fixture
+from tests.integration.test_nebius_application_operations import applications as applications
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.integration.test_nebius_pool_observation_registry import capture_scope
 from tests.integration.test_nebius_pool_registry import prepare, publish_placement, setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_task_image_render import build_inputs
 
 
@@ -73,7 +79,10 @@ async def test_build_concurrency_is_pool_wide_and_does_not_reserve_idle_executio
 
 
 @pytest.mark.parametrize("classes,winner", [(("development", "development"), "build"),
-                                           (("development", "production"), "execution")])
+                                           (("development", "production"), "execution"),
+                                           (("development", "staging"), "execution"),
+                                           (("staging", "production"), "execution"),
+                                           (("production", "staging"), "build")])
 async def test_mixed_waiting_work_uses_class_then_age_not_workload_kind(sessions, classes, winner):
     _, principals, executions, builds, profiles, observer = await mixed_setup(
         sessions, occupied_cpu=3000, environment_classes=classes)
@@ -112,3 +121,47 @@ async def test_native_capture_uses_actual_attempt_epoch_not_selection_generation
     assert job.generation == 3
     assert job.lease_id == "task-image:" + str(builds[0].key.local_work_id)
     assert job.reservation_id == first.reservation_id
+
+
+@pytest.mark.parametrize("personal_kind", ["build", "execution"])
+async def test_personal_and_shared_work_use_distinct_priority_in_the_same_participant(sessions, applications, personal_kind):
+    from loom_service.pool_management.registry import PoolAdmissionError
+
+    registry, _, (alice, _), prepare_application, _, _ = applications
+    plan = prepare_application()
+    await registry.create(principal=alice, idempotency_key="mixed-personal-origin", **plan)
+    app = plan["prepared"].registration
+    participants, principals, executions, builds, profiles, observer = await mixed_setup(sessions,
+        occupied_cpu=3000, data_environment_id=app.data_environment_id, cluster_id=app.cluster_id)
+    origin = PoolWorkOriginV1.model_validate({"kind": "application", "submission_id": uuid4(),
+        "data_environment_id": app.data_environment_id, "application": {
+            "application_id": app.application_id, "incarnation": app.incarnation,
+            "deployment_generation": 1, "release_id": app.release_id, "source_digest": plan["release"].source_digest}})
+    personal_body = (builds[0] if personal_kind == "build" else executions[0]).model_copy(update={"origin": origin})
+    shared_body = executions[0] if personal_kind == "build" else builds[0]
+    personal_prepare = prepare_build if personal_kind == "build" else prepare
+    shared_prepare = prepare if personal_kind == "build" else prepare_build
+    assert (await personal_prepare(sessions, principals[0], personal_body, profiles)).phase == "waiting"
+    assert (await shared_prepare(sessions, principals[0], shared_body, profiles)).phase == "waiting"
+    # Changing an old personal selection to a shared origin is a conflict, not
+    # legitimate promotion through replay or a common development credential.
+    spoofed = personal_body.model_copy(update={"origin": executions[0].origin})
+    with pytest.raises(PoolAdmissionError, match="pool_request_conflict"):
+        await personal_prepare(sessions, principals[0], spoofed, profiles)
+    await publish_placement(sessions, observer, CapacityPlacement.model_validate(placement_fixture(
+        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
+        requested_cpu=1500, quota_nodes=1)))
+    assert (await personal_prepare(sessions, principals[0], personal_body, profiles)).phase == "waiting"
+    shared = await shared_prepare(sessions, principals[0], shared_body, profiles)
+    assert shared.phase == "reserved"
+    assert (await personal_prepare(sessions, principals[0], personal_body, profiles)).phase == "waiting"
+    async with sessions.begin() as session:
+        rows = (await session.scalars(select(NebiusPoolRequest))).all()
+        assert {row.participant_id for row in rows} == {participants[0].participant_id}
+        assert sorted(row.priority for row in rows) == [2, 3]
+        assert await session.scalar(select(func.count()).select_from(TaskImageMaterializationAttempt)) == 0
+        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == shared.reservation_id).values(
+            phase="cancelled_unstarted"))
+    # Once the only higher-priority grant is gone, personal work uses all free
+    # capacity. No idle shared-dev share remains reserved.
+    assert (await personal_prepare(sessions, principals[0], personal_body, profiles)).phase == "reserved"

@@ -60,7 +60,7 @@ async def machine(sessions, pool_id, participant_id=None):
 
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
-                pinned=True, memory_quota=True):
+                pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1"):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
@@ -81,7 +81,7 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                                     for name, quota in placement.quota_resources.items()}}
     async with sessions.begin() as session:
         await session.execute(insert(NebiusPoolBinding).values(
-            pool_id=first.pool_id, installation_id=first.installation_id, cluster_id="cluster-1",
+            pool_id=first.pool_id, installation_id=first.installation_id, cluster_id=cluster_id,
             node_group_id=group_id, policy_revision=1, admission_epoch=2, mode="global",
             binding_json=binding, binding_sha256=canonical_digest(binding).removeprefix("sha256:")))
     participants = []
@@ -90,7 +90,7 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
     for index in range(2):
         participant = first.model_copy(update={
             "participant_id": first.participant_id if index == 0 else uuid4(),
-            "environment_id": first.environment_id if index == 0 else uuid4(),
+            "environment_id": (data_environment_id or first.environment_id) if index == 0 else uuid4(),
             "incarnation": first.incarnation if index == 0 else uuid4(),
             "environment_class": environment_classes[index],
             "execution_namespace": first.execution_namespace.model_copy(update={"name": f"{group_id}-execution-{index}", "uid": uuid4()}),
