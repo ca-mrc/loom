@@ -363,6 +363,37 @@ async def test_readonly_probe_is_get_only_and_does_not_update_usage(
     assert usage == (None, None)
 
 
+@pytest.mark.parametrize("storage_available", [True, False])
+async def test_api_only_readiness_uses_own_dependencies_and_retains_authentication(
+    svc_setup: tuple[FastAPI, str, UUID], monkeypatch: pytest.MonkeyPatch,
+    storage_available: bool,
+) -> None:
+    app, token, _team_id = svc_setup
+    app.state.settings = app.state.settings.model_copy(update={"service_mode": "api_only"})
+    monkeypatch.setenv("LOOM_ENV", "development")
+    monkeypatch.setenv("LOOM_NAMESPACE", "loom-dev-personal-readiness")
+    calls: list[str] = []
+
+    def head_bucket(*, Bucket: str) -> None:  # noqa: N803 - boto3 API
+        calls.append(Bucket)
+        if not storage_available:
+            raise RuntimeError("private-provider-secret")
+
+    monkeypatch.setattr(app.state.minio_client, "head_bucket", head_bucket)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        anonymous = await client.get("/api/v1/health/ready")
+        assert anonymous.status_code == 401
+        assert calls == []
+        response = await client.get("/api/v1/health/ready", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == (200 if storage_available else 503)
+    body = response.json()
+    assert body["mode"] == "api_only" and body["postgres"] == "ready"
+    assert body["object_store"] == ("ready" if storage_available else "not-ready")
+    assert "capacity_ready" not in body and "mutation_epoch" not in body
+    assert "private-provider-secret" not in response.text
+    assert calls == ["artifacts", "trajectories"]
+
+
 async def test_owner_rotates_token_revoking_old_secret(
     auth_setup: tuple[FastAPI, UUID, UUID, UUID, UUID],  # noqa: F811
 ) -> None:
