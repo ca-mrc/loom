@@ -658,7 +658,7 @@
       "name": "libssl3t64",
       "version": "3.0.13-0ubuntu3.15",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl3t64_3.0.13-0ubuntu3.15_amd64.deb",
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+files/libssl3t64_3.0.13-0ubuntu3.15_amd64.deb",
       "bytes": 1944134,
       "sha256": "3d0955bc049bbcca0f4c3e78a3a8b994593d96db7d84f4320217224433844534"
     },
