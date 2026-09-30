@@ -1,0 +1,198 @@
+"""Global reservation identity and release barriers on actual PostgreSQL."""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import create_engine, insert, inspect, select, update
+from sqlalchemy.exc import DBAPIError, IntegrityError
+
+
+@pytest.fixture
+def pool_database(isolated_migration_postgres_url):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+def registered(connection):
+    from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
+
+    pool_id, participant_id = uuid4(), uuid4()
+    connection.execute(insert(NebiusPoolBinding).values(
+        pool_id=pool_id, installation_id=uuid4(), cluster_id="cluster-" + uuid4().hex,
+        node_group_id="group-1", policy_revision=1, admission_epoch=1, mode="closed",
+        binding_json={"protected": True}, binding_sha256="a" * 64))
+    connection.execute(insert(NebiusPoolParticipant).values(
+        participant_id=participant_id, pool_id=pool_id, environment_id=uuid4(),
+        incarnation=uuid4(), binding_revision=1, admission_epoch=1, phase="fenced",
+        binding_json={"protected": True}, binding_sha256="b" * 64))
+    return pool_id, participant_id
+
+
+def request(connection, pool_id, participant_id, **changes):
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+
+    values = dict(
+        request_id=uuid4(), pool_id=pool_id, participant_id=participant_id,
+        workload_kind="trial", local_work_id=uuid4(), generation=1, admission_epoch=1,
+        target_id="nebius-default", request_sha256="c" * 64, request_json={"typed": True},
+        deadline_at=datetime.now(UTC) + timedelta(minutes=10), phase="reserved",
+        cpu_millis=1000, memory_mib=1024, ephemeral_storage_mib=1024, pod_slots=1,
+    ) | changes
+    connection.execute(insert(NebiusPoolRequest).values(**values))
+    return values
+
+
+def advance(connection, row, phase, **values):
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+
+    connection.execute(update(NebiusPoolRequest).where(
+        NebiusPoolRequest.request_id == row["request_id"]).values(phase=phase, **values))
+
+
+def cleanup_intent(connection, row):
+    advance(connection, row, "create_intent", plan_sha256="d" * 64, plan_json={"fixed": True})
+    advance(connection, row, "cleanup_intent")
+
+
+def cleanup(connection, row, **changes):
+    from loom.db.nebius_pool_schema import NebiusPoolCleanupObservation
+
+    values = dict(
+        observation_id=uuid4(), request_id=row["request_id"], plan_sha256="d" * 64,
+        namespace_uid=uuid4(), writer_epoch=1, observed_at=datetime.now(UTC),
+        evidence_json={"qualified_by_gateway": True},
+    ) | changes
+    connection.execute(insert(NebiusPoolCleanupObservation).values(**values))
+    return values["observation_id"]
+
+
+def test_migration_and_orm_have_the_same_pool_journal_columns(pool_database):
+    from loom.db.nebius_pool_schema import (
+        NebiusPoolBinding,
+        NebiusPoolCleanupObservation,
+        NebiusPoolParticipant,
+        NebiusPoolRequest,
+    )
+
+    for model in (NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolRequest, NebiusPoolCleanupObservation):
+        assert {column["name"] for column in inspect(pool_database).get_columns(model.__tablename__)} == set(model.__table__.columns.keys())
+
+
+def test_same_local_request_in_two_participants_is_distinct_but_replay_key_is_unique(pool_database):
+    with pool_database.begin() as connection:
+        a_pool, alice = registered(connection)
+        b_pool, bob = registered(connection)
+        first = request(connection, a_pool, alice)
+        request(connection, b_pool, bob, local_work_id=first["local_work_id"])
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            request(connection, a_pool, alice, local_work_id=first["local_work_id"])
+        request(connection, a_pool, alice, local_work_id=first["local_work_id"], generation=2)
+
+
+def test_request_cannot_claim_a_different_physical_pool(pool_database):
+    with pool_database.begin() as connection:
+        _, alice = registered(connection)
+        other_pool, _ = registered(connection)
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            request(connection, other_pool, alice)
+
+
+@pytest.mark.parametrize("changes", [
+    {"generation": 0}, {"admission_epoch": 0}, {"cpu_millis": -1},
+    {"pod_slots": 0}, {"request_sha256": "bad"}, {"request_json": []},
+    {"phase": "released"}, {"phase": "observed"},
+])
+def test_new_request_cannot_bypass_accounting_or_begin_with_external_effects(pool_database, changes):
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            request(connection, pool, participant, **changes)
+
+
+@pytest.mark.parametrize("phase", ["reserved", "waiting"])
+def test_only_never_started_requests_cancel_without_cleanup(pool_database, phase):
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        row = request(connection, pool, participant, phase=phase)
+        advance(connection, row, "cancelled_unstarted")
+        assert connection.execute(select(NebiusPoolRequest.phase)).scalar_one() == "cancelled_unstarted"
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            advance(connection, row, "reserved")
+
+
+@pytest.mark.parametrize("phase", ["create_intent", "observed", "cleanup_intent"])
+def test_started_requests_cannot_skip_cleanup_or_cancel_as_unstarted(pool_database, phase):
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        row = request(connection, pool, participant)
+        advance(connection, row, "create_intent", plan_sha256="d" * 64, plan_json={"fixed": True})
+        if phase != "create_intent":
+            advance(connection, row, phase, **({"job_uid": uuid4()} if phase == "observed" else {}))
+        for target in ("released", "cancelled_unstarted", "reserved"):
+            with pytest.raises(DBAPIError), connection.begin_nested():
+                advance(connection, row, target)
+
+
+def test_release_requires_this_request_and_plan_cleanup_observation(pool_database):
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        first = request(connection, pool, participant)
+        second = request(connection, pool, participant)
+        for row in (first, second):
+            cleanup_intent(connection, row)
+        wrong = cleanup(connection, second)
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            advance(connection, first, "released", cleanup_observation_id=wrong)
+        with pytest.raises(IntegrityError), connection.begin_nested():
+            cleanup(connection, first, plan_sha256="e" * 64)
+        own = cleanup(connection, first)
+        advance(connection, first, "released", cleanup_observation_id=own)
+        assert connection.execute(select(NebiusPoolRequest.phase).where(
+            NebiusPoolRequest.request_id == first["request_id"])).scalar_one() == "released"
+
+
+@pytest.mark.parametrize("changes", [
+    {"request_sha256": "e" * 64}, {"generation": 2}, {"admission_epoch": 2},
+    {"request_json": {"changed": True}}, {"cpu_millis": 500},
+    {"deadline_at": datetime(2100, 1, 1, tzinfo=UTC)},
+    {"plan_sha256": "e" * 64}, {"plan_json": {"changed": True}},
+])
+def test_journal_rejects_mutating_identity_workload_envelope_deadline_or_plan(pool_database, changes):
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        row = request(connection, pool, participant)
+        cleanup_intent(connection, row)
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            advance(connection, row, "cleanup_intent", **changes)
+
+
+def test_late_job_uid_is_monotonic_while_cleanup_remains_pending(pool_database):
+    with pool_database.begin() as connection:
+        pool, participant = registered(connection)
+        row = request(connection, pool, participant)
+        cleanup_intent(connection, row)
+        job_uid = uuid4()
+        advance(connection, row, "cleanup_intent", job_uid=job_uid)
+        for changed in (None, uuid4()):
+            with pytest.raises(DBAPIError), connection.begin_nested():
+                advance(connection, row, "cleanup_intent", job_uid=changed)
+
+
+def test_downgrade_refuses_to_erase_retained_pool_history(pool_database):
+    with pool_database.begin() as connection:
+        registered(connection)
+    config = Config("database/migrations/alembic.ini")
+    config.set_main_option("sqlalchemy.url", pool_database.url.render_as_string(hide_password=False).replace("%", "%%"))
+    with pytest.raises(DBAPIError, match="cannot remove global pool history"):
+        command.downgrade(config, "0170")
