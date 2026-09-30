@@ -40,6 +40,10 @@ def test_deliver_exact_hash_qualified_machine_tokens_without_rotation(tmp_path):
         *(row.execution_namespace.name for row in request.registration.spec.participants)}
     assert {doc["metadata"]["namespace"] for doc in documents.values()} == expected
     assert len(documents) == 8  # Observer + gateway, then CP/actuator for each shared participant.
+    development, = [row for row in request.registration.spec.participants if row.environment_class == "development"]
+    observer, = [row for row in request.registration.spec.machines if row.role == "observer"]
+    observer_secret, = [doc for doc in documents.values() if doc["metadata"]["name"] == "loom-pool-machine-" + observer.machine_id.hex]
+    assert observer_secret["metadata"]["namespace"] == development.execution_namespace.name
     assert all(doc["immutable"] is True and doc["type"] == "Opaque" and set(doc["data"]) == {"token"} for doc in documents.values())
     receipt = deliver_pool_material(request=request, tokens=tokens, api=api, state_dir=tmp_path)
     assert deliver_pool_material(request=request, tokens=tokens, api=api, state_dir=tmp_path) == receipt
