@@ -1606,6 +1606,35 @@ single-target collection remains unchanged. Managed hosted execution stays
 disabled until the shared ledger, local claim protocol and protected Job-write
 gateway are integrated and qualified together.
 
+## Global pool reservation journal
+
+`loom.nebius_pool_contract` binds request identity to a participant, workload kind,
+local work ID and generation. Equal local IDs in independent environment databases
+do not identify the same request. A reservation receipt retains its request digest,
+admission epoch, frozen plan and any observed Job UID. Waiting is not a reservation
+receipt; cancellation and uncertain external writes do not imply free capacity.
+
+Migration `0171` adds protected pool/participant registrations, immutable request
+journals and retained cleanup observations. PostgreSQL enforces unique request
+keys and participant-to-pool binding. Registration identities cannot be reassigned;
+binding changes require a newer revision, and epochs cannot move backwards.
+Requests cannot change their workload, envelope, deadline, namespace or frozen plan.
+Only never-started requests can become `cancelled_unstarted` without cleanup.
+Started requests remain charged through `cleanup_intent`; a late-discovered Job UID
+can be appended there but cannot then be replaced or removed. Release requires a
+cleanup observation recorded after cleanup intent and tied to the exact request,
+plan and namespace. Request and
+cleanup history cannot be deleted, and downgrade refuses retained pool history.
+
+These are storage and transition constraints, not proof of actual Kubernetes
+cleanup or installed global admission. The trusted gateway must qualify writer
+fencing, Job/Pod/auxiliary absence and environment-owned output drain before
+recording cleanup. The registry must authenticate dedicated machine identities,
+validate typed workload inputs and serialize physical-pool admission. The current
+single-environment controllers do not switch writers merely because these tables
+exist; connected admission, the production pool collector, durable local handoff
+and protected no-dual-writer migration remain required before activation.
+
 ## Native task-image capacity fairness
 
 An explicitly registered guest capacity alias shares its ordinary target's

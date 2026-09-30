@@ -1,0 +1,150 @@
+"""Durable global resource journals; protected registration is separate authority."""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PgUUID  # noqa: N811
+from sqlalchemy.orm import Mapped, mapped_column
+
+from loom.db.base import Base
+
+
+class NebiusPoolBinding(Base):
+    __tablename__ = "nebius_pool_bindings"
+    __table_args__ = (
+        UniqueConstraint("cluster_id", "node_group_id", name="nebius_pool_physical_identity_key"),
+        CheckConstraint("policy_revision > 0 AND admission_epoch > 0 AND mode IN ('legacy','closed','global')",
+                        name="nebius_pool_binding_state_check"),
+        CheckConstraint("pool_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "installation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "length(cluster_id) BETWEEN 1 AND 253 AND length(node_group_id) BETWEEN 1 AND 253",
+                        name="nebius_pool_binding_identity_check"),
+        CheckConstraint("jsonb_typeof(binding_json) = 'object' AND binding_sha256 ~ '^[0-9a-f]{64}$'",
+                        name="nebius_pool_binding_payload_check"),
+    )
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    installation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    cluster_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_group_id: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admission_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    binding_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NebiusPoolParticipant(Base):
+    __tablename__ = "nebius_pool_participants"
+    __table_args__ = (
+        UniqueConstraint("participant_id", "pool_id", name="nebius_pool_participant_pool_key"),
+        UniqueConstraint("environment_id", "incarnation", name="nebius_pool_participant_incarnation_key"),
+        CheckConstraint("binding_revision > 0 AND admission_epoch > 0 AND phase IN ('active','fenced')",
+                        name="nebius_pool_participant_state_check"),
+        CheckConstraint("participant_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "environment_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "incarnation <> '00000000-0000-0000-0000-000000000000'::uuid",
+                        name="nebius_pool_participant_identity_check"),
+        CheckConstraint("jsonb_typeof(binding_json) = 'object' AND binding_sha256 ~ '^[0-9a-f]{64}$'",
+                        name="nebius_pool_participant_payload_check"),
+    )
+    participant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_bindings.pool_id", ondelete="RESTRICT"), nullable=False)
+    environment_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    incarnation: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admission_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    binding_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class NebiusPoolRequest(Base):
+    __tablename__ = "nebius_pool_requests"
+    __table_args__ = (
+        ForeignKeyConstraint(["participant_id", "pool_id"],
+                             ["nebius_pool_participants.participant_id", "nebius_pool_participants.pool_id"],
+                             ondelete="RESTRICT", name="nebius_pool_request_participant_fk"),
+        ForeignKeyConstraint(["cleanup_observation_id", "request_id", "plan_sha256", "namespace_uid"],
+                             ["nebius_pool_cleanup_observations.observation_id", "nebius_pool_cleanup_observations.request_id", "nebius_pool_cleanup_observations.plan_sha256", "nebius_pool_cleanup_observations.namespace_uid"],
+                             ondelete="RESTRICT", use_alter=True, name="nebius_pool_request_cleanup_fk"),
+        UniqueConstraint("participant_id", "workload_kind", "local_work_id", "generation", name="nebius_pool_request_replay_key"),
+        UniqueConstraint("request_id", "plan_sha256", "namespace_uid", name="nebius_pool_request_plan_key"),
+        CheckConstraint("generation > 0 AND admission_epoch > 0 AND "
+                        "request_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "namespace_uid <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "local_work_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "workload_kind IN ('trial','verifier','task_image_build','application_image_build') AND "
+                        "target_id ~ '^[a-z0-9][a-z0-9-]{0,79}$'",
+                        name="nebius_pool_request_identity_check"),
+        CheckConstraint("cpu_millis > 0 AND memory_mib > 0 AND ephemeral_storage_mib >= 0 AND pod_slots > 0",
+                        name="nebius_pool_request_envelope_check"),
+        CheckConstraint("request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object'",
+                        name="nebius_pool_request_payload_check"),
+        CheckConstraint("phase IN ('waiting','reserved','create_intent','observed','cleanup_intent','released','cancelled_unstarted') AND "
+                        "((phase IN ('waiting','reserved','cancelled_unstarted')) = (plan_sha256 IS NULL)) AND "
+                        "((plan_sha256 IS NULL) = (plan_json IS NULL)) AND "
+                        "(plan_sha256 IS NULL OR (plan_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(plan_json) = 'object'))",
+                        name="nebius_pool_request_plan_check"),
+        CheckConstraint("(phase NOT IN ('waiting','reserved','cancelled_unstarted','create_intent') OR job_uid IS NULL) AND "
+                        "(phase <> 'observed' OR job_uid IS NOT NULL) AND "
+                        "(job_uid IS NULL OR job_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
+                        "((phase = 'released') = (cleanup_observation_id IS NOT NULL))",
+                        name="nebius_pool_request_evidence_check"),
+    )
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    participant_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    namespace_uid: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    workload_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    local_work_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    admission_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_id: Mapped[str] = mapped_column(Text, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    request_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    deadline_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    cpu_millis: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    memory_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ephemeral_storage_mib: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    pod_slots: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_sha256: Mapped[str | None] = mapped_column(Text)
+    plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    job_uid: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    cleanup_observation_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
+class NebiusPoolCleanupObservation(Base):
+    """Gateway-qualified absence references, not caller assertions of cleanup."""
+
+    __tablename__ = "nebius_pool_cleanup_observations"
+    __table_args__ = (
+        UniqueConstraint("observation_id", "request_id", "plan_sha256", "namespace_uid", name="nebius_pool_cleanup_binding_key"),
+        ForeignKeyConstraint(["request_id", "plan_sha256", "namespace_uid"],
+                             ["nebius_pool_requests.request_id", "nebius_pool_requests.plan_sha256", "nebius_pool_requests.namespace_uid"],
+                             ondelete="RESTRICT", name="nebius_pool_cleanup_request_fk"),
+        CheckConstraint("writer_epoch > 0 AND observation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "namespace_uid <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+                        "plan_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(evidence_json) = 'object'",
+                        name="nebius_pool_cleanup_shape_check"),
+    )
+    observation_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    plan_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    namespace_uid: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    writer_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    evidence_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

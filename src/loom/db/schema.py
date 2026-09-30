@@ -59,6 +59,12 @@ from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnviron
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
 )
+from loom.db.nebius_pool_schema import NebiusPoolBinding as NebiusPoolBinding
+from loom.db.nebius_pool_schema import (
+    NebiusPoolCleanupObservation as NebiusPoolCleanupObservation,
+)
+from loom.db.nebius_pool_schema import NebiusPoolParticipant as NebiusPoolParticipant
+from loom.db.nebius_pool_schema import NebiusPoolRequest as NebiusPoolRequest
 
 
 class Team(Base):
