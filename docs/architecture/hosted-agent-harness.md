@@ -1,0 +1,243 @@
+# Hosted agent harnesses
+
+This document is the implementation checklist for adding an agent harness to
+automatic Nebius execution. It complements
+[`agent-adapter.md`](agent-adapter.md), which describes the local and worker
+`loom-launcher` path. A launcher adapter being available to a worker does not
+make that harness available to hosted execution.
+
+## Execution ownership
+
+The hosted control plane compiles a task, trial and deployed runtime profile
+into an immutable `loom.execution-runtime-plan.v1`. The plan is stored on a
+Loom execution lease. The execution actuator validates that plan and renders
+one Kubernetes Job; Kubernetes does not define Loom's plan or lease concepts.
+
+For a workspace-reading harness, the Job has two distinct trust domains:
+
+```text
+execution container (trusted controller image)
+  loom-execution-runtime
+    -> Python harness phase
+    -> ServiceSandboxDriver
+       | private Unix-socket RPC
+       v
+task-sandbox sidecar (task image)
+  loom-sandbox-runtime
+    -> commands and file operations in the task environment
+```
+
+The controller owns the immutable task bundle, private verifier inputs,
+Gateway identity, trajectory files and durable output staging. The task
+sandbox receives only the public agent workspace. The task image does not
+receive provider credentials, Kubernetes credentials or direct access to the
+controller filesystem.
+
+The task sandbox is a Kubernetes native sidecar: an init container with
+`restartPolicy: Always`. Its image is the task image. The main `execution`
+container uses the selected digest-pinned agent controller image. Both mount a
+small role-specific `emptyDir` containing the sandbox Unix socket; they do not
+share the task filesystem.
+
+## Select the plan shape first
+
+Do not choose a plan from the agent slug alone. Classify the harness by the
+environment it actually needs:
+
+| Shape | Use when | Current implementation |
+|---|---|---|
+| Response-only | The model returns text and never reads or executes in the task image. | `direct-completion`; `litellm` is an alias. No private task sandbox. Verification is in the same execution attempt. |
+| Workspace-reading | The harness reads files or runs commands in the task image. | `terminus-2`. Use the private task-sandbox topology, shared verifier lifecycle and deferred verifier-plan contract. |
+| Private-solution | A trusted baseline needs `solution/` or another input forbidden to model agents. | Not admitted automatically today. Design a distinct input policy; never expose the solution through the workspace-agent path. |
+
+The private-solution row is forward-looking design guidance, not current
+runtime behavior.
+
+Unknown agent names must fail before plan compilation or at its defense-in-depth
+admission boundary. They must not fall through to the direct-completion runner
+or be recorded as another harness. At the materializer boundary, the legacy
+rejection code remains `direct_completion_required`; do not interpret that code
+as a fallback or rewrite. Hosted APIs may reject the unsupported selection
+earlier with a user-facing availability message.
+
+The current workspace compiler is named `_compile_terminus_plan` because
+Terminus-2 is its only hosted caller. Keep it as the single private-sandbox
+compiler until another workspace-reading harness is implemented. At that
+point, parameterize the agent phase and harness-owned outputs; do not copy the
+sandbox, verifier, allocation or deferred-plan logic into a harness-specific
+compiler.
+
+## Controller phase contract
+
+The compiler freezes an exact process command in `plan.main`, for example:
+
+```text
+python -I -m loom.service_execution_sandbox_task terminus-2 \
+  --workspace /workspace
+```
+
+The Go execution runtime runs this command from the trusted controller image.
+It is a process launch, not a per-trial package installation. A new hosted
+harness needs a controller image that already contains its pinned dependencies
+and a Python phase that:
+
+1. Reads configuration only from the immutable controller workspace and frozen
+   environment.
+2. Connects to `task-sandbox` through `ServiceSandboxDriver`.
+3. Stages only public agent inputs.
+4. Runs the harness under the existing deadline and cancellation fence.
+5. Writes canonical and native evidence to declared controller-workspace paths.
+6. Returns without grading; the common controller owns verifier selection.
+
+Terminus-2 is the reference implementation. Hosted
+`service_execution_terminus2.run_terminus2` reuses
+`LoomTerminus2Runtime`, but supplies a lease-scoped Gateway client and the
+socket-backed `ServiceSandboxDriver`. It deliberately does not call the legacy
+worker `setup()` method, because task images must already contain their bounded
+runtime tools.
+
+Future harness guidance: before reusing a local `SubprocessAgent`, compare its
+driver requirements with the native driver. In particular, local launcher
+agents commonly require `Driver.exec_streaming`;
+`ServiceSandboxDriver.exec_streaming` is currently unsupported. A hosted
+implementation must add a bounded process handle, stream capture, cancellation
+and exit-status contract rather than silently falling back to non-streaming
+execution.
+
+## Verification is harness-independent
+
+`resolve_verifier_env_mode(task, trial)` selects the batch override first and
+then the task value. A workspace harness must not implement its own shared or
+separate grader.
+
+### Shared
+
+The agent and verifier are phases in one execution lease and one Job. The
+controller withholds `tests/**`, `verifier/**`, `solution/**`,
+`upstream-task.toml` and `.loom/**` during the agent phase. After the harness
+returns, it refuses planted private paths, injects verifier inputs, and runs the
+verifier against the same `task-sandbox`. This preserves live services,
+sockets and other process state that cannot be archived.
+
+### Separate
+
+Current compiler support:
+
+The agent plan contains one `task-sandbox` and
+`verifier_execution=separate_execution`. It commits a validated public
+`workspace.tar` plus declared mutable-path state. The
+`compile_deferred_verifier_plan` helper can produce a child plan with the fixed
+trusted phase:
+
+```text
+python -I -m loom.service_execution_sandbox_task verify-sandbox \
+  --workspace /workspace
+```
+
+That plan restores the public state into `verifier-sandbox`, injects private
+inputs, and grades without rerunning the agent. The verifier command must never
+be recovered by editing the preceding harness argv.
+
+Current limitation: no production scheduler path calls the deferred compiler
+or automatically reserves the child verifier lease. The administrative
+reservation path enforces parent cleanup, but automatic on-demand creation is
+owned by [#2212](https://github.com/qianyi-sun/loom/issues/2212). Until that is
+wired, the fixed deferred argv is a compiler contract rather than active trial
+behavior.
+
+Guest execution may colocate both private guests for its bounded runtime. That
+is an execution-class constraint, not a harness-specific verifier policy.
+
+## Workspace and private-input review
+
+For every new workspace harness, document and test:
+
+- The exact working directory and user identity.
+- Which bundle paths are public during the agent phase.
+- Every private path kept by the controller.
+- Whether the harness creates files outside the declared workdir.
+- Required `environment.mutable_paths`, reference files, symlinks and ACL
+  preservation.
+- Whether background services must remain alive for shared grading.
+- Cleanup behavior on success, timeout, cancellation and capture failure.
+
+The harness must use the supplied driver. It must not mount a host/container
+socket, read the controller workspace, fetch private inputs itself, or create a
+second sandbox lifecycle.
+
+## Evidence and artifact contract
+
+The runtime captures only paths declared in the frozen plan. It never guesses
+harness evidence from a workspace glob. Classify each output, set whether it is
+required, and keep secrets out of every payload.
+
+Assess at least these outputs:
+
+| Evidence | Question to answer |
+|---|---|
+| Canonical trajectory | Which typed events represent prompts, model calls, tool actions, observations, errors and completion? |
+| Native trace | Which harness-native JSONL, recording, session or checkpoint files are needed for audit and replay? |
+| Model input | Can the exact model-facing messages be retained without credentials or private verifier material? |
+| Terminal transcript | Is command/output evidence separate from model turns, bounded and ordered? |
+| Usage/accounting | How are every Gateway call and token count joined to the lease, trial, step and native event? |
+| Task artifacts | Which task-declared paths are downloaded from the sandbox, and which are required? |
+| Workspace handoff | Does separate grading require `workspace.tar`, mutable paths, references or ACL metadata? |
+| Verifier evidence | Is `verifier/output.json` required, and is optional CTRF/native detail declared separately? |
+| Diagnostics | Which sanitized exception, version, stderr and startup records make failures actionable? |
+
+The Go runtime already contributes bounded per-phase stdout/stderr,
+`result.json`, output sizes and SHA-256 values, phase timing, exit status and
+immutable runtime identity. Harness output still needs explicit declarations
+for native trajectories, terminal recordings, model-input traces and
+checkpoints. A reward or exit code alone is not sufficient capture evidence.
+
+## Admission and release checklist
+
+A hosted harness is ready only when all of the following are implemented and
+tested:
+
+1. The service catalog reports readiness that matches native admission.
+2. Automatic admission accepts only the task, model, network and capability
+   shapes the hosted runner supports.
+3. A signed, digest-pinned controller image contains the exact harness version
+   and dependencies; its runtime binding is frozen into the Batch and plan.
+4. The compiler selects the correct response-only, workspace-reading or
+   private-solution topology and freezes the harness phase command.
+5. The controller dispatcher has an explicit phase for the harness. Unknown
+   phases fail closed.
+6. Gateway protocol, model identity, request parameters, credentials and call
+   accounting are proven for the harness's actual wire format.
+7. Driver operations, deadlines, cancellation, process cleanup and output
+   bounds are supported without local-worker assumptions.
+8. Public/private workspace staging and both applicable verifier modes pass
+   tests without harness-specific verifier branches.
+9. Every required canonical and native artifact is declared, captured,
+   materialized and downloadable from the complete Trial bundle.
+10. Unit tests cover admission rejection, plan shape, command dispatch,
+    verifier topology, missing capture, timeout and cancellation. A bounded live
+    acceptance run records exact controller/harness versions and proves real
+    workspace operations, model calls, verification, artifacts and cleanup.
+
+Local worker success, catalog visibility, image build success or a numeric
+reward does not by itself satisfy this checklist.
+
+## Code map
+
+- Plan compilation and hosted admission:
+  `src/loom/service_execution_materialization.py`
+- Workload topology projected for admission:
+  `src/loom/execution_contract.py`
+- Frozen plan validation:
+  `src/loom/execution_runtime_contract.py`
+- Python sandbox phases and private-input staging:
+  `src/loom/service_execution_sandbox_task.py`
+- Terminus hosted bridge:
+  `src/loom/service_execution_terminus2.py`
+- Unix-socket driver:
+  `src/loom/driver/service_sandbox.py`
+- Parent-cleanup gate for child verifier reservations:
+  `src/loom_control_plane/service_execution.py`
+- Kubernetes Job rendering:
+  `src/loom_execution_actuator/renderer.py`
+- Generic phase/output supervisor:
+  `cmd/loom-execution-runtime/`
