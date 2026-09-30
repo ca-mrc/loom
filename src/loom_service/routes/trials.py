@@ -46,6 +46,7 @@ from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
+from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
@@ -53,6 +54,8 @@ from loom_llm_gateway.rate_card import (
 from loom_service import wire_responses as wire
 from loom_service.agent_catalog import (
     known_names,
+    native_selections_error,
+    selection_agents,
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
@@ -1323,6 +1326,13 @@ async def submit_trial(
     require_submitting_user(ctx)
     _validate_agent_name(payload.config)
     payload = _resolve_trial_provider_route(payload)
+    # Hosted single trials run natively on Nebius (#2054).
+    if not local_execution_enabled():
+        native_err = native_selections_error(
+            NEBIUS_BACKEND, selection_agents(payload.config, []),
+        )
+        if native_err is not None:
+            raise HTTPException(status_code=400, detail=native_err)
     await validate_submission_agent_task_compatibility(
         s,
         team_id=ctx.team_id,

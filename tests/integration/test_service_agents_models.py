@@ -187,8 +187,11 @@ async def setup(
 
 
 async def test_agents_includes_builtins_and_adapters(
+    monkeypatch: pytest.MonkeyPatch,
     setup: tuple[FastAPI, str],
 ) -> None:
+    # Runtime-contract metadata; hosted Nebius availability is covered separately.
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
     app, raw = setup
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
@@ -348,3 +351,38 @@ async def test_models_unauthenticated_401(
     ) as ac:
         r = await ac.get("/api/v1/models")
     assert r.status_code == 401
+
+
+async def test_agents_report_hosted_native_availability(
+    monkeypatch: pytest.MonkeyPatch,
+    setup: tuple[FastAPI, str],
+) -> None:
+    """#2054: on hosted (Nebius) deployments the catalog reports what native
+    execution can actually run instead of claiming every entry is ready."""
+    monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
+    app, raw = setup
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        r = await ac.get("/api/v1/agents", headers={"Authorization": f"Bearer {raw}"})
+    assert r.status_code == 200
+    by_name = {a["name"]: a for a in r.json()["items"]}
+
+    for name in ("direct-completion", "terminus-2"):
+        assert by_name[name]["service_mode_ready"] is True, name
+        assert by_name[name]["readiness_status"] == "ready", name
+    for name in ("oracle", "codex", "openhands-sdk"):
+        entry = by_name[name]
+        assert entry["service_mode_ready"] is False, name
+        assert entry["readiness_status"] == "unavailable", name
+        assert "not yet runnable on hosted (Nebius) execution" in entry["readiness_message"]
+        # Still a supported product entry; only its native path is missing.
+        assert entry["product_support"] == "supported", name
+
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", "1")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://svc",
+    ) as ac:
+        local = await ac.get("/api/v1/agents", headers={"Authorization": f"Bearer {raw}"})
+    local_by_name = {a["name"]: a for a in local.json()["items"]}
+    assert local_by_name["codex"]["service_mode_ready"] is True

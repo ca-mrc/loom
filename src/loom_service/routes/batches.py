@@ -70,6 +70,8 @@ from loom_service.admin_audit import (
 )
 from loom_service.agent_catalog import (
     known_names,
+    native_selections_error,
+    selection_agents,
     validate_agent_model_compat,
 )
 from loom_service.auth_guards import (
@@ -675,6 +677,21 @@ def _resolve_payload_provider_routes(
     )
 
 
+def _reject_if_not_natively_runnable(
+    backend: str,
+    selections: list[tuple[str, str]],
+    *,
+    action: str = "",
+) -> None:
+    err = native_selections_error(backend, selections)
+    if err is not None:
+        reject_submission(
+            reason="agent_not_natively_runnable",
+            status_code=400,
+            detail=f"{action}{err}",
+        )
+
+
 def _disambiguate_derived_labels(
     combos: list[Combination],
     connection_names: dict[UUID, str],
@@ -1026,6 +1043,10 @@ async def _create_batch_record(
     # #2054: resolve every selection's connection/model once. From here on,
     # preflight, budget, persistence and fan-out all read these values.
     payload = _resolve_payload_provider_routes(payload, trial_config)
+    _reject_if_not_natively_runnable(
+        payload.backend,
+        selection_agents(trial_config, payload.combinations),
+    )
 
     # Validate provider_connection_id before task materialization/fan-out
     # work so known bad provider/model input returns a direct actionable error.
@@ -2657,6 +2678,15 @@ async def rerun_failed_batch(
     )
     rerun_trial_config = dict(b.trial_config)
     combinations = [dict(item) for item in b.combinations or []]
+    _reject_if_not_natively_runnable(
+        b.backend,
+        selection_agents(
+            rerun_trial_config,
+            combinations,
+            {int(t["combination_idx"]) for t in targets},
+        ),
+        action="cannot rerun ",
+    )
     runtime_profile_json = json.dumps(b.service_execution_runtime_profile or {})
     if request_payload.use_current_runtime:
         selections = combinations or [rerun_trial_config]

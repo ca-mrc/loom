@@ -55,6 +55,14 @@ from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.verifier_runtime import resolve_verifier_env_mode
 
+# Harnesses the native (Nebius) execution path can run today. OpenHands,
+# Codex and Oracle are supported product entries but are not yet connected
+# to native execution (#2054); the catalog and submission paths reuse this
+# set so they report that instead of claiming readiness.
+NATIVE_EXECUTION_AGENT_NAMES: frozenset[str] = frozenset(
+    {"direct-completion", "litellm", "terminus-2"},
+)
+
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GLOB_MAGIC = re.compile(r"[*?[]")
@@ -439,7 +447,7 @@ def automatic_service_execution_rejections(
         reasons.append("custom_verifier_identity_unsupported")
     if len(task.steps) != 1 or task.multi_step is not None:
         reasons.append("single_step_required")
-    if trial.agent_name not in {"direct-completion", "litellm", "terminus-2"}:
+    if trial.agent_name not in NATIVE_EXECUTION_AGENT_NAMES:
         reasons.append("direct_completion_required")
     if trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")

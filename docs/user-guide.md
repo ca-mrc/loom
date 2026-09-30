@@ -848,6 +848,13 @@ Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode, Claude Code,
 Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
 but new submissions are rejected with the reason.
 
+On hosted (Nebius) deployments, native execution currently runs only
+`direct-completion` (and its `litellm` alias) and `terminus-2`. OpenHands, Codex
+and Oracle are supported product entries but are not yet connected to native
+execution: `/api/v1/agents` reports them as `unavailable` with that reason, and
+hosted submissions naming them are rejected before admission. Local Docker
+execution is unaffected. Tracking: #2054.
+
 Every model-backed selection needs an explicitly selected, authorized
 OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
 or shared with your team. There is no fallback to platform credentials, and
