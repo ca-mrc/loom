@@ -174,7 +174,7 @@ class PoolExecutionOutbox:
             raise PoolHandoffError
         return receipt
 
-    async def propose(self, *, trial_id: UUID, target_id: str) -> PoolExecutionHandoff:
+    async def propose(self, *, trial_id: UUID, target_id: str) -> PoolExecutionHandoff | None:
         """Freeze actual compiled input without claiming an execution or budget."""
         self.participant.target(target_id, "trial")
         async with self.sessions.begin() as session:
@@ -206,7 +206,11 @@ class PoolExecutionOutbox:
                 raise PoolHandoffError
             compiled = await _compile_service_candidate(session, row=candidate, environment=self.environment,
                 pool_id=self.logical_pool_id, maximum_deadline_seconds=self.maximum_deadline_seconds, current_time=now)
-            if compiled is None or target_id not in {target.id for target in compiled.targets}:
+            if compiled is None:
+                # Compilation may have finished an image-failed queued Trial.
+                # Commit that existing terminal behavior without claiming work.
+                return None
+            if target_id not in {target.id for target in compiled.targets}:
                 raise PoolHandoffError
             runtime = (await allocate_target_resources(session, compiled.runtime_plan, target_id=target_id, now=now)
                        if compiled.allocate_resources else compiled.runtime_plan)

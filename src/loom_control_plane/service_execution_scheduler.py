@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from sqlalchemy import select, text, update
@@ -49,6 +49,10 @@ _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
 
 class ServiceExecutionConfigurationError(ValueError):
     """A known per-Trial configuration cannot run under this scheduler's bounds."""
+
+
+class GlobalExecutionSelector(Protocol):
+    async def select_next(self) -> object | None: ...
 
 
 @dataclass(frozen=True)
@@ -432,11 +436,19 @@ async def run_service_execution_scheduler_loop(
     image_admission_keyring: ImageAdmissionKeyring,
     interval_seconds: float,
     maximum_deadline_seconds: int,
+    global_selector: GlobalExecutionSelector | None = None,
 ) -> None:
     """Continuously reserve converted service tasks; cancellation stops the loop."""
 
     while True:
         try:
+            if global_selector is not None:
+                # A selection is not a lease. Empty/failed global selection never
+                # falls through to the environment-local capacity writer.
+                if await global_selector.select_next() is not None:
+                    continue
+                await asyncio.sleep(interval_seconds)
+                continue
             async with session_factory() as session:
                 lease = await reserve_next_service_execution(
                     session,

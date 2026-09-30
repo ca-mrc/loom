@@ -2018,8 +2018,13 @@ the existing result finalization and usage recording. It sends stop before outpu
 drain, preserves the output deadline even without a locally observed Pod, and
 projects deletion only from the retained manager release. A missing Job never
 authorizes a new create. Global mode rejects legacy namespace watches and has no
-local provisioning or Kubernetes write fallback. The actual scheduler selection,
-protected startup and installed writer transition still require connection.
+local provisioning or Kubernetes write fallback. The existing scheduler loop can
+now select global proposals from its normal queued-Trial eligibility contract;
+it preserves team fairness within shared/personal priority, skips live proposals
+and incompatible candidates, and never falls back to local reservation on an
+empty or failed global selection. Image-preparation and configuration failures
+retain their existing no-attempt terminal semantics. Protected startup, global
+node-share allocation evidence and the installed writer transition remain open.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
