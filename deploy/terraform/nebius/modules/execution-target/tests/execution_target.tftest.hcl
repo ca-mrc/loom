@@ -297,3 +297,63 @@ run "public_service_allocations_opt_in" {
     error_message = "Explicit service opt-in must permit allocations from the existing network public pools."
   }
 }
+
+run "h100_default_disabled" {
+  command = plan
+  assert {
+    condition     = length(nebius_mk8s_v1_node_group.h100_execution) == 0 && output.h100_resource_pool == null
+    error_message = "Omitted H100 pool must create no GPU node group."
+  }
+}
+
+run "h100_opt_in_bounded_private_pool" {
+  command = plan
+  variables {
+    h100_pool = { max_nodes = 1, disk_gib = 1100, drivers_preset = "cuda12.8" }
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.execution.template.resources.platform == "cpu-e2" && nebius_mk8s_v1_node_group.h100_execution[0].template.resources.platform == "gpu-h100-sxm" && nebius_mk8s_v1_node_group.h100_execution[0].template.resources.preset == "1gpu-16vcpu-200gb"
+    error_message = "The independent H100 pool must preserve the CPU node group's platform."
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.h100_execution[0].autoscaling.min_node_count == 0 && nebius_mk8s_v1_node_group.h100_execution[0].autoscaling.max_node_count == 1 && nebius_mk8s_v1_node_group.h100_execution[0].strategy.max_surge.count == 0
+    error_message = "H100 qualification configuration must start at zero and stay inside its one-node ceiling."
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.h100_execution[0].template.gpu_settings.drivers_preset == "cuda12.8" && nebius_mk8s_v1_node_group.h100_execution[0].template.boot_disk.size_gibibytes == 1100 && nebius_mk8s_v1_node_group.h100_execution[0].template.metadata.labels["loom.nebius/gpu-model"] == "H100"
+    error_message = "Preserve the GPU driver, exact model selector and disk headroom."
+  }
+  assert {
+    condition     = nebius_mk8s_v1_node_group.h100_execution[0].template.taints[1].key == "loom.nebius/gpu-model" && nebius_mk8s_v1_node_group.h100_execution[0].template.taints[1].value == "H100" && nebius_mk8s_v1_node_group.h100_execution[0].template.reservation_policy.policy == "FORBID"
+    error_message = "The on-demand pool must be GPU-tainted and avoid reservations."
+  }
+  assert {
+    condition     = output.h100_resource_pool.runtime_qualified == false
+    error_message = "IaC configuration must never assert GPU runtime qualification."
+  }
+}
+
+run "h100_rejects_other_region" {
+  command = plan
+  variables {
+    region    = "eu-west1"
+    h100_pool = { max_nodes = 1, disk_gib = 1100, drivers_preset = "cuda12.8" }
+  }
+  expect_failures = [terraform_data.contract]
+}
+
+run "h100_rejects_unbounded_or_empty_pool" {
+  command = plan
+  variables {
+    h100_pool = { max_nodes = 0, disk_gib = 1100, drivers_preset = "cuda12.8" }
+  }
+  expect_failures = [var.h100_pool]
+}
+
+run "h100_rejects_insufficient_disk" {
+  command = plan
+  variables {
+    h100_pool = { max_nodes = 1, disk_gib = 1000, drivers_preset = "cuda12.8" }
+  }
+  expect_failures = [var.h100_pool]
+}

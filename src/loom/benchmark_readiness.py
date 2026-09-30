@@ -135,6 +135,7 @@ class BenchmarkReadinessItem:
     smoke_status: str
     readiness_state: ReadinessState
     blocker_reason: str | None
+    runtime_blockers: tuple[str, ...] = ()
 
 
 def _source_scheme(source: str | None) -> str:
@@ -167,14 +168,24 @@ def build_readiness_item(
     raw_count = len(tasks)
     valid_count = 0
     unsupported_architectures = 0
+    runnable_count = 0
+    runtime_blockers: set[str] = set()
     for task in tasks:
         try:
             config = TaskConfig.model_validate(task.config)
         except ValidationError:
             continue
         valid_count += 1
+        from loom.task_runtime_compatibility import task_runtime_rejections
+
+        rejections = task_runtime_rejections(config)
+        runtime_blockers.update(f"{task.id}: {reason}" for reason in rejections)
+        if config.upstream_origin is not None:
+            adapter_status = "available"
         try:
             execution_cpu_arch(config.environment.cpu_arch)
+            if not rejections:
+                runnable_count += 1
         except ValueError:
             unsupported_architectures += 1
     invalid_count = raw_count - valid_count
@@ -184,7 +195,7 @@ def build_readiness_item(
     license_allowed_count = (
         0
         if unsupported_runtime or deferred_support or non_v1_supported
-        else valid_count - unsupported_architectures
+        else runnable_count
     )
     license_blocked_count = 0
 
@@ -210,6 +221,9 @@ def build_readiness_item(
     elif unsupported_architectures:
         readiness_state = "blocked"
         blocker_reason = "unsupported_cpu_architecture"
+    elif runtime_blockers:
+        readiness_state = "blocked"
+        blocker_reason = "task_requirements_unsupported"
     elif raw_count == 0:
         readiness_state = "blocked"
         blocker_reason = "manifest_missing"
@@ -242,6 +256,7 @@ def build_readiness_item(
         smoke_status="unknown",
         readiness_state=readiness_state,
         blocker_reason=blocker_reason,
+        runtime_blockers=tuple(sorted(runtime_blockers)),
     )
 
 
@@ -256,6 +271,11 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         else:
             message += " is registered."
         selectable = True
+    elif item.blocker_reason == "task_requirements_unsupported":
+        label = "Runtime support required"
+        fields = sorted({reason.split(": ", 1)[-1].rsplit(": ", 1)[0] for reason in item.runtime_blockers})
+        message = "Imported task requirements need runtime support: " + ", ".join(fields) + "."
+        selectable = False
     elif item.blocker_reason == "unsupported_cpu_architecture":
         label = "Unsupported architecture"
         message = (
@@ -334,6 +354,7 @@ def readiness_display_fields(item: BenchmarkReadinessItem) -> dict[str, Any]:
         "readiness_message": message,
         "selectable": selectable,
         "blocker_reason": item.blocker_reason,
+        "runtime_blockers": list(item.runtime_blockers),
     }
 
 

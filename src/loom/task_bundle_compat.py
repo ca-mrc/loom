@@ -11,32 +11,14 @@ import re
 import shlex
 import tomllib
 from collections.abc import Iterable, Mapping
-from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from loom.dockerfile_instructions import DockerfileParseError, dockerfile_instructions
-
-
-class CompatibilitySeverity(StrEnum):
-    ERROR = "error"
-    WARNING = "warning"
-
-
-class TaskBundleCompatibilityIssue(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    code: str
-    severity: CompatibilitySeverity
-    path: str
-    line: int
-    phase: str
-    message: str
-    hint: str
-    evidence: dict[str, str] = Field(default_factory=dict)
-
+from loom.models.task_compatibility import CompatibilitySeverity as CompatibilitySeverity
+from loom.models.task_compatibility import (
+    TaskBundleCompatibilityIssue as TaskBundleCompatibilityIssue,
+)
 
 _PYTORCH_INDEX_RE = re.compile(r"https?://download\.pytorch\.org/whl(?:/|\b)")
 _PYTORCH_INDEX_PACKAGES = frozenset({

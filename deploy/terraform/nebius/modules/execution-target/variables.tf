@@ -318,3 +318,23 @@ variable "enable_public_service_allocations" {
   type        = bool
   default     = false
 }
+
+variable "h100_pool" {
+  description = "Opt-in dedicated H100 pool; null preserves the CPU-only topology. This config is not runtime qualification."
+  type = object({
+    max_nodes      = number
+    disk_gib       = number
+    drivers_preset = string
+  })
+  default = null
+
+  validation {
+    condition = var.h100_pool == null ? true : (
+      var.h100_pool.max_nodes >= 1 && var.h100_pool.max_nodes <= 32 &&
+      floor(var.h100_pool.max_nodes) == var.h100_pool.max_nodes &&
+      var.h100_pool.disk_gib >= 1100 && floor(var.h100_pool.disk_gib) == var.h100_pool.disk_gib &&
+      contains(["cuda12", "cuda12.4", "cuda12.8"], var.h100_pool.drivers_preset)
+    )
+    error_message = "H100 pool needs an explicit 1-32 node ceiling, at least 1100 GiB disk, and a supported driver preset."
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "id": "terminal-bench-4@4.0.0",
+  "display_name": "Terminal-Bench 4.0.0 (official source, unqualified)",
+  "series": "terminal-bench",
+  "license_spdx": "Apache-2.0",
+  "license_url": "https://github.com/harbor-framework/terminal-bench/blob/452bf305c6daa62fc59061d22133a7cbc7c1572e/LICENSE",
+  "source_subdir": "tasks",
+  "expected_task_count": 66,
+  "origin": {
+    "kind": "git",
+    "locator": "https://github.com/harbor-framework/terminal-bench.git",
+    "revision": "452bf305c6daa62fc59061d22133a7cbc7c1572e",
+    "release": "4.0.0",
+    "split": "test"
+  }
+}

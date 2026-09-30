@@ -28,6 +28,11 @@ resource "terraform_data" "contract" {
     }
 
     precondition {
+      condition     = var.h100_pool == null || var.region == "eu-north1"
+      error_message = "gpu-h100-sxm is available only in eu-north1; do not substitute another GPU platform."
+    }
+
+    precondition {
       condition     = var.execution_min_nodes <= var.execution_max_nodes
       error_message = "execution_min_nodes cannot exceed execution_max_nodes."
     }
@@ -508,4 +513,51 @@ resource "nebius_mk8s_v1_node_group" "execution" {
     nebius_iam_v1_access_permit.node_registry_pull,
     nebius_mk8s_v1_node_group.system,
   ]
+}
+
+resource "nebius_mk8s_v1_node_group" "h100_execution" {
+  count       = var.h100_pool == null ? 0 : 1
+  parent_id   = nebius_mk8s_v1_cluster.target.id
+  name        = "${local.resource_prefix}-execution-h100"
+  labels      = local.common_labels
+  version     = var.kubernetes_version
+  auto_repair = {}
+
+  autoscaling = {
+    min_node_count = 0
+    max_node_count = var.h100_pool.max_nodes
+  }
+  strategy = {
+    drain_timeout   = "20m"
+    max_surge       = { count = 0 }
+    max_unavailable = { count = 1 }
+  }
+  template = {
+    service_account_id = nebius_iam_v1_service_account.node_registry_pull.id
+    max_pods           = var.execution_max_pods
+    metadata = {
+      labels = {
+        "loom.nebius/node-role"        = "execution"
+        "loom.nebius/cluster-scope-id" = var.cluster_scope_id
+        "loom.nebius/resource-pool"    = "h100"
+        "loom.nebius/gpu-model"        = "H100"
+      }
+    }
+    taints = [
+      { key = "loom.nebius/execution", value = "true", effect = "NO_SCHEDULE" },
+      { key = "loom.nebius/gpu-model", value = "H100", effect = "NO_SCHEDULE" },
+    ]
+    boot_disk = {
+      type           = "NETWORK_SSD"
+      size_gibibytes = var.h100_pool.disk_gib
+    }
+    network_interfaces = [{ subnet_id = nebius_vpc_v1_subnet.target.id }]
+    resources = {
+      platform = "gpu-h100-sxm"
+      preset   = "1gpu-16vcpu-200gb"
+    }
+    gpu_settings       = { drivers_preset = var.h100_pool.drivers_preset }
+    reservation_policy = { policy = "FORBID" }
+  }
+  depends_on = [nebius_iam_v1_access_permit.node_registry_pull, terraform_data.contract]
 }

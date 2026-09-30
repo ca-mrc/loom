@@ -214,7 +214,8 @@ class TestNormalizeMapping:
             "relative-output.json",
             "logs/verifier/**",
         ]
-        assert "environment" not in normalized["verifier"]
+        assert cfg.verifier.environment is not None
+        assert cfg.verifier.environment.memory_mb == 4096
 
     def test_native_tb21_maps_no_internet_to_no_network(self) -> None:
         raw = {
