@@ -51,10 +51,11 @@ async def machine(sessions, pool_id, participant_id=None):
         return await resolve_pool_machine(session, "Bearer " + raw)
 
 
-async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
+async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
+                parent_id=None, quota_nodes=None, environment_classes=("development", "development")):
     placement = CapacityPlacement.model_validate(placement_fixture(
-        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
-        requested_cpu=occupied_cpu, quota_nodes=max_nodes, used_nodes=1,
+        target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
+        requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
     ))
     placement = placement.model_copy(update={"node_group": placement.node_group.model_copy(update={"max_nodes": max_nodes})})
     first, body = inputs()
@@ -67,7 +68,7 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
     async with sessions.begin() as session:
         await session.execute(insert(NebiusPoolBinding).values(
             pool_id=first.pool_id, installation_id=first.installation_id, cluster_id="cluster-1",
-            node_group_id="pool-test", policy_revision=1, admission_epoch=2, mode="global",
+            node_group_id=group_id, policy_revision=1, admission_epoch=2, mode="global",
             binding_json=binding, binding_sha256=canonical_digest(binding).removeprefix("sha256:")))
     participants = []
     principals = []
@@ -77,8 +78,9 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
             "participant_id": first.participant_id if index == 0 else uuid4(),
             "environment_id": first.environment_id if index == 0 else uuid4(),
             "incarnation": first.incarnation if index == 0 else uuid4(),
-            "execution_namespace": first.execution_namespace.model_copy(update={"name": f"execution-{index}", "uid": uuid4()}),
-            "build_namespace": first.build_namespace.model_copy(update={"name": f"build-{index}", "uid": uuid4()}),
+            "environment_class": environment_classes[index],
+            "execution_namespace": first.execution_namespace.model_copy(update={"name": f"{group_id}-execution-{index}", "uid": uuid4()}),
+            "build_namespace": first.build_namespace.model_copy(update={"name": f"{group_id}-build-{index}", "uid": uuid4()}),
             "targets": (first.targets[0].model_copy(update={"profile_id": uuid4()}),),
         })
         async with sessions.begin() as session:
@@ -98,13 +100,7 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
             execution_class=nebius_cpu_execution_class(), image_admission_keyring=IMAGE_ADMISSION_KEYRING,
         )
     observer = await machine(sessions, first.pool_id)
-    capture = await capture_scope(sessions, observer)
-    provider, kubernetes = snapshots(capture)
-    provider = provider.model_copy(update={"node_group": placement.node_group, "node_count": 1,
-        "target_node_count": 1, "ready_node_count": 1, "quota_resources": placement.quota_resources})
-    kubernetes = kubernetes.model_copy(update={"nodes": placement.nodes, "active_nodes": 1, "ready_nodes": 1,
-        "template_samples": placement.template_samples})
-    await publish(sessions, observer, capture, provider=provider, kubernetes=kubernetes)
+    await publish_placement(sessions, observer, placement)
     requests = []
     for participant in participants:
         # Independent environment DBs may reuse their local work UUID.
@@ -113,6 +109,28 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1):
             "origin": body["origin"] | {"data_environment_id": participant.environment_id},
         }))
     return participants, principals, requests, profiles, observer
+
+
+async def publish_placement(sessions, observer, placement):
+    capture = await capture_scope(sessions, observer)
+    provider, kubernetes = snapshots(capture)
+    totals = {"nodes": "nodes", "vcpu": "vcpu_millis", "memory": "memory_mib", "storage": "storage_mib"}
+    provider = provider.model_copy(update={"node_group": placement.node_group,
+        "node_count": placement.node_group.node_count, "target_node_count": placement.node_group.node_count,
+        "ready_node_count": sum(node.ready for node in placement.nodes), "quota_resources": placement.quota_resources,
+        **{f"{prefix}_{totals[name]}": getattr(quota, attr) for name, quota in placement.quota_resources.items()
+           for prefix, attr in (("quota", "limit"), ("used", "used"))}})
+    from loom_execution_capacity_collector.contracts import ResourceTotals
+
+    def total(field):
+        return ResourceTotals(**{key: sum(getattr(getattr(node, field), key) for node in placement.nodes)
+                                 for key in ("cpu_millis", "memory_mib", "storage_mib")})
+    kubernetes = kubernetes.model_copy(update={"nodes": placement.nodes, "active_nodes": len(placement.nodes),
+        "ready_nodes": sum(node.ready for node in placement.nodes), "allocatable": total("allocatable"),
+        "requested": total("requested"), "provisioned": total("allocatable"),
+        "pending_jobs": len(placement.pending_pods), "pending_pods": placement.pending_pods,
+        "template_samples": placement.template_samples, "daemonsets": placement.daemonsets})
+    await publish(sessions, observer, capture, provider=provider, kubernetes=kubernetes)
 
 
 async def prepare(sessions, principal, request, profiles):
@@ -194,3 +212,47 @@ async def test_waiting_renews_without_reordering_or_fabricating_a_grant(sessions
         current = (await session.scalars(select(NebiusPoolRequest))).one()
         assert current.created_at == created_at and current.renewed_at > renewed_at
         assert current.phase == "waiting" and current.granted_at is None and current.priority == 2
+
+
+async def test_distinct_physical_pools_cannot_double_spend_shared_provider_quota(sessions):
+    first = await setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3, parent_id="shared")
+    second = await setup(sessions, occupied_cpu=3000, max_nodes=2, quota_nodes=3,
+                         parent_id="shared", group_id="other-pool")
+    profiles = first[3] | second[3]
+    results = await asyncio.wait_for(asyncio.gather(
+        prepare(sessions, first[1][0], first[2][0], profiles),
+        prepare(sessions, second[1][0], second[2][0], profiles),
+    ), timeout=15)
+    # Each pool has one full native node. Only one additional node fits the
+    # shared quota of three, even though each provider snapshot reported one.
+    assert sorted(result.phase for result in results) == ["reserved", "waiting"]
+
+
+@pytest.mark.parametrize("classes,winner", [(("development", "production"), 1),
+                                           (("development", "staging"), 1),
+                                           (("development", "development"), 0)])
+async def test_fitting_waits_keep_class_then_age_priority(sessions, classes, winner):
+    _, principals, requests, profiles, observer = await setup(sessions, occupied_cpu=3000,
+                                                            environment_classes=classes)
+    for index in range(2):
+        assert (await prepare(sessions, principals[index], requests[index], profiles)).phase == "waiting"
+    placement = CapacityPlacement.model_validate(placement_fixture(
+        target_id="pool-test", node_cpu=3000, node_memory=8192, node_storage=32768,
+        requested_cpu=1500, quota_nodes=1, used_nodes=1))
+    await publish_placement(sessions, observer, placement)
+    loser = 1 - winner
+    assert (await prepare(sessions, principals[loser], requests[loser], profiles)).phase == "waiting"
+    assert (await prepare(sessions, principals[winner], requests[winner], profiles)).phase == "reserved"
+
+
+async def test_replay_does_not_rerender_an_existing_grant_or_renew_its_lifetime(sessions):
+    _, principals, requests, profiles, _ = await setup(sessions)
+    first = await prepare(sessions, principals[0], requests[0], profiles)
+    async with sessions() as session:
+        before = await session.get(NebiusPoolRequest, first.reservation_id)
+    replay = await prepare(sessions, principals[0], requests[0], {})
+    async with sessions() as session:
+        after = await session.get(NebiusPoolRequest, first.reservation_id)
+    assert first == replay
+    assert (before.created_at, before.renewed_at, before.granted_at, before.deadline_at) == (
+        after.created_at, after.renewed_at, after.granted_at, after.deadline_at)
