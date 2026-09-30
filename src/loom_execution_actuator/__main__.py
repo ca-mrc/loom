@@ -241,11 +241,13 @@ async def _run() -> None:
         if isinstance(builder, PoolNativeBuildController):
             tasks.append(asyncio.create_task(_build_heartbeat_loop(builder, min(10.0, settings.poll_seconds), runtime_health)))
         try:
-            await asyncio.gather(*tasks)
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                await task
         finally:
             for task in tasks:
                 task.cancel()
-            # Drain every sibling even when one failed. The original gather's
+            # Drain every sibling even when one failed. The original task's
             # exception propagates only after shared resources are safe to close.
             await asyncio.gather(*tasks, return_exceptions=True)
 
