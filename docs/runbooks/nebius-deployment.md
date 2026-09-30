@@ -79,6 +79,7 @@ loom --context management-alice dev app suspend APPLICATION_UUID
 loom --context management-alice dev app resume APPLICATION_UUID
 loom --context management-alice dev app destroy APPLICATION_UUID
 loom --context management-alice dev app retry BLOCKED_OPERATION_UUID
+loom --context management-alice dev app evidence OPERATION_UUID
 ```
 
 Each mutation prints a replay key and exact retry command before its POST. After a
@@ -89,6 +90,14 @@ fence the request to that observed generation. `wait` exits 0 only for completed
 1 for blocked/superseded or request errors, and 2 for a local timeout. A timeout
 does not cancel remote work. Retry of a blocked operation is an explicit action,
 not a substitute for reconciling uncertain writes.
+
+`evidence` is read-only and owner-scoped. It shows saved Kubernetes/cloud effect
+counts by resource kind, action and journal phase, alongside lease activity and
+whether completion was recorded. It exposes no credentials or resource contents.
+The snapshot can distinguish unconfirmed mutations from observed journal entries,
+but is not live provider or credential-revocation proof. Do not resume, release
+capacity or retry a blocked operation merely because all displayed effects are
+observed; the lifecycle's normal completion barriers still apply.
 
 Destroy stops only the owned application and retains shared development data and
 its identity claims; it is not a shared database, bucket or namespace purge.

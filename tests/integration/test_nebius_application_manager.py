@@ -105,10 +105,14 @@ async def test_update_from_actual_ready_completion_preserves_identity_and_freeze
 
 async def test_resume_uses_same_release_after_real_stopped_completion(stopped_context, platform_inputs):
     from loom.nebius_application_contract import ApplicationOperationRequestV1
+    from loom_service.application_management.operation_evidence import read_operation_evidence
 
     registry, _, alice, lease, runtime, *_ = stopped_context
     plan = await registry.frozen_plan(lease)
     await registry.complete_stopped(lease, await evidence(stopped_context))
+    report = await read_operation_evidence(registry.session_factory, lease.operation_id, principal=alice)
+    assert report.completion_recorded is True and report.lease_active is False
+    assert report.operation.phase == 'completed'
     service, release = manager(registry, platform_inputs, plan=plan, authority=runtime.authority)
     operation = await service.transition(alice, lease.application_id,
         ApplicationOperationRequestV1(action='resume', expected_generation=2), idempotency_key='resume')
@@ -138,6 +142,7 @@ async def test_management_api_authenticates_owner_and_never_exposes_private_plan
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://management.example.com') as a, \
                 httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://management.example.com') as b:
             assert (await a.get('/api/v1/applications')).status_code == 401
+            assert (await a.get(f'/api/v1/application-operations/{uuid4()}/evidence')).status_code == 401
             for client, name in ((a, 'alice'), (b, 'bob')):
                 login = await client.post('/api/v1/auth/login', json={'username': name, 'password': name + '-owner-passphrase'})
                 assert login.status_code == 200

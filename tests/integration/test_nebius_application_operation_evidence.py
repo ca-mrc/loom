@@ -12,7 +12,9 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_cloud_effects import binding, observe
 from tests.integration.test_nebius_application_effects import expire, intent, started
 from tests.integration.test_nebius_application_operations import applications as applications
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -105,3 +107,39 @@ async def test_expired_lease_is_reported_without_claiming_or_releasing_it(applic
         row = await session.scalar(select(NebiusApplicationOperation).where(
             NebiusApplicationOperation.operation_id == operation.operation_id))
         assert row.lease_token == lease.lease_token and row.runner_epoch == lease.runner_epoch
+
+
+async def test_operation_and_effect_counts_share_one_read_snapshot(applications, monkeypatch):
+    from loom_service.application_management import operation_evidence
+
+    registry, factory, alice, plan, operation, lease = await started(applications)
+    original = operation_evidence._counts
+    changed = False
+
+    async def concurrent_writer_after_operation_read(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            changed = True
+            await registry.prepare_cloud_create(lease, "account", binding(plan))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(operation_evidence, "_counts", concurrent_writer_after_operation_read)
+    first = await operation_evidence.read_operation_evidence(factory, operation.operation_id, principal=alice)
+    assert not first.cloud  # The concurrent commit is outside this snapshot.
+    following = await operation_evidence.read_operation_evidence(factory, operation.operation_id, principal=alice)
+    assert [row.model_dump() for row in following.cloud] == [
+        {"kind": "service_account", "action": "create", "phase": "prepared", "count": 1},
+    ]
+
+
+async def test_unqualified_journal_labels_never_become_public_payload(applications):
+    from loom.db.nebius_application_effect_schema import NebiusApplicationEffect
+    from loom_service.application_management.operation_evidence import read_operation_evidence
+
+    _, factory, alice, _, operation, _ = await started(applications)
+    async with factory.begin() as session:
+        session.add(NebiusApplicationEffect(operation_id=operation.operation_id, effect_key="malformed", sequence=1,
+            intent_json={"kind": "private-malformed-label", "action": "create"}, phase="prepared"))
+    with pytest.raises(ManagementError, match="application_evidence_unqualified") as error:
+        await read_operation_evidence(factory, operation.operation_id, principal=alice)
+    assert error.value.status_code == 503 and "private-malformed-label" not in str(error.value)
