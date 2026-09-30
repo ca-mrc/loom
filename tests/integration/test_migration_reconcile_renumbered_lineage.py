@@ -3,8 +3,8 @@
 Simulates a pre-#857 staging database: it carries the full staging-lifecycle
 content but is MISSING the three inserted migrations' content (0062 benchmark
 profiles, 0066 autoscaler prod-pressure, 0067 gb10 pool rename) and is stamped
-at 0072. Proves that stamping such a DB to 0072 and running ``upgrade head``
-(which includes 0073) heals it into the exact fresh-head shape, and that a
+at 0072. Proves that stamping such a DB to 0072 and upgrading through 0166
+(which includes 0073) heals it into the pre-retirement shape, and that a
 second run is a guarded no-op.
 """
 
@@ -81,7 +81,7 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
     command.stamp(cfg, "0072")
 
     # Reconcile: upgrade head includes 0073 before later migrations.
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0166")
 
     healed = inspect(engine)
     for table, columns in _INSERTED_COLUMNS.items():
@@ -100,7 +100,7 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
     # 0074 reapplies once from its real predecessor.
     command.downgrade(cfg, "0073")
     command.stamp(cfg, "0072")
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0166")
     again = inspect(engine)
     assert again.has_table("benchmark_aliases")
     with engine.connect() as conn:
@@ -110,3 +110,12 @@ def test_0073_reconciles_a_diverged_pre_renumber_database(
             ).scalar()
             == "gb10"
         )
+
+    # Reconciliation must also lead to the current head, where only the obsolete
+    # pool policy table retires. Retained benchmark and Worker history survives.
+    command.upgrade(cfg, "head")
+    assert not inspect(engine).has_table("worker_pool_autoscaler_policies")
+    assert inspect(engine).has_table("benchmark_aliases")
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT pool_name FROM workers WHERE hostname='recon-probe'")).scalar_one() == "gb10"
+    engine.dispose()

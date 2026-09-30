@@ -185,7 +185,9 @@ def capacity_guard_template_database(postgres_url: str) -> Iterator[dict[str, ob
         application_cfg.set_main_option(
             "sqlalchemy.url", environment_admin_url.render_as_string(hide_password=False)
         )
-        command.upgrade(application_cfg, "head")
+        # This fixture qualifies the published shared-cluster guard chain,
+        # whose legacy tables were retired from current applications in 0171.
+        command.upgrade(application_cfg, "0166")
 
         environment_admin_engine = create_engine(environment_admin_url)
         try:

@@ -1,8 +1,8 @@
 """GET /api/v1/health — unauthenticated liveness probe.
 
 Used by the docker-compose healthcheck + k8s readinessProbe. Does NOT
-hit the DB — Plan 18 will add `/health/ready` for a deeper check; this
-endpoint only proves the FastAPI process is alive."""
+hit the DB; authenticated `/health/ready` checks PostgreSQL and configured
+object-store buckets. This endpoint only proves the FastAPI process is alive."""
 
 from __future__ import annotations
 
@@ -56,10 +56,6 @@ async def version(response: Response) -> dict[str, str | None]:
         "buildRevision": read_build_revision(),
         "buildTime": read_build_time(),
     }
-
-
-
-
 
 
 @router.get("/health/ready")

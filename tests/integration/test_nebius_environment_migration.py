@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, insert, inspect, select, text, update
+from sqlalchemy import MetaData, Table, create_engine, insert, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from loom.db.schema_startup import service_schema_head
@@ -159,7 +159,7 @@ def test_registration_database_rejects_invalid_state(environment_database, chang
 
 
 def test_upgrade_preserves_legacy_dev_rows(environment_database):
-    from loom.db.schema import DevInstance, Team, User
+    from loom.db.schema import Team, User
 
     cfg = Config("database/migrations/alembic.ini")
     cfg.set_main_option("sqlalchemy.url", environment_database.url.render_as_string(hide_password=False).replace("%", "%%"))
@@ -168,12 +168,16 @@ def test_upgrade_preserves_legacy_dev_rows(environment_database):
     with environment_database.begin() as connection:
         connection.execute(insert(Team).values(id=team, name=str(team)))
         connection.execute(insert(User).values(id=owner, username=str(owner), username_normalized=str(owner)))
-        connection.execute(insert(DevInstance).values(
+        legacy_instances = Table("dev_instances", MetaData(), autoload_with=connection)
+        connection.execute(legacy_instances.insert().values(
             name="retained", owner_user_id=owner, owner_team_id=team, max_slots=2,
             deployment_generation=1, candidate_sha="a" * 40, operation_id=uuid4(),
         ))
         before = connection.execute(text("SELECT to_jsonb(d) FROM dev_instances d")).scalar_one()
-    command.upgrade(cfg, "head")
+    command.upgrade(cfg, "0166")
+    with pytest.raises(RuntimeError, match="retained-row disposition: dev_instances"):
+        command.upgrade(cfg, "head")
     with environment_database.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0166"
         assert connection.execute(text("SELECT to_jsonb(d) FROM dev_instances d")).scalar_one() == before
         assert connection.execute(text("SELECT count(*) FROM nebius_environments")).scalar_one() == 0

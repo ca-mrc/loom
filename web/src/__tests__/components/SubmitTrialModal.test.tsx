@@ -122,14 +122,6 @@ function mockEndpoints(): FetchMock {
           }),
         );
       }
-      if (url.includes("/api/v1/local-servers")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ items: [] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
       if (url.includes("/api/v1/trials")) {
         return Promise.resolve(
           new Response(

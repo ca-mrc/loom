@@ -467,9 +467,9 @@ Secrets and side-effect workflows:
 - PRs from forks or external contributor branches must not depend on
   protected secrets; maintainers can rerun protected workflows from a
   trusted branch when needed.
-- The benchmark publishing workflow uses the protected
-  `huggingface-publish` environment and should only expose `HF_TOKEN`
-  after branch restrictions and maintainer approval pass.
+- The former Hugging Face benchmark publishing workflow is retired.
+  Upstream benchmark fetching/adaptation and prepared-local publication remain
+  separate supported paths; they do not restore that workflow or its environment.
 - Deployment or publish workflow changes are public-repository security-boundary
   changes, so the fail-closed planner must select the full CI validation set. A
   platform-admin review may be requested for context, but it is not a `dev`

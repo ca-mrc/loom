@@ -1,4 +1,8 @@
-"""Verify Alembic migrations apply cleanly and the in_flight_count trigger fires."""
+"""Verify published pre-retirement migrations and their retained data contracts.
+
+This historical suite ends at 0166. The current head and retirement behavior are
+verified separately in test_legacy_feature_retirement.py.
+"""
 
 from __future__ import annotations
 
@@ -10,18 +14,15 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import CheckConstraint, create_engine, inspect, text
+from sqlalchemy import MetaData, Table, create_engine, inspect, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from testcontainers.postgres import PostgresContainer
 
 from loom.db.schema import (
-    DevInstance,
-    PersonalDevCandidate,
     Team,
     User,
 )
-from loom.db.schema_startup import service_schema_head
 
 
 @pytest.fixture(scope="module")
@@ -45,7 +46,7 @@ def postgres_url():
             check=True,
         )
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
@@ -68,6 +69,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                 revision = connection.execute(
                     text("SELECT version_num FROM alembic_version")
                 ).scalar_one()
+                candidates = Table("personal_dev_candidates", MetaData(), autoload_with=connection)
             assert revision == "0120"
         finally:
             engine.dispose()
@@ -79,7 +81,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
         candidate_id = uuid4()
         coordinate_name = "coordinate-repair"
         now = datetime.now(UTC)
-        candidate = PersonalDevCandidate(
+        candidate = dict(
             id=candidate_id,
             owner_user_id=owner_id,
             owner_team_id=team_id,
@@ -115,7 +117,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                 await session.commit()
 
             async with sessions() as session:
-                session.add(candidate)
+                await session.execute(candidates.insert().values(**candidate))
                 await session.commit()
 
             async with sessions() as session:
@@ -154,7 +156,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                         "owner_id": owner_id,
                         "team_id": team_id,
                         "candidate_id": candidate_id,
-                        "candidate_sha": candidate.candidate_sha,
+                        "candidate_sha": candidate["candidate_sha"],
                         "operation_id": uuid4(),
                     },
                 )
@@ -163,7 +165,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             await engine.dispose()
 
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
@@ -180,7 +182,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
                     ),
                     {"name": coordinate_name},
                 ).one()
-            assert revision == service_schema_head()
+            assert revision == "0166"
             assert tuple(coordinates) == (
                 f"loom-dev-{coordinate_name}",
                 "loom_dev_coordinate_repair",
@@ -189,7 +191,7 @@ async def test_0122_downgrade_retains_repaired_constraint(postgres_url: str) -> 
             engine.dispose()
     finally:
         subprocess.run(
-            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "head"],
+            [sys.executable, "-m", "alembic", "-c", "database/migrations/alembic.ini", "upgrade", "0166"],
             cwd=repo_root,
             check=True,
         )
@@ -493,28 +495,10 @@ def test_dev_instance_capacity_coordinates_are_derived_from_personal_name(
 
 
 @pytest.mark.legacy_pool
-def test_dev_instance_capacity_coordinate_constraint_matches_model_and_migration(
+def test_legacy_dev_instance_capacity_coordinate_constraint(
     postgres_url: str,
 ) -> None:
-    """The current fail-closed coordinate rule must match ORM and database."""
-
-    expected_model_sql = (
-        "(candidate_id IS NULL AND capacity_namespace IS NULL AND capacity_database IS NULL) "
-        "OR (candidate_id IS NOT NULL AND capacity_namespace IS NOT NULL "
-        "AND capacity_database IS NOT NULL "
-        "AND capacity_namespace = 'loom-dev-' || name "
-        "AND capacity_database = CASE WHEN storage_binding IS NULL "
-        "THEN 'loom_dev_' || replace(name, '-', '_') "
-        "ELSE 'ld_' || replace(name, '-', '_') || '_' || "
-        "replace(subject_incarnation::text, '-', '') END)"
-    )
-    model_checks = {
-        constraint.name: str(constraint.sqltext)
-        for constraint in DevInstance.__table__.constraints
-        if isinstance(constraint, CheckConstraint)
-    }
-
-    assert model_checks["dev_instances_personal_capacity_identity_check"] == expected_model_sql
+    """The published historical coordinate constraint remains enforced in SQL."""
 
     engine = create_engine(postgres_url)
     try:

@@ -12,12 +12,20 @@ class _FakeEngine:
         pass
 
 
+@pytest.mark.parametrize(
+    ("environment", "local_opt_in", "expect_worker_recovery"),
+    [("production", "0", False), ("production", "1", False),
+     ("development", "0", False), ("development", "1", True)],
+)
 def test_startup_runs_native_execution_without_retired_autoscalers(
     monkeypatch: pytest.MonkeyPatch,
+    environment: str, local_opt_in: str, expect_worker_recovery: bool,
 ) -> None:
     from loom_control_plane import app as control_plane_app
     from loom_control_plane.config import ControlPlaneSettings
 
+    monkeypatch.setenv("LOOM_ENV", environment)
+    monkeypatch.setenv("LOOM_LOCAL_EXECUTION", local_opt_in)
     started: set[str] = set()
 
     async def schema_ready(_engine: object) -> int:
@@ -29,6 +37,7 @@ def test_startup_runs_native_execution_without_retired_autoscalers(
         started.add(task.get_name())
         await asyncio.Event().wait()
 
+    monkeypatch.setattr(control_plane_app, "_load_admin_secret_verifier", lambda _: None)
     monkeypatch.setattr(control_plane_app, "_assert_schema_startup", schema_ready)
     monkeypatch.setattr(control_plane_app, "create_async_engine", lambda *_a, **_kw: _FakeEngine())
     monkeypatch.setattr(control_plane_app, "build_s3_client", lambda **_: object())
@@ -50,6 +59,9 @@ def test_startup_runs_native_execution_without_retired_autoscalers(
     )
     with TestClient(control_plane_app.create_app(settings)) as client:
         assert client.get("/healthz").status_code == 200
+    assert ("loom-cp-crash-detector" in started) is expect_worker_recovery
+    assert "loom-cp-retry-exhausted-sweeper" in started
+    assert "loom-cp-live-preview-reconciler" in started
     assert "loom-cp-service-execution-scheduler" in started
     assert "loom-cp-worker-pool-autoscaler" not in started
     assert "loom-cp-elastic-slurm-worker-controller" not in started

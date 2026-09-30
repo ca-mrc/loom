@@ -394,11 +394,10 @@ python_type = "SecretStr"
 secret      = { key = "together-api-key" }
 
 [service_config.huggingface_api_key]
-used_by      = ["llm-gateway", "loom-service"]
+used_by      = ["llm-gateway"]
 python_type  = "SecretStr"
 secret       = { key = "huggingface-api-key" }
-env_override = { "loom-service" = "HF_TOKEN" }
-description  = "Optional Hugging Face read token. Gateway uses it for HF model endpoints; loom-service exposes it as HF_TOKEN for catalog mirror provisioning. Workers must materialize from internal object-store mirrors without HF_TOKEN."
+description  = "Optional Hugging Face inference token for retained local execution through the gateway. Upstream dataset download/adaptation uses its own HF_TOKEN environment input; workers materialize datasets from internal mirrors."
 
 [service_config.rate_card_cache_ttl_sec]
 used_by     = ["llm-gateway"]
@@ -741,11 +740,6 @@ default     = 10
 used_by     = ["loom-service"]
 python_type = "int"
 default     = 256
-
-[service_config.local_servers_json]
-used_by     = ["loom-service"]
-python_type = "str"
-default     = "{}"
 
 # Secret-store master-key rotation.
 # LOOM_SECRET_STORE_MASTER_KEYS (plural): comma-separated base64 AES-256 keys.
