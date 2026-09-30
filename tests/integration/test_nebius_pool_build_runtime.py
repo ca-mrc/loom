@@ -114,7 +114,8 @@ async def test_concurrent_recovery_records_exact_result_without_releasing_capaci
     assert (await journal.get(request.key)).phase == "stop_pending"
     async with sessions() as session:
         global_row = await session.get(NebiusPoolRequest, handoff.reservation_id)
-        assert global_row.phase == "observed" and global_row.cleanup_observation_id is None
+        assert global_row.phase == "cleanup_intent" and global_row.cleanup_observation_id is None
+        assert global_row.stop_json is not None and global_row.drain_json is not None
 
 
 @pytest.mark.parametrize("damage", ["superseded", "source", "cancelled"])
@@ -166,3 +167,90 @@ async def test_foreign_kubernetes_identity_cannot_supply_publication(sessions, t
             await PoolNativeBuildController(driver=driver, kubernetes=Reader(job)).run_once()
     row, _ = await local_rows(sessions, request)
     assert row.state == "claimed" and not row.registry_images
+
+
+@pytest.mark.parametrize("outcome", ["success", "invalid", "cancelled", "expired", "superseded"])
+async def test_native_lifecycle_attests_actual_local_output_and_never_releases(sessions, tmp_path, outcome):
+    from loom.pipeline.keys import canonical_digest
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+
+    app, token, _, request, journal = await selected(sessions, tmp_path)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        handoff = await driver.advance(request.key)
+        job = await gateway_job(sessions, handoff)
+        if outcome in {"success", "invalid"}:
+            finish(job, request, invalid=outcome == "invalid")
+        else:
+            async with sessions.begin() as session:
+                if outcome == "cancelled":
+                    await session.execute(update(Trial).values(cancellation_requested_at=datetime.now(UTC)))
+                elif outcome == "expired":
+                    await session.execute(update(TaskImageMaterialization).values(
+                        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1)))
+                else:
+                    await session.execute(update(TaskImageMaterialization).values(lease_epoch=2, claimed_by="successor"))
+        controller = PoolNativeBuildController(driver=driver, kubernetes=Reader(job))
+        await controller.run_once()
+        row, attempt = await local_rows(sessions, request)
+        evidence = copy.deepcopy(attempt.native_build)
+        await controller.run_once()
+    expected_cause = {"success": "completed", "invalid": "failed", "cancelled": "cancelled",
+        "expired": "lease_lost", "superseded": "lease_lost"}[outcome]
+    async with sessions() as session:
+        managed = await session.get(NebiusPoolRequest, handoff.reservation_id)
+        assert managed.phase == "cleanup_intent" and managed.cleanup_observation_id is None
+        assert managed.stop_json["request"] == evidence["pool_stop"]
+        assert managed.stop_json["request"]["cause"] == expected_cause
+        assert managed.drain_json == evidence["pool_drain"]
+        assert managed.drain_json["output_generation"] == 1
+        assert managed.drain_json["output_state"] == ("committed" if outcome == "success" else "unavailable")
+        assert managed.drain_json["evidence_sha256"] == canonical_digest(evidence["pool_output"]).removeprefix("sha256:")
+    after = (await local_rows(sessions, request))[1].native_build
+    assert after["pool_stop"] == evidence["pool_stop"] and after["pool_drain"] == evidence["pool_drain"]
+    assert not after.get("capacity_released_at")
+    if outcome == "cancelled":
+        assert row.state == "queued" and row.attempt_count == 0 and row.lease_epoch == 1
+    elif outcome == "superseded":
+        assert row.claimed_by == "successor" and row.lease_epoch == 2
+
+
+@pytest.mark.parametrize("lost", ["stop", "drain"])
+async def test_lost_lifecycle_reply_replays_committed_local_evidence(sessions, tmp_path, lost):
+    from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+
+    app, token, _, request, journal = await selected(sessions, tmp_path)
+    payloads = {"stop": [], "drain": []}
+
+    class Boundary(httpx.AsyncBaseTransport):
+        inner = httpx.ASGITransport(app=app)
+        dropped = False
+
+        async def handle_async_request(self, incoming):
+            operation = incoming.url.path.rsplit("/", 1)[-1]
+            if operation in payloads:
+                _, attempt = await local_rows(sessions, request)
+                assert attempt.native_build["pool_output"]  # committed before HTTP
+                assert json.loads(incoming.content) == attempt.native_build["pool_" + operation]
+                payloads[operation].append(incoming.content)
+            response = await self.inner.handle_async_request(incoming)
+            if operation == lost and not self.dropped:
+                self.dropped = True
+                assert response.status_code == 200
+                await response.aclose()
+                raise httpx.ReadError("reply lost after commit")
+            return response
+
+    async with httpx.AsyncClient(transport=Boundary()) as http:
+        driver = PoolBuildDriver(outbox=journal, management=client(http, token))
+        handoff = await driver.advance(request.key)
+        job = await gateway_job(sessions, handoff)
+        finish(job, request)
+        with pytest.raises(PoolRequestUnconfirmedError):
+            await PoolNativeBuildController(driver=driver, kubernetes=Reader(job)).run_once()
+        await PoolNativeBuildController(driver=driver, kubernetes=Reader(job)).run_once()
+    assert len(payloads[lost]) == 2 and payloads[lost][0] == payloads[lost][1]
+    async with sessions() as session:
+        managed = await session.get(NebiusPoolRequest, handoff.reservation_id)
+        assert managed.phase == "cleanup_intent" and managed.drain_json is not None
