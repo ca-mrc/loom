@@ -29,12 +29,16 @@ def configure(app, installed):
         "schema_version": "loom.application-session-audience.v1",
         "application_id": installed["application"]["application_id"],
         "origin": "https://alice.dev.example.com", "access_generation": 1}
-    app.state.settings = app.state.settings.model_copy(update={
+    # Reconstruct like a new installed process; model_copy retains the old
+    # cached session_audience and would silently test an unscoped browser session.
+    values = app.state.settings.model_dump(exclude_computed_fields=True)
+    values.update({
         "pool_submission_source_json": None if installed is None else json.dumps(installed),
         "auth_session_audience_json": None if audience is None else json.dumps(audience),
         "public_base_url": None if audience is None else audience["origin"],
         "auth_local_http": audience is None,
     })
+    app.state.settings = type(app.state.settings)(_env_file=None, **values)
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, insert, select, update
 from sqlalchemy.exc import DBAPIError
 
-from loom.db.schema import Batch, Task, Team, Trial
+from loom.db.schema import Batch, NebiusPoolSubmission, Task, Team, Trial, User
 
 
 def seed(connection, *, known=True):
@@ -47,6 +47,46 @@ def test_downgrade_refuses_to_drop_submission_provenance(isolated_migration_post
     try:
         with engine.begin() as connection:
             seed(connection)
+        config = Config("database/migrations/alembic.ini")
+        config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
+        with pytest.raises(DBAPIError, match="cannot remove global pool history"):
+            command.downgrade(config, "0170")
+    finally:
+        engine.dispose()
+
+
+def seed_handoff(connection):
+    identity, team_id, user_id = uuid4(), uuid4(), uuid4()
+    connection.execute(insert(Team).values(id=team_id, name=str(team_id)))
+    connection.execute(insert(User).values(id=user_id, username=str(user_id), username_normalized=str(user_id)))
+    origin = {"schema_version": "loom.pool-work-origin.v1", "data_environment_id": str(uuid4()),
+        "submission_id": str(identity), "kind": "environment", "application": None}
+    connection.execute(insert(NebiusPoolSubmission).values(id=identity, team_id=team_id, user_id=user_id,
+        request_sha256="a" * 64, pool_origin=origin))
+    return identity, origin
+
+
+@pytest.mark.parametrize("field", ["origin", "payload", "user", "team"])
+def test_direct_origin_binding_cannot_be_reassigned(isolated_migration_postgres_url, field):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            identity, origin = seed_handoff(connection)
+            other, _ = seed_handoff(connection)
+            row = connection.execute(select(NebiusPoolSubmission).where(NebiusPoolSubmission.id == other)).one()
+            changes = {"origin": {"pool_origin": origin | {"data_environment_id": str(uuid4())}},
+                "payload": {"request_sha256": "b" * 64}, "user": {"user_id": row.user_id}, "team": {"team_id": row.team_id}}
+            with pytest.raises(DBAPIError, match="submission handoff is immutable"), connection.begin_nested():
+                connection.execute(update(NebiusPoolSubmission).where(NebiusPoolSubmission.id == identity).values(**changes[field]))
+    finally:
+        engine.dispose()
+
+
+def test_downgrade_refuses_unconsumed_direct_handoff(isolated_migration_postgres_url):
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            seed_handoff(connection)
         config = Config("database/migrations/alembic.ini")
         config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url.replace("%", "%%"))
         with pytest.raises(DBAPIError, match="cannot remove global pool history"):
