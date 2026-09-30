@@ -698,6 +698,16 @@ Mutation requests use idempotency keys. Exact replay returns the same operation'
 current status, including when a peer commits it during request planning.
 `/application-operations/{id}/retry` retries a blocked current operation.
 
+The additive owner-scoped `GET /application-operations/{id}/evidence` returns a
+bounded journal projection: operation state, runner epoch, boolean lease activity
+and completion-record presence, and grouped Kubernetes/cloud effect counts by
+fixed kind, action and journal phase. A read-only repeatable-read transaction
+keeps the projection in one snapshot. It returns no frozen plan, resource identity,
+intent, credential, lease token or raw provider error, and uses `Cache-Control:
+no-store`. Existing operation/status response schemas are unchanged. These counts
+do not prove current provider state, process absence, access revocation or readiness;
+even every effect being observed does not authorize completion or a retry.
+
 `ApplicationManager` uses protected installation-pinned release records, foundation,
 shared-development binding and namespace authority. Owners cannot supply images,
 provider authority, storage ownership or readiness assertions through these APIs.
@@ -794,7 +804,7 @@ scrubbed fragment and requires an explicit sign-in click. Management login respo
 use `Cache-Control: no-store`; raw proofs must never be logged or placed in a query.
 
 `loom dev app` invokes the application API for create, list, status, update,
-suspend, resume, retained destroy, operation retry/wait and login. Create/update
+suspend, resume, retained destroy, operation retry/wait/evidence and login. Create/update
 require a qualified application `--release` UUID, not a legacy candidate ID or a
 local source path. Generation-fenced mutations print their exact retry command,
 including the selected management context, before submission. A timeout never

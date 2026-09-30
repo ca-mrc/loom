@@ -155,6 +155,25 @@ def test_foreign_operation_response_cannot_satisfy_wait(application_http):
     assert len(requests) == 1
 
 
+@pytest.mark.parametrize("foreign", [False, True])
+def test_evidence_reads_only_its_exact_operation_and_never_issues_mutation(application_http, capsys, foreign):
+    responses, requests = application_http
+    responses["GET", f"/api/v1/application-operations/{OPERATION}/evidence"] = httpx.Response(200, json={
+        "schema_version": "loom.nebius-application-operation-evidence.v1",
+        "operation": {**operation("running"), "operation_id": RELEASE if foreign else OPERATION},
+        "runner_epoch": 1, "lease_active": True, "completion_recorded": False,
+        "kubernetes": [], "cloud": [{"kind": "access_key", "action": "delete", "phase": "observed", "count": 1}],
+    })
+    assert main(["dev", "app", "evidence", OPERATION]) == (1 if foreign else 0)
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", f"/api/v1/application-operations/{OPERATION}/evidence"),
+    ]
+    output = capsys.readouterr()
+    if not foreign:
+        assert json.loads(output.out)["completion_recorded"] is False
+        assert "Retry:" not in output.err
+
+
 @pytest.mark.parametrize("command", ["create", "suspend"])
 def test_printed_retry_command_round_trips_leading_hyphen_key(application_http, capsys, command):
     responses, requests = application_http
@@ -170,3 +189,15 @@ def test_printed_retry_command_round_trips_leading_hyphen_key(application_http, 
     assert len(requests) == 2
     assert requests[0].content == requests[1].content
     assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"] == "-retry"
+
+
+def test_evidence_network_failure_guides_read_only_retry(application_http, capsys):
+    responses, requests = application_http
+    responses["GET", f"/api/v1/application-operations/{OPERATION}/evidence"] = httpx.ReadTimeout("private upstream detail")
+    assert main(["dev", "app", "evidence", OPERATION]) == 1
+    assert len(requests) == 1 and requests[0].method == "GET"
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "read-only" in output.err
+    assert "printed retry command" not in output.err
+    assert "private upstream detail" not in output.err

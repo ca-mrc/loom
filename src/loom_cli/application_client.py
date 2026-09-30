@@ -16,6 +16,7 @@ from loom.nebius_application_contract import (
     ApplicationRegistrationV1,
     ApplicationStatusV1,
 )
+from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
 from loom_cli import server_client
 from loom_cli.server_client import assert_2xx
 
@@ -82,6 +83,15 @@ class ApplicationClient:
         ))
         if result.operation_id != operation_id:
             raise ValueError("application operation mismatch")
+        return result
+
+    def evidence(self, operation_id: UUID) -> ApplicationOperationEvidenceV1:
+        result = ApplicationOperationEvidenceV1.model_validate(assert_2xx(
+            self.http.get(f"/api/v1/application-operations/{operation_id}/evidence"),
+            action="read application operation evidence",
+        ))
+        if result.operation.operation_id != operation_id:
+            raise ValueError("application operation evidence mismatch")
         return result
 
     def wait(self, operation_id: UUID, *, timeout: float) -> tuple[ApplicationOperationV1, bool]:
