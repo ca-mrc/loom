@@ -60,7 +60,7 @@ async def machine(sessions, pool_id, participant_id=None, *, role=None):
 
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
-                pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1"):
+                pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1", namespace_uids=None):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
@@ -93,8 +93,10 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
             "environment_id": (data_environment_id or first.environment_id) if index == 0 else uuid4(),
             "incarnation": first.incarnation if index == 0 else uuid4(),
             "environment_class": environment_classes[index],
-            "execution_namespace": first.execution_namespace.model_copy(update={"name": f"{group_id}-execution-{index}", "uid": uuid4()}),
-            "build_namespace": first.build_namespace.model_copy(update={"name": f"{group_id}-build-{index}", "uid": uuid4()}),
+            "execution_namespace": first.execution_namespace.model_copy(update={"name": f"{group_id}-execution-{index}",
+                "uid": (namespace_uids or {}).get(f"{group_id}-execution-{index}", uuid4())}),
+            "build_namespace": first.build_namespace.model_copy(update={"name": f"{group_id}-build-{index}",
+                "uid": (namespace_uids or {}).get(f"{group_id}-build-{index}", uuid4())}),
             "targets": (first.targets[0].model_copy(update={"profile_id": uuid4(),
                 "workload_kinds": ("trial", "verifier", "task_image_build")}),),
         })

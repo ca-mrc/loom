@@ -117,15 +117,15 @@ async def test_fixed_create_commits_before_http_and_observes_real_defaulted_docu
 
 
 async def test_lost_post_reply_then_404_does_not_resend_and_eventually_observes(sessions):
-    from loom_service.pool_management.kubernetes import PoolKubernetesWaiting
+    from loom_service.pool_management.kubernetes import PoolKubernetesWaitingError
 
     gateway, api, principal, receipt, http = await provider(sessions)
     async with http:
         api.lose_reply = True
-        with pytest.raises(PoolKubernetesWaiting, match=r"^pool_kubernetes_unconfirmed$"):
+        with pytest.raises(PoolKubernetesWaitingError, match=r"^pool_kubernetes_unconfirmed$"):
             await gateway.create(principal, receipt.reservation_id, kind="Job")
         api.hide_objects = True
-        with pytest.raises(PoolKubernetesWaiting):
+        with pytest.raises(PoolKubernetesWaitingError):
             await gateway.create(principal, receipt.reservation_id, kind="Job")
         assert len(api.writes) == 1
         api.hide_objects = False
@@ -135,12 +135,12 @@ async def test_lost_post_reply_then_404_does_not_resend_and_eventually_observes(
 
 async def test_concurrent_reconcilers_create_exactly_one_job(sessions):
     gateway, api, principal, receipt, http = await provider(sessions)
-    from loom_service.pool_management.kubernetes import PoolKubernetesWaiting
+    from loom_service.pool_management.kubernetes import PoolKubernetesWaitingError
 
     async with http:
         outcomes = await asyncio.gather(*(gateway.create(principal, receipt.reservation_id, kind="Job")
                                           for _ in range(3)), return_exceptions=True)
-        assert all(not isinstance(result, Exception) or isinstance(result, PoolKubernetesWaiting) for result in outcomes)
+        assert all(not isinstance(result, Exception) or isinstance(result, PoolKubernetesWaitingError) for result in outcomes)
         assert any(not isinstance(result, Exception) and result.phase == "observed" for result in outcomes)
         assert len(api.writes) == 1
 
@@ -255,3 +255,58 @@ async def test_endpoint_cannot_redirect_or_embed_authority(sessions, url):
     async with httpx.AsyncClient(base_url=url) as http:
         with pytest.raises(ValueError):
             KubernetesPoolGateway(journal, http)
+
+
+@pytest.mark.parametrize("damage", ["redirect", "oversize", "invalid-json", "non-object", "timeout"])
+async def test_namespace_transport_is_bounded_and_no_failure_authorizes_a_write(sessions, monkeypatch, damage):
+    from loom_service.pool_management import kubernetes
+
+    gateway, api, principal, receipt, original = await provider(sessions)
+    calls = []
+
+    async def handler(request):
+        calls.append(request)
+        if damage == "redirect":
+            return httpx.Response(302, headers={"Location": "https://foreign.invalid/"})
+        if damage == "oversize":
+            return httpx.Response(200, content=b" " * (2 * 1024 * 1024 + 1))
+        if damage == "invalid-json":
+            return httpx.Response(200, text="SENSITIVE malformed")
+        if damage == "non-object":
+            return httpx.Response(200, json=[])
+        await asyncio.sleep(1)
+        return api(request)
+
+    monkeypatch.setattr(kubernetes, "_TIMEOUT", 0.05)
+    async with original, httpx.AsyncClient(base_url="https://kubernetes.example", follow_redirects=True,
+                                           transport=httpx.MockTransport(handler)) as http:
+        gateway.http = http
+        with pytest.raises(kubernetes.PoolKubernetesError) as caught:
+            await gateway.create(principal, receipt.reservation_id, kind="Job")
+        assert "SENSITIVE" not in str(caught.value)
+        assert len(calls) == 1 and calls[0].method == "GET" and not api.writes
+        async with sessions() as session:
+            effect = (await session.scalars(select(NebiusPoolEffect))).one()
+            assert effect.phase == "prepared" and effect.dispatch_id is None
+
+
+async def test_namespace_change_between_create_and_observation_remains_charged(sessions):
+    from loom_service.pool_management.kubernetes import PoolKubernetesError
+
+    gateway, api, principal, receipt, original = await provider(sessions)
+
+    def handler(request):
+        response = api(request)
+        if request.method == "POST":
+            api.namespace_uid = uuid4()
+        return response
+
+    async with original, httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(handler)) as http:
+        gateway.http = http
+        with pytest.raises(PoolKubernetesError):
+            await gateway.create(principal, receipt.reservation_id, kind="Job")
+        async with sessions() as session:
+            effect = (await session.scalars(select(NebiusPoolEffect))).one()
+            row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+            assert effect.phase == "dispatched" and row.phase == "create_intent"
+            assert row.job_uid is None and row.cleanup_observation_id is None
