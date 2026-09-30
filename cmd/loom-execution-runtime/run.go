@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,7 +200,7 @@ func runPlan(
 				continue
 			}
 			result.Status = classifyFailure(ctx, evidence)
-			if result.Status == "task_error" && sandboxCleanupTimeout(workspace, evidence.Role) {
+			if result.Status == "task_error" && sandboxCleanupFailure(workspace, evidence.Role) {
 				result.Status = "runtime_error"
 			}
 			if errors.Is(context.Cause(ctx), errSandboxLost) {
@@ -342,7 +343,11 @@ func runPhase(
 	return evidence, err
 }
 
-func sandboxCleanupTimeout(workspace, role string) bool {
+var cleanupDiagnosticSuffix = regexp.MustCompile(
+	`^pid=[1-9][0-9]{0,9};ppid=[0-9]{1,10};state=[RSDTtXZPIUW];uid=[0-9]{1,10};wchan=[A-Za-z0-9_.]{1,64};kill_errno=[0-9]{1,3};sigkill_pending=[01](?:,pid=[1-9][0-9]{0,9};ppid=[0-9]{1,10};state=[RSDTtXZPIUW];uid=[0-9]{1,10};wchan=[A-Za-z0-9_.]{1,64};kill_errno=[0-9]{1,3};sigkill_pending=[01]){0,3}$`,
+)
+
+func sandboxCleanupFailure(workspace, role string) bool {
 	if role != "agent" && role != "verifier" {
 		return false
 	}
@@ -358,8 +363,22 @@ func sandboxCleanupTimeout(workspace, role string) bool {
 	if err := json.Unmarshal(payload, &recorded); err != nil {
 		return false
 	}
-	return recorded.ExceptionType == "SandboxRPCError" &&
-		recorded.ExceptionMessage == "sandbox stop_processes failed (HTTP 409; cleanup_timeout)"
+	return recorded.ExceptionType == "SandboxRPCError" && cleanupFailureMessage(recorded.ExceptionMessage)
+}
+
+func cleanupFailureMessage(message string) bool {
+	const head = "sandbox stop_processes failed (HTTP 409; "
+	for _, reason := range []string{"cleanup_timeout", "cleanup_signal_denied", "cleanup_signal_failed"} {
+		if message == head+reason+")" {
+			return true
+		}
+		prefix := head + reason + "; "
+		rest, ok := strings.CutPrefix(message, prefix)
+		if ok && strings.HasSuffix(rest, ")") && cleanupDiagnosticSuffix.MatchString(strings.TrimSuffix(rest, ")")) {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyFailure(ctx context.Context, evidence phaseEvidence) string {

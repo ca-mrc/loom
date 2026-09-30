@@ -42,7 +42,8 @@ _RPC_OPERATIONS = {"/health": "health", "/exec": "exec", "/file": "file_transfer
                    "/resume-processes": "resume_processes", "/restore-directory": "directory_restore"}
 _CLEANUP_REASONS = frozenset({
     "pid_namespace_invalid", "process_owner_mismatch", "process_inspection_failed",
-    "cleanup_timeout", "cleanup_cancelled", "cleanup_failed",
+    "cleanup_timeout", "cleanup_signal_denied", "cleanup_signal_failed",
+    "cleanup_cancelled", "cleanup_failed",
 })
 _EXEC_REASONS = frozenset({
     "exec_request_invalid", "exec_user_mismatch", "exec_timeout_invalid",
@@ -52,6 +53,29 @@ _PROCESS_DIAGNOSTIC = re.compile(
     r"pid=([1-9][0-9]{0,9});ppid=([0-9]{1,10});state=([RSDTtXZPIUW]);"
     r"uid=([0-9]{1,10});expected_uid=([0-9]{1,10})"
 )
+_CLEANUP_SNAPSHOT_RECORD = (
+    r"pid=[1-9][0-9]{0,9};ppid=[0-9]{1,10};state=[RSDTtXZPIUW];"
+    r"uid=[0-9]{1,10};wchan=[A-Za-z0-9_.]{1,64};"
+    r"kill_errno=[0-9]{1,3};sigkill_pending=[01]"
+)
+_CLEANUP_SNAPSHOT = re.compile(
+    rf"{_CLEANUP_SNAPSHOT_RECORD}(?:,{_CLEANUP_SNAPSHOT_RECORD}){{0,3}}"
+)
+_CLEANUP_DIAGNOSTIC_REASONS = frozenset({
+    "cleanup_timeout", "cleanup_signal_denied", "cleanup_signal_failed",
+})
+
+
+def _bounded_cleanup_snapshot(value: str) -> bool:
+    if _CLEANUP_SNAPSHOT.fullmatch(value) is None:
+        return False
+    for record in value.split(","):
+        fields = dict(part.split("=", 1) for part in record.split(";"))
+        if max(int(fields["pid"]), int(fields["ppid"])) >= 2**31:
+            return False
+        if int(fields["uid"]) >= 2**32 or int(fields["kill_errno"]) > 255:
+            return False
+    return True
 
 
 class SandboxRPCError(DriverError):
@@ -79,6 +103,10 @@ class SandboxRPCError(DriverError):
                     match and max(int(match[1]), int(match[2])) < 2**31
                     and max(int(match[4]), int(match[5])) < 2**32
                 ):
+                    detail += "; " + diagnostic
+            elif reason in _CLEANUP_DIAGNOSTIC_REASONS:
+                diagnostic = exc.response.headers.get("X-Loom-Sandbox-Process", "")
+                if _bounded_cleanup_snapshot(diagnostic):
                     detail += "; " + diagnostic
         else:
             detail = "transport_timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"

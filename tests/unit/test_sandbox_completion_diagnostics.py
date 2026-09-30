@@ -94,3 +94,47 @@ async def test_rpc_retains_only_bounded_kernel_process_identity(diagnostic, reta
     ))
     assert (diagnostic in str(error)) is retained
     assert "private" not in str(error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason,diagnostic,retained", [
+    (
+        "cleanup_timeout",
+        "pid=31;ppid=1;state=D;uid=0;wchan=wait_on_bit;kill_errno=0;sigkill_pending=1",
+        True,
+    ),
+    (
+        "cleanup_signal_denied",
+        "pid=18;ppid=1;state=S;uid=1000;wchan=do_wait;kill_errno=1;sigkill_pending=0",
+        True,
+    ),
+    (
+        "cleanup_timeout",
+        "pid=31;ppid=1;state=D;uid=0;wchan=../secret;kill_errno=0;sigkill_pending=0",
+        False,
+    ),
+    (
+        "cleanup_timeout",
+        "pid=31;ppid=1;state=D;uid=0;wchan=wait;kill_errno=0;sigkill_pending=0;command=private",
+        False,
+    ),
+    (
+        "cleanup_signal_failed",
+        "pid=31;ppid=1;state=D;uid=0;wchan=wait;kill_errno=999;sigkill_pending=0",
+        False,
+    ),
+])
+async def test_rpc_retains_only_bounded_cleanup_snapshot(reason, diagnostic, retained):
+    from loom.driver.service_sandbox import SandboxRPCError
+
+    response = httpx.Response(409, headers={
+        "X-Loom-Sandbox-Error": reason,
+        "X-Loom-Sandbox-Process": diagnostic,
+    }, request=httpx.Request("POST", "http://private-endpoint/stop-processes"),
+        text="private response")
+    error = SandboxRPCError("/stop-processes", httpx.HTTPStatusError(
+        "private exception", request=response.request, response=response,
+    ))
+    assert (diagnostic in str(error)) is retained
+    assert "private" not in str(error)
+    assert "secret" not in str(error)
