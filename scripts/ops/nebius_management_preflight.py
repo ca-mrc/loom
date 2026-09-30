@@ -24,6 +24,7 @@ from scripts.ops.deploy_nebius_platform import (  # noqa: E402
     job_failed,
     verify_cluster_identity,
 )
+from scripts.ops.nebius_controller_inventory import controller_inventory  # noqa: E402
 from scripts.ops.nebius_ingress_preflight import inspect_ingress  # noqa: E402
 from scripts.ops.nebius_refresh_probe_inspection import failed_refresh_probes  # noqa: E402
 
@@ -337,7 +338,8 @@ def _list(kube: Kubectl, kind: str, *, namespaced: bool = False) -> list[dict[st
     value = json.loads(kube.run("get", kind, *(["--all-namespaces"] if namespaced else []), "-o", "json"))
     # Missing/failed inventory is not an empty list. Never expose API diagnostics.
     items = value.get("items")
-    if not isinstance(items, list) or any(not isinstance(item, dict) or "metadata" not in item for item in items):
+    if (not isinstance(items, list) or value.get("metadata", {}).get("continue")
+            or any(not isinstance(item, dict) or "metadata" not in item for item in items)):
         raise DeploymentError("incomplete resource inventory")
     return items
 
@@ -394,6 +396,7 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
                                              namespace=namespace, expected_cluster_id=expected_cluster_id),
         "public_host": config["public_host"],
         "configured_execution_node_group_id": config["execution_node_group_id"],
+        "controller_inventory": controller_inventory(kube, lambda kind, namespaced: _list(kube, kind, namespaced=namespaced)),
         "nodes": [{**_identity(item), "role": item["metadata"].get("labels", {}).get("loom.nebius/node-role"),
             "provider_id": item.get("spec", {}).get("providerID"),
             "unschedulable": item.get("spec", {}).get("unschedulable", False),

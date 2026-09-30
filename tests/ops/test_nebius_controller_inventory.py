@@ -5,7 +5,6 @@ import json
 
 import pytest
 from scripts.ops import nebius_management_preflight as preflight
-
 from tests.ops.test_nebius_management_preflight import Cluster
 
 
