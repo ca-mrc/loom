@@ -53,14 +53,14 @@ def native_reader(config, *, count=1):
             _quota("non-gpu-memory", "byte", 80 * 1024**3, 0, 3),
             _quota("ssd-storage", "byte", 800 * 1024**3, 0, 4)], next_page_token=""))),
         node_group_client=SimpleNamespace(get=lambda *_a, **_kw: _awaitable(SimpleNamespace(
-            metadata=SimpleNamespace(id="nodegroup-test", parent_id="cluster-test", resource_version=9),
+            metadata=SimpleNamespace(id=config.nebius_node_group_id, parent_id="cluster-test", resource_version=9),
             spec=_node_group_spec(), status=SimpleNamespace(state=_enum("RUNNING"), node_count=count,
                 target_node_count=count, ready_node_count=count, reconciling=False, events=[])))))
 
 
-def cluster_reader(calls):
+def cluster_reader(calls, group_id="nodegroup-test"):
     node = _node()
-    node.metadata.labels["nebius.com/node-group-id"] = "nodegroup-test"
+    node.metadata.labels["nebius.com/node-group-id"] = group_id
     # Two environments reuse a local claim. Only registered Job identity makes
     # them two distinct global grants; the foreign pending Pod stays charged.
     foreign = _pod(1, name="foreign", pending=True)
@@ -69,7 +69,7 @@ def cluster_reader(calls):
     def listing(kind, items, **kwargs):
         calls.append(kind)
         if kind == "nodes":
-            assert kwargs["label_selector"] == "loom.nebius/role=execution,nebius.com/node-group-id=nodegroup-test"
+            assert kwargs["label_selector"] == f"loom.nebius/role=execution,nebius.com/node-group-id={group_id}"
         if kind == "pods":
             with k8s.ApiClient() as api:
                 return SimpleNamespace(data=json.dumps({"apiVersion": "v1", "kind": "PodList",
