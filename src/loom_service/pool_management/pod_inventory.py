@@ -62,3 +62,19 @@ def owned_pod(value: dict[str, Any], created: PoolGatewayEffect, *, uid: UUID, r
             or any(key in labels and labels[key] != job_name for key in ("job-name", "batch.kubernetes.io/job-name"))):
         raise ValueError("pool_pod_identity_conflict")
     return PoolPodReference(name, uid, resource_version, bool(metadata.get("deletionTimestamp")))
+
+
+def require_unstarted_pod_absence(value: dict[str, Any], *, namespace: str, job_name: str, reservation_id: UUID) -> None:
+    """No observed Job UID exists: any possible child blocks, never invent a UID."""
+    metadata = value["metadata"]
+    name = metadata.get("name")
+    labels, annotations, owners = metadata.get("labels", {}), metadata.get("annotations", {}), metadata.get("ownerReferences", [])
+    if (value.get("apiVersion") != "v1" or value.get("kind") != "Pod" or metadata.get("namespace") != namespace
+            or not isinstance(name, str) or re.fullmatch(r"[a-z0-9](?:[-a-z0-9.]{0,251}[a-z0-9])?", name) is None
+            or not isinstance(labels, dict) or not isinstance(annotations, dict) or not isinstance(owners, list)
+            or any(not isinstance(owner, dict) for owner in owners)):
+        raise ValueError("pool_pod_identity_conflict")
+    if (name.startswith(job_name + "-") or any(owner.get("name") == job_name for owner in owners)
+            or annotations.get("loom.nebius/pool-reservation-id") == str(reservation_id)
+            or any(labels.get(key) == job_name for key in ("job-name", "batch.kubernetes.io/job-name"))):
+        raise ValueError("pool_unobserved_job_has_pod_candidate")

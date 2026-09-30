@@ -1787,7 +1787,7 @@ before management HTTP. Published images come from that attempt's append-only
 publication rows, not the materialization's combined history. Valid successful
 publication is committed; failed, cancelled or lost-lease output is unavailable.
 Restart replays the saved evidence, grace and cause after a lost stop/drain reply.
-This consumer is not yet installed: queue selection, release and protected writer
+This consumer is not yet installed: queue selection, local release recovery and protected writer
 migration remain required.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
@@ -1840,6 +1840,26 @@ finalizers remain intact. An absent Pod completes only its deletion record, not
 the reservation. Complete namespace/object absence and write-fencing qualification
 still precede capacity release.
 
+The fixed gateway's cleanup verifier now performs that release qualification.
+It snapshots the request, retained stop/drain and all effect identities/phases in
+one transaction. A dispatched but unobserved CREATE blocks release even after
+404. Prepared creates cannot acquire dispatch permission after cleanup intent;
+observed/rejected creates cannot acquire another permit. Outside SQL, the verifier
+checks the original namespace UID, exact Job and build ConfigMap absence, and a
+complete consistent namespace Pod inventory. Without an observed Job UID, any
+candidate by Job name, owner name, reservation or Job-name label blocks absence;
+the verifier does not invent a UID or delete unrelated Pods.
+
+Finalization rechecks current gateway credentials, exact snapshot identity and
+effect fingerprint, and a maximum 60-second observation window. It atomically
+retains the cleanup observation and releases only that reservation. A raced effect,
+stale snapshot, changed namespace, incomplete read or transaction failure leaves
+capacity charged. Concurrent/lost-reply recovery returns the same retained release
+receipt. These internal facts have no public submission endpoint. Unresolved
+CREATE uncertainty remains charged until qualified observation or protected
+writer-fencing recovery; the latter and installed gateway orchestration remain
+separate boundaries.
+
 The machine lifecycle API retains separate immutable stop and drain attestations
 bound to the exact request, reservation, frozen plan and native/execution lease
 generation. Stop fences new creates immediately and freezes termination grace,
@@ -1856,7 +1876,7 @@ remain authorized, then confirm durable committed/unavailable output before fina
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
 it does not qualify execution output. The execution runtime adapter,
-complete absence/release qualification and delayed-start absolute deadline
+local release recovery, gateway orchestration and delayed-start absolute deadline
 remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
@@ -1892,10 +1912,10 @@ before activation, and recovers lost replies with the same selection/grant/attem
 It returns active or stop-pending work to the runtime reconciler; it never falls
 back to local capacity admission or direct Kubernetes writes.
 
-These are storage and transition constraints, not proof of actual Kubernetes
-cleanup or installed global admission. The trusted gateway must qualify writer
-fencing, Job/Pod/auxiliary absence and environment-owned output drain before
-recording cleanup. The registry must authenticate dedicated machine identities,
+Receipt storage and transition constraints alone are not Kubernetes cleanup proof
+or installed global admission. The fixed gateway verifier supplies the qualified
+absence/output-drain and settled-create evidence before recording cleanup.
+The registry authenticates dedicated machine identities and must
 validate all workload kinds and serialize physical-pool admission. The current
 single-environment controllers do not switch writers merely because these tables
 exist; connected admission, installation of the production pool collector, durable local handoff

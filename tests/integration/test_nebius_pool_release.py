@@ -1,12 +1,15 @@
 """Capacity release requires fresh fixed-gateway absence and settled create authority."""
 from __future__ import annotations
 
+import asyncio
 import copy
+from dataclasses import replace
+from datetime import timedelta
 from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 
 from loom.db.nebius_pool_schema import NebiusPoolCleanupObservation, NebiusPoolRequest
 from loom.db.schema import Token
@@ -113,7 +116,7 @@ async def test_uncertain_dispatched_create_is_not_released_by_404_or_drain(sessi
 async def test_state_or_authority_change_during_inventory_requires_new_proof(sessions, change):
     from loom_service.pool_management.pod_inventory import PoolPodReference
 
-    gateway, api, principal, receipt, original, inventory, job = await stopped(sessions)
+    gateway, _api, principal, receipt, original, inventory, job = await stopped(sessions)
     changed = False
 
     async def handler(request):
@@ -138,3 +141,98 @@ async def test_state_or_authority_change_during_inventory_requires_new_proof(ses
     assert row.phase == "cleanup_intent" and not evidence
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolCleanupObservation)) == 0
+
+
+@pytest.mark.parametrize("state", ["prepared", "rejected"])
+async def test_settled_unstarted_create_releases_without_renewing_dispatch(sessions, state):
+    from loom_service.pool_management.kubernetes import PoolKubernetesRejectedError
+
+    gateway, api, principal, receipt, original = await provider(sessions)
+    if state == "prepared":
+        effect = await gateway.journal.prepare_create(principal, receipt.reservation_id, kind="Job")
+    else:
+        api.post_status = 409
+        with pytest.raises(PoolKubernetesRejectedError):
+            await gateway.create(principal, receipt.reservation_id, kind="Job")
+        effect = await gateway.journal.prepare_create(principal, receipt.reservation_id, kind="Job")
+    await begin_cleanup(sessions, receipt.reservation_id)
+    await original.aclose()
+    async with httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(InventoryAPI(api, []))) as http:
+        gateway.http = http
+        assert (await gateway.verify_cleanup(principal, receipt.reservation_id)).phase == "released"
+    if state == "prepared":
+        with pytest.raises(ValueError):
+            await gateway.journal.dispatch_create(principal, effect.effect_id)
+    else:
+        assert await gateway.journal.dispatch_create(principal, effect.effect_id) is None
+
+
+@pytest.mark.parametrize("marker", ["name", "owner", "label", "reservation"])
+async def test_unobserved_job_cannot_hide_possible_residual_children(sessions, marker):
+    gateway, _api, principal, receipt, http, inventory, _ = await stopped(sessions, started=False)
+    async with sessions() as session:
+        request = await session.get(NebiusPoolRequest, receipt.reservation_id)
+        job = copy.deepcopy(request.plan_json["job"])
+    job["metadata"]["uid"] = str(uuid4())  # Intentionally NOT an observed gateway UID.
+    child = pod(job)
+    metadata = child["metadata"]
+    metadata.update(name="possible-child", labels={}, annotations={}, ownerReferences=[])
+    if marker == "name":
+        metadata["name"] = job["metadata"]["name"] + "-late"
+    elif marker == "owner":
+        metadata["ownerReferences"] = [{"name": job["metadata"]["name"], "kind": "Job", "uid": str(uuid4())}]
+    elif marker == "label":
+        metadata["labels"]["job-name"] = job["metadata"]["name"]
+    else:
+        metadata["annotations"]["loom.nebius/pool-reservation-id"] = str(receipt.reservation_id)
+    inventory.pods.append(child)
+    async with http:
+        with pytest.raises(ValueError):
+            await gateway.verify_cleanup(principal, receipt.reservation_id)
+    assert (await retained(sessions, receipt))[0].phase == "cleanup_intent"
+
+
+@pytest.mark.parametrize("damage", ["age", "name", "namespace"])
+async def test_cleanup_snapshot_cannot_change_scope_or_outlive_its_scan_window(sessions, damage):
+    gateway, _api, principal, receipt, http, _, _ = await stopped(sessions)
+    await http.aclose()
+    snapshot = await gateway.cleanup.prepare(principal, receipt.reservation_id)
+    if damage == "age":
+        snapshot = replace(snapshot, captured_at=snapshot.captured_at - timedelta(seconds=61))
+    elif damage == "name":
+        snapshot = replace(snapshot, job_name="foreign-job")
+    else:
+        snapshot = replace(snapshot, namespace=snapshot.namespace.model_copy(update={"uid": uuid4()}))
+    with pytest.raises(ValueError):
+        await gateway.cleanup.finalize(principal, snapshot, pod_list_resource_version="30")
+    row, evidence = await retained(sessions, receipt)
+    assert row.phase == "cleanup_intent" and not evidence
+
+
+async def test_cleanup_observation_and_release_rollback_together(sessions):
+    gateway, _api, principal, receipt, http, _, _ = await stopped(sessions)
+    async with sessions.begin() as session:
+        await session.execute(text("""
+            CREATE FUNCTION reject_test_pool_release() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.phase = 'released' THEN RAISE EXCEPTION 'test rollback boundary'; END IF;
+                RETURN NEW;
+            END; $$;
+        """))
+        await session.execute(text("""
+            CREATE TRIGGER reject_test_pool_release BEFORE UPDATE ON nebius_pool_requests
+            FOR EACH ROW EXECUTE FUNCTION reject_test_pool_release();
+        """))
+    async with http:
+        with pytest.raises(ValueError):
+            await gateway.verify_cleanup(principal, receipt.reservation_id)
+    row, evidence = await retained(sessions, receipt)
+    assert row.phase == "cleanup_intent" and row.cleanup_observation_id is None and not evidence
+
+
+async def test_concurrent_cleanup_reconcilers_retain_one_release_observation(sessions):
+    gateway, _api, principal, receipt, http, _, _ = await stopped(sessions)
+    async with http:
+        results = await asyncio.gather(*(gateway.verify_cleanup(principal, receipt.reservation_id) for _ in range(3)))
+    assert all(result == results[0] and result.phase == "released" for result in results)
+    assert len((await retained(sessions, receipt))[1]) == 1

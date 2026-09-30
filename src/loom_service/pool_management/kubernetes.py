@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
 import httpx
 
+from loom.nebius_pool_contract import PoolReceiptV1
 from loom_service.pool_management.auth import PoolPrincipal
+from loom_service.pool_management.cleanup import PoolCleanupJournal
 from loom_service.pool_management.gateway_journal import (
     CreateKind,
     PoolGatewayDeletion,
@@ -24,7 +27,12 @@ from loom_service.pool_management.gateway_journal import (
 )
 from loom_service.pool_management.kubernetes_identity import matches_frozen_workload
 from loom_service.pool_management.pod_cleanup import PoolPodCleanupJournal, PoolPodDeletion
-from loom_service.pool_management.pod_inventory import PoolPodInventory, PoolPodReference, owned_pod
+from loom_service.pool_management.pod_inventory import (
+    PoolPodInventory,
+    PoolPodReference,
+    owned_pod,
+    require_unstarted_pod_absence,
+)
 
 _MAX_BODY = 2 * 1024 * 1024
 _TIMEOUT = 30
@@ -53,6 +61,7 @@ class KubernetesPoolGateway:
             raise ValueError("pool Kubernetes endpoint must be an HTTPS origin")
         self.journal, self.http = journal, http
         self.pod_cleanup = PoolPodCleanupJournal(journal)
+        self.cleanup = PoolCleanupJournal(journal)
 
     async def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *,
                        params: dict[str, str] | None = None) -> dict[str, Any] | None:
@@ -97,10 +106,12 @@ class KubernetesPoolGateway:
             raise PoolKubernetesError from None
 
     async def _namespace(self, effect: PoolGatewayEffect) -> None:
-        name = effect.document["metadata"]["namespace"]
+        await self._namespace_identity(effect.document["metadata"]["namespace"], effect.namespace_uid)
+
+    async def _namespace_identity(self, name: str, uid: UUID) -> None:
         value = await self._request("GET", "/api/v1/namespaces/" + name)
         if (value is None or value.get("kind") != "Namespace" or value.get("apiVersion") != "v1"
-                or self._identity(value)[0] != effect.namespace_uid or value["metadata"].get("name") != name):
+                or self._identity(value)[0] != uid or value["metadata"].get("name") != name):
             raise PoolKubernetesError("pool_kubernetes_namespace_conflict")
 
     @staticmethod
@@ -249,8 +260,16 @@ class KubernetesPoolGateway:
         return await self.pod_cleanup.observe(principal, effect.effect_id)
 
     async def _pod_inventory(self, created: PoolGatewayEffect) -> PoolPodInventory:
-        await self._namespace(created)
-        path = "/api/v1/namespaces/" + created.document["metadata"]["namespace"] + "/pods"
+        resource_version, pods = await self._scan_pods(created.document["metadata"]["namespace"], created.namespace_uid,
+            lambda item, uid, rv: owned_pod(item, created, uid=uid, resource_version=rv))
+        assert created.observed_uid is not None
+        return PoolPodInventory(created.reservation_id, created.effect_id, created.namespace_uid,
+            created.observed_uid, resource_version, pods)
+
+    async def _scan_pods(self, namespace: str, namespace_uid: UUID,
+                         qualify: Callable[[dict[str, Any], UUID, str], PoolPodReference | None]) -> tuple[str, tuple[PoolPodReference, ...]]:
+        await self._namespace_identity(namespace, namespace_uid)
+        path = "/api/v1/namespaces/" + namespace + "/pods"
         cursor, resource_version = "", ""
         cursors, seen_uids, seen_names = set[str](), set[UUID](), set[str]()
         owned: list[PoolPodReference] = []
@@ -279,14 +298,46 @@ class KubernetesPoolGateway:
                     raise PoolKubernetesError("pool_kubernetes_invalid_inventory")
                 seen_uids.add(uid)
                 seen_names.add(name)
-                matched = owned_pod(item, created, uid=uid, resource_version=item_rv)
+                matched = qualify(item, uid, item_rv)
                 if matched is not None:
                     owned.append(matched)
             if not following:
-                await self._namespace(created)
-                assert created.observed_uid is not None
-                return PoolPodInventory(created.reservation_id, created.effect_id, created.namespace_uid,
-                                        created.observed_uid, resource_version, tuple(owned))
+                await self._namespace_identity(namespace, namespace_uid)
+                return resource_version, tuple(owned)
             cursors.add(following)
             cursor = following
         raise PoolKubernetesError("pool_kubernetes_inventory_limit")
+
+    async def verify_cleanup(self, principal: PoolPrincipal, reservation_id: UUID) -> PoolReceiptV1:
+        """Release only after fresh complete absence and unchanged write state."""
+        snapshot = await self.cleanup.prepare(principal, reservation_id)
+        if isinstance(snapshot, PoolReceiptV1):
+            return snapshot
+        namespace = snapshot.namespace
+
+        def qualify(item: dict[str, Any], uid: UUID, rv: str) -> PoolPodReference | None:
+            if snapshot.job is not None:
+                return owned_pod(item, snapshot.job, uid=uid, resource_version=rv)
+            require_unstarted_pod_absence(item, namespace=namespace.name,
+                job_name=snapshot.job_name, reservation_id=reservation_id)
+            return None
+
+        try:
+            async with asyncio.timeout(_TIMEOUT):
+                await self._namespace_identity(namespace.name, namespace.uid)
+                paths = ["/apis/batch/v1/namespaces/" + namespace.name + "/jobs/" + snapshot.job_name]
+                if snapshot.has_configmap:
+                    paths.append("/api/v1/namespaces/" + namespace.name + "/configmaps/" + snapshot.job_name)
+                for path in paths:
+                    if await self._request("GET", path) is not None:
+                        raise PoolKubernetesWaitingError
+                resource_version, pods = await self._scan_pods(namespace.name, namespace.uid, qualify)
+                if pods:
+                    raise PoolKubernetesWaitingError
+        except TimeoutError:
+            raise PoolKubernetesWaitingError from None
+        except PoolKubernetesError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise PoolKubernetesError("pool_kubernetes_invalid_cleanup") from None
+        return await self.cleanup.finalize(principal, snapshot, pod_list_resource_version=resource_version)

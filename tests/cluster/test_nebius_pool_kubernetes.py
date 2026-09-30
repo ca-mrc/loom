@@ -243,6 +243,10 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                 while (await gateway.pod_inventory(principal, receipt.reservation_id)).pods:
                     assert time.monotonic() < deadline, "real residual Pod retirement did not converge"
                     await asyncio.sleep(0.1)
+                released = await gateway.verify_cleanup(principal, receipt.reservation_id)
+                assert released.phase == "released" and not released.capacity_charged
+                assert released.cleanup_observation_id is not None
+                assert await gateway.verify_cleanup(principal, receipt.reservation_id) == released
             deletes = [path for method, path in mutations if method == "DELETE"]
             assert len(deletes) == len(set(deletes)) == 4
         legacy = await asyncio.to_thread(core.create_namespaced_service_account_token, "legacy", "pool-management",
