@@ -1781,9 +1781,14 @@ Pod-UID readback. Partial Pod lists fail closed. No observed global Job UID mean
 no speculative Kubernetes read or local create. The local claim, source and live
 demand are rechecked around external reads; current attempts are heartbeated while
 waiting, and stale/superseded attempts cannot publish results. Terminal or withdrawn
-work enters local `stop_pending`, retaining its capacity charge. This consumer is
-not yet installed: stop/drain delivery, queue selection, release and protected
-writer migration remain required.
+work enters local `stop_pending`, retaining its capacity charge. The same local
+transaction freezes bounded output evidence and the exact stop/drain messages
+before management HTTP. Published images come from that attempt's append-only
+publication rows, not the materialization's combined history. Valid successful
+publication is committed; failed, cancelled or lost-lease output is unavailable.
+Restart replays the saved evidence, grace and cause after a lost stop/drain reply.
+This consumer is not yet installed: queue selection, release and protected writer
+migration remain required.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
@@ -1835,12 +1840,14 @@ output state, output generation, evidence digest and the exact stop digest. Nati
 output generation must equal its build lease epoch. Neither acknowledgment nor a
 successful deletion frees capacity. Lost replies replay the same retained evidence.
 
-The connected cancellation adapter must derive these acknowledgments from the
+The execution cancellation adapter must derive these acknowledgments from the
 existing runtime's actual state: signal cancellation while partial-output uploads
 remain authorized, then confirm durable committed/unavailable output before final
 cleanup and release. The API is not itself proof of that local output state.
-The runtime adapter, residual-Pod deletion, complete absence/release qualification,
-and delayed-start absolute deadline remain unimplemented boundaries.
+The native runtime consumer supplies its own saved publication/failure evidence;
+it does not qualify execution output. The execution runtime adapter, residual-Pod
+deletion, complete absence/release qualification and delayed-start absolute deadline
+remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
 management. It keeps selection generation separate from build lease epoch and permits

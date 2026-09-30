@@ -1,21 +1,44 @@
-"""Native global-handoff consumer: read results, heartbeat and retain stop intent.
+"""Native global-handoff consumer: results, heartbeat and durable stop/drain.
 
 No local capacity admission or Kubernetes writes. All SQL commits finish before
-management/Kubernetes I/O. Stop/drain delivery and release require their separate
-reconciliation; a terminal result never frees the charged global reservation.
+management/Kubernetes I/O. Local output evidence commits before stop/drain HTTP;
+neither a terminal result nor those replies frees the charged reservation.
 """
 from __future__ import annotations
 
-from typing import Any, Protocol
+import logging
+from datetime import datetime, timedelta
+from typing import Any, Literal, Protocol
 
-from loom.db.schema import TaskImageMaterialization, TaskImageMaterializationAttempt
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
+from loom.db.schema import (
+    TaskImageMaterialization,
+    TaskImageMaterializationAttempt,
+    TaskImagePublicationEvidence,
+)
+from loom.nebius_pool_contract import PoolRequestKeyV1
+from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
+from loom.pipeline.keys import canonical_digest
 from loom_control_plane.task_image_materializations import heartbeat_task_image_materialization
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
 from loom_execution_actuator.pool_native_observation import qualify_native_observation
 from loom_execution_actuator.pool_origins import preferred_task_image_origin
 from loom_execution_actuator.pool_outbox import PoolHandoffError, _clock, _snapshot, _source_matches
-from loom_execution_actuator.task_image_controller import record_native_build_result
+from loom_execution_actuator.task_image_controller import (
+    fail_native_build,
+    record_native_build_result,
+)
+
+StopCause = Literal["completed", "failed", "cancelled", "lease_lost", "deadline"]
+_LOG = logging.getLogger(__name__)
+
+
+def _digest(value: dict[str, Any]) -> str:
+    return canonical_digest(value).removeprefix("sha256:")
 
 
 class PoolNativeBuildApi(Protocol):
@@ -25,6 +48,56 @@ class PoolNativeBuildApi(Protocol):
 class PoolNativeBuildController:
     def __init__(self, *, driver: PoolBuildDriver, kubernetes: PoolNativeBuildApi) -> None:
         self.driver, self.kubernetes = driver, kubernetes
+
+    async def _finish(self, session: AsyncSession, saved: NebiusPoolBuildOutbox,
+                       attempt: TaskImageMaterializationAttempt, runtime: PoolNativeRuntimeV1, *,
+                       now: datetime, cause: StopCause) -> None:
+        """Save one attempt's real evidence and fixed messages before any HTTP."""
+        native = dict(attempt.native_build or {})
+        saved.phase = "stop_pending"
+        if "pool_stop" in native:
+            return  # Lost replies replay the original grace, cause and evidence.
+        images = (await session.execute(select(TaskImagePublicationEvidence.component,
+            TaskImagePublicationEvidence.registry_image).where(
+                TaskImagePublicationEvidence.materialization_attempt_id == attempt.id)
+            .order_by(TaskImagePublicationEvidence.component, TaskImagePublicationEvidence.registry_image))).all()
+        state: Literal["committed", "unavailable"] = "committed" if cause == "completed" and images else "unavailable"
+        output = {"attempt_id": str(attempt.id), "lease_epoch": attempt.lease_epoch,
+            "cause": cause, "output_state": state, "registry_images": [list(pair) for pair in images],
+            "diagnostics": {name: native[name] for name in ("failure_reason", "failure_message", "builder_log",
+                "job_conditions", "pod_uid", "pod_status", "scheduling", "phases", "observed_at") if name in native}}
+        handoff = self.driver.outbox._view(saved)
+        assert runtime.receipt.plan_sha256 is not None
+        stop = PoolStopV1(action=handoff.action, reservation_id=runtime.receipt.reservation_id,
+            plan_sha256=runtime.receipt.plan_sha256, lease_generation=runtime.lease_epoch, cause=cause,
+            grace_deadline_at=min(runtime.deadline_at, now + timedelta(seconds=30)))
+        drain = PoolDrainV1(action=handoff.action, reservation_id=stop.reservation_id,
+            plan_sha256=stop.plan_sha256, lease_generation=runtime.lease_epoch,
+            stop_sha256=_digest(stop.model_dump(mode="json")), output_generation=runtime.lease_epoch,
+            output_state=state, evidence_sha256=_digest(output))
+        attempt.native_build = {**native, "pool_output": output,
+            "pool_stop": stop.model_dump(mode="json"), "pool_drain": drain.model_dump(mode="json")}
+
+    async def _lifecycle(self, key: PoolRequestKeyV1) -> tuple[PoolStopV1, PoolDrainV1] | None:
+        outbox = self.driver.outbox
+        async with outbox._transaction(key) as (session, saved):
+            if saved is None or saved.phase != "stop_pending" or saved.attempt_id is None:
+                return None
+            attempt = await session.get(TaskImageMaterializationAttempt, saved.attempt_id)
+            if attempt is None or attempt.native_build is None:
+                raise PoolHandoffError
+            native = attempt.native_build
+            stop, drain = PoolStopV1.model_validate(native["pool_stop"]), PoolDrainV1.model_validate(native["pool_drain"])
+            handoff = outbox._view(saved)
+            if (handoff.activated is None or stop.action != handoff.action or drain.action != handoff.action
+                    or stop.reservation_id != saved.reservation_id or drain.reservation_id != stop.reservation_id
+                    or stop.plan_sha256 != handoff.activated.plan_sha256 or drain.plan_sha256 != stop.plan_sha256
+                    or stop.lease_generation != attempt.lease_epoch or drain.lease_generation != attempt.lease_epoch
+                    or drain.output_generation != attempt.lease_epoch
+                    or drain.stop_sha256 != _digest(native["pool_stop"])
+                    or drain.evidence_sha256 != _digest(native["pool_output"])):
+                raise PoolHandoffError
+            return stop, drain
 
     async def _record(self, runtime: PoolNativeRuntimeV1, observed: dict[str, Any] | None = None) -> bool:
         """Requalify both sides of external reads; stale work retains stop intent."""
@@ -71,7 +144,13 @@ class PoolNativeBuildController:
                 participant=outbox.participant, logical_pool_id=outbox.logical_pool_id) is not None
             if (saved.phase == "stop_pending" or not current or not demand or runtime.deadline_at <= now
                     or runtime.receipt.phase not in {"create_intent", "observed"}):
-                saved.phase = "stop_pending"
+                cause: StopCause = "lease_lost" if not current else "deadline" if runtime.deadline_at <= now else "cancelled"
+                if "pool_stop" not in native and current:
+                    await session.flush()
+                    await fail_native_build(session, row,
+                        "build_deadline_exceeded" if cause == "deadline" else "build_cancelled",
+                        builder_id=outbox.builder_id, retryable=True)
+                await self._finish(session, saved, attempt, runtime, now=now, cause=cause)
                 await session.flush()
                 return False
             await session.flush()
@@ -82,18 +161,35 @@ class PoolNativeBuildController:
                 await record_native_build_result(session, row, attempt, builder_id=outbox.builder_id,
                     observed=observed, registry_repository=runtime.registry_repository)
                 if row.state not in {"claimed", "running"}:
-                    saved.phase = "stop_pending"
+                    await self._finish(session, saved, attempt, runtime, now=now,
+                        cause="completed" if row.state == "ready" else "failed")
             await session.flush()
             return saved.phase == "active"
 
-    async def run_once(self) -> None:
-        for pending in await self.driver.outbox.pending():
-            handoff = await self.driver.advance(pending.request.key)
-            if handoff.phase not in {"active", "stop_pending"}:
-                continue
-            runtime = await self.driver.management.native_runtime(handoff.action)
-            if not await self._record(runtime) or runtime.receipt.job_uid is None:
-                continue
+    async def _reconcile(self, key: PoolRequestKeyV1) -> None:
+        handoff = await self.driver.advance(key)
+        if handoff.phase not in {"active", "stop_pending"}:
+            return
+        runtime = await self.driver.management.native_runtime(handoff.action)
+        if await self._record(runtime) and runtime.receipt.job_uid is not None:
             observed = await self.kubernetes.observe_pool(runtime)
             if observed is not None:
                 await self._record(runtime, observed)
+        lifecycle = await self._lifecycle(key)
+        if lifecycle is not None:
+            stop, drain = lifecycle
+            await self.driver.management.stop(stop)
+            await self.driver.management.drain(drain)
+
+    async def run_once(self) -> None:
+        first_error: Exception | None = None
+        for pending in await self.driver.outbox.pending():
+            try:
+                await self._reconcile(pending.request.key)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+                _LOG.warning("Global native build deferred materialization=%s error=%s",
+                    pending.request.key.local_work_id, type(error).__name__)
+        if first_error is not None:
+            raise first_error

@@ -215,9 +215,14 @@ class NativeBuildKubernetesApi:
             qualify_native_observation(job, runtime)
             listing = self._json(self._core.list_namespaced_pod(runtime.namespace.name,
                 label_selector="job-name=" + runtime.job_name, limit=100, _request_timeout=20))
-            if listing.get("metadata", {}).get("continue"):
+            if (listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
+                    or not isinstance(listing.get("items"), list)
+                    or any(not isinstance(pod, dict) for pod in listing["items"])
+                    or listing.get("metadata", {}).get("continue")):
                 raise ValueError("pool_native_partial_pod_list")
-            job["pods"] = listing["items"]
+            # List item type metadata is legitimately omitted by Kubernetes.
+            # Inherit only from the qualified PodList, retaining explicit types.
+            job["pods"] = [{"apiVersion": "v1", "kind": "Pod", **pod} for pod in listing["items"]]
             qualify_native_observation(job, runtime)
             if job["pods"] and (capture_logs or job.get("status", {}).get("succeeded") or job.get("status", {}).get("failed")):
                 pod = job["pods"][0]
