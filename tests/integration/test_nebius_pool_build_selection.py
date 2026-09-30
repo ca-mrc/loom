@@ -84,11 +84,12 @@ async def test_closed_intake_cannot_persist_selection_or_consume_attempt(session
     assert not await journal.pending() and await counts(sessions, request.key.local_work_id) == (0, 0, 0)
 
 
-async def test_real_queue_drives_management_activation_without_direct_job_writer(sessions, tmp_path):
+@pytest.mark.parametrize("occupied_cpu", [0, 3000])
+async def test_real_queue_drives_management_activation_without_direct_job_writer(sessions, tmp_path, occupied_cpu):
     from loom_execution_actuator.pool_build_driver import PoolBuildDriver
     from loom_execution_actuator.pool_build_runtime import PoolNativeBuildController
 
-    app, _, token, participants, _, _ = await setup(sessions, tmp_path)
+    app, _, token, participants, _, _ = await setup(sessions, tmp_path, occupied_cpu=occupied_cpu)
     participant = participants[0]
     _, request, _ = await local_setup(sessions, environment_id=participant.environment_id)
     journal = outbox(sessions, participant)
@@ -98,9 +99,13 @@ async def test_real_queue_drives_management_activation_without_direct_job_writer
         await controller.run_once()
     async with sessions() as session:
         row = (await session.scalars(select(NebiusPoolBuildOutbox))).one()
-        assert row.materialization_id == request.key.local_work_id and row.phase == "active"
-        assert row.activated_json["phase"] == "create_intent"
-    assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
+        assert row.materialization_id == request.key.local_work_id
+        assert row.phase == ("selected" if occupied_cpu else "active")
+        if occupied_cpu:
+            assert row.activated_json is None
+        else:
+            assert row.activated_json["phase"] == "create_intent"
+    assert await counts(sessions, request.key.local_work_id) == ((0, 0, 0) if occupied_cpu else (1, 1, 1))
 
 
 async def test_reselection_generation_comes_from_history_not_build_lease(sessions):

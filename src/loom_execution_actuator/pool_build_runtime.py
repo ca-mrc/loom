@@ -25,6 +25,7 @@ from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.pipeline.keys import canonical_digest
 from loom_control_plane.task_image_materializations import heartbeat_task_image_materialization
 from loom_execution_actuator.pool_build_driver import PoolBuildDriver
+from loom_execution_actuator.pool_build_selection import PoolBuildSelector
 from loom_execution_actuator.pool_native_observation import qualify_native_observation
 from loom_execution_actuator.pool_origins import preferred_task_image_origin
 from loom_execution_actuator.pool_outbox import PoolHandoffError, _clock, _snapshot, _source_matches
@@ -46,8 +47,12 @@ class PoolNativeBuildApi(Protocol):
 
 
 class PoolNativeBuildController:
-    def __init__(self, *, driver: PoolBuildDriver, kubernetes: PoolNativeBuildApi) -> None:
+    def __init__(self, *, driver: PoolBuildDriver, kubernetes: PoolNativeBuildApi,
+                 selector: PoolBuildSelector | None = None) -> None:
+        if selector is not None and selector.outbox is not driver.outbox:
+            raise PoolHandoffError
         self.driver, self.kubernetes = driver, kubernetes
+        self.selector = selector
 
     async def _finish(self, session: AsyncSession, saved: NebiusPoolBuildOutbox,
                        attempt: TaskImageMaterializationAttempt, runtime: PoolNativeRuntimeV1, *,
@@ -185,5 +190,14 @@ class PoolNativeBuildController:
                     first_error = error
                 _LOG.warning("Global native build deferred materialization=%s error=%s",
                     pending.request.key.local_work_id, type(error).__name__)
+        if self.selector is not None:
+            try:
+                selected = await self.selector.select_next()
+                if selected is not None:
+                    await self._reconcile(selected.request.key)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+                _LOG.warning("Global native build selection deferred error=%s", type(error).__name__)
         if first_error is not None:
             raise first_error

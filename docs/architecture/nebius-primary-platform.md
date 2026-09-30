@@ -1925,6 +1925,18 @@ client. It withdraws stale waiting demand before renewal, checks management stat
 before activation, and recovers lost replies with the same selection/grant/attempt.
 It returns active or stop-pending work to the runtime reconciler; it never falls
 back to local capacity admission or direct Kubernetes writes.
+The queue selector derives requests from real native-consumer demand, the frozen
+materialization and its persisted originating submission. It prefers shared
+environment demand over personal-only demand, retaining age within each class;
+management still independently qualifies origin and makes the global admission
+decision. It excludes live selections, unreleased native effects, completed work,
+backoff and exhausted attempts. Unsupported source snapshots or lost selection
+races do not consume attempts or hide later candidates. Registered sources use
+the retained canonical specification and must pass source admission/pinning in
+the final outbox transaction. Generations advance from retained outbox history,
+independently of build lease epochs. A configured native controller selects one
+new candidate after reconciliation, then uses the same driver/runtime path.
+The installed startup and protected no-dual-writer transition are not yet connected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
