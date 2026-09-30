@@ -47,7 +47,7 @@ def outbox(sessions, participant, **changes):
 def grant(request, **changes):
     return PoolReceiptV1.model_validate({"reservation_id": uuid4(), "pool_id": request.pool_id,
         "request_key": request.key, "admission_epoch": request.admission_epoch,
-        "request_sha256": canonical_digest(request).removeprefix("sha256:"), "phase": "reserved", **changes})
+        "request_sha256": canonical_digest(request.model_dump(mode="json")).removeprefix("sha256:"), "phase": "reserved", **changes})
 
 
 async def counts(sessions, identity):
@@ -182,6 +182,28 @@ async def test_request_and_claim_are_atomic_when_final_journal_write_fails(sessi
         await journal.accept_grant(request.key, grant(request))
     assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
     assert (await journal.get(request.key)).phase == "selected"
+
+
+async def test_new_epoch_recovers_old_selection_for_cancellation_not_a_new_claim(sessions):
+    participant, request, _ = await local_setup(sessions)
+    await outbox(sessions, participant).remember(request)
+    new_participant = participant.model_copy(update={"admission_epoch": participant.admission_epoch + 1})
+    recovered = outbox(sessions, new_participant)
+    assert (await recovered.get(request.key)).action.admission_epoch == request.admission_epoch
+    receipt = grant(request)
+    assert (await recovered.accept_grant(request.key, receipt)).phase == "cancel_pending"
+    assert (await recovered.confirm_cancel(request.key, receipt.model_copy(update={"phase": "cancelled_unstarted"}))).phase == "cancelled"
+    assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
+
+
+async def test_fenced_epoch_retains_already_attached_attempt_identity_for_recovery(sessions):
+    participant, request, _ = await local_setup(sessions)
+    old = outbox(sessions, participant)
+    await old.remember(request)
+    attached = await old.accept_grant(request.key, grant(request))
+    new = outbox(sessions, participant.model_copy(update={"admission_epoch": participant.admission_epoch + 1}))
+    assert await new.get(request.key) == attached
+    assert await new.pending() == (attached,)
 
 
 async def test_installed_schema_matches_orm_and_retains_selection_evidence(sessions):
