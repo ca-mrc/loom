@@ -78,7 +78,7 @@ class _TaskImage(_Strict):
             target=self.target, settings=self.settings, runtime_class_overhead=self.runtime_class_overhead)
 
 
-class _Catalog(_Strict):
+class PoolProfileCatalog(_Strict):
     schema_version: Literal["loom.pool-profiles.v1"]
     image_admission_keyring: dict[str, Any]
     execution: tuple[_Execution, ...] = Field(max_length=128)
@@ -117,7 +117,7 @@ def load_pool_profiles(path: Path) -> PoolProfiles:
             os.close(descriptor)
         if len(payload) > 2 * 1024 * 1024:
             raise ValueError("catalog too large")
-        return _Catalog.model_validate(json.loads(payload, object_pairs_hook=_object)).profiles()
+        return PoolProfileCatalog.model_validate(json.loads(payload, object_pairs_hook=_object)).profiles()
     except (OSError, ValueError, TypeError):
         # Configuration errors must not echo credentials accidentally pasted into
         # the catalog. The catalog itself never establishes registration authority.

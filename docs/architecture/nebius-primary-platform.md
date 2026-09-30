@@ -2068,6 +2068,22 @@ failed authorization or reconciliation clears readiness. Server termination stop
 and drains background work before its HTTP clients and database engine close.
 The entrypoint does not provision its own RBAC or bypass the protected migration.
 
+Initial registration uses the fixed `loom_service.pool_management.installation`
+Job and a versioned `loom.pool-installation.v1` configuration. It binds physical
+pool identity, exact participant namespaces/targets, the renderer catalog and
+dedicated machine credential hashes. The database transaction serializes with
+admission, rejects drift or revoked/expired authority, and registers the pool
+**closed**. Exact replay never rotates credentials, resets state or opens intake.
+Historical configurations remain readable after credential expiry; new writes
+check validity against the database clock. The Job reports only a bounded receipt
+after commit and receives no Kubernetes token or write role.
+
+The protected registration stage retains exact ConfigMap/Job identities and
+uncertain-create evidence. A missing response followed by absence does not permit
+another CREATE. Staging proves neither database registration nor writer retirement;
+the parent migration must qualify candidate publication, namespace ownership,
+successful runtime execution and the no-dual-writer barrier before opening intake.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.

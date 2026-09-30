@@ -1410,6 +1410,15 @@ HTTPS health and frontend routing smoke are deployment checks only. User login,
 real workload execution, result integrity and fault-recovery acceptance remain the
 separate pure-Nebius E2E milestone.
 
+Shared-pool registration is an internal stage of the protected writer migration,
+not a manual installation command. Its fixed Job consumes hash-only registration
+configuration and leaves admission closed. Preserve its stage journal, ConfigMap,
+Job and Pod evidence on failure or a lost response; do not delete/recreate them or
+open the pool manually. Successful resource staging is not a successful database
+registration or permission to switch controllers. The ordinary management image
+refresh does not authorize this migration's credential, configuration or RBAC
+changes. The connected protected switchover remains required before deployment.
+
 **Verifying the deployed version (#2009):** confirm the rendered candidate SHA
 actually reached the cluster by comparing it against what the running app
 reports, not just this deployment's own logs. Open the target URL, click the
