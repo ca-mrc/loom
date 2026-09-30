@@ -148,7 +148,6 @@ async def test_activation_never_commits_the_callers_transaction(sessions):
 @pytest.mark.parametrize("damage", ["digest", "epoch", "pool", "other_participant", "closed", "selector", "missing_profile", "waiting"])
 async def test_unqualified_activation_creates_no_intent(sessions, damage):
     from loom_service.pool_management.control import PoolControlError
-
     from loom_service.pool_management.registry import PoolProfiles
 
     participants, principals, executions, _, profiles, _ = await mixed_setup(sessions,

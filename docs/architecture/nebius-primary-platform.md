@@ -1691,6 +1691,17 @@ do not identify the same request. A reservation receipt retains its request dige
 admission epoch, frozen plan and any observed Job UID. Waiting is not a reservation
 receipt; cancellation and uncertain external writes do not imply free capacity.
 
+The internal activation control locks the exact request, requalifies its current
+origin/profile and charged envelope, then freezes the actual execution Job or
+native-build Job/ConfigMap once. The absolute deadline is retained and first
+activation uses only the remaining runtime; replay returns the stored receipt,
+never a rerender or renewed allowance. Status does not renew waiting freshness.
+Unstarted cancellation can atomically cancel waiting or reserved work, including
+while intake is closed; it cannot cancel an already activated intent into free
+capacity. Concurrent activation/cancellation has one winner. These functions own
+no commit and perform no external write. Gateway dispatch fencing, output-drain
+qualification and actual cleanup remain required before exposing admission.
+
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
 keys and participant-to-pool binding. Registration identities cannot be reassigned;

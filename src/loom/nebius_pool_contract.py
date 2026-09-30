@@ -101,6 +101,21 @@ class PoolRequestKeyV1(_PoolContract):
         return self.participant_id, self.workload_kind, self.local_work_id, self.generation
 
 
+class PoolRequestActionV1(_PoolContract):
+    """Reference an existing immutable request; never accept workload/phase authority."""
+
+    schema_version: Literal["loom.pool-request-action.v1"] = "loom.pool-request-action.v1"
+    pool_id: UUID
+    request_key: PoolRequestKeyV1
+    admission_epoch: _Generation
+    request_sha256: _Digest
+
+    @model_validator(mode="after")
+    def identity(self) -> PoolRequestActionV1:
+        _non_nil(self.pool_id)
+        return self
+
+
 class PoolReceiptV1(_PoolContract):
     """A durable reservation snapshot, never caller-provided release authority.
 
