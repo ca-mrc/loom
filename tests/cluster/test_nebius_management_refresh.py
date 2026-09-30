@@ -124,8 +124,31 @@ def test_repeat_refresh_preserves_retained_identity_and_observes_native_drain(re
                 assert not core.list_namespaced_pod(namespace, label_selector='app=loom-service').items
                 assert all(row.spec.replicas == 0 and row.status.observed_generation >= row.metadata.generation
                     for row in apps.list_namespaced_replica_set(namespace, label_selector='app=loom-service').items)
-                assert switch_refresh(**args, activate=True) is True
-                assert switch_refresh(**args, activate=True) is True
+                if iteration == 0:
+                    stopped = api.read()
+                    initial = _snapshot(stopped)
+                    initial['metadata']['uid'] = stopped['metadata']['uid']
+                    successor = replace(switch, operation_id=uuid4(), initial_stopped=initial)
+                    with HTTPSManagementRefreshSwitchAPI(request=successor, binding=binding,
+                            shared_namespace_uid=shared.metadata.uid, api_server=endpoint, ssl_context=trust,
+                            activation_check=lambda _request: True) as successor_api:
+                        next_args = dict(request=successor, api=successor_api,
+                            state_dir=tmp_path / str(iteration) / 'successor-switch')
+                        while not switch_refresh(**next_args, activate=False):
+                            assert time.monotonic() < deadline, 'native stopped adoption did not converge'
+                            time.sleep(0.2)
+                        adopted = successor_api.read()
+                        assert adopted['spec'] == stopped['spec']
+                        assert adopted['metadata']['uid'] == stopped['metadata']['uid']
+                        assert adopted['metadata']['annotations']['loom.nebius/management-refresh-id'] == str(successor.operation_id)
+                        with pytest.raises(ValueError, match='cutover unresolved'):
+                            switch_refresh(**args, activate=False)
+                        assert not core.list_namespaced_pod(namespace, label_selector='app=loom-service').items
+                        assert switch_refresh(**next_args, activate=True) is True
+                        assert switch_refresh(**next_args, activate=True) is True
+                else:
+                    assert switch_refresh(**args, activate=True) is True
+                    assert switch_refresh(**args, activate=True) is True
                 assert api.read()['metadata']['uid'] == active['metadata']['uid']
             assert core.read_namespaced_secret('retained-test-material', namespace).metadata.uid == retained.metadata.uid
             for path, content in prior_states.items():

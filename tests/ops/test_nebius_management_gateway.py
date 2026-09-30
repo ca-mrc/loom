@@ -87,7 +87,7 @@ def test_refresh_authority_binds_operation_uuid_layout_and_closed_results(tmp_pa
     'refresh_recovery', 'refresh_cluster_identity', 'refresh_resource_inventory',
     'refresh_persistent_storage', 'refresh_prerequisites', 'refresh_foundation',
     'refresh_shared_material', 'refresh_platform_capacity', 'refresh_publication',
-    'refresh_cloud_identity', 'refresh_public_route',
+    'refresh_cloud_identity', 'refresh_public_route', 'refresh_supersession',
 ])
 def test_refresh_preserves_closed_retained_preflight_diagnostics(tmp_path, stage):
     gateway = module()
