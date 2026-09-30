@@ -1137,6 +1137,29 @@ effects and investigate; do not reset state or automatically create another Job.
 Only proven release permits retrying the recorded first-application intent;
 personal HTTPS/login/suspend-resume remains a separate acceptance gate.
 
+### Qualify personal object-access retirement
+
+Before accepting a provider's retirement protocol, use an ordinary application
+create to establish successful signed read-only probes for all protected data and
+source buckets, then suspend that generation and verify its original-key denials
+after exact IAM absence. Check that a sibling application and shared data remain
+available. The active-start qualification runs those positive probes without
+additional object permissions, new buckets, policy changes or secret export.
+
+Nebius can return structured `AccessDenied` for a nonexistent key. That response
+alone is not retirement proof: completion requires the existing exact account,
+key and membership deletion readbacks plus signed denials in every original scope,
+SQL retirement and stopped-workload evidence. Do not substitute HTML/generic403,
+transport failure, a synthetic missing-key experiment or a successful Job.
+
+For an already-deleted historical key, retain its encrypted material and immutable
+operation history. The installation's original-upgrade-rooted, unchanged storage
+scope supplies legacy source-bucket binding; never invent a new frozen plan or
+recreate a deleted key. Complete a separate ordinary application's positive-create,
+suspend and original-key denial cycle before explicitly retrying the historical
+blocked retirement. Missing
+material, incompatible scope or unresolved provider effects remain blocked.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

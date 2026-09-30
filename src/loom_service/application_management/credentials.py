@@ -149,8 +149,10 @@ class ApplicationCredentialProvider:
             raise ProviderRetryError("application_principal_changed")
         return material
 
-    async def qualify(self, lease: ApplicationLease) -> ApplicationAccessReadiness:
+    async def qualify(self, lease: ApplicationLease, verifier: ApplicationObjectAccessVerifier) -> ApplicationAccessReadiness:
         """Recheck provisioned access, without new IAM/material/Secret delivery."""
+        if verifier.storage != self.storage:
+            raise ProviderBlockedError("application_object_access_binding_conflict")
         plan = await self.registry.frozen_plan(lease)
         row = self._qualify(plan)
         principal = await self.identities.read(lease)
@@ -168,6 +170,7 @@ class ApplicationCredentialProvider:
             await self.cloud.reconcile(lease, lease.operation_id, key)
         storage = await self.cloud.key_material(lease)
         password = self._password(plan, row, material, storage)
+        await verifier.verify_active(plan, storage)
         if await self.identities.read(lease) != principal:
             raise ProviderRetryError("application_principal_changed")
         role = await self.database.qualify(lease, password, schema_revision=plan["release"]["schema_revision"])
@@ -220,6 +223,8 @@ class ApplicationCredentialProvider:
         The lifecycle caller must stop old processes separately. Shared groups,
         buckets, policies and other applications' credentials are never targets.
         """
+        if verifier.storage != self.storage:
+            raise ProviderBlockedError("application_object_access_binding_conflict")
         current_plan = await self.registry.frozen_plan(lease)
         row = self._registration(current_plan)
         through = lease.access_generation - (1 if row.desired_state == "active" else 0)
@@ -251,6 +256,15 @@ class ApplicationCredentialProvider:
         history = await self.cloud.registry.cloud_history(lease)
         targets = [effect for effect in history if effect.action == "create" and effect.phase == "observed"
                    and self._registration(plans[effect.operation_id]).access_generation <= through]
+        # The protected refresh invariant preserves these parents. A data UUID
+        # alone cannot turn another installation's bucket/group scope into proof
+        # for this historical generation. Validate the full set before deletes.
+        parents = {"account": ("service_account", self.storage.project_id),
+            "key": ("access_key", self.storage.project_id), "data": ("membership", self.storage.data_group_id),
+            "source": ("membership", self.storage.source_group_id)}
+        for effect in targets:
+            if parents.get(effect.key) != (effect.kind, effect.expected.get("metadata", {}).get("parent_id")):
+                raise ProviderBlockedError("application_object_access_binding_conflict")
         proofs: list[tuple[ApplicationKeyRetirement, dict[str, Any], dict[str, str]]] = []
         for effect in targets:
             if effect.kind != "access_key":

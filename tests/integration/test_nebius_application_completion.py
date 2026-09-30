@@ -16,7 +16,6 @@ from loom.db.nebius_application_operation_schema import (
 from loom.db.nebius_application_schema import NebiusApplication, NebiusDeploymentNameClaim
 from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
 from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
-from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.proofs import ApplicationStopEvidence
 from loom_service.application_management.runtime import ApplicationRuntimeProvider
 from loom_service.environment_management.provider import ProviderWaitingError
@@ -75,7 +74,9 @@ async def stopped_context(applications, platform_inputs, database_access, shared
         async with httpx.AsyncClient(base_url=endpoint, transport=httpx.MockTransport(
             lambda request: httpx.Response(403, text='<Error><Code>InvalidAccessKeyId</Code></Error>'),
         )) as storage_http:
-            verifier = ApplicationObjectAccessVerifier(storage_http)
+            from tests.integration.test_nebius_application_credentials import object_verifier
+
+            verifier = object_verifier(storage_http, credentials, platform_inputs, plan)
             yield registry, factory, alice, lease, runtime, credentials, verifier, api, cloud, original
 
 
