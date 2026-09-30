@@ -115,3 +115,35 @@ def test_prepared_create_cannot_dispatch_after_intake_or_request_is_fenced(pool_
         with pytest.raises(DBAPIError), connection.begin_nested():
             dispatch(connection, effect)
         assert connection.execute(select(NebiusPoolEffect.phase).where(NebiusPoolEffect.effect_id == effect["effect_id"])).scalar_one() == "prepared"
+
+
+def test_closed_intake_permits_bound_cleanup_but_not_wrong_uid_or_capacity_release(pool_database):
+    from loom.db.nebius_pool_schema import (
+        NebiusPoolBinding,
+        NebiusPoolEffect,
+        NebiusPoolParticipant,
+        NebiusPoolRequest,
+    )
+
+    with pool_database.begin() as connection:
+        row, created = prepared(connection)
+        dispatch(connection, created)
+        uid = uuid4()
+        connection.execute(update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == created["effect_id"]).values(
+            phase="observed", observed_uid=uid, observed_resource_version="7"))
+        advance(connection, row, "observed", job_uid=uid)
+        advance(connection, row, "cleanup_intent")
+        connection.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == row["pool_id"]).values(mode="closed"))
+        connection.execute(update(NebiusPoolParticipant).where(
+            NebiusPoolParticipant.participant_id == row["participant_id"]).values(phase="fenced"))
+        effect = {key: created[key] for key in ("request_id", "plan_sha256", "namespace_uid")}
+        effect.update(effect_id=uuid4(), effect_key="delete:job", sequence=2, phase="prepared",
+            intent_json=created["intent_json"] | {"action": "delete", "uid": str(uid), "resource_version": "7"})
+        connection.execute(insert(NebiusPoolEffect).values(**effect))
+        dispatch(connection, effect)
+        statement = update(NebiusPoolEffect).where(NebiusPoolEffect.effect_id == effect["effect_id"])
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            connection.execute(statement.values(phase="observed", observed_uid=uuid4()))
+        connection.execute(statement.values(phase="observed", observed_uid=uid))
+        assert connection.execute(select(NebiusPoolRequest.phase).where(
+            NebiusPoolRequest.request_id == row["request_id"])).scalar_one() == "cleanup_intent"

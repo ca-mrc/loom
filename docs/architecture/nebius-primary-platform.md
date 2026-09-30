@@ -1714,6 +1714,17 @@ cleanup observation recorded after cleanup intent and tied to the exact request,
 plan and namespace. Request and
 cleanup history cannot be deleted, and downgrade refuses retained pool history.
 
+The gateway effect table separately retains fixed write intent, an append-once
+dispatch identity/machine epoch, and immutable observed UID/resource version or
+definite rejection. Its composite foreign key binds the request, plan and namespace.
+A dispatched write cannot reset to prepared, move to another target or disappear.
+Database guards reject new create dispatch after intake closure, participant fencing,
+epoch change, cleanup intent or deadline expiry. Bound deletion can still dispatch
+with intake closed, but its observed UID must match the original deletion intent.
+Neither observed nor rejected effects release the capacity request. These storage
+barriers are not yet an external-write implementation: dedicated gateway credential
+checks, actual target/body qualification and Kubernetes reconciliation remain required.
+
 These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer
 fencing, Job/Pod/auxiliary absence and environment-owned output drain before

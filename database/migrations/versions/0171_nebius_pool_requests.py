@@ -229,8 +229,16 @@ CREATE TABLE nebius_pool_observations (
             IF OLD.phase = 'prepared' AND NEW.phase = 'dispatched' THEN
                 IF NOT EXISTS (
                     SELECT 1 FROM nebius_pool_machines m JOIN nebius_pool_requests r ON r.pool_id = m.pool_id
+                    JOIN nebius_pool_bindings p ON p.pool_id = r.pool_id
+                    JOIN nebius_pool_participants e ON e.participant_id = r.participant_id
                     WHERE r.request_id = NEW.request_id AND m.machine_id = NEW.dispatch_machine_id
                       AND m.role = 'gateway' AND m.phase = 'active' AND m.credential_epoch = NEW.dispatch_epoch
+                      AND p.mode IN ('closed','global') AND (
+                        (NEW.intent_json->>'action' = 'create' AND r.phase = 'create_intent'
+                         AND p.mode = 'global' AND r.admission_epoch = p.admission_epoch
+                         AND e.phase = 'active' AND e.admission_epoch = p.admission_epoch
+                         AND r.deadline_at > clock_timestamp()) OR
+                        (NEW.intent_json->>'action' = 'delete' AND r.phase = 'cleanup_intent'))
                 ) THEN
                     RAISE EXCEPTION 'global pool effect dispatcher is not qualified' USING ERRCODE = '23514';
                 END IF;
