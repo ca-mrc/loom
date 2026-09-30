@@ -136,7 +136,8 @@ than being treated as an empty cluster.
 `controller_inventory` adds Deployment/CronJob identities, declared ServiceAccounts,
 selected execution target/pool/group identifiers and database Secret references.
 Referenced `envFrom` ConfigMaps are projected through the same field allowlist;
-Secret values and inline database URLs are never exported or fetched. The report
+It never fetches Secret resources; inline database URLs are redacted from the
+Deployment/ConfigMap responses and never exported. The report
 also lists RoleBinding/ClusterRoleBinding grants for Job-write verbs, including
 wildcards and group subjects, and explicitly identifies unresolved role references.
 This discovers guest controllers and target aliases without assuming one controller
