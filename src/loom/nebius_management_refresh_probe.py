@@ -26,6 +26,9 @@ from loom.nebius_application_contract import (
 )
 
 SCHEMA = "loom.nebius-management-refresh-probe.v1"
+FAILURE_STAGES = frozenset({"settings", "database_url", "database", "read_only", "schema", "operations"})
+FAILURE_ERRORS = frozenset({"ValueError", "ValidationError", "KeyError", "FileNotFoundError",
+    "TimeoutError", "OperationalError", "ProgrammingError", "OtherError"})
 SETTINGS_PATH = Path("/var/run/loom-management-refresh/probe.json")
 _ACTIVE_PHASES = ("pending", "running", "blocked")
 _PLAN_KEYS = {"schema_version", "registration", "release", "shared", "files", "platform_envelope"}
@@ -34,6 +37,16 @@ _IDENTITY_FIELDS = ("data_environment_id", "cluster_id", "platform_namespace")
 _MAX_OPERATIONS = 4096
 _MAX_PLAN_BYTES = 1024 * 1024
 _MAX_TOTAL_BYTES = 32 * 1024 * 1024
+
+
+class RefreshProbeError(ValueError):
+    """Retain only closed diagnostic categories, never private database details."""
+
+    def __init__(self, stage: str, error: Exception):
+        super().__init__("refresh_probe_unqualified")
+        self.stage = stage if stage in FAILURE_STAGES else "database"
+        kind = type(error).__name__
+        self.error_type = kind if kind in FAILURE_ERRORS else "OtherError"
 
 
 class RefreshProbeSettings(BaseModel):
@@ -93,6 +106,7 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
     engine = create_async_engine(url, pool_size=1, max_overflow=0, pool_timeout=10,
         isolation_level="REPEATABLE READ", connect_args={"connect_timeout": 10,
             "options": "-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=5000"})
+    stage = "database"
     try:
         async with asyncio.timeout(150):
             settings = RefreshProbeSettings.model_validate(settings.model_dump())
@@ -100,13 +114,16 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
                 raise ValueError
             factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
             async with factory.begin() as session:
+                stage = "read_only"
                 if await session.scalar(text("SHOW transaction_read_only")) != "on":
                     raise ValueError
+                stage = "schema"
                 revisions = (await session.scalars(text("SELECT version_num FROM alembic_version LIMIT 2"))).all()
                 if revisions != [settings.expected_revision]:
                     raise ValueError
                 checked = 0
                 if settings.mode == "manager":
+                    stage = "operations"
                     # Cloud retirement reads earlier generations' frozen plans.
                     # Qualify their contract too, without requiring old cleanup
                     # versions to match the new shared schema or rerendering them.
@@ -139,8 +156,8 @@ async def database_snapshot(url: URL, settings: RefreshProbeSettings) -> dict[st
                     checked = sum(operation.phase in _ACTIVE_PHASES for operation in operations)
                 return {"schema": SCHEMA, "status": "qualified", "mode": settings.mode,
                     "revision": settings.expected_revision, "operations_checked": checked}
-    except Exception:
-        raise ValueError("refresh_probe_unqualified") from None
+    except Exception as error:
+        raise RefreshProbeError(stage, error) from None
     finally:
         await engine.dispose()
 
@@ -150,7 +167,7 @@ def refresh_database_url(value: str, settings: RefreshProbeSettings) -> URL:
     try:
         namespace = settings.namespace if settings.mode == "manager" else settings.shared.platform_namespace
         url = make_url(value)
-        if (url.drivername != "postgresql" or url.username != "loom_service" or not url.password
+        if (url.drivername not in {"postgresql", "postgresql+psycopg"} or url.username != "loom_service" or not url.password
                 or url.host != f"loom-postgres.{namespace}.svc" or url.port != 5432 or url.database != "loom"
                 or dict(url.query) != {"sslmode": "verify-full", "sslrootcert": "/var/run/loom-db/ca.crt"}):
             raise ValueError
@@ -160,16 +177,21 @@ def refresh_database_url(value: str, settings: RefreshProbeSettings) -> URL:
 
 
 def main() -> int:
+    stage = "settings"
     try:
         with SETTINGS_PATH.open("rb") as stream:
             raw = stream.read(262145)
         if len(raw) > 262144:
             raise ValueError
         settings = RefreshProbeSettings.model_validate_json(raw)
+        stage = "database_url"
         url = refresh_database_url(os.environ["LOOM_REFRESH_DB_URL"], settings)
+        stage = "database"
         report = asyncio.run(database_snapshot(url, settings))
-    except Exception:
-        print(json.dumps({"schema": SCHEMA, "status": "unqualified"}, sort_keys=True))
+    except Exception as error:
+        failure = error if isinstance(error, RefreshProbeError) else RefreshProbeError(stage, error)
+        print(json.dumps({"schema": SCHEMA, "status": "unqualified", "stage": failure.stage,
+            "error_type": failure.error_type}, sort_keys=True))
         return 1
     print(json.dumps(report, sort_keys=True))
     return 0

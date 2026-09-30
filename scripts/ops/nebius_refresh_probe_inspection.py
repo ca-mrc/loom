@@ -9,7 +9,12 @@ from uuid import UUID
 
 from scripts.ops.deploy_nebius_platform import Kubectl, job_failed
 
-from loom.nebius_management_refresh_probe import SCHEMA, RefreshProbeSettings
+from loom.nebius_management_refresh_probe import (
+    FAILURE_ERRORS,
+    FAILURE_STAGES,
+    SCHEMA,
+    RefreshProbeSettings,
+)
 
 _MARKER = "loom.nebius/management-refresh-id"
 _INSTALLATION = "loom.nebius/management-installation"
@@ -29,7 +34,12 @@ def _diagnostic(raw: str) -> dict[str, str]:
                 return {"error_type": error}
             continue
         if isinstance(value, dict) and value.get("schema") == SCHEMA and value.get("status") == "unqualified":
-            return {"status": "unqualified"}
+            result = {"status": "unqualified"}
+            for key, allowed in (("stage", FAILURE_STAGES), ("error_type", FAILURE_ERRORS)):
+                field = value.get(key)
+                if isinstance(field, str) and field in allowed:
+                    result[key] = field
+            return result
     return {"status": "unavailable"}
 
 
