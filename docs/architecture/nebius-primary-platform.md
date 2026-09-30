@@ -1682,7 +1682,7 @@ profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
 attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
 not its separate selection generation. Admission HTTP, actual
-caller outboxes, fixed gateway and protected writer migration are still
+caller outboxes, the gateway worker and protected writer migration are still
 required. Application-image builds remain a later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
@@ -1699,8 +1699,9 @@ never a rerender or renewed allowance. Status does not renew waiting freshness.
 Unstarted cancellation can atomically cancel waiting or reserved work, including
 while intake is closed; it cannot cancel an already activated intent into free
 capacity. Concurrent activation/cancellation has one winner. These functions own
-no commit and perform no external write. Gateway dispatch fencing, output-drain
-qualification and actual cleanup remain required before exposing admission.
+no commit and perform no external write. Connected gateway reconciliation,
+output-drain qualification and complete cleanup remain required before exposing
+admission.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request
@@ -1721,9 +1722,32 @@ A dispatched write cannot reset to prepared, move to another target or disappear
 Database guards reject new create dispatch after intake closure, participant fencing,
 epoch change, cleanup intent or deadline expiry. Bound deletion can still dispatch
 with intake closed, but its observed UID must match the original deletion intent.
-Neither observed nor rejected effects release the capacity request. These storage
-barriers are not yet an external-write implementation: dedicated gateway credential
-checks, actual target/body qualification and Kubernetes reconciliation remain required.
+Neither observed nor rejected effects release the capacity request.
+
+The internal fixed gateway journal owns its transactions and commits each one-use
+dispatch permit before returning permission for Kubernetes I/O. Dedicated gateway
+credentials authorize only their registered pool; callers supply request identities,
+not manifests. The HTTP adapter uses the frozen Job/ConfigMap, verifies namespace
+UIDs before and after readback, and compares exact workload fields while accepting
+qualified API defaults. Native Job creation also rechecks the live, observed
+ConfigMap UID and contents. A lost response followed by 404 never authorizes another
+create. UID-bound deletion derives its target from the retained create observation;
+neither a successful deletion nor an absent Job frees capacity.
+
+Residual-Pod inventory scans the complete bound namespace with bounded pagination
+and one consistent list resource version. It qualifies original Job UID, name,
+reservation/plan/effect markers and local claim generation, including terminal and
+terminating Pods. Contradictory identities, partial lists and namespace replacement
+fail closed. This inventory is read-only, not deletion or release authority. The
+adapter's disposable-cluster tests qualify real API defaulting, restricted writes,
+Job-created Pods and object retirement; they do not qualify the protected installer
+or a running global worker.
+
+The connected cancellation adapter must retain the existing runtime's stop-then-drain
+ordering: signal cancellation with bounded termination grace while partial-output
+uploads remain authorized, then confirm durable committed/unavailable output before
+final cleanup and release. The internal object-deletion primitive alone does not
+implement this protocol, residual-Pod deletion, or the delayed-start absolute deadline.
 
 These are storage and transition constraints, not proof of actual Kubernetes
 cleanup or installed global admission. The trusted gateway must qualify writer
@@ -1731,7 +1755,7 @@ fencing, Job/Pod/auxiliary absence and environment-owned output drain before
 recording cleanup. The registry must authenticate dedicated machine identities,
 validate all workload kinds and serialize physical-pool admission. The current
 single-environment controllers do not switch writers merely because these tables
-exist; connected admission, the production pool collector, durable local handoff
+exist; connected admission, installation of the production pool collector, durable local handoff
 and protected no-dual-writer migration remain required before activation.
 
 ## Native task-image capacity fairness

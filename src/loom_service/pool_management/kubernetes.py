@@ -23,6 +23,7 @@ from loom_service.pool_management.gateway_journal import (
     PoolGatewayJournal,
 )
 from loom_service.pool_management.kubernetes_identity import matches_frozen_workload
+from loom_service.pool_management.pod_inventory import PoolPodInventory, PoolPodReference, owned_pod
 
 _MAX_BODY = 2 * 1024 * 1024
 _TIMEOUT = 30
@@ -51,10 +52,11 @@ class KubernetesPoolGateway:
             raise ValueError("pool Kubernetes endpoint must be an HTTPS origin")
         self.journal, self.http = journal, http
 
-    async def _request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    async def _request(self, method: str, path: str, body: dict[str, Any] | None = None, *,
+                       params: dict[str, str] | None = None) -> dict[str, Any] | None:
         try:
             async with asyncio.timeout(_TIMEOUT):
-                async with self.http.stream(method, path, json=body, follow_redirects=False, timeout=_TIMEOUT) as response:
+                async with self.http.stream(method, path, json=body, params=params, follow_redirects=False, timeout=_TIMEOUT) as response:
                     if response.status_code == 404 and method in {"GET", "DELETE"}:
                         return None
                     if method != "GET" and response.status_code in {409, 422}:
@@ -187,3 +189,59 @@ class KubernetesPoolGateway:
             raise PoolKubernetesWaitingError
         await self._namespace(current.created)
         return await self.journal.observe_delete(principal, effect.effect_id)
+
+    async def pod_inventory(self, principal: PoolPrincipal, reservation_id: UUID) -> PoolPodInventory:
+        """Fresh complete namespace snapshot, not a label-filtered absence guess."""
+        created = await self.journal.get_created(principal, reservation_id, kind="Job")
+        try:
+            async with asyncio.timeout(_TIMEOUT):
+                return await self._pod_inventory(created)
+        except TimeoutError:
+            raise PoolKubernetesWaitingError from None
+        except PoolKubernetesError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError):
+            raise PoolKubernetesError("pool_kubernetes_invalid_inventory") from None
+
+    async def _pod_inventory(self, created: PoolGatewayEffect) -> PoolPodInventory:
+        await self._namespace(created)
+        path = "/api/v1/namespaces/" + created.document["metadata"]["namespace"] + "/pods"
+        cursor, resource_version = "", ""
+        cursors, seen_uids, seen_names = set[str](), set[UUID](), set[str]()
+        owned: list[PoolPodReference] = []
+        for _ in range(128):
+            # Each page and the overall scan are bounded. Refuse a stale/expired
+            # continuation instead of silently restarting with a mixed snapshot.
+            value = await self._request("GET", path, params={"limit": "64", "continue": cursor})
+            if (value is None or value.get("apiVersion") != "v1" or value.get("kind") != "PodList"
+                    or not isinstance(value.get("metadata"), dict) or not isinstance(value.get("items"), list)):
+                raise PoolKubernetesError("pool_kubernetes_invalid_inventory")
+            metadata = value["metadata"]
+            rv, following = metadata.get("resourceVersion"), metadata.get("continue", "")
+            if (not isinstance(rv, str) or re.fullmatch(r"[A-Za-z0-9._:-]{1,253}", rv) is None
+                    or (resource_version and rv != resource_version)
+                    or not isinstance(following, str) or len(following) > 4096
+                    or (following and (following == cursor or following in cursors))):
+                raise PoolKubernetesError("pool_kubernetes_invalid_inventory")
+            resource_version = rv
+            for item in value["items"]:
+                # Kubernetes encodes type metadata on the qualified PodList,
+                # not necessarily on its items. Never override explicit types.
+                item = {"apiVersion": "v1", "kind": "Pod", **item}
+                uid, item_rv = self._identity(item, terminating=True)
+                name = item["metadata"]["name"]
+                if uid in seen_uids or name in seen_names or len(seen_uids) >= 8192:
+                    raise PoolKubernetesError("pool_kubernetes_invalid_inventory")
+                seen_uids.add(uid)
+                seen_names.add(name)
+                matched = owned_pod(item, created, uid=uid, resource_version=item_rv)
+                if matched is not None:
+                    owned.append(matched)
+            if not following:
+                await self._namespace(created)
+                assert created.observed_uid is not None
+                return PoolPodInventory(created.reservation_id, created.effect_id, created.namespace_uid,
+                                        created.observed_uid, resource_version, tuple(owned))
+            cursors.add(following)
+            cursor = following
+        raise PoolKubernetesError("pool_kubernetes_inventory_limit")

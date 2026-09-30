@@ -206,6 +206,12 @@ class PoolGatewayJournal:
             effect, request = await self._effect(session, pool, effect_id)
             return _view(effect, request)
 
+    async def get_created(self, principal: PoolPrincipal, reservation_id: UUID, *, kind: CreateKind) -> PoolGatewayEffect:
+        """Read existing observed authority only, without preparing an effect."""
+        async with self._transaction(principal) as (session, pool):
+            request = await self._request(session, pool, reservation_id)
+            return _view(await self._created(session, request, kind), request)
+
     async def dispatch_create(self, principal: PoolPrincipal, effect_id: UUID) -> PoolGatewayEffect | None:
         async with self._transaction(principal) as (session, pool):
             effect, request = await self._effect(session, pool, effect_id)
