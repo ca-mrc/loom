@@ -20,6 +20,7 @@ CREATE TABLE nebius_pool_execution_outbox (
     pool_id UUID NOT NULL, participant_id UUID NOT NULL, request_sha256 TEXT NOT NULL,
     request_json JSONB NOT NULL, selection_json JSONB NOT NULL, phase TEXT NOT NULL,
     reservation_id UUID, receipt_json JSONB, cancelled_json JSONB, activation_json JSONB, activated_json JSONB,
+    stop_json JSONB, drain_json JSONB, output_json JSONB,
     attached_lease_id UUID REFERENCES execution_leases(id) ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT nebius_pool_execution_outbox_grant_key UNIQUE (reservation_id),
@@ -46,7 +47,11 @@ CREATE TABLE nebius_pool_execution_outbox (
         (phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND
         (activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND
         (phase='cancelled') = (cancelled_json IS NOT NULL) AND
-        (cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object'))
+        (cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object') AND
+        (stop_json IS NULL OR (phase='stop_pending' AND jsonb_typeof(stop_json)='object')) AND
+        (drain_json IS NULL) = (output_json IS NULL) AND
+        (drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json)='object' AND
+            jsonb_typeof(output_json)='object')))
 );
 CREATE UNIQUE INDEX nebius_pool_execution_outbox_live_key ON nebius_pool_execution_outbox(trial_id)
     WHERE phase <> 'cancelled';
@@ -68,14 +73,17 @@ BEGIN
             RAISE EXCEPTION 'execution selection must start unclaimed' USING ERRCODE='23514';
         END IF;
     ELSE
-        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json']) IS DISTINCT FROM
-           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json']) OR
+        IF (to_jsonb(OLD)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json']) IS DISTINCT FROM
+           (to_jsonb(NEW)-ARRAY['phase','reservation_id','receipt_json','cancelled_json','attached_lease_id','activation_json','activated_json','stop_json','drain_json','output_json']) OR
            (OLD.reservation_id IS NOT NULL AND ROW(OLD.reservation_id,OLD.receipt_json) IS DISTINCT FROM
                                                ROW(NEW.reservation_id,NEW.receipt_json)) OR
            (OLD.attached_lease_id IS NOT NULL AND OLD.attached_lease_id IS DISTINCT FROM NEW.attached_lease_id) OR
            (OLD.cancelled_json IS NOT NULL AND OLD.cancelled_json IS DISTINCT FROM NEW.cancelled_json) OR
            (OLD.activation_json IS NOT NULL AND OLD.activation_json IS DISTINCT FROM NEW.activation_json) OR
-           (OLD.activated_json IS NOT NULL AND OLD.activated_json IS DISTINCT FROM NEW.activated_json) THEN
+           (OLD.activated_json IS NOT NULL AND OLD.activated_json IS DISTINCT FROM NEW.activated_json) OR
+           (OLD.stop_json IS NOT NULL AND OLD.stop_json IS DISTINCT FROM NEW.stop_json) OR
+           (OLD.drain_json IS NOT NULL AND OLD.drain_json IS DISTINCT FROM NEW.drain_json) OR
+           (OLD.output_json IS NOT NULL AND OLD.output_json IS DISTINCT FROM NEW.output_json) THEN
             RAISE EXCEPTION 'execution selection evidence is immutable' USING ERRCODE='23514';
         END IF;
         IF NOT (OLD.phase=NEW.phase OR (OLD.phase='selected' AND NEW.phase IN ('grant_pending','cancel_pending')) OR
@@ -136,6 +144,38 @@ BEGIN
         l.workload_requirements_json=NEW.request_json->'execution'->'requirements'
     ) THEN
         RAISE EXCEPTION 'execution attached lease differs' USING ERRCODE='23514';
+    END IF;
+    IF NEW.stop_json IS NOT NULL AND (
+        NEW.stop_json->'action'=NEW.activation_json->'action' AND
+        NEW.stop_json->>'reservation_id'=NEW.reservation_id::text AND
+        NEW.stop_json->>'plan_sha256'=NEW.activated_json->>'plan_sha256' AND
+        NEW.stop_json->>'lease_generation'=NEW.request_json->'execution'->>'lease_generation' AND
+        NEW.stop_json->>'cause' IN ('completed','failed','cancelled','lease_lost','deadline') AND
+        EXISTS (SELECT 1 FROM execution_leases l WHERE l.id=NEW.attached_lease_id AND
+            l.desired_state IN ('cancel','retry','timeout','delete_pending') AND l.revoked_at IS NOT NULL AND
+            (NEW.stop_json->>'grace_deadline_at')::timestamptz <= l.cleanup_deadline_at)) IS NOT TRUE THEN
+        RAISE EXCEPTION 'execution stop identity differs' USING ERRCODE='23514';
+    END IF;
+    IF NEW.drain_json IS NOT NULL AND (
+        NEW.drain_json->'action'=NEW.stop_json->'action' AND
+        NEW.drain_json->>'reservation_id'=NEW.stop_json->>'reservation_id' AND
+        NEW.drain_json->>'plan_sha256'=NEW.stop_json->>'plan_sha256' AND
+        NEW.drain_json->>'lease_generation'=NEW.stop_json->>'lease_generation' AND
+        NEW.drain_json->>'stop_sha256' ~ '^[0-9a-f]{64}$' AND
+        NEW.drain_json->>'evidence_sha256' ~ '^[0-9a-f]{64}$' AND
+        NEW.output_json->>'lease_id'=NEW.lease_id::text AND
+        NEW.drain_json->>'output_generation'=NEW.output_json->>'output_generation' AND
+        NEW.drain_json->>'output_state'=NEW.output_json->>'output_state' AND
+        EXISTS (SELECT 1 FROM execution_leases l WHERE l.id=NEW.attached_lease_id AND
+            l.output_commit_state IN ('committed','unavailable') AND l.output_generation=l.resource_generation AND
+            NEW.output_json->>'output_state'=l.output_commit_state AND
+            NEW.output_json->>'output_generation'=l.output_generation::text AND
+            (NEW.output_json->>'upload_session_id')::uuid IS NOT DISTINCT FROM l.output_upload_session_id AND
+            NEW.output_json->>'manifest_sha256' IS NOT DISTINCT FROM l.output_manifest_sha256 AND
+            NEW.output_json->>'marker_sha256' IS NOT DISTINCT FROM l.output_marker_sha256 AND
+            (NEW.output_json->>'committed_at')::timestamptz IS NOT DISTINCT FROM l.output_committed_at AND
+            NEW.output_json->>'unavailable_reason' IS NOT DISTINCT FROM l.output_unavailable_reason)) IS NOT TRUE THEN
+        RAISE EXCEPTION 'execution drain evidence differs' USING ERRCODE='23514';
     END IF;
     RETURN NEW;
 END $$;

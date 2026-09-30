@@ -11,6 +11,15 @@ class PoolExecutionDriver:
     def __init__(self, *, outbox: PoolExecutionOutbox, management: PoolClient) -> None:
         self.outbox, self.management = outbox, management
 
+    async def stop_and_drain(self, key: PoolRequestKeyV1) -> None:
+        stop = await self.outbox.begin_stop(key)
+        if stop is None:
+            return
+        await self.management.stop(stop)
+        drain = await self.outbox.begin_drain(key)
+        if drain is not None:
+            await self.management.drain(drain)
+
     async def _cancel(self, handoff: PoolExecutionHandoff) -> PoolExecutionHandoff:
         try:
             receipt = await self.management.cancel_unstarted(handoff.action)

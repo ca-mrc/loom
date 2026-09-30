@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select, text
@@ -23,6 +24,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolRequestKeyV1,
 )
+from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_pool_workload import PoolExecutionPrepareV1, PoolExecutionWorkloadV1
 from loom.nebius_rollout_guard import admission_open
@@ -280,6 +282,81 @@ class PoolExecutionOutbox:
                 row.phase = "stop_pending" if row.phase == "active" else "cancel_pending"
                 await session.flush()
             return self._view(row)
+
+    async def _cleanup_lease(self, session: AsyncSession, row: NebiusPoolExecutionOutbox) -> ServiceExecutionLease:
+        saved = self._view(row)
+        if saved.phase not in {"active", "stop_pending"} or saved.activated is None or row.attached_lease_id is None:
+            raise PoolHandoffError
+        lease = await session.get(ServiceExecutionLease, row.attached_lease_id, with_for_update=True, populate_existing=True)
+        if (lease is None or lease.trial_id != row.trial_id or lease.target_id != saved.request.target_id
+                or lease.resource_generation != saved.request.key.generation
+                or lease.execution_unit_key != saved.request.execution.execution_unit_key
+                or lease.job_name != "loom-pool-" + saved.activated.reservation_id.hex):
+            raise PoolHandoffError
+        return lease
+
+    async def begin_stop(self, key: PoolRequestKeyV1) -> PoolStopV1 | None:
+        """Retain cleanup consent from local revocation, before waiting for output."""
+        async with self.sessions.begin() as session:
+            row = await self._load(session, key)
+            lease = await self._cleanup_lease(session, row)
+            if row.stop_json is not None:
+                return PoolStopV1.model_validate(row.stop_json)
+            if lease.desired_state not in {"cancel", "retry", "timeout", "delete_pending"}:
+                return None
+            if lease.revoked_at is None or lease.cleanup_deadline_at is None:
+                raise PoolHandoffError
+            saved = self._view(row)
+            assert saved.activated is not None and saved.activated.plan_sha256 is not None
+            cause: Literal["completed", "failed", "cancelled", "lease_lost", "deadline"]
+            if lease.desired_state == "cancel":
+                cause = "cancelled"
+            elif lease.desired_state == "timeout":
+                cause = "deadline"
+            else:
+                cause = "completed" if lease.output_commit_state == "committed" else "failed"
+            stop = PoolStopV1(action=saved.action, reservation_id=saved.activated.reservation_id,
+                plan_sha256=saved.activated.plan_sha256, lease_generation=saved.request.execution.lease_generation,
+                cause=cause, grace_deadline_at=min(lease.cleanup_deadline_at, await _clock(session) + timedelta(seconds=300)))
+            row.stop_json, row.phase = stop.model_dump(mode="json"), "stop_pending"
+            await session.flush()
+            return stop
+
+    @staticmethod
+    def _output_evidence(lease: ServiceExecutionLease) -> dict[str, Any]:
+        return {"lease_id": str(lease.id), "output_state": lease.output_commit_state,
+            "output_generation": lease.output_generation,
+            "upload_session_id": str(lease.output_upload_session_id) if lease.output_upload_session_id else None,
+            "manifest_sha256": lease.output_manifest_sha256, "marker_sha256": lease.output_marker_sha256,
+            "committed_at": lease.output_committed_at.isoformat() if lease.output_committed_at else None,
+            "unavailable_reason": lease.output_unavailable_reason}
+
+    async def begin_drain(self, key: PoolRequestKeyV1) -> PoolDrainV1 | None:
+        """Freeze committed/unavailable output evidence; never close its window here."""
+        async with self.sessions.begin() as session:
+            row = await self._load(session, key)
+            lease = await self._cleanup_lease(session, row)
+            if row.stop_json is None:
+                return None
+            if lease.output_commit_state not in {"committed", "unavailable"}:
+                return None
+            if lease.output_generation != lease.resource_generation:
+                raise PoolHandoffError
+            output = self._output_evidence(lease)
+            if row.drain_json is not None:
+                if output != row.output_json:
+                    raise PoolHandoffError
+                return PoolDrainV1.model_validate(row.drain_json)
+            stop = PoolStopV1.model_validate(row.stop_json)
+            drain = PoolDrainV1(action=stop.action, reservation_id=stop.reservation_id,
+                plan_sha256=stop.plan_sha256, lease_generation=stop.lease_generation,
+                stop_sha256=canonical_digest(row.stop_json).removeprefix("sha256:"),
+                output_generation=lease.resource_generation,
+                output_state="committed" if lease.output_commit_state == "committed" else "unavailable",
+                evidence_sha256=canonical_digest(output).removeprefix("sha256:"))
+            row.output_json, row.drain_json = output, drain.model_dump(mode="json")
+            await session.flush()
+            return drain
 
     async def _finish_unstarted_claim(self, session: AsyncSession, row: NebiusPoolExecutionOutbox) -> None:
         if row.attached_lease_id is None:

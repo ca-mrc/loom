@@ -13,7 +13,10 @@ from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
 from loom.db.nebius_pool_schema import NebiusPoolRequest
 from loom.db.schema import ServiceExecutionLease
 from loom.pipeline.keys import canonical_digest
-from loom_control_plane.service_execution import enqueue_execution_transition, mark_execution_output_unavailable
+from loom_control_plane.service_execution import (
+    enqueue_execution_transition,
+    mark_execution_output_unavailable,
+)
 from loom_execution_actuator.pool_execution_driver import PoolExecutionDriver
 from tests.integration.test_nebius_pool_execution_activation import selected
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions

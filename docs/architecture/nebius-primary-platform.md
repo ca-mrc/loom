@@ -2000,7 +2000,13 @@ effect identity, without manifests or credentials and without requiring current
 profiles. Its read-only Kubernetes adapter qualifies namespace UID before/after,
 the exact observed Job and sole controller-owned Pod before reusing existing
 execution normalization. A missing Job is only absence, never deletion or release
-authority. Controller/output recovery and the installed writer transition remain
+authority. The local execution outbox separately commits immutable stop and drain
+messages before HTTP. Stop derives from existing lease revocation and does not
+wait for output; drain requires that lease's committed/unavailable output at its
+original resource generation, retaining the exact manifest/marker or unavailable
+evidence. Lost replies replay the same records and grace deadline. These messages
+do not close the output window, project deletion, or release capacity. The
+controller hookup, release projection and installed writer transition remain
 unconnected.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof

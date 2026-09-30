@@ -72,7 +72,11 @@ class NebiusPoolExecutionOutbox(Base):
             "(phase IN ('active','stop_pending')) = (activated_json IS NOT NULL) AND "
             "(activated_json IS NULL OR jsonb_typeof(activated_json)='object') AND "
             "(phase='cancelled') = (cancelled_json IS NOT NULL) AND "
-            "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object')",
+            "(cancelled_json IS NULL OR jsonb_typeof(cancelled_json)='object') AND "
+            "(stop_json IS NULL OR (phase='stop_pending' AND jsonb_typeof(stop_json)='object')) AND "
+            "(drain_json IS NULL) = (output_json IS NULL) AND "
+            "(drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json)='object' AND "
+            "jsonb_typeof(output_json)='object'))",
             name="nebius_pool_execution_outbox_phase_check"),
     )
     lease_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
@@ -89,6 +93,9 @@ class NebiusPoolExecutionOutbox(Base):
     cancelled_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     activation_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     activated_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    stop_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    drain_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    output_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
