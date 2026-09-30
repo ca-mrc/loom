@@ -178,3 +178,110 @@ def test_binding_roundtrip_is_detached_from_mutable_input_and_frozen():
     with pytest.raises(ValidationError):
         binding.execution_namespace.name = "foreign"
     assert PoolParticipantV1.model_validate_json(binding.model_dump_json()) == binding
+
+
+def receipt(state="reserved", **changes):
+    started = state not in {"reserved", "cancelled_unstarted"}
+    return {
+        "reservation_id": "90000000-0000-4000-8000-000000000001",
+        "pool_id": "50000000-0000-4000-8000-000000000001",
+        "request_key": key(), "admission_epoch": 1, "request_sha256": "a" * 64,
+        "phase": state, "plan_sha256": "b" * 64 if started else None,
+        "job_uid": "a0000000-0000-4000-8000-000000000001" if state == "observed" else None,
+        "cleanup_observation_id": "b0000000-0000-4000-8000-000000000001" if state == "released" else None,
+    } | changes
+
+
+@pytest.mark.parametrize("phase,charged", [
+    ("reserved", True), ("create_intent", True), ("observed", True),
+    ("cleanup_intent", True), ("released", False), ("cancelled_unstarted", False),
+])
+def test_uncertain_and_cleanup_states_retain_capacity(phase, charged):
+    from loom.nebius_pool_contract import PoolReceiptV1
+
+    assert PoolReceiptV1.model_validate(receipt(phase)).capacity_charged is charged
+
+
+@pytest.mark.parametrize("phase,changes", [
+    ("reserved", {"plan_sha256": "b" * 64}),
+    ("cancelled_unstarted", {"job_uid": "a0000000-0000-4000-8000-000000000001"}),
+    ("create_intent", {"plan_sha256": None}),
+    ("create_intent", {"job_uid": "a0000000-0000-4000-8000-000000000001"}),
+    ("observed", {"job_uid": None}),
+    ("observed", {"plan_sha256": None}),
+    ("cleanup_intent", {"plan_sha256": None}),
+    ("cleanup_intent", {"cleanup_observation_id": "b0000000-0000-4000-8000-000000000001"}),
+    ("released", {"cleanup_observation_id": None}),
+    ("released", {"plan_sha256": None}),
+])
+def test_receipt_cannot_drop_intent_or_invent_release_without_evidence_reference(phase, changes):
+    from loom.nebius_pool_contract import PoolReceiptV1
+
+    with pytest.raises(ValidationError):
+        PoolReceiptV1.model_validate(receipt(phase, **changes))
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reservation_id", str(UUID(int=0))), ("pool_id", str(UUID(int=0))),
+    ("admission_epoch", True), ("admission_epoch", 0),
+    ("request_sha256", "A" * 64), ("request_sha256", "a" * 63),
+    ("plan_sha256", "private/raw/payload"),
+    ("job_uid", str(UUID(int=0))), ("cleanup_observation_id", str(UUID(int=0))),
+    ("phase", "failed"), ("phase", "expired"), ("phase", "cancelled"),
+])
+def test_receipt_identity_and_phase_cannot_bypass_resource_accounting(field, value):
+    from loom.nebius_pool_contract import PoolReceiptV1
+
+    with pytest.raises(ValidationError):
+        PoolReceiptV1.model_validate(receipt("released", **{field: value}))
+
+
+_PHASES = ("reserved", "create_intent", "observed", "cleanup_intent", "released", "cancelled_unstarted")
+_EDGES = {
+    ("reserved", "create_intent"), ("reserved", "cancelled_unstarted"),
+    ("create_intent", "observed"), ("create_intent", "cleanup_intent"),
+    ("observed", "cleanup_intent"), ("cleanup_intent", "released"),
+}
+
+
+@pytest.mark.parametrize("previous", _PHASES)
+@pytest.mark.parametrize("following", _PHASES)
+def test_receipt_transition_cannot_skip_cleanup_or_reactivate_terminal_request(previous, following):
+    from loom.nebius_pool_contract import PoolReceiptV1, validate_pool_receipt_transition
+
+    first = PoolReceiptV1.model_validate(receipt(previous))
+    payload = receipt(following)
+    if previous == "observed" and following in {"cleanup_intent", "released"}:
+        payload["job_uid"] = str(first.job_uid)
+    second = PoolReceiptV1.model_validate(payload)
+    if previous == following or (previous, following) in _EDGES:
+        validate_pool_receipt_transition(first, second)
+    else:
+        with pytest.raises(ValueError):
+            validate_pool_receipt_transition(first, second)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reservation_id", "90000000-0000-4000-8000-000000000002"),
+    ("pool_id", "50000000-0000-4000-8000-000000000002"),
+    ("request_key", key(generation=2)), ("admission_epoch", 2),
+    ("request_sha256", "c" * 64), ("plan_sha256", "c" * 64),
+    ("job_uid", None), ("job_uid", "a0000000-0000-4000-8000-000000000002"),
+])
+def test_cleanup_transition_cannot_replace_frozen_request_plan_or_observed_job(field, value):
+    from loom.nebius_pool_contract import PoolReceiptV1, validate_pool_receipt_transition
+
+    first = PoolReceiptV1.model_validate(receipt("observed"))
+    payload = receipt("cleanup_intent", job_uid=str(first.job_uid)) | {field: value}
+    with pytest.raises(ValueError):
+        validate_pool_receipt_transition(first, PoolReceiptV1.model_validate(payload))
+
+
+def test_replaying_released_receipt_cannot_change_cleanup_evidence():
+    from loom.nebius_pool_contract import PoolReceiptV1, validate_pool_receipt_transition
+
+    first = PoolReceiptV1.model_validate(receipt("released"))
+    second = PoolReceiptV1.model_validate(receipt(
+        "released", cleanup_observation_id="b0000000-0000-4000-8000-000000000002"))
+    with pytest.raises(ValueError):
+        validate_pool_receipt_transition(first, second)
