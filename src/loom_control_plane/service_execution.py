@@ -1900,7 +1900,7 @@ async def record_execution_event(
         # Enrich the existing failed outcome; never reopen it or alter artifacts.
         await session.flush()
         diagnosis = await read_execution_failure(session, lease)
-        if diagnosis is not None:
+        if diagnosis is not None and diagnosis["reason"] == "oom_killed":
             lease.error_class = "permanent"
             lease.error_code = "oom_killed"
             lease.error_message = diagnosis["message"]
