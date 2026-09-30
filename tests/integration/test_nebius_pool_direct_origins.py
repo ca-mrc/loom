@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from loom.db.base import Base
 from loom.db.schema import DataLifecycleAuthority, Team, Token, Trial, User, UserSession
@@ -31,13 +31,12 @@ def configure(app, installed):
         "origin": "https://alice.dev.example.com", "access_generation": 1}
     # Reconstruct like a new installed process; model_copy retains the old
     # cached session_audience and would silently test an unscoped browser session.
-    values = app.state.settings.model_dump(exclude_computed_fields=True)
-    values.update({
+    values = {
         "pool_submission_source_json": None if installed is None else json.dumps(installed),
         "auth_session_audience_json": None if audience is None else json.dumps(audience),
         "public_base_url": None if audience is None else audience["origin"],
         "auth_local_http": audience is None,
-    })
+    }
     app.state.settings = type(app.state.settings)(_env_file=None, **values)
 
 
@@ -188,3 +187,36 @@ async def test_unconfigured_service_does_not_forward_client_origin(direct_stack)
         BODY | {"pool_origin": source("environment")}, {"Authorization": "Bearer " + token, HEADER: str(uuid4())}))
     assert trial.pool_origin is None
     assert HEADER not in captured[0].headers
+
+
+@pytest.mark.parametrize("damage", ["missing-csrf", "wrong-csrf", "wrong-audience", "revoked"])
+async def test_cp_reauthenticates_browser_before_handoff_or_idempotency(direct_stack, damage):
+    app, cp, _, team_id, user_id, captured = direct_stack
+    configure(app, source())
+    settings = app.state.settings
+    async with app.state.session_factory.begin() as session:
+        created = await create_session_for_user(session, user=await session.get(User, user_id),
+            current_team_id=team_id, session_ttl_seconds=3600, audience=settings.session_audience)
+    await stored(direct_stack, await public_submit(direct_stack,
+        headers={settings.auth_csrf_header_name: created.raw_csrf},
+        cookies={settings.session_cookie_name: created.raw_session}))
+    headers = dict(captured[0].headers)
+    expected = 401
+    if damage == "missing-csrf":
+        del headers["x-loom-csrf"]
+        expected = 403
+    elif damage == "wrong-csrf":
+        headers["x-loom-csrf"] = "wrong"
+        expected = 403
+    elif damage == "wrong-audience":
+        audience = settings.session_audience.model_dump(mode="json")
+        audience["application_id"] = str(uuid4())
+        headers["x-loom-session-audience"] = json.dumps(audience)
+    else:
+        async with app.state.session_factory.begin() as session:
+            await session.execute(update(UserSession).where(UserSession.user_id == user_id).values(revoked_at=datetime.now(UTC)))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=cp), base_url="http://cp") as client:
+        response = await client.post("/trials", json=json.loads(captured[0].content), headers=headers)
+    assert response.status_code == expected, response.text
+    async with app.state.session_factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Trial)) == 1

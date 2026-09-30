@@ -32,6 +32,7 @@ from loom.llm_call_ledger import serialize_llm_call
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.nebius_pool_priority import PoolWorkOriginV1
+from loom.nebius_submission import qualify_trial_submission
 from loom.service_execution_backend import (
     NEBIUS_BACKEND,
     NEBIUS_LOGICAL_POOL_ID,
@@ -171,6 +172,30 @@ def _required_worker_pool(payload: dict[str, Any]) -> str | None:
 
 
 
+async def _browser_submitter(session: AsyncSession, request: Request) -> AuthContext:
+    """The shared CP verifies the bound session and CSRF, never just its audience."""
+    audience = None
+    raw_audience = request.headers.get("X-Loom-Session-Audience")
+    if raw_audience is not None:
+        if len(raw_audience) > 4096:
+            raise HTTPException(status_code=401, detail="invalid session audience")
+        try:
+            audience = ApplicationSessionAudienceV1.model_validate_json(raw_audience)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="invalid session audience") from None
+    ctx = require_human_or_admin(await verify_session_cookie(session, request.cookies.get("loom_session"), audience=audience))
+    verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
+    require_scope(ctx, "submit")
+    if ctx.team_id is not None and not is_admin(ctx):
+        disabled_at = (await session.execute(
+            select(Team.disabled_at).where(Team.id == ctx.team_id),
+        )).scalar_one_or_none()
+        if disabled_at is not None:
+            raise HTTPException(status_code=403, detail="team is disabled")
+    await session.commit()
+    return ctx
+
+
 @router.post("/trials", status_code=201)
 async def submit_trial(
     request: Request,
@@ -179,6 +204,8 @@ async def submit_trial(
 ) -> dict[str, Any]:
     async with request.app.state.session_factory() as session:
         ctx = await verify_bearer_token(session, authorization)
+        if not authorization:
+            ctx = await _browser_submitter(session, request)
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
@@ -263,6 +290,17 @@ async def submit_trial(
     else:
         raise HTTPException(status_code=401, detail="not authorized to submit")
 
+    raw_submission_id = request.headers.get("X-Loom-Submission-ID")
+    if raw_submission_id is not None:
+        # Qualify before even the idempotency fast path. A body/header assertion
+        # cannot promote work or borrow another user's retained service handoff.
+        async with request.app.state.session_factory() as session:
+            try:
+                direct_origin = await qualify_trial_submission(session, raw_submission_id,
+                    team_id=ctx.team_id, user_id=ctx.user_id, payload=payload)
+            except ValueError:
+                raise HTTPException(status_code=409, detail="submission provenance unavailable") from None
+        pool_origin = direct_origin.model_dump(mode="json")
 
     # Plan 19: if `idempotency_key` was supplied and a trial with that
     # key already exists FOR THIS TEAM, return its trial_id without
@@ -653,28 +691,7 @@ async def cancel_trial(
             allow_family_orchestrator=True,
         )
         if not authorization:
-            cookie = request.cookies.get("loom_session")
-            audience = None
-            raw_audience = request.headers.get("X-Loom-Session-Audience")
-            if raw_audience is not None:
-                if len(raw_audience) > 4096:
-                    raise HTTPException(status_code=401, detail="invalid session audience")
-                try:
-                    audience = ApplicationSessionAudienceV1.model_validate_json(raw_audience)
-                except ValueError:
-                    raise HTTPException(status_code=401, detail="invalid session audience") from None
-            # Shared CP accepts sessions from multiple applications, but the
-            # declared audience authenticates nothing without its bound proof.
-            ctx = require_human_or_admin(await verify_session_cookie(session, cookie, audience=audience))
-            verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
-            require_scope(ctx, "submit")
-            if ctx.team_id is not None and not is_admin(ctx):
-                disabled_at = (await session.execute(
-                    select(Team.disabled_at).where(Team.id == ctx.team_id),
-                )).scalar_one_or_none()
-                if disabled_at is not None:
-                    raise HTTPException(status_code=403, detail="team is disabled")
-            await session.commit()
+            ctx = await _browser_submitter(session, request)
     if ctx is None:
         raise HTTPException(status_code=401, detail="not authorized")
     caller_is_admin = is_admin(ctx)

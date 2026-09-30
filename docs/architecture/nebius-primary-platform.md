@@ -1630,9 +1630,20 @@ producer carries that retained origin into child trials. Ordinary callers refere
 a batch cannot inherit its origin. PostgreSQL prevents origin changes, including
 silently classifying an old NULL, and refuses a downgrade that would erase origins.
 Missing configuration/history remains unknown, not environment-priority work.
-Direct single-trial submissions still require a trusted service-to-control-plane
-origin handoff before global admission can support them; this Batch path does not
-establish complete producer coverage or an installed priority guarantee.
+For direct single-trial submission, the authenticated service commits a small
+immutable `nebius_pool_submissions` record before forwarding: server-issued UUID,
+exact forwarded-payload digest, submitting user/team and protected origin. The
+control plane independently authenticates the bearer or bound browser session/CSRF
+and checks this record against the actual payload/caller before its idempotency
+lookup. An HTTP origin or submission-ID assertion alone gives no priority. Public
+input cannot replace the service-generated header. Personal backends retain the
+existing trusted shared-development-DB access; this is not hostile-backend isolation.
+The service releases SQL/session-auth locks before HTTP. A retained handoff replay
+keeps its idempotency key; replay across application updates never overwrites the
+original Trial origin. As with other submissions, clients should supply an
+idempotency key to recover their own retry after a lost response. Missing
+configuration remains compatible/unknown; this producer coverage does not establish
+an installed global-admission or priority guarantee.
 
 The management-side observation registry issues a persisted capture scope from
 registered participants and committed gateway Job receipts. A dedicated observer

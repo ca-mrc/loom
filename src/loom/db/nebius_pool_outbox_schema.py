@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
@@ -21,6 +22,25 @@ from sqlalchemy.dialects.postgresql import UUID as PgUUID  # noqa: N811
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+
+
+class NebiusPoolSubmission(Base):
+    """Server-written direct-trial provenance; the HTTP ID alone authorizes nothing."""
+
+    __tablename__ = "nebius_pool_submissions"
+    __table_args__ = (
+        CheckConstraint("id <> '00000000-0000-0000-0000-000000000000'::uuid AND "
+            "request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(pool_origin) = 'object' AND "
+            "(pool_origin->>'submission_id' = id::text AND "
+            "pool_origin->>'kind' IN ('environment','application')) IS TRUE",
+            name="nebius_pool_submissions_payload_check"),
+    )
+    id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
+    team_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    pool_origin: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
 class NebiusPoolBuildOutbox(Base):

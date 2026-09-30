@@ -77,6 +77,7 @@ from loom_service.monitor_filters import (
 )
 from loom_service.multi_model import usage_by_role
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
+from loom_service.pool_submission import prepare_trial_submission
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
@@ -1352,12 +1353,22 @@ async def submit_trial(
             agent_submission=True,
         )
 
+    try:
+        body, submission_id = await prepare_trial_submission(s, request.app.state.settings,
+            team_id=ctx.team_id, user_id=ctx.user_id, payload=payload.model_dump(mode="json"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="submission provenance unavailable") from None
+    # The CP independently verifies the caller. Commit the origin and release
+    # browser-auth locks before that network hop, including legacy configuration.
+    await s.commit()
     resp = await forward(
         request.app.state.http_client,
         method="POST",
         path="/trials",
         authorization=authorization,
-        json_body=payload.model_dump(mode="json"),
+        json_body=body,
+        submission_request=request,
+        submission_id=submission_id,
     )
     return propagate(resp)
 
