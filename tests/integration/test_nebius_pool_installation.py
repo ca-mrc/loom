@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
 from loom_service.pool_management.auth import resolve_pool_machine
@@ -82,6 +82,62 @@ async def test_registration_rollback_has_no_partial_authority(sessions):
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 0
         assert await session.scalar(select(func.count()).select_from(NebiusPoolMachine)) == 0
+
+
+async def test_historical_installation_remains_parseable_but_expired_credentials_cannot_be_installed(sessions):
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, _ = installation()
+    for machine in config["machines"]:
+        machine.update(issued_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
+            expires_at=(datetime.now(UTC) - timedelta(days=1)).isoformat())
+    spec = PoolInstallation.model_validate(config)
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await register_installation(session, spec)
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 0
+
+
+async def test_concurrent_same_installation_has_one_closed_registration(sessions):
+    import asyncio
+
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, _ = installation()
+    spec = PoolInstallation.model_validate(config)
+
+    async def install():
+        async with sessions.begin() as session:
+            return await register_installation(session, spec)
+
+    left, right = await asyncio.gather(install(), install())
+    assert left == right
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 1
+
+
+@pytest.mark.parametrize("state", ["global", "revoked"])
+async def test_registration_cannot_reopen_or_reset_live_authority(sessions, state):
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, _ = installation()
+    spec = PoolInstallation.model_validate(config)
+    async with sessions.begin() as session:
+        await register_installation(session, spec)
+    async with sessions.begin() as session:
+        if state == "global":
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(mode="global"))
+        else:
+            await session.execute(update(NebiusPoolMachine).where(NebiusPoolMachine.machine_id == spec.machines[0].machine_id).values(phase="revoked"))
+    with pytest.raises(ValueError):
+        async with sessions.begin() as session:
+            await register_installation(session, spec)
+    async with sessions() as session:
+        if state == "global":
+            assert (await session.get(NebiusPoolBinding, spec.pool_id)).mode == "global"
+        else:
+            assert (await session.get(NebiusPoolMachine, spec.machines[0].machine_id)).phase == "revoked"
 
 
 @pytest.mark.parametrize("drift", ["credential", "profile", "namespace", "policy"])
