@@ -1656,8 +1656,15 @@ has a separate timestamp for create-rate accounting. Impossible/stale waits do n
 block fitting work. Exact admitted replay returns its retained receipt without
 rerendering, refreshing a deadline or depending on currently free capacity.
 This is execution-only internal admission, not an activated global execution/build
-service: the build adapter, HTTP boundary, actual collector/caller outboxes, fixed
-gateway and protected writer migration are still required.
+service. A separate internal task-image adapter now accepts typed materialization
+selection and legacy or registered source identity, reuses the actual native
+prepare/build/publish renderer, and measures its sequential-init peak. Storage,
+registry, Secret, resource and runtime settings come only from its protected
+profile. Selection generation and prospective native lease epoch are distinct;
+Job/ConfigMap names use the global reservation identity. The adapter acquires no
+attempt or grant. Mixed execution/build admission, the HTTP boundary, actual
+collector/caller outboxes, fixed gateway and protected writer migration are still
+required. Application-image builds remain a later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
