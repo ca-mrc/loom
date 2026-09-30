@@ -22,6 +22,7 @@ variable "integration_platform" {
     bucket_prefix              = string
     system_preset              = optional(string, "4vcpu-16gb")
     system_disk_gib            = optional(number, 80)
+    system_max_pods            = optional(number, 64)
     system_create_before_drain = optional(bool, false)
     execution_max_nodes        = optional(number, 100)
     native_builder_group_id    = optional(string)

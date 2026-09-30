@@ -50,7 +50,19 @@ output IDs and readback beside deployment evidence. Reinitialize from the same
 versioned backend to recover local state; do not import resources from the
 execution state or force-unlock an active operation.
 
-One 4-vCPU/16-GiB system node remains running. The execution group starts at zero
+One system node remains running (4-vCPU/16-GiB by default). Optional
+`integration_platform.system_max_pods` controls only its Pod limit: integer
+16–110, default 64. An unchanged input keeps the existing node template;
+execution groups retain their separate Pod limits. Raising this limit does not
+add CPU, RAM or disk, and still requires actual scheduler-fit qualification.
+Nebius derives each node's Pod CIDR from this limit: 64 uses a /25 and 110 uses
+a /24. Check available cluster Pod-address space and review the saved plan before
+changing it. Treat a change as a node replacement: preserve current off-node
+backup/restore, volume and ingress evidence, and use the create-before-drain
+procedure in `docs/runbooks/nebius-deployment.md`. Do not edit a live Node's
+capacity or weaken admission to bypass a Pod-slot shortage.
+
+The execution group starts at zero
 with the native API technical maximum of 100 nodes configured in Terraform.
 Explicit lower `integration_platform.execution_max_nodes` values remain valid;
 review existing tfvars before removing an intentional limit. Keep that value

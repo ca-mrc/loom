@@ -719,6 +719,20 @@ capacity. Include existing maintenance scratch as well as management, concurrent
 children, rollout surge, system daemons and images; undeclared Pod requests do
 not mean the workload uses no disk.
 
+`integration_platform.system_max_pods` separately configures the primary system
+node's Pod limit (integer 16–110, default 64); execution and regional groups are
+unchanged. A platform can have free CPU, memory and disk but insufficient Pod
+slots. Compare the protected preflight's numeric `required.pods` with
+`allocatable.pods`, including maintenance, rollout surge and the full child
+allowance. Do not lower the reservation or bypass admission just to pass the check.
+The [pinned Nebius provider's node-group contract](https://github.com/nebius/terraform-provider-nebius/blob/v0.6.46/docs/resources/mk8s_v1_node_group.md#nestedatt--template)
+documents 110 as the native default and derives the per-node Pod CIDR as
+`32 - ceil(log2(2 * max_pods))`. Increasing 64 to 110 therefore changes /25 to
+/24. Check cluster Pod-address availability, including temporary surge nodes;
+do not assume VM subnet free addresses alone prove Pod-address availability.
+The larger Pod limit adds no compute or persistent storage but must be treated
+as a node-replacement operation with the same retained-data protections below.
+
 For a planned system-node replacement, `system_create_before_drain: true` selects
 one temporary surge node and zero unavailable nodes; the steady count remains
 one. The default remains the existing drain-first strategy. These inputs do not
