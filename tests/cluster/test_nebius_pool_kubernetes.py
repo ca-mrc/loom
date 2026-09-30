@@ -33,6 +33,7 @@ from tests.integration.test_nebius_pool_cleanup_journal import begin_cleanup
 from tests.integration.test_nebius_pool_control import action, operate
 from tests.integration.test_nebius_pool_registry import machine, prepare
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.integration.test_nebius_pool_stop_drain import accept_drain, drain_input
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
                                 reason="requires explicitly disposable Kubernetes")
@@ -150,7 +151,7 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                 pods = await asyncio.to_thread(core.list_namespaced_pod, namespace)
                 assert all(pod.spec.node_name is None for pod in pods.items)
             for receipt, workload_kind in receipts:
-                await begin_cleanup(sessions, receipt.reservation_id)
+                owner, stop = await begin_cleanup(sessions, receipt.reservation_id, drained=False)
                 for kind in (["Job", "ConfigMap"] if workload_kind == "task_image_build" else ["Job"]):
                     deadline = time.monotonic() + 20
                     while True:
@@ -161,6 +162,10 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                             assert time.monotonic() < deadline, "fixed object deletion did not converge"
                             await asyncio.sleep(0.1)
                     assert deleted.phase == "observed"
+                    if kind == "Job":
+                        # Real foreground Job/Pod termination completes before
+                        # output drain; only final auxiliaries require drain.
+                        await accept_drain(sessions, owner, drain_input(stop))
                 deadline = time.monotonic() + 20
                 while (await gateway.pod_inventory(principal, receipt.reservation_id)).pods:
                     assert time.monotonic() < deadline, "real residual Pod retirement did not converge"

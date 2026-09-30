@@ -20,6 +20,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolWaitingV1,
 )
+from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom.pipeline.keys import canonical_digest
@@ -48,7 +49,7 @@ class PoolClient:
         self._owns_client, self._closed = client is None, False
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False, trust_env=False)
 
-    async def _post(self, action: PoolRequestActionV1, operation: Literal["prepare", "status", "activate", "cancel-unstarted"],
+    async def _post(self, action: PoolRequestActionV1, operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain"],
                     body: bytes) -> PoolResult:
         if self._closed or len(body) > MAX_POOL_REQUEST_BYTES:
             raise PoolRequestUnconfirmedError
@@ -112,3 +113,16 @@ class PoolClient:
         self._closed, self._token = True, ""
         if self._owns_client:
             await self._client.aclose()
+
+    async def _lifecycle(self, body: PoolStopV1 | PoolDrainV1) -> PoolReceiptV1:
+        receipt = await self._post(body.action, "stop" if isinstance(body, PoolStopV1) else "drain", body.model_dump_json().encode())
+        if (not isinstance(receipt, PoolReceiptV1) or receipt.phase not in {"cleanup_intent", "released"}
+                or receipt.reservation_id != body.reservation_id or receipt.plan_sha256 != body.plan_sha256):
+            raise PoolRequestUnconfirmedError
+        return receipt
+
+    async def stop(self, body: PoolStopV1) -> PoolReceiptV1:
+        return await self._lifecycle(PoolStopV1.model_validate_json(body.model_dump_json()))
+
+    async def drain(self, body: PoolDrainV1) -> PoolReceiptV1:
+        return await self._lifecycle(PoolDrainV1.model_validate_json(body.model_dump_json()))

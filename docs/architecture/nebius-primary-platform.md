@@ -1753,7 +1753,7 @@ while intake is closed; it cannot cancel an already activated intent into free
 capacity. Concurrent activation/cancellation has one winner. These functions own
 no commit and perform no external write. The management-only participant API
 exposes these operations under `/internal/pools/v1/{pool_id}` as `prepare`,
-`status`, `activate`, and `cancel-unstarted`. It requires a dedicated credential
+`status`, `activate`, `cancel-unstarted`, `stop`, and `drain`. It requires a dedicated credential
 bound to that pool and participant; ordinary users, administrators, generic
 workers and observer/gateway credentials cannot substitute. Prepare and first
 activation require the protected runtime-profile catalog. The participant client
@@ -1802,11 +1802,22 @@ adapter's disposable-cluster tests qualify real API defaulting, restricted write
 Job-created Pods and object retirement; they do not qualify the protected installer
 or a running global worker.
 
-The connected cancellation adapter must retain the existing runtime's stop-then-drain
-ordering: signal cancellation with bounded termination grace while partial-output
-uploads remain authorized, then confirm durable committed/unavailable output before
-final cleanup and release. The internal object-deletion primitive alone does not
-implement this protocol, residual-Pod deletion, or the delayed-start absolute deadline.
+The machine lifecycle API retains separate immutable stop and drain attestations
+bound to the exact request, reservation, frozen plan and native/execution lease
+generation. Stop fences new creates immediately and freezes termination grace,
+capped by the rendered Pod's grace and 300 seconds. The gateway can then send a
+UID-bound foreground Job deletion without waiting for output drain. Auxiliary
+deletion additionally requires the matching drain attestation: committed/unavailable
+output state, output generation, evidence digest and the exact stop digest. Native
+output generation must equal its build lease epoch. Neither acknowledgment nor a
+successful deletion frees capacity. Lost replies replay the same retained evidence.
+
+The connected cancellation adapter must derive these acknowledgments from the
+existing runtime's actual state: signal cancellation while partial-output uploads
+remain authorized, then confirm durable committed/unavailable output before final
+cleanup and release. The API is not itself proof of that local output state.
+The runtime adapter, residual-Pod deletion, complete absence/release qualification,
+and delayed-start absolute deadline remain unimplemented boundaries.
 
 The native-build local outbox commits an immutable typed selection before contacting
 management. It keeps selection generation separate from build lease epoch and permits

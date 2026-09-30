@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -18,11 +19,26 @@ from tests.integration.test_nebius_pool_gateway_journal import setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-async def begin_cleanup(sessions, reservation_id):
-    # Test setup only. Production cleanup must originate from the connected
-    # environment outbox after durable output drain, not an owner boolean.
-    async with sessions.begin() as session:
-        await session.execute(update(NebiusPoolRequest).where(NebiusPoolRequest.request_id == reservation_id).values(phase="cleanup_intent"))
+async def begin_cleanup(sessions, reservation_id, *, drained=True):
+    from loom_service.pool_management.registry import _receipt
+    from tests.integration.test_nebius_pool_registry import machine
+    from tests.integration.test_nebius_pool_stop_drain import (
+        accept_drain,
+        accept_stop,
+        drain_input,
+        stop_input,
+    )
+
+    async with sessions() as session:
+        row = await session.get(NebiusPoolRequest, reservation_id)
+        receipt = _receipt(row)
+        pool_id, participant_id = row.pool_id, row.participant_id
+    owner = await machine(sessions, pool_id, participant_id)
+    stop = (await stop_input(sessions, receipt)).model_copy(update={"grace_deadline_at": datetime.now(UTC)})
+    await accept_stop(sessions, owner, stop)
+    if drained:
+        await accept_drain(sessions, owner, drain_input(stop))
+    return owner, stop
 
 
 async def observed(sessions, *, kind="Job", cleanup=True):
@@ -40,8 +56,11 @@ async def test_delete_uses_only_retained_create_uid_and_commits_before_permissio
     journal, principal, receipt, created = await observed(sessions, kind=kind)
     deletion = await journal.prepare_delete(principal, receipt.reservation_id, kind=kind)
     assert deletion.created == created
-    assert deletion.document == {"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background",
-                                 "preconditions": {"uid": str(created.observed_uid)}}
+    expected = {"apiVersion": "v1", "kind": "DeleteOptions", "propagationPolicy": "Background",
+                "preconditions": {"uid": str(created.observed_uid)}}
+    if kind == "Job":
+        expected.update(propagationPolicy="Foreground", gracePeriodSeconds=0)
+    assert deletion.document == expected
     assert deletion.phase == "prepared" and deletion.dispatch_id is None
     assert await journal.prepare_delete(principal, receipt.reservation_id, kind=kind) == deletion
     deletion.document["preconditions"]["uid"] = str(uuid4())

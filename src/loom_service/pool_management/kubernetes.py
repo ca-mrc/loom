@@ -161,7 +161,7 @@ class KubernetesPoolGateway:
         return True
 
     async def delete(self, principal: PoolPrincipal, reservation_id: UUID, *, kind: CreateKind) -> PoolGatewayDeletion:
-        """Retire an observed fixed object after separately authorized output drain.
+        """Signal a stopped Job, or retire an auxiliary after output drain.
 
         Returning an observed deletion proves only this object's live absence,
         never Pod absence, a fenced writer, task completion or capacity release.

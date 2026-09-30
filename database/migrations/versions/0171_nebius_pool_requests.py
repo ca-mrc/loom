@@ -258,6 +258,8 @@ CREATE TABLE nebius_pool_requests (
 	phase TEXT NOT NULL,
 	plan_sha256 TEXT,
 	plan_json JSONB,
+	stop_json JSONB,
+	drain_json JSONB,
 	job_uid UUID,
 	cleanup_observation_id UUID,
 	created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -274,6 +276,9 @@ CREATE TABLE nebius_pool_requests (
         (granted_at IS NULL OR granted_at >= created_at) AND (phase <> 'waiting' OR granted_at IS NULL) AND
         (phase IN ('waiting','cancelled_unstarted') OR granted_at IS NOT NULL)),
 	CONSTRAINT nebius_pool_request_payload_check CHECK (request_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(request_json) = 'object'),
+    CONSTRAINT nebius_pool_request_lifecycle_check CHECK (
+        (stop_json IS NULL OR (jsonb_typeof(stop_json) = 'object' AND phase IN ('cleanup_intent','released'))) AND
+        (drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json) = 'object'))),
 	CONSTRAINT nebius_pool_request_plan_check CHECK (phase IN ('waiting','reserved','create_intent','observed','cleanup_intent','released','cancelled_unstarted') AND ((phase IN ('waiting','reserved','cancelled_unstarted')) = (plan_sha256 IS NULL)) AND ((plan_sha256 IS NULL) = (plan_json IS NULL)) AND (plan_sha256 IS NULL OR (plan_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(plan_json) = 'object'))),
 	CONSTRAINT nebius_pool_request_evidence_check CHECK ((phase NOT IN ('waiting','reserved','cancelled_unstarted','create_intent') OR job_uid IS NULL) AND (phase <> 'observed' OR job_uid IS NOT NULL) AND (job_uid IS NULL OR job_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND ((phase = 'released') = (cleanup_observation_id IS NOT NULL)))
 );
@@ -557,9 +562,9 @@ CREATE TABLE nebius_pool_observations (
                 END IF;
                 RETURN NEW;
             END IF;
-            IF (to_jsonb(NEW) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at']::text[])
+            IF (to_jsonb(NEW) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at','stop_json','drain_json']::text[])
                IS DISTINCT FROM
-               (to_jsonb(OLD) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at']::text[]) THEN
+               (to_jsonb(OLD) - ARRAY['phase','plan_sha256','plan_json','job_uid','cleanup_observation_id','renewed_at','granted_at','stop_json','drain_json']::text[]) THEN
                 RAISE EXCEPTION 'global pool request identity is immutable';
             END IF;
             IF NEW.renewed_at < OLD.renewed_at OR
@@ -571,9 +576,37 @@ CREATE TABLE nebius_pool_observations (
             IF (OLD.plan_sha256 IS NOT NULL AND
                 (NEW.plan_sha256 IS DISTINCT FROM OLD.plan_sha256 OR NEW.plan_json IS DISTINCT FROM OLD.plan_json))
                OR (OLD.job_uid IS NOT NULL AND NEW.job_uid IS DISTINCT FROM OLD.job_uid)
+               OR (OLD.stop_json IS NOT NULL AND NEW.stop_json IS DISTINCT FROM OLD.stop_json)
+               OR (OLD.drain_json IS NOT NULL AND NEW.drain_json IS DISTINCT FROM OLD.drain_json)
                OR (OLD.cleanup_observation_id IS NOT NULL AND
                    NEW.cleanup_observation_id IS DISTINCT FROM OLD.cleanup_observation_id) THEN
                 RAISE EXCEPTION 'global pool request evidence is immutable';
+            END IF;
+            IF NEW.stop_json IS NOT NULL AND (
+                NEW.stop_json->'request'->>'reservation_id' = NEW.request_id::text AND
+                NEW.stop_json->'request'->>'plan_sha256' = NEW.plan_sha256 AND
+                NEW.stop_json->'request'->'action'->>'pool_id' = NEW.pool_id::text AND
+                NEW.stop_json->'request'->'action'->>'admission_epoch' = NEW.admission_epoch::text AND
+                NEW.stop_json->'request'->'action'->>'request_sha256' = NEW.request_sha256 AND
+                NEW.stop_json->'request'->'action'->'request_key' = NEW.request_json->'key' AND
+                NEW.stop_json->>'request_sha256' ~ '^[0-9a-f]{64}$' AND
+                jsonb_typeof(NEW.stop_json->'grace_seconds') = 'number' AND
+                (NEW.stop_json->>'grace_seconds') ~ '^[0-9]+$' AND
+                (NEW.stop_json->>'grace_seconds')::bigint BETWEEN 0 AND 300) IS NOT TRUE THEN
+                RAISE EXCEPTION 'global pool stop identity differs' USING ERRCODE = '23514';
+            END IF;
+            IF NEW.drain_json IS NOT NULL AND (
+                NEW.drain_json->>'reservation_id' = NEW.request_id::text AND
+                NEW.drain_json->>'plan_sha256' = NEW.plan_sha256 AND
+                NEW.drain_json->'action' = NEW.stop_json->'request'->'action' AND
+                NEW.drain_json->>'lease_generation' = NEW.stop_json->'request'->>'lease_generation' AND
+                NEW.drain_json->>'stop_sha256' = NEW.stop_json->>'request_sha256' AND
+                NEW.drain_json->>'output_state' IN ('committed','unavailable') AND
+                (NEW.workload_kind <> 'task_image_build' OR
+                    NEW.drain_json->>'output_generation' = NEW.drain_json->>'lease_generation') AND
+                NEW.drain_json->>'evidence_sha256' ~ '^[0-9a-f]{64}$' AND
+                (NEW.drain_json->>'output_generation')::bigint > 0 AND OLD.stop_json IS NOT NULL) IS NOT TRUE THEN
+                RAISE EXCEPTION 'global pool drain identity differs' USING ERRCODE = '23514';
             END IF;
             IF to_jsonb(NEW) = to_jsonb(OLD) THEN
                 RETURN NEW;
@@ -582,7 +615,9 @@ CREATE TABLE nebius_pool_observations (
                 RETURN NEW;
             END IF;
             IF OLD.phase = 'cleanup_intent' AND NEW.phase = 'cleanup_intent'
-               AND OLD.job_uid IS NULL AND NEW.job_uid IS NOT NULL THEN
+               AND ((OLD.job_uid IS NULL AND NEW.job_uid IS NOT NULL)
+                    OR (OLD.stop_json IS NULL AND NEW.stop_json IS NOT NULL)
+                    OR (OLD.drain_json IS NULL AND NEW.drain_json IS NOT NULL)) THEN
                 RETURN NEW;
             END IF;
             IF NOT (

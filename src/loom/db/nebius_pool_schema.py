@@ -172,6 +172,9 @@ class NebiusPoolRequest(Base):
                         "(job_uid IS NULL OR job_uid <> '00000000-0000-0000-0000-000000000000'::uuid) AND "
                         "((phase = 'released') = (cleanup_observation_id IS NOT NULL))",
                         name="nebius_pool_request_evidence_check"),
+        CheckConstraint("(stop_json IS NULL OR (jsonb_typeof(stop_json) = 'object' AND phase IN ('cleanup_intent','released'))) AND "
+                        "(drain_json IS NULL OR (stop_json IS NOT NULL AND jsonb_typeof(drain_json) = 'object'))",
+                        name="nebius_pool_request_lifecycle_check"),
     )
     request_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
     pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
@@ -192,6 +195,8 @@ class NebiusPoolRequest(Base):
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     plan_sha256: Mapped[str | None] = mapped_column(Text)
     plan_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    stop_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    drain_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     job_uid: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     cleanup_observation_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())

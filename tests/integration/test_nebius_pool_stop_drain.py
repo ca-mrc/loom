@@ -173,3 +173,63 @@ async def test_real_participant_transport_retains_stop_then_drain(sessions, tmp_
         row = await session.get(NebiusPoolRequest, receipt.reservation_id)
         assert row.stop_json["request"] == stop.model_dump(mode="json")
         assert row.drain_json == drain_input(stop).model_dump(mode="json")
+
+
+@pytest.mark.parametrize("operation", ["stop", "drain"])
+async def test_lifecycle_does_not_commit_the_callers_transaction(sessions, operation):
+    from loom_service.pool_management.lifecycle import drain_pool_request, stop_pool_request
+
+    _, _, receipt, owner = await setup(sessions)
+    stop = await stop_input(sessions, receipt)
+    if operation == "drain":
+        await accept_stop(sessions, owner, stop)
+    async with sessions() as session:
+        if operation == "stop":
+            await stop_pool_request(session, owner, stop)
+        else:
+            await drain_pool_request(session, owner, drain_input(stop))
+        async with sessions() as observer:
+            row = await observer.get(NebiusPoolRequest, receipt.reservation_id)
+            assert (row.stop_json if operation == "stop" else row.drain_json) is None
+        await session.rollback()
+    async with sessions() as session:
+        row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+        assert (row.stop_json if operation == "stop" else row.drain_json) is None
+
+
+@pytest.mark.parametrize("operation", ["stop", "drain"])
+async def test_lost_lifecycle_reply_replays_without_replacing_evidence(sessions, tmp_path, operation):
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+    from tests.integration.test_nebius_pool_participant_http import client
+    from tests.integration.test_nebius_pool_participant_http import setup as http_setup
+
+    app, _, token, _, executions, _ = await http_setup(sessions, tmp_path)
+    calls = []
+
+    async def lose_reply(response):
+        if response.request.url.path.endswith("/" + operation):
+            calls.append(response.status_code)
+            if len(calls) == 1:
+                assert response.status_code == 200
+                raise httpx.ReadError("lost committed lifecycle reply")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), event_hooks={"response": [lose_reply]}) as http:
+        management = client(http, token)
+        request = executions[0]
+        await management.prepare(request)
+        receipt = await management.activate(action(request, activation=True))
+        stop = await stop_input(sessions, receipt)
+        body = stop if operation == "stop" else drain_input(stop)
+        if operation == "drain":
+            await management.stop(stop)
+        with pytest.raises(PoolRequestUnconfirmedError):
+            await getattr(management, operation)(body)
+        assert calls == [200]
+        async with sessions() as session:
+            row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+            saved = row.stop_json if operation == "stop" else row.drain_json
+        result = await getattr(client(http, token), operation)(body)
+        assert result.capacity_charged and calls == [200, 200]
+        async with sessions() as session:
+            row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+            assert (row.stop_json if operation == "stop" else row.drain_json) == saved

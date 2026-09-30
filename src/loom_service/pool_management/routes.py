@@ -15,6 +15,7 @@ from loom.nebius_pool_contract import (
     PoolRequestActionV1,
     PoolWaitingV1,
 )
+from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_execution_capacity_collector.pool_contracts import (
     MAX_POOL_OBSERVATION_BYTES,
@@ -29,6 +30,7 @@ from loom_service.pool_management.control import (
     cancel_unstarted_pool_request,
     pool_request_status,
 )
+from loom_service.pool_management.lifecycle import drain_pool_request, stop_pool_request
 from loom_service.pool_management.observations import (
     PoolObservationError,
     issue_pool_capture,
@@ -104,7 +106,7 @@ async def publish_observation(request: Request, pool_id: UUID) -> Response:
 
 
 async def _participant(request: Request, pool_id: UUID,
-                       operation: Literal["prepare", "status", "activate", "cancel-unstarted"]) -> Response:
+                       operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain"]) -> Response:
     body = await request.body()
     if len(body) > MAX_POOL_REQUEST_BYTES:
         raise _error(413, "pool_request_too_large")
@@ -130,6 +132,13 @@ async def _participant(request: Request, pool_id: UUID,
                     result = await prepare_execution(session, principal, workload, profiles=profiles)
                 else:
                     result = await prepare_task_image(session, principal, workload, profiles=profiles)
+            elif operation in {"stop", "drain"}:
+                lifecycle: PoolStopV1 | PoolDrainV1 = (PoolStopV1.model_validate_json(body) if operation == "stop"
+                    else PoolDrainV1.model_validate_json(body))
+                if lifecycle.action.pool_id != pool_id or lifecycle.action.request_key.participant_id != principal.participant_id:
+                    raise _error(403, "pool_participant_scope_unavailable")
+                result = (await stop_pool_request(session, principal, lifecycle) if isinstance(lifecycle, PoolStopV1)
+                    else await drain_pool_request(session, principal, lifecycle))
             else:
                 activation = PoolActivationV1.model_validate_json(body) if operation == "activate" else None
                 action = activation.action if activation is not None else PoolRequestActionV1.model_validate_json(body)
@@ -175,3 +184,13 @@ async def activate(request: Request, pool_id: UUID) -> Response:
 @router.post("/{pool_id}/cancel-unstarted")
 async def cancel_unstarted(request: Request, pool_id: UUID) -> Response:
     return await _participant(request, pool_id, "cancel-unstarted")
+
+
+@router.post("/{pool_id}/stop")
+async def stop(request: Request, pool_id: UUID) -> Response:
+    return await _participant(request, pool_id, "stop")
+
+
+@router.post("/{pool_id}/drain")
+async def drain(request: Request, pool_id: UUID) -> Response:
+    return await _participant(request, pool_id, "drain")
