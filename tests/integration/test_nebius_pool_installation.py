@@ -16,10 +16,10 @@ from tests.integration.test_nebius_pool_registry import sessions as sessions
 from tests.unit.test_nebius_pool_profiles import document
 
 
-def installation():
+def installation(environments=("production", "staging", "development")):
     participant, _, profiles = document()
     participants, executions, builds = [], [], []
-    for index, environment in enumerate(("production", "staging", "development")):
+    for index, environment in enumerate(environments):
         profile_id = uuid4()
         current = participant.model_copy(update={"participant_id": uuid4(), "environment_id": uuid4(),
             "incarnation": uuid4(), "environment_class": environment,
@@ -52,20 +52,29 @@ def installation():
         "participants": participants, "machines": credentials, "profiles": profiles}, raw
 
 
-async def test_actual_registration_entrypoint_installs_closed_pool_and_exact_replay(sessions, tmp_path):
+@pytest.mark.parametrize("environments, participant_count, machine_count", [
+    (("development",), 1, 3),
+    (("staging", "development"), 2, 4),
+    (("production", "staging", "development"), 3, 5),
+    (("production", "staging", "staging", "development"), 4, 6),
+])
+async def test_actual_registration_entrypoint_installs_closed_pool_and_exact_replay(
+    sessions, tmp_path, environments, participant_count, machine_count,
+):
     from loom_service.pool_management.installation import run_installation
 
-    config, raw = installation()
+    config, raw = installation(environments)
     file = tmp_path / "installation.json"
     file.write_text(json.dumps(config))
     url = sessions.kw["bind"].url.render_as_string(hide_password=False)
     first = await run_installation(file, db_url=url)
     assert await run_installation(file, db_url=url) == first
-    assert first["mode"] == "closed" and first["participants"] == 3 and first["machines"] == 5
+    assert first["mode"] == "closed"
+    assert first["participants"] == participant_count and first["machines"] == machine_count
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(NebiusPoolBinding)) == 1
-        assert await session.scalar(select(func.count()).select_from(NebiusPoolParticipant)) == 3
-        assert await session.scalar(select(func.count()).select_from(NebiusPoolMachine)) == 5
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolParticipant)) == participant_count
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolMachine)) == machine_count
         for identity, secret in raw.items():
             principal = await resolve_pool_machine(session, "Bearer " + secret)
             assert principal is not None and principal.machine_id == identity and principal.pool_mode == "closed"

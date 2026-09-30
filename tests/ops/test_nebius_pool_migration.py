@@ -12,10 +12,10 @@ from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_registration import request as registration_request
 
 
-def migration_request():
+def migration_request(environments=("production", "staging", "development")):
     from scripts.ops.nebius_pool_migration import PoolGuardTarget, PoolMigrationRequest
 
-    registration = registration_request()
+    registration = registration_request(environments)
     targets = []
     for index, participant in enumerate(registration.spec.participants):
         namespace = f"loom-platform-{index}"
@@ -74,7 +74,7 @@ class MigrationAPI:
         return {"job_uid": job["uid"], "pod_uid": "b9fe1340-2941-4c37-835c-3a0f668dc25a",
             "registration": {"schema_version": "loom.pool-installation-receipt.v1", "operation_id": str(spec.operation_id),
                 "pool_id": str(spec.pool_id), "installation_sha256": digest(spec.model_dump(mode="json")),
-                "mode": "closed", "participants": 3, "machines": 5}}
+                "mode": "closed", "participants": len(spec.participants), "machines": len(spec.machines)}}
 
 
 def run(request, api, tmp_path):
@@ -165,3 +165,70 @@ def test_pending_job_reuses_same_registration_and_never_releases_guards(tmp_path
     assert run(request, api, tmp_path)["status"] == "pool_registered_closed"
     assert len(api.registration.creates) == 2
     assert len([row for row in api.actions if row[1] == "acquire"]) == 3
+
+
+@pytest.mark.parametrize("environments, expected_count", [
+    (("development",), 1),
+    (("staging", "development"), 2),
+    (("production", "staging", "staging", "development"), 4),
+])
+def test_initial_closure_covers_qualified_participants_without_a_fixed_roster(tmp_path, environments, expected_count):
+    request = migration_request(environments)
+    api = MigrationAPI(request)
+    result = run(request, api, tmp_path)
+    assert result["status"] == "pool_registered_closed"
+    assert result["writer_migration_complete"] is False
+    assert run(request, api, tmp_path) == result
+    assert len([row for row in api.actions if row[1] == "acquire"]) == expected_count
+    record = json.loads((tmp_path / "state/migration.json").read_text())
+    assert record["guards"] == {str(row.participant_id): "held" for row in request.registration.spec.participants}
+    assert record["registration"]["proof"]["registration"]["participants"] == expected_count
+    assert len(api.registration.creates) == 2
+
+
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "foreign", "same_namespace", "same_namespace_uid"])
+def test_exact_guard_per_participant_is_required_before_any_side_effect(tmp_path, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    request = migration_request(("staging", "development"))
+    first, second = request.guards
+    if damage == "missing":
+        guards = (first,)
+    elif damage == "duplicate":
+        guards = (first, first)
+    elif damage == "foreign":
+        guards = (first, replace(second, participant_id=uuid4()))
+    elif damage == "same_namespace":
+        guards = (first, replace(second, namespace=first.namespace))
+    else:
+        guards = (first, replace(second, namespace_uid=first.namespace_uid))
+    request = replace(request, guards=guards)
+    api = MigrationAPI(request)
+    with pytest.raises(PoolMigrationError):
+        run(request, api, tmp_path)
+    assert not api.actions and not api.registration.creates
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("field", ["participants", "machines"])
+def test_mismatched_registration_counts_cannot_qualify_a_smaller_installation(tmp_path, monkeypatch, field):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    request = migration_request(("staging", "development"))
+    api = MigrationAPI(request)
+    original = api.register
+
+    def wrong_receipt(state_dir):
+        result = original(state_dir)
+        result["registration"][field] = 7
+        return result
+
+    monkeypatch.setattr(api, "register", wrong_receipt)
+    for _ in range(2):
+        with pytest.raises(PoolMigrationError) as error:
+            run(request, api, tmp_path)
+        assert error.value.stage == "registration"
+    assert len(api.guards) == 2
+    assert len(api.registration.creates) == 2
+    record = json.loads((tmp_path / "state/migration.json").read_text())
+    assert record["registration"]["proof"] is None

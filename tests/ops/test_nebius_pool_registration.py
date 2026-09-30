@@ -9,12 +9,12 @@ from tests.integration.test_nebius_pool_installation import installation
 from tests.ops.test_nebius_management_stage import PhaseAPI
 
 
-def request():
+def request(environments=("production", "staging", "development")):
     from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 
     from loom_service.pool_management.installation import PoolInstallation
 
-    config, _ = installation()
+    config, _ = installation(environments)
     spec = PoolInstallation.model_validate(config)
     binding = ManagementBinding(str(spec.installation_id), "loom-nebius-management", str(uuid4()), str(uuid4()))
     candidate = {"source_ref": "refs/heads/dev", "candidate_sha": "1" * 40,
