@@ -2142,6 +2142,18 @@ and registration explicitly leave writer migration incomplete. Controller
 retirement, RBAC changes, global runtime installation and activation remain later
 barriers; none is implied by a closed-registration receipt.
 
+The separate controller-retirement stage retains that closure evidence without
+replaying commands in control-plane Pods after stopping them. It suspends the
+three recorded collectors, then scales the three actuators and three control
+planes to zero, preserving their UIDs and Pod templates. Exact UID, resource
+version and spec preconditions bound each PATCH. Lost or unqualified responses
+retain write intent and permit readback only; only a complete Kubernetes conflict
+or invalid-request rejection permits another attempt. Complete namespace
+ReplicaSet/Job/Pod observations must prove drain, including terminating Pods and
+all collector container states. Replay rechecks earlier stopped workloads without
+writing. This stage neither changes RBAC nor activates a replacement writer;
+effective authority fencing and the connected protected installer remain required.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
