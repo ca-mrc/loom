@@ -21,12 +21,14 @@ from loom.nebius_pool_contract import (
     PoolWaitingV1,
 )
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
+from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom.pipeline.keys import canonical_digest
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
 PoolResult = PoolReceiptV1 | PoolWaitingV1
+PoolOperation = Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain", "native-runtime"]
 _RESULT: TypeAdapter[PoolResult] = TypeAdapter(Annotated[PoolResult, Field(discriminator="schema_version")])
 
 
@@ -49,8 +51,7 @@ class PoolClient:
         self._owns_client, self._closed = client is None, False
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=False, trust_env=False)
 
-    async def _post(self, action: PoolRequestActionV1, operation: Literal["prepare", "status", "activate", "cancel-unstarted", "stop", "drain"],
-                    body: bytes) -> PoolResult:
+    async def _exchange(self, action: PoolRequestActionV1, operation: PoolOperation, body: bytes) -> bytes:
         if self._closed or len(body) > MAX_POOL_REQUEST_BYTES:
             raise PoolRequestUnconfirmedError
         try:
@@ -69,13 +70,23 @@ class PoolClient:
                         if len(result) + len(chunk) > MAX_POOL_REQUEST_BYTES:
                             raise PoolRequestUnconfirmedError
                         result.extend(chunk)
-            receipt = _RESULT.validate_json(bytes(result))
-            if (receipt.pool_id != action.pool_id or receipt.request_key != action.request_key
-                    or receipt.request_sha256 != action.request_sha256
-                    or (isinstance(receipt, PoolReceiptV1) and receipt.admission_epoch != action.admission_epoch)):
-                raise PoolRequestUnconfirmedError
-            return receipt
+            return bytes(result)
         except (httpx.HTTPError, TimeoutError, ValueError):
+            raise PoolRequestUnconfirmedError from None
+
+    @staticmethod
+    def _identity(action: PoolRequestActionV1, receipt: PoolResult) -> None:
+        if (receipt.pool_id != action.pool_id or receipt.request_key != action.request_key
+                or receipt.request_sha256 != action.request_sha256
+                or (isinstance(receipt, PoolReceiptV1) and receipt.admission_epoch != action.admission_epoch)):
+            raise PoolRequestUnconfirmedError
+
+    async def _post(self, action: PoolRequestActionV1, operation: PoolOperation, body: bytes) -> PoolResult:
+        try:
+            receipt = _RESULT.validate_json(await self._exchange(action, operation, body))
+            self._identity(action, receipt)
+            return receipt
+        except ValueError:
             raise PoolRequestUnconfirmedError from None
 
     async def prepare(self, request: PoolExecutionPrepareV1 | PoolTaskImagePrepareV1) -> PoolResult:
@@ -126,3 +137,13 @@ class PoolClient:
 
     async def drain(self, body: PoolDrainV1) -> PoolReceiptV1:
         return await self._lifecycle(PoolDrainV1.model_validate_json(body.model_dump_json()))
+
+    async def native_runtime(self, action: PoolRequestActionV1) -> PoolNativeRuntimeV1:
+        action = PoolRequestActionV1.model_validate_json(action.model_dump_json())
+        try:
+            runtime = PoolNativeRuntimeV1.model_validate_json(
+                await self._exchange(action, "native-runtime", action.model_dump_json().encode()))
+            self._identity(action, runtime.receipt)
+            return runtime
+        except ValueError:
+            raise PoolRequestUnconfirmedError from None

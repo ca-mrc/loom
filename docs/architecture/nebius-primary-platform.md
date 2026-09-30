@@ -1753,7 +1753,7 @@ while intake is closed; it cannot cancel an already activated intent into free
 capacity. Concurrent activation/cancellation has one winner. These functions own
 no commit and perform no external write. The management-only participant API
 exposes these operations under `/internal/pools/v1/{pool_id}` as `prepare`,
-`status`, `activate`, `cancel-unstarted`, `stop`, and `drain`. It requires a dedicated credential
+`status`, `activate`, `cancel-unstarted`, `stop`, `drain`, and `native-runtime`. It requires a dedicated credential
 bound to that pool and participant; ordinary users, administrators, generic
 workers and observer/gateway credentials cannot substitute. Prepare and first
 activation require the protected runtime-profile catalog. The participant client
@@ -1761,6 +1761,17 @@ uses bounded HTTPS requests, checks exact response identity, and never redirects
 or automatically retries uncertain writes. Connected controller/gateway workers,
 output-drain qualification and complete cleanup remain required before installation
 can enable global admission.
+
+Native runtime readback derives a bounded description from the retained activated
+plan, even when current profiles are unavailable. It returns the receipt, target,
+namespace name/UID, deterministic Job name, actual native lease epoch, original
+deadline, expected image repository and, when observed, the Job create-effect ID.
+It returns no manifests, source payload or credentials and performs no rerender or
+external write. The native epoch is distinct from the selection generation. A Job
+UID requires its matching observed gateway effect. The runtime controller must
+qualify read-only Kubernetes observations against these retained identities before
+using publication or failure evidence; readback alone does not implement that
+controller or prove a build completed.
 
 Migration `0171` adds protected pool/participant registrations, immutable request
 journals and retained cleanup observations. PostgreSQL enforces unique request

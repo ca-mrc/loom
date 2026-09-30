@@ -125,3 +125,48 @@ def test_client_rejects_non_origin_urls_before_loading_credentials(tmp_path, ori
 
     with pytest.raises(ValueError):
         PoolClient(origin=origin, bearer_token_file=tmp_path / "absent", timeout_seconds=1)
+
+
+@pytest.mark.parametrize("damage", ["pool", "key", "epoch", "digest", "name", "effect", "manifest", "malformed"])
+async def test_native_runtime_rejects_cross_request_or_unbound_identity(tmp_path, damage):
+    from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+
+    request, receipt = inputs()
+    action = PoolRequestActionV1(pool_id=request.pool_id, request_key=request.key,
+        admission_epoch=request.admission_epoch, request_sha256=receipt["request_sha256"])
+    receipt.update(phase="observed", plan_sha256="a" * 64, job_uid=str(uuid4()))
+    runtime = {"receipt": receipt, "target_id": request.target_id,
+        "namespace": {"name": "loom-build", "uid": str(uuid4())},
+        "job_name": "loom-pool-" + receipt["reservation_id"].replace("-", ""),
+        "lease_epoch": request.build.expected_lease_epoch + 1,
+        "deadline_at": request.deadline_at.isoformat(), "registry_repository": "registry.example/tasks",
+        "job_effect_id": str(uuid4())}
+    if damage == "pool":
+        receipt["pool_id"] = str(uuid4())
+    elif damage == "key":
+        receipt["request_key"]["generation"] += 1
+    elif damage == "epoch":
+        receipt["admission_epoch"] += 1
+    elif damage == "digest":
+        receipt["request_sha256"] = "b" * 64
+    elif damage == "name":
+        runtime["job_name"] = "foreign-build"
+    elif damage == "effect":
+        runtime["job_effect_id"] = None
+    elif damage == "manifest":
+        runtime["job"] = {"spec": {"private-test-credential": "must not be returned"}}
+    calls = []
+
+    def handler(incoming):
+        calls.append(incoming)
+        assert incoming.url.path == f"/internal/pools/v1/{request.pool_id}/native-runtime"
+        assert incoming.content == action.model_dump_json().encode()
+        return (httpx.Response(200, content=b"private-test-credential: not-json") if damage == "malformed"
+                else httpx.Response(200, json=runtime))
+
+    management, http = transport(tmp_path, handler)
+    async with http:
+        with pytest.raises(PoolRequestUnconfirmedError) as caught:
+            await management.native_runtime(action)
+    assert "private-test-credential" not in str(caught.value)
+    assert len(calls) == 1
