@@ -70,7 +70,7 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
                 assert trial.state == "queued" and trial.attempt_count == 0
                 assert trial.config["verifier_env_mode"] is None
                 assert trial.scheduling_observation["reason"] == "platform_deploying"
-                await release(session, owner="test-verifier-rollout")
+                await release(session, owner="test-verifier-rollout", candidate="a" * 40)
                 await session.commit()
                 guard_owned = False
                 now += timedelta(seconds=16)
@@ -95,7 +95,7 @@ async def test_scheduler_persists_revision_bound_default_before_admission(
     finally:
         async with sessions() as session:
             if guard_owned:
-                await release(session, owner="test-verifier-rollout")
+                await release(session, owner="test-verifier-rollout", candidate="a" * 40)
                 await session.commit()
             await _clean_image_links(session, trial_id)
         await engine.dispose()

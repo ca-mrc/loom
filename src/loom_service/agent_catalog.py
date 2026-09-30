@@ -34,7 +34,7 @@ that should restrict can be overridden in `_ADAPTER_OVERRIDES`).
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -553,6 +553,62 @@ def resolve_agents(
     return [entry for entry in catalog if entry.name in canonical_names]
 
 
+def native_execution_error(agent_name: str) -> str | None:
+    """Why this agent cannot run on hosted (Nebius native) execution yet.
+
+    Returns None when native execution can run it (or the name is unknown,
+    which catalog validation reports separately). The set comes from native
+    admission itself, so the catalog, API and admission cannot disagree.
+    """
+    from loom.service_execution_materialization import NATIVE_EXECUTION_AGENT_NAMES
+
+    agent = get_agent(agent_name, include_internal=True)
+    if agent is None or {agent.name, *agent.aliases} & NATIVE_EXECUTION_AGENT_NAMES:
+        return None
+    runnable = ", ".join(sorted(NATIVE_EXECUTION_AGENT_NAMES))
+    return (
+        f"agent {agent.display_name or agent.name!r} is not yet runnable on hosted "
+        f"(Nebius) execution; currently only {runnable} run there (#2054)"
+    )
+
+
+def selection_agents(
+    trial_config: Mapping[str, Any],
+    combinations: Sequence[Any],
+    indices: set[int] | None = None,
+) -> list[tuple[str, str]]:
+    """(context, agent_name) per selection of a batch; `combinations` may hold
+    `Combination` models or stored dicts. `indices` limits combinations."""
+    if combinations:
+        out: list[tuple[str, str]] = []
+        for i, combo in enumerate(combinations):
+            if indices is not None and i not in indices:
+                continue
+            name = combo.get("agent_name") if isinstance(combo, Mapping) else combo.agent_name
+            if isinstance(name, str) and name:
+                out.append((f"combinations[{i}]", name))
+        return out
+    name = trial_config.get("agent_name")
+    return [("trial_config", name)] if isinstance(name, str) and name else []
+
+
+def native_selections_error(
+    backend: str | None,
+    selections: Iterable[tuple[str, str]],
+) -> str | None:
+    """First selection hosted Nebius execution cannot run yet, as
+    `"<context>: <reason>"`, or None. Other backends are unaffected."""
+    from loom.service_execution_backend import NEBIUS_BACKEND
+
+    if backend != NEBIUS_BACKEND:
+        return None
+    for context, agent_name in selections:
+        err = native_execution_error(agent_name)
+        if err is not None:
+            return f"{context}: {err}"
+    return None
+
+
 def validate_agent_model_compat(
     agent_name: str,
     model: ModelSpec | None,
@@ -618,5 +674,8 @@ __all__ = [
     "get_agent",
     "known_names",
     "list_agents",
+    "native_execution_error",
+    "native_selections_error",
+    "selection_agents",
     "validate_agent_model_compat",
 ]

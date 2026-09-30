@@ -1434,18 +1434,52 @@ expiry that could restart work on a partially updated platform. New automation
 then reports `skipped_locked`, leaving the failed deployment for recovery.
 
 For recovery, inspect the recorded phase, migration and workload state first.
-Repair forward or restore compatible application images; do not automatically
-downgrade the database. After confirming the platform is healthy and the previous
-runner is no longer applying changes, explicitly release the recorded owner:
+Fix the diagnosed cause, confirm the original workflow is terminal, and use the
+protected recovery operation for the existing single-primary integration platform:
 
 ```sh
-kubectl --kubeconfig /protected/kubeconfig -n loom-nebius-platform \
-  exec deployment/loom-control-plane -- python -m loom.nebius_rollout_guard \
-  release --owner <guard_owner-from-deployment-evidence>
+gh workflow run nebius-rollout.yml --repo qianyi-sun/loom --ref dev \
+  -f operation=recover -f recovery_run_id=FAILED_ROLLOUT_RUN_ID
 ```
 
-Then manually dispatch the workflow if another rollout is needed. Never delete
-another owner's pause or rerun the former unguarded operator for routine updates.
+Recovery reads the failed attempt's sanitized deployment record and the
+successful publication of its original candidate. Before acquiring the pause,
+the workflow persists its owner, candidate, previous configured candidate and
+run/attempt in a GitHub Deployment record. If runner loss prevents artifact
+upload, recovery can locate that server-side intent for the exact failed run.
+The database must still confirm the matching held owner/candidate; an intent
+record alone never grants ownership. The candidate SHA, image digests,
+guard owner, cluster and namespaces remain fixed. It uses the current merged
+recovery tooling and the original candidate's migration graph, without selecting
+the newest publication. The live configured candidate must match the original candidate or the
+persisted previous candidate when failure preceded configuration application.
+The held database guard must still match; another owner/candidate, successful or
+nonterminal run, missing evidence, or primary-target replacement blocks this path.
+The same protected Environment and workflow concurrency apply, and
+`NEBIUS_AUTO_ROLLOUT_ENABLED` must remain enabled. Failed candidate Jobs may be
+replaced only through this explicit recovery. Completed Jobs are reused.
+
+When a shared-schema migration is required, rollout checks application database
+access after holding the dispatch guard and before backup or manifest application.
+`application_database_access_active` means application credentials or sessions still
+permit access, even if the current connection count is zero. Suspend the affected
+applications through their authorized lifecycle and verify revocation/drain
+completion before recovering. The recovery operation does not revoke credentials
+or suspend applications itself. Never bypass the application schema guard, delete
+its credential records, stamp the migration revision, or clear the rollout guard
+directly. A new attempt blocked before mutation releases its own pause; an attempt
+recovering a partially applied candidate retains the original pause on failure.
+Failure reporting reads the persisted guard again, including when a database
+commit succeeds but the command response is lost. Unavailable observation records
+an unknown possible pause; it never treats a process-local flag as proof that
+dispatch is open. The recovery owner is loaded from the failed record, rather
+than supplied as a separate manual owner override.
+
+Recovery observes the guard directly through PostgreSQL, so a failed Control
+Plane Pod cannot prevent repair. It releases only the matching owner and
+candidate after HTTPS and workload readback succeed. Inspect the new sanitized deployment evidence and installed
+versions before resuming suspended applications. Repair forward or review a
+compatible restore separately; recovery does not authorize a database downgrade.
 
 ### Replacing an immutable primary target
 

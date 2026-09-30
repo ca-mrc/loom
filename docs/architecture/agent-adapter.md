@@ -11,7 +11,11 @@ Loom drives three kinds of agents:
    subprocess inside the sandbox. The included CLI adapters live
    in `packages/loom-launcher/`.
 
-This doc focuses on the third category: the extensible surface.
+This doc focuses on the third category in local and worker-owned execution.
+Automatic Nebius execution has a separate, fail-closed controller contract; a
+launcher adapter is not hosted readiness. See
+[`hosted-agent-harness.md`](hosted-agent-harness.md) before admitting an adapter
+on Nebius.
 
 ## `loom-launcher` framework
 
@@ -91,7 +95,7 @@ adapters compose one of them:
 | `poll_local_http` | HTTP `/events?since=N` (curl in-sandbox) | reserved for server-mode adapters |
 | `tail_pty` | ANSI terminal output (parsed) | qwen-cli, kimi-cli |
 
-## Builtin worker runtimes
+## Builtin local and worker runtimes
 
 Some agents do not go through `loom-launcher` or `SubprocessAgent`. They are
 implemented directly in the worker and listed in `src/loom_service/agent_catalog.py`
@@ -103,9 +107,13 @@ under `_BUILTIN`:
 | `direct-completion` | `builtin-direct-completion` | `gateway-llm-calls` | Response-only Gateway completion; `litellm` is a deprecated alias |
 | `terminus-2` | `builtin-terminus2-harbor` | `typed_events+harbor_artifacts` | Pinned Harbor `Terminus2` in-process; typed `terminus2_*` events + `.loom/agent/` artifacts |
 
-`terminus-2` is installed via `deploy/Dockerfile.worker`, not per-trial
-`install_script`. See [`terminus2-runtime.md`](terminus2-runtime.md) for the
-bridge, gateway ledger, staging smoke, and export status.
+The local/worker `terminus-2` runtime is installed via
+`deploy/Dockerfile.worker`, not a per-trial `install_script`. Native Nebius uses
+the separately published `deploy/Dockerfile.harbor-runtime` controller image,
+the common execution-plan supervisor, and a task-image sandbox sidecar. See
+[`terminus2-runtime.md`](terminus2-runtime.md) for both paths and
+[`hosted-agent-harness.md`](hosted-agent-harness.md) for the hosted extension
+contract.
 
 ## Launcher adapters
 

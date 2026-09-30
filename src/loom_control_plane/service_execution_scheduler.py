@@ -27,6 +27,7 @@ from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     compile_service_execution_plan,
+    resolve_runner_task_image,
 )
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
@@ -311,7 +312,8 @@ async def _reserve_service_candidate(
         now=current_time,
     )
     requirements = workload_requirements_from_task(
-        resolve_prepared_task(task, grant) if grant else task,
+        resolve_prepared_task(task, grant) if grant
+        else resolve_runner_task_image(task, runtime_plan.task_image_ref),
         trial_config if binding is None else None,
     )
     blocked: ExecutionProvisioningBlockedError | None = None

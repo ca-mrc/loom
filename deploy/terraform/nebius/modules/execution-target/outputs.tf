@@ -91,3 +91,18 @@ output "deployment_access" {
     private_service_cidr       = nebius_vpc_v1_allocation.deployment_access_private.status.details.allocated_cidr
   }
 }
+
+output "h100_resource_pool" {
+  description = "Configured GPU node group; runtime/device/plugin and allocatable-resource qualification remain separate."
+  value = var.h100_pool == null ? null : {
+    id                = nebius_mk8s_v1_node_group.h100_execution[0].id
+    platform          = "gpu-h100-sxm"
+    preset            = "1gpu-16vcpu-200gb"
+    min_nodes         = 0
+    max_nodes         = var.h100_pool.max_nodes
+    disk_gib          = var.h100_pool.disk_gib
+    gpu_model         = "H100"
+    gpu_memory_gb     = 80
+    runtime_qualified = false
+  }
+}

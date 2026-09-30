@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Any, cast
 
+from loom_benchmarks.base import BenchmarkAdapter
 from loom_benchmarks.fetch import fetch_upstream
 from loom_benchmarks.registry import REGISTRY
 
@@ -27,9 +28,10 @@ def prepare_adapter_benchmark(
     refresh: bool = False,
     limit: int | None = None,
     instance_ids: set[str] | None = None,
+    adapter_override: BenchmarkAdapter | None = None,
 ) -> PreparedAdapterBenchmark:
     try:
-        adapter = REGISTRY[benchmark]
+        adapter = adapter_override if adapter_override is not None else REGISTRY[benchmark]
     except KeyError as exc:
         raise ValueError(f"unknown benchmark adapter: {benchmark}") from exc
     # Profile ids such as terminal-bench-2@tb2.1-r6 are valid upstream identities.
@@ -43,6 +45,14 @@ def prepare_adapter_benchmark(
             f"benchmark cache {cache_dir.resolve()} is not writable or contains files "
             "owned by another user; choose a writable --cache-dir or LOOM_BENCHMARK_CACHE"
         ) from exc
+    origin = getattr(getattr(adapter, "spec", None), "origin", None)
+    if origin is not None:
+        if limit is not None:
+            raise ValueError("native Harbor subsets require explicit instance ids and a distinct profile identity")
+        requested = set(origin.subset) if instance_ids is None else instance_ids
+        if requested != set(origin.subset):
+            raise ValueError("native Harbor selected instance ids must match the persisted origin.subset")
+        instance_ids = requested or None
     selected = _select_instances(
         adapter, source_dir=source_dir, instance_ids=instance_ids, limit=limit
     )
@@ -63,7 +73,8 @@ def prepare_adapter_benchmark(
             raise ValueError(f"invalid or duplicate adapter task id: {converted.task_id}")
         _validate_instance_id(converted.task_id.removeprefix(adapter.name + "/"))
         ids.add(converted.task_id)
-        validate_task_dir_dockerfiles(bundle)
+        if origin is None:
+            validate_task_dir_dockerfiles(bundle)
         config = load_task_config_from_bundle(bundle)
         if config["task"]["id"] != converted.task_id:
             raise ValueError(f"adapter task.toml id does not match {converted.task_id}")
@@ -93,6 +104,13 @@ def prepare_adapter_benchmark(
         tomls.append(bundle / "task.toml")
     if not tomls:
         raise ValueError(f"benchmark {benchmark} selected no tasks")
+    profile_provenance = _adapter_profile_provenance(adapter)
+    if origin is not None:
+        profile_provenance["compatibility"] = {
+            "imported": True, "runtime_verified": False,
+            "blocked_tasks": sum(item["source_provenance"]["compatibility"]["status"] == "blocked" for item in tasks.values()),
+            "task_count": len(tasks),
+        }
     manifest = {
         "benchmark_id": adapter.name,
         "display_name": adapter.display_name,
@@ -103,7 +121,7 @@ def prepare_adapter_benchmark(
         "upstream_kind": adapter.upstream_source.kind,
         "upstream_locator": adapter.upstream_source.locator,
         "upstream_revision": adapter.upstream_source.revision or "",
-        "benchmark_profile_provenance": _adapter_profile_provenance(adapter),
+        "benchmark_profile_provenance": profile_provenance,
         "tasks": list(tasks.values()),
     }
     from loom_benchmark_tool.register_cmd import validate_profile_registration

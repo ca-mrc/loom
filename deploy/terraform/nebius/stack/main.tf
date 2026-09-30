@@ -24,6 +24,7 @@ module "execution_target" {
   execution_max_pods                = var.target.execution_max_pods
   system_preset                     = var.target.system_preset
   execution_preset                  = var.target.execution_preset
+  h100_pool                         = var.target.h100_pool
   system_disk_gib                   = var.target.system_disk_gib
   execution_disk_gib                = var.target.execution_disk_gib
   evidence_bucket_name              = var.evidence_bucket_name

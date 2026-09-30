@@ -57,13 +57,14 @@ async def acquire(session: AsyncSession, *, owner: str, candidate: str) -> dict[
     return {"status": "acquired", "active": counts}
 
 
-async def release(session: AsyncSession, *, owner: str) -> dict[str, Any]:
-    # Only the owner can resume; never clear another deployment/operator pause.
+async def release(session: AsyncSession, *, owner: str, candidate: str) -> dict[str, Any]:
+    # Recovery belongs to the exact paused rollout, including its candidate.
     result = await session.execute(text(
-        "DELETE FROM nebius_rollout_guard WHERE id = 1 AND owner = :owner RETURNING id"
-    ), {"owner": owner})
+        "DELETE FROM nebius_rollout_guard "
+        "WHERE id = 1 AND owner = :owner AND candidate_sha = :candidate RETURNING id"
+    ), {"owner": owner, "candidate": candidate})
     if result.scalar_one_or_none() is None:
-        raise ValueError("rollout guard owner does not match")
+        raise ValueError("rollout guard owner or candidate does not match")
     return {"status": "released"}
 
 
@@ -88,7 +89,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 return await acquire(session, owner=args.owner, candidate=args.candidate)
             if args.action == "observe":
                 return await observe(session, owner=args.owner, candidate=args.candidate)
-            return await release(session, owner=args.owner)
+            return await release(session, owner=args.owner, candidate=args.candidate)
     finally:
         await engine.dispose()
 
@@ -97,10 +98,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("acquire", "release", "observe"))
     parser.add_argument("--owner", required=True)
-    parser.add_argument("--candidate")
+    parser.add_argument("--candidate", required=True)
     args = parser.parse_args()
-    if args.action in {"acquire", "observe"} and not args.candidate:
-        parser.error("acquire and observe require --candidate")
+    if not args.candidate:
+        parser.error("--candidate must not be empty")
     try:
         print(json.dumps(asyncio.run(_run(args))))
     except Exception:

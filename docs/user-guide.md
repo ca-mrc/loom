@@ -848,6 +848,44 @@ Other agents (SWE-agent, Mini SWE-agent, Aider, OpenCode, Claude Code,
 Gemini CLI, Kimi CLI, Qwen CLI) stay listed so historical runs remain readable,
 but new submissions are rejected with the reason.
 
+On hosted (Nebius) deployments, native execution currently runs
+`direct-completion` (and its `litellm` alias), `terminus-2` and `oracle`.
+OpenHands and Codex are supported product entries but are not yet connected to
+native execution: `/api/v1/agents` reports them as `unavailable` with that
+reason, and hosted submissions naming them are rejected before admission. Local
+Docker execution is unaffected. Tracking: #2054.
+
+Hosted Oracle runs in the same private task sandbox as Terminus-2, so it needs a
+task image (or a Dockerfile the platform prepares), and the task must have a
+script verifier under `verifier/`. Only Oracle's sandbox receives `solution/`;
+it is removed again before the workspace snapshot and grading, and model agents
+never see it. Oracle makes no model calls: its accounting records zero calls,
+and a Gateway call during an Oracle attempt fails materialization.
+
+A response-only task for `direct-completion`/`litellm` should leave
+`environment.docker_image` (and `dockerfile`) unset. It then runs in the
+platform's runner image, which each execution plan freezes per run, so the task
+keeps working across service upgrades. A task that pins `docker_image` must
+still match the deployed runner image exactly, and a task with a Dockerfile is
+not run in the runner image. The #2054 acceptance TaskSet (answer `17 × 19`
+with only `323`) is built with:
+
+```bash
+uv run python scripts/ops/build_agent_model_acceptance_taskset.py --output /tmp/ts-2054
+loom tasksets submit /tmp/ts-2054
+```
+
+The workspace acceptance TaskSet (`agent-model-2054/workspace-csv-summary`)
+exercises a real read/write/execute loop for OpenHands, Terminus-2 and Codex, and
+Oracle's reference solution. Its image is prepared from the task's Dockerfile.
+The verifier reports `report` (exact integer totals) and `reproduced` (the
+generated `summarize.py` recreates them from the task input):
+
+```bash
+uv run python scripts/ops/build_agent_model_acceptance_taskset.py --task workspace --output /tmp/ts-2054-ws
+loom tasksets submit /tmp/ts-2054-ws
+```
+
 Every model-backed selection needs an explicitly selected, authorized
 OpenAI-compatible Provider Connection (`openai-compatible` or `custom`), owned by
 or shared with your team. There is no fallback to platform credentials, and
@@ -1830,9 +1868,11 @@ loom run
 - `direct-completion` — sends the prompt directly through the Gateway and can
   project response text to exact artifact paths; it does not execute workspace
   tools. `litellm` remains a deprecated compatibility alias.
-- `terminus-2` — Harbor Terminus2 embedded in the worker image; tool-use
-  terminal loop with typed `terminus2_*` trajectory events and Harbor artifacts
-  under `.loom/agent/`. Requires a provider + model; does not use
+- `terminus-2` — Harbor Terminus2 embedded in the local/worker runtime or the
+  digest-pinned Nebius controller image; tool-use terminal loop with typed
+  `terminus2_*` trajectory events and Harbor artifacts under `.loom/agent/`.
+  Hosted terminal commands execute in the separate task-image sandbox through
+  Loom's private sandbox driver. Requires a provider + model; does not use
   `loom-launcher` or per-trial `install_script`. See
   [`architecture/terminus2-runtime.md`](architecture/terminus2-runtime.md).
 

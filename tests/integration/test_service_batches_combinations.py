@@ -1079,3 +1079,42 @@ async def test_model_backed_submission_without_connection_is_rejected(
     detail = r.json()["detail"]
     assert "combinations[1]" in detail
     assert "requires a Provider Connection" in detail
+
+
+async def test_nebius_batch_rejects_agents_without_native_execution(
+    setup: tuple[FastAPI, str],
+    postgres_url: str,
+) -> None:
+    """#2054: a Nebius batch naming an agent native execution cannot run yet
+    gets one clear reason before admission, not raw per-task codes."""
+    app, raw = setup
+    conn_id = _insert_connection(postgres_url, raw, "Native check", ("gpt-4o",))
+
+    r = await _post(
+        app,
+        raw,
+        {
+            "name": "native-check",
+            "purpose": "evaluation",
+            "backend": "nebius",
+            "task_filter": {"license": "MIT", "subset_kind": "first_n", "n": 1},
+            "trial_config": {},
+            "provider_connection_id": str(conn_id),
+            "combinations": [
+                {
+                    "agent_name": "terminus-2",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o"},
+                    "n_per_task": 1,
+                },
+                {
+                    "agent_name": "codex",
+                    "agent_model": {"provider": "openai", "name": "gpt-4o"},
+                    "n_per_task": 1,
+                },
+            ],
+        },
+    )
+
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert detail.startswith("combinations[1]: agent 'codex' is not yet runnable")

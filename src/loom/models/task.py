@@ -20,10 +20,12 @@ from pydantic import (
 )
 
 from loom.execution_requirements import TaskExecutionRequirementsV1
+from loom.models.harbor import ArtifactSource, HarborConversion, UpstreamOrigin, VerifierCollect
 from loom.models.healthcheck import HealthcheckSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy, Public
 from loom.models.skill import SkillRef
+from loom.models.task_compatibility import TaskBundleCompatibilityIssue
 from loom.models.types import (
     OS,
     GPUVendor,
@@ -150,7 +152,19 @@ class EnvironmentConfig(BaseModel):
     memory_mb: int | None = Field(default=None, gt=0)
     storage_mb: int | None = Field(default=None, gt=0)
     gpus: int = Field(default=0, ge=0)
+    gpu_types: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    compose_files: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     sidecars: list[TaskSidecarConfig] = []
+
+    @model_validator(mode="after")
+    def _native_requirements(self) -> EnvironmentConfig:
+        if self.gpu_types and (self.gpus == 0 or any(not value.strip() for value in self.gpu_types)):
+            raise ValueError("gpu_types requires a positive GPU count and nonempty exact model names")
+        for value in self.compose_files:
+            path = PurePosixPath(value)
+            if not value or path.is_absolute() or ".." in path.parts or "\\" in value or "\x00" in value:
+                raise ValueError("compose_files must reference paths inside the task bundle")
+        return self
 
     @model_serializer(mode="wrap")
     def _omit_unused_handoff_declarations(self, handler: Any) -> dict[str, Any]:
@@ -221,6 +235,15 @@ class VerifierDefaults(BaseModel):
     timeout_sec: float = Field(default=300, gt=0)
     env_mode: VerifierEnvMode = "separate"
     user: str | int | None = None
+    environment: EnvironmentConfig | None = Field(default=None, exclude_if=lambda value: value is None)
+    environment_vars: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
+    collect: tuple[VerifierCollect, ...] = Field(default=(), exclude_if=lambda value: not value)
+
+    @model_validator(mode="after")
+    def _separate_environment(self) -> VerifierDefaults:
+        if self.environment is not None and self.env_mode == "shared":
+            raise ValueError("shared verifier cannot declare a separate environment")
+        return self
 
 
 class AgentOverrides(BaseModel):
@@ -256,6 +279,7 @@ class StepConfig(BaseModel):
     instruction_file: PurePosixPath = PurePosixPath("instruction.md")
     agent: AgentOverrides | None = None
     verifier: VerifierOverrides | None = None
+    artifact_sources: tuple[ArtifactSource, ...] = Field(default=(), exclude_if=lambda value: not value)
     artifacts: list[str] = []  # POSIX globs
     required_artifacts: list[str] = []  # verifier-required POSIX globs
     min_reward: dict[str, float] | float | None = None
@@ -329,6 +353,12 @@ def bind_service_execution_runtime_plan(
 class TaskConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1"] = "1"
+    upstream_origin: UpstreamOrigin | None = Field(default=None, exclude_if=lambda value: value is None)
+    upstream_task_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    upstream_package_digest: Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")] | None = Field(default=None, exclude_if=lambda value: value is None)
+    upstream_conversion: HarborConversion | None = Field(default=None, exclude_if=lambda value: value is None)
+    import_blockers: tuple[TaskBundleCompatibilityIssue, ...] = Field(default=(), exclude_if=lambda value: not value)
+    solution_environment: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     required_agent_capabilities: frozenset[str] = frozenset()
     task: TaskMetadata
     environment: EnvironmentConfig
