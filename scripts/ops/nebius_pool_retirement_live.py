@@ -10,6 +10,7 @@ import json
 import ssl
 from typing import Any, Protocol
 
+import httpx
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI
 from scripts.ops.nebius_management_switch import _matches, _stable
@@ -27,6 +28,27 @@ from loom.nebius_platform_render import digest
 
 class PoolGuardObserver(Protocol):
     def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]: ...
+
+
+def _patch_result(response: httpx.Response, *, desired: dict[str, Any], uid: str) -> bool:
+    """Decode a bounded exact update; only qualified rejection permits retry."""
+    if response.status_code not in {200, 409, 422} or response.headers.get("content-encoding", "identity").lower() != "identity":
+        raise ValueError
+    raw = bytearray()
+    for chunk in response.iter_bytes(chunk_size=16384):
+        if len(raw) + len(chunk) > 4 * 1024**2:
+            raise ValueError
+        raw.extend(chunk)
+    value = json.loads(raw)
+    if response.status_code in {409, 422}:
+        if (not isinstance(value, dict) or value.get("apiVersion") != "v1" or value.get("kind") != "Status"
+                or value.get("status") != "Failure" or value.get("code") != response.status_code
+                or value.get("reason") != {409: "Conflict", 422: "Invalid"}[response.status_code]):
+            raise ValueError
+        return False
+    if not isinstance(value, dict) or not _matches(value, desired, uid):
+        raise ValueError
+    return True
 
 
 class HTTPSPoolRetirementAPI(HTTPSManagementStageAPI):
@@ -98,23 +120,7 @@ class HTTPSPoolRetirementAPI(HTTPSManagementStageAPI):
                 {"op": "replace", "path": "/spec/" + field, "value": desired["spec"][field]}]
             with self.client.stream("PATCH", self._path(key), json=patches,
                     headers={"Content-Type": "application/json-patch+json"}) as response:
-                if response.status_code not in {200, 409, 422} or response.headers.get("content-encoding", "identity").lower() != "identity":
-                    raise ValueError
-                raw = bytearray()
-                for chunk in response.iter_bytes(chunk_size=16384):
-                    if len(raw) + len(chunk) > 4 * 1024**2:
-                        raise ValueError
-                    raw.extend(chunk)
-                value = json.loads(raw)
-                if response.status_code in {409, 422}:
-                    if (not isinstance(value, dict) or value.get("apiVersion") != "v1" or value.get("kind") != "Status"
-                            or value.get("status") != "Failure" or value.get("code") != response.status_code
-                            or value.get("reason") != {409: "Conflict", 422: "Invalid"}[response.status_code]):
-                        raise ValueError
-                    return False
-                if not isinstance(value, dict) or not _matches(value, desired, _uid(original)):
-                    raise ValueError
-            return True
+                return _patch_result(response, desired=desired, uid=_uid(original))
         except Exception:
             raise ValueError("pool_retirement_update_unconfirmed") from None
 

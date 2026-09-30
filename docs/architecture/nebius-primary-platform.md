@@ -2154,6 +2154,16 @@ all collector container states. Replay rechecks earlier stopped workloads withou
 writing. This stage neither changes RBAC nor activates a replacement writer;
 effective authority fencing and the connected protected installer remain required.
 
+The participant-role phase composes that retained retirement barrier with six
+fixed Role replacements: the existing execution-actuator and task-image-builder
+roles in each participant's namespaces. It preserves Role UIDs, bindings and
+unrelated metadata, changing only the recorded rules to the fixed reader rules
+and adding its operation marker. Exact preconditions, retained update intent and
+bounded readback handle lost replies without uncertain retries. It rechecks the
+stopped workloads and restricted roles on replay. The phase does not create
+bindings or gateway permissions, and its receipt still marks writer migration
+incomplete: extra grants and unrecorded writers require separate qualification.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
