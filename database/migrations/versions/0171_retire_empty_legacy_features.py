@@ -1,7 +1,7 @@
 """Retire empty obsolete feature tables without deleting historical records.
 
-Revision ID: 0167
-Revises: 0166
+Revision ID: 0171
+Revises: 0170
 
 The five task-image authority/evidence tables used by retained image-history
 fixtures and their foreign keys are intentionally excluded. Published legacy migration chains remain.
@@ -12,8 +12,8 @@ empty structure, not discarded data (upgrade refuses every nonempty table).
 from alembic import op
 from sqlalchemy import text
 
-revision = "0167"
-down_revision = "0166"
+revision = "0171"
+down_revision = "0170"
 branch_labels = None
 depends_on = None
 

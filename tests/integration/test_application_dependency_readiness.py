@@ -17,8 +17,9 @@ from loom.admin_secret import AdminSecretVerifier
 from loom_service.routes.health import router
 
 
+@pytest.mark.parametrize("service_mode", ["standalone", "api_only"])
 async def test_readiness_without_staging_tables_and_missing_bucket(
-    shared_minio: MinioContainer, monkeypatch: pytest.MonkeyPatch,
+    shared_minio: MinioContainer, monkeypatch: pytest.MonkeyPatch, service_mode: str,
 ) -> None:
     cfg = shared_minio.get_config()
     s3 = boto3.client(
@@ -38,7 +39,7 @@ async def test_readiness_without_staging_tables_and_missing_bucket(
         app.include_router(router, prefix="/api/v1")
         app.state.session_factory = async_sessionmaker(engine)
         app.state.settings = SimpleNamespace(
-            artifacts_bucket=buckets[0], trajectories_bucket=buckets[1],
+            service_mode=service_mode, artifacts_bucket=buckets[0], trajectories_bucket=buckets[1],
             session_cookie_name="loom_session", session_audience="application",
         )
         token = "loom_admin_" + "disposable-readiness-fixture-" * 2
@@ -57,16 +58,21 @@ async def test_readiness_without_staging_tables_and_missing_bucket(
                     )
                     assert response.status_code == 200, response.text
                     assert response.json()["status"] == "ready"
-                    assert response.json()["environment"] == environment
+                    if service_mode == "standalone":
+                        assert response.json()["environment"] == environment
+                    else:
+                        assert response.json()["mode"] == "api_only"
                 s3.delete_bucket(Bucket=buckets[1])
                 response = await client.get(
                     "/api/v1/health/ready", headers={"Authorization": f"Bearer {token}"},
                 )
                 assert response.status_code == 503
                 assert response.json()["postgres"] == "ready"
-                assert response.json()["blockers"] == [
-                    "object-store-bucket-unavailable:readiness-trajectories",
-                ]
+                expected = ("object-store-unavailable" if service_mode == "api_only"
+                            else "object-store-bucket-unavailable:readiness-trajectories")
+                assert response.json()["blockers"] == [expected]
+                if service_mode == "api_only":
+                    assert all(bucket not in response.text for bucket in buckets)
                 assert token not in response.text
                 assert cfg["secret_key"] not in response.text
                 assert (await client.get("/api/v1/health")).status_code == 200

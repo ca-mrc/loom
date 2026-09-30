@@ -32,7 +32,7 @@ def test_fresh_head_has_only_retained_candidates_and_reversible_empty_retirement
     cfg = _config(isolated_migration_postgres_url)
     try:
         assert set(inspect(engine).get_table_names()) & set(CANDIDATES) == RETAINED
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         assert set(CANDIDATES) <= set(inspect(engine).get_table_names())
         before = {}
         with engine.begin() as connection:
@@ -50,7 +50,7 @@ def test_fresh_head_has_only_retained_candidates_and_reversible_empty_retirement
             for name, rows in before.items():
                 assert connection.execute(text(f"SELECT to_jsonb(t) FROM {name} t")).scalars().all() == rows
         assert set(inspect(engine).get_table_names()) & set(CANDIDATES) == RETAINED
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         command.upgrade(cfg, "head")
     finally:
         engine.dispose()
@@ -62,7 +62,7 @@ def test_retirement_refuses_rows_and_preserves_the_entire_old_schema(
     engine = create_engine(isolated_migration_postgres_url)
     cfg = _config(isolated_migration_postgres_url)
     try:
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         with engine.begin() as connection:
             connection.execute(text("""
                 INSERT INTO gb10_worker_pool_desired_states
@@ -73,7 +73,7 @@ def test_retirement_refuses_rows_and_preserves_the_entire_old_schema(
             command.upgrade(cfg, "head")
         assert set(CANDIDATES) <= set(inspect(engine).get_table_names())
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0166"
+            assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0170"
             assert connection.execute(text("SELECT count(*) FROM gb10_worker_pool_desired_states")).scalar_one() == 1
     finally:
         engine.dispose()
@@ -85,7 +85,7 @@ def test_retirement_refuses_external_view_dependency_without_cascade(
     engine = create_engine(isolated_migration_postgres_url)
     cfg = _config(isolated_migration_postgres_url)
     try:
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         with engine.begin() as connection:
             connection.execute(text("CREATE VIEW retained_external_view AS SELECT * FROM dev_instances"))
         with pytest.raises(DBAPIError, match="depend"):
@@ -104,7 +104,7 @@ def test_downgrade_matches_postgres_dump_restore_of_the_original_catalog() -> No
     with PostgresContainer("postgres:16") as pg:
         url = pg.get_connection_url().replace("postgresql+psycopg2://", "postgresql+psycopg://")
         cfg = _config(url)
-        command.upgrade(cfg, "0166")
+        command.upgrade(cfg, "0170")
         dsn = url.replace("postgresql+psycopg://", "postgresql://")
         # pg_dump round-trips varchar-array casts into equivalent per-element
         # text casts. Compare against PostgreSQL's own restored catalog rather
@@ -123,12 +123,12 @@ def test_downgrade_matches_postgres_dump_restore_of_the_original_catalog() -> No
         with psycopg.connect(reference_dsn) as connection:
             connection.execute(sql)
         cfg = _config(reference_dsn.replace("postgresql://", "postgresql+psycopg://"))
-        command.stamp(cfg, "0166")
+        command.stamp(cfg, "0170")
         with psycopg.connect(reference_dsn) as connection:
             connection.execute("SET TRANSACTION READ ONLY")
             before = read_application_schema_inventory(connection, role_bindings={"test": "application-owner"})
         command.upgrade(cfg, "head")
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         with psycopg.connect(reference_dsn) as connection:
             connection.execute("SET TRANSACTION READ ONLY")
             after = read_application_schema_inventory(connection, role_bindings={"test": "application-owner"})
@@ -141,7 +141,7 @@ def test_retirement_refuses_dynamic_sql_dependencies(
     engine = create_engine(isolated_migration_postgres_url)
     cfg = _config(isolated_migration_postgres_url)
     try:
-        command.downgrade(cfg, "0166")
+        command.downgrade(cfg, "0170")
         with engine.begin() as connection:
             connection.execute(text("""
                 CREATE FUNCTION external_legacy_reader() RETURNS bigint LANGUAGE plpgsql AS $$

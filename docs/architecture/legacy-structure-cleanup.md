@@ -59,7 +59,7 @@ unknown dependent SQL routines or objects.
 Published migrations remain intact. In particular, the independent
 `capacity_build_guard_migrations` chain references personal-development tables.
 It cannot be silently removed or treated as compatible with the new schema.
-Migration 0167 aborts if such dependent routines are installed.
+Migration 0171 aborts if such dependent routines are installed.
 
 `src/loom/application_schema_provisioning.py`,
 `src/loom/application_schema_readonly.py`, and
@@ -106,7 +106,7 @@ sizes, FKs, trigger/function/view candidates, visible grants and version tables.
 
 ## Migration and rollback
 
-Migration 0167 locks the fixed 20-table set with `NOWAIT`, checks for rows under
+Migration 0171 locks the fixed 20-table set with `NOWAIT`, checks for rows under
 those locks, checks routine references, then drops the fixed set without
 `CASCADE`. Any nonempty table, unknown dependent routine/view/FK, or competing
 lock aborts the transaction. Do not delete rows or alter installed guards to
@@ -122,8 +122,11 @@ Deploy application code and migration as one release. Older service code queries
 `dev_instances` during secret GC, so a migration-first overlap may fail that
 periodic GC until the new service starts. Readiness and current business records
 remain separate. For code rollback to a pre-cleanup service, restore revision
-0166 before starting that service, following normal backup/rollback procedures.
-An old standalone code image must not be run against 0167.
+0170 before starting the pre-cleanup service, following normal backup/rollback
+procedures. This undoes retirement only and preserves the intervening verifier,
+TaskSet lifecycle and execution-recovery migrations. Older images need their own
+compatible schema revision and separately qualified rollback.
+An old standalone code image must not be run against 0171.
 
 ## Verification and acceptance boundary
 
@@ -136,7 +139,7 @@ Focused disposable PostgreSQL 16 / MinIO coverage verifies:
   including constraints, indexes, triggers, functions and default permissions.
 - Historical image publication, grants and projection events remain readable.
   Frozen historical migration tests retain their data instead of deleting it to
-  satisfy 0167. Current API/readiness and secret-GC tests use the new head.
+  satisfy 0171. Current API/readiness and secret-GC tests use the new head.
 - Authenticated readiness works in development/staging/production without any
   staging tables; a missing bucket returns sanitized 503. Local Worker recovery,
   native execution leases and cancellation remain covered.

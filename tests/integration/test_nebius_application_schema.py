@@ -26,6 +26,7 @@ from tests.integration.test_nebius_application_database import (
 from tests.integration.test_nebius_application_database import database_access as database_access
 from tests.integration.test_nebius_application_database import login
 
+
 @pytest.fixture
 def migration_access(isolated_migration_postgres_url):
     url = make_url(isolated_migration_postgres_url).set(drivername="postgresql")
