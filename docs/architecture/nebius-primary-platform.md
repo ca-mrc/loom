@@ -1692,7 +1692,11 @@ arithmetic to measure the complete single-Pod envelope. Named RuntimeClasses nee
 explicit protected overhead; absent requests cannot silently rely on API-server
 defaulting. The request digest retains origin and absolute deadline while the
 rendered remaining runtime changes with the time of activation. This adapter
-does not expose an endpoint, grant capacity, write a Job or establish installed
+also passes the original absolute deadline to the trusted execution runtime.
+Delayed container startup cannot renew input, proxy or phase execution time;
+expired startup is rejected and whole-lease expiry prevents verifier handoff.
+The separate bounded output-commit context remains available for partial evidence.
+This adapter does not expose an endpoint, grant capacity, write a Job or establish installed
 global admission. The registry/gateway still must qualify current authority and
 freeze the first activation document before a Kubernetes write.
 
@@ -1887,8 +1891,9 @@ remain authorized, then confirm durable committed/unavailable output before fina
 cleanup and release. The API is not itself proof of that local output state.
 The native runtime consumer supplies its own saved publication/failure evidence;
 it does not qualify execution output. The execution runtime adapter,
-installed gateway startup and delayed-start absolute deadline
-remain unimplemented boundaries.
+installed gateway startup and native-build delayed-start absolute deadline
+remain unimplemented boundaries. The execution PID1 runtime enforces its original
+absolute deadline, but does not itself attest output drain or release capacity.
 
 The native-build local outbox commits an immutable typed selection before contacting
 management. It keeps selection generation separate from build lease epoch and permits

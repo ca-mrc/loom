@@ -98,6 +98,10 @@ def prepare_pool_execution(request: PoolExecutionPrepareV1, *, participant: Pool
     if job["spec"]["parallelism"] != 1 or job["spec"]["completions"] != 1:
         raise ValueError("pool_execution_requires_single_pod")
     pod = job["spec"]["template"]["spec"]
+    # A frozen relative Job timeout must not become fresh consent when its
+    # CREATE or scheduling was delayed. The trusted PID1 runtime bounds input,
+    # proxy and phase contexts by this original deadline; output drain is separate.
+    pod["containers"][0]["args"].extend(["--deadline-at", request.deadline_at.isoformat()])
     accounting_pod = dict(pod)
     if profile.runtime_class_overhead is not None:
         overhead = profile.runtime_class_overhead
