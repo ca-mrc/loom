@@ -285,3 +285,19 @@ def test_replaying_released_receipt_cannot_change_cleanup_evidence():
         "released", cleanup_observation_id="b0000000-0000-4000-8000-000000000002"))
     with pytest.raises(ValueError):
         validate_pool_receipt_transition(first, second)
+
+
+def test_cancelled_uncertain_create_can_record_late_job_identity_without_freeing_capacity():
+    from loom.nebius_pool_contract import PoolReceiptV1, validate_pool_receipt_transition
+
+    uncertain = PoolReceiptV1.model_validate(receipt("cleanup_intent"))
+    found = PoolReceiptV1.model_validate(receipt(
+        "cleanup_intent", job_uid="a0000000-0000-4000-8000-000000000001"))
+    validate_pool_receipt_transition(uncertain, found)
+    assert found.capacity_charged
+    with pytest.raises(ValueError):
+        validate_pool_receipt_transition(found, uncertain)
+    replaced = PoolReceiptV1.model_validate(receipt(
+        "cleanup_intent", job_uid="a0000000-0000-4000-8000-000000000002"))
+    with pytest.raises(ValueError):
+        validate_pool_receipt_transition(found, replaced)

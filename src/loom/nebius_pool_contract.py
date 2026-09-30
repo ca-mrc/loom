@@ -15,6 +15,10 @@ PoolWorkloadKind = Literal["trial", "verifier", "task_image_build", "application
 _Generation = Annotated[int, Field(gt=0, le=2**63 - 1, strict=True)]
 _NAMESPACE = r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$"
 _TARGET = r"^[a-z0-9][a-z0-9-]{0,79}$"
+_Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+PoolRequestPhase = Literal[
+    "reserved", "create_intent", "observed", "cleanup_intent", "released", "cancelled_unstarted",
+]
 
 
 def _non_nil(*identities: UUID) -> None:
@@ -93,3 +97,68 @@ class PoolRequestKeyV1(_PoolContract):
 
     def storage_key(self) -> tuple[UUID, PoolWorkloadKind, UUID, int]:
         return self.participant_id, self.workload_kind, self.local_work_id, self.generation
+
+
+class PoolReceiptV1(_PoolContract):
+    """A durable reservation snapshot, never caller-provided release authority.
+
+    Waiting requests have no reservation receipt. The registry must independently
+    qualify cleanup_observation_id against this request, frozen plan, namespace
+    and fenced writer before persisting a released receipt. This shape validates
+    references and accounting state; it cannot prove actual Kubernetes absence.
+    Blocked/unknown transport outcomes do not replace the durable phase.
+    """
+
+    schema_version: Literal["loom.pool-receipt.v1"] = "loom.pool-receipt.v1"
+    reservation_id: UUID
+    pool_id: UUID
+    request_key: PoolRequestKeyV1
+    admission_epoch: _Generation
+    request_sha256: _Digest
+    phase: PoolRequestPhase
+    plan_sha256: _Digest | None = None
+    job_uid: UUID | None = None
+    cleanup_observation_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def durable_phase(self) -> PoolReceiptV1:
+        _non_nil(self.reservation_id, self.pool_id)
+        _non_nil(*(value for value in (self.job_uid, self.cleanup_observation_id) if value is not None))
+        unstarted = self.phase in {"reserved", "cancelled_unstarted"}
+        if unstarted != (self.plan_sha256 is None):
+            raise ValueError("pool_intent_phase_mismatch")
+        if ((self.phase in {"reserved", "cancelled_unstarted", "create_intent"} and self.job_uid is not None)
+                or (self.phase == "observed" and self.job_uid is None)):
+            raise ValueError("pool_job_phase_mismatch")
+        if (self.phase == "released") != (self.cleanup_observation_id is not None):
+            raise ValueError("pool_cleanup_phase_mismatch")
+        return self
+
+    @property
+    def capacity_charged(self) -> bool:
+        return self.phase not in {"released", "cancelled_unstarted"}
+
+
+def validate_pool_receipt_transition(previous: PoolReceiptV1, following: PoolReceiptV1) -> None:
+    """Reject history loss; caller still owns transactional CAS and proof checks."""
+    for field in ("reservation_id", "pool_id", "request_key", "admission_epoch", "request_sha256"):
+        if getattr(previous, field) != getattr(following, field):
+            raise ValueError("pool_receipt_identity_changed")
+    for field in ("plan_sha256", "job_uid", "cleanup_observation_id"):
+        value = getattr(previous, field)
+        if value is not None and value != getattr(following, field):
+            raise ValueError("pool_receipt_evidence_changed")
+    if previous == following:
+        return
+    # Cancellation may precede the readback of an uncertain create. Retain the
+    # discovered UID while staying charged; it cannot then disappear or change.
+    if (previous.phase == following.phase == "cleanup_intent"
+            and previous.job_uid is None and following.job_uid is not None):
+        return
+    edges = {
+        ("reserved", "create_intent"), ("reserved", "cancelled_unstarted"),
+        ("create_intent", "observed"), ("create_intent", "cleanup_intent"),
+        ("observed", "cleanup_intent"), ("cleanup_intent", "released"),
+    }
+    if (previous.phase, following.phase) not in edges:
+        raise ValueError("pool_receipt_transition_forbidden")
