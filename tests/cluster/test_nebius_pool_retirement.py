@@ -15,6 +15,7 @@ from tests.integration.test_execution_actuator_k3s import _load_client, _start_k
 from tests.ops.test_nebius_pool_retirement import initialize, retire
 from tests.ops.test_nebius_pool_retirement import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_retirement_live import Guards
+from tests.ops.test_nebius_pool_role_fencing import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -24,10 +25,12 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(240)
-async def test_actual_controller_retirement_preserves_templates_waits_for_pods_and_replays_readonly(retirement_inputs, tmp_path):
+async def test_actual_controller_retirement_preserves_templates_waits_for_pods_and_replays_readonly(retirement_inputs, fencing_inputs, tmp_path):
     from kubernetes import client
     from scripts.ops.nebius_pool_retirement import retirement_documents
     from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
+    from scripts.ops.nebius_pool_role_fencing import fence_pool_roles
+    from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 
     from loom_service.pool_management.installation import PoolInstallation
 
@@ -36,6 +39,7 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
     try:
         _, core, batch = await asyncio.to_thread(_load_client, container)
         apps = client.AppsV1Api(core.api_client)
+        rbac = client.RbacAuthorizationV1Api(core.api_client)
         binding = request.migration.registration.binding
         names = {binding.namespace, *(guard.namespace for guard in request.migration.guards),
             *(ns.name for row in request.migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))}
@@ -79,6 +83,21 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
         request = replace(request, migration=migration,
             actuators=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-actuator"] for row in request.actuators),
             collectors=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-capacity-collector"] for row in request.collectors))
+        roles = []
+        for original in fencing_inputs.originals:
+            document = copy.deepcopy(original)
+            for field in ("uid", "resourceVersion"):
+                document["metadata"].pop(field)
+            namespace, name = document["metadata"]["namespace"], document["metadata"]["name"]
+            installed_role = await asyncio.to_thread(rbac.create_namespaced_role, namespace, document)
+            roles.append(core.api_client.sanitize_for_serialization(installed_role))
+            participant, = [row for row in migration.registration.spec.participants
+                if namespace in {row.execution_namespace.name, row.build_namespace.name}]
+            await asyncio.to_thread(rbac.create_namespaced_role_binding, namespace, {
+                "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": name},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+                "subjects": [{"kind": "ServiceAccount", "name": "loom-execution-actuator", "namespace": participant.execution_namespace.name}]})
+        fencing = replace(fencing_inputs, retirement=request, originals=tuple(roles))
         initialize(request, tmp_path)
 
         # Hold one real pending controller Pod in deletion so a scale-to-zero
@@ -135,6 +154,34 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 assert current["metadata"]["uid"] == original["metadata"]["uid"]
                 field = "jobTemplate" if current["kind"] == "CronJob" else "template"
                 assert current["spec"][field] == original["spec"][field]
+            with HTTPSPoolRoleFenceAPI(request=fencing, retirement=api, api_server=configuration.host, ssl_context=tls) as roles_api:
+                methods.clear()
+                roles_api.client.event_hooks["request"].append(lambda message: methods.append(message.method))
+                result = await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
+                    state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+                assert result["status"] == "participant_roles_restricted" and result["writer_migration_complete"] is False
+                assert methods.count("PATCH") == 6
+                methods.clear()
+                assert await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
+                    state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor") == result
+                assert set(methods) == {"GET"}
+        # These use real issued runtime tokens, not operator impersonation or
+        # inspection of rendered rules. No probe Job is persisted.
+        import httpx
+
+        for participant in migration.registration.spec.participants:
+            issued = await asyncio.to_thread(core.create_namespaced_service_account_token, "loom-execution-actuator",
+                participant.execution_namespace.name, client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
+            async with httpx.AsyncClient(base_url=configuration.host,
+                    verify=ssl.create_default_context(cafile=configuration.ssl_ca_cert),
+                    headers={"Authorization": "Bearer " + issued.status.token}, timeout=20, trust_env=False) as http:
+                for namespace in (participant.execution_namespace.name, participant.build_namespace.name):
+                    assert (await http.get("/apis/batch/v1/namespaces/" + namespace + "/jobs/missing")).status_code == 404
+                    for verb in ("create", "update", "patch", "delete", "deletecollection"):
+                        response = await http.post("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", json={
+                            "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview", "spec": {
+                                "resourceAttributes": {"namespace": namespace, "group": "batch", "resource": "jobs", "verb": verb}}})
+                        assert response.status_code == 201 and response.json()["status"]["allowed"] is False
         for name in names:
             assert not (await asyncio.to_thread(core.list_namespaced_pod, name)).items
     finally:
