@@ -583,11 +583,25 @@ Cloud retirement separately reconciles prior-generation grants and deletes exact
 owned memberships, keys and accounts in dependency order. Prepared predecessor
 creates are never sent; uncertain deletion intents survive suspend-to-destroy
 without another request. Shared groups, buckets and policies remain untouched.
-Retained encrypted material supplies a signed, read-only object-service probe
-after IAM retirement. The protected HTTPS client must match the original frozen
-endpoint. Only an explicit HTTP403 `InvalidAccessKeyId` response proves key
-rejection; generic access denial, successful reads, redirects, malformed responses
-and transport failures keep retirement pending. An interrupted permissionless key
+Retained encrypted material supplies signed, read-only `ListObjectsV2` probes
+after fresh provider readback confirms exact IAM retirement, including on replay.
+Every distinct artifacts, trajectories and source bucket must return a bounded,
+well-formed HTTP403 `InvalidAccessKeyId` or `AccessDenied` response. This is a
+**composite access-retirement attestation**, not a claim that `AccessDenied` alone
+proves universal key invalidity or that list denial tests every read/write action.
+Successful reads, other errors, redirects, encoded or ambiguous XML responses and
+transport failures keep retirement pending; no probe independently releases capacity.
+
+The verifier's scope comes from the protected installation. Supported refreshes
+preserve its endpoint, region, buckets, groups/project and shared data identity,
+rooted to the original completed upgrade. Historical plans must match its
+registration/shared data and cluster, shared namespace, endpoint/region and data
+buckets; historical IAM parents must match its recorded groups/project. This
+immutable installation boundary supplies legacy source-bucket scope without
+rewriting a frozen plan. A data UUID alone cannot establish that boundary.
+The HTTP origin must match the original frozen endpoint, and the signer uses the
+original encrypted key with redirects and ambient client authentication disabled.
+An interrupted permissionless key
 with no committed material or membership intent is deleted without fabricating
 probe credentials. This composes access retirement, not installed readiness or
 permission to release capacity.
@@ -595,7 +609,9 @@ permission to release capacity.
 Before startup, credential `qualify` requires retained material and the four
 already-observed current IAM grants. It reconciles their live identities without
 new cloud mutations, validates the protected CA/keyring and original object key,
-and requalifies schema, SQL login and actual shared membership under the current
+and requires positive responses to the identical read-only probe in every scoped
+bucket. Only the expected bucket/prefix-bounded list response qualifies; ordinary
+denial is not readiness. It then requalifies schema, SQL login and actual shared membership under the current
 source/lease checks. Positive catalog checks require every individual runtime
 table/sequence privilege; missing grants are never repaired here. Qualification
 reuses bounded grant/enrollment replay, not a new administrative SQL interface.

@@ -35,7 +35,7 @@ async def ready_evidence(context, lease=None):
         database=await coordinator.credentials.retire_database(lease),
         objects=await coordinator.credentials.retire_cloud(lease, coordinator.object_verifier),
         prepared=await coordinator.runtime.read_prepared(lease),
-        access=await coordinator.credentials.qualify(lease),
+        access=await coordinator.credentials.qualify(lease, coordinator.object_verifier),
         network=await coordinator.runtime.read_shared_network(lease))
 
 

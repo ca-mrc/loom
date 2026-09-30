@@ -16,12 +16,15 @@ from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
 from loom.nebius_application_network import application_shared_network_policies
 from loom_service.application_management.coordinator import ApplicationLifecycleCoordinator
 from loom_service.application_management.kubernetes import ApplicationKubernetesProvider
-from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.runtime import ApplicationRuntimeProvider
 from loom_service.environment_management.provider import ProviderBlockedError, ProviderWaitingError
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_credentials import database_access as database_access
-from tests.integration.test_nebius_application_credentials import setup
+from tests.integration.test_nebius_application_credentials import (
+    object_success,
+    object_verifier,
+    setup,
+)
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
 from tests.integration.test_nebius_application_kubernetes import KubernetesAPI
 from tests.integration.test_nebius_application_material import management_key as management_key
@@ -49,11 +52,12 @@ async def preparation(applications, platform_inputs, database_access, shared_ca)
         api.objects[f"/apis/networking.k8s.io/v1/namespaces/{shared.platform_namespace}/networkpolicies/{doc['metadata']['name']}"] = doc
     async with httpx.AsyncClient(base_url='https://kubernetes.test', transport=httpx.MockTransport(api.handle)) as http:
         runtime = ApplicationRuntimeProvider(registry, ApplicationKubernetesProvider(registry, http), authority=authority)
-        # Fresh generation has no retired key to probe. Any unexpected access
-        # reaches a real verifier with controlled I/O, never a success callback.
+        # The concrete verifier must positively qualify the new generation's
+        # actual signed read-only request in every protected storage scope.
         async with httpx.AsyncClient(base_url='https://storage.eu-north1.nebius.cloud',
-                transport=httpx.MockTransport(lambda request: httpx.Response(500))) as storage_http:
-            coordinator = ApplicationLifecycleCoordinator(registry, runtime, credentials, ApplicationObjectAccessVerifier(storage_http))
+                transport=httpx.MockTransport(object_success)) as storage_http:
+            verifier = object_verifier(storage_http, credentials, platform_inputs, await registry.frozen_plan(lease))
+            coordinator = ApplicationLifecycleCoordinator(registry, runtime, credentials, verifier)
             yield coordinator, registry, factory, alice, lease, api, cloud, row
 
 
@@ -112,8 +116,8 @@ async def test_concrete_preparation_does_not_return_proof_after_source_supersess
     await close_quota(preparation)
     qualify = coordinator.credentials.qualify
 
-    async def supersede(current):
-        result = await qualify(current)
+    async def supersede(current, verifier):
+        result = await qualify(current, verifier)
         await registry.transition(lease.application_id, principal=alice, idempotency_key='stop',
             action='suspend', expected_generation=1)
         return result
