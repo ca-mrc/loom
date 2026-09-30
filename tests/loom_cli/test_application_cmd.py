@@ -189,3 +189,15 @@ def test_printed_retry_command_round_trips_leading_hyphen_key(application_http, 
     assert len(requests) == 2
     assert requests[0].content == requests[1].content
     assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"] == "-retry"
+
+
+def test_evidence_network_failure_guides_read_only_retry(application_http, capsys):
+    responses, requests = application_http
+    responses["GET", f"/api/v1/application-operations/{OPERATION}/evidence"] = httpx.ReadTimeout("private upstream detail")
+    assert main(["dev", "app", "evidence", OPERATION]) == 1
+    assert len(requests) == 1 and requests[0].method == "GET"
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "read-only" in output.err
+    assert "printed retry command" not in output.err
+    assert "private upstream detail" not in output.err
