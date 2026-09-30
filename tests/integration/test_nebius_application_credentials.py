@@ -152,6 +152,34 @@ async def test_active_qualification_requires_read_only_access_to_all_storage_sco
     assert len(cloud.mutations) == 4  # Qualification never provisions or retries IAM.
 
 
+@pytest.mark.parametrize("change_provider", [False, True])
+async def test_changed_protected_group_cannot_retire_historical_storage_scope(
+    applications, platform_inputs, database_access, shared_ca, change_provider,
+):
+    provider, registry, _, alice, row, lease, cloud, _ = await setup(applications, platform_inputs, database_access, shared_ca)
+    await provider.prepare(lease)
+    stopped = await registry.transition(row.application_id, principal=alice, action="suspend",
+        idempotency_key="scope-conflict", expected_generation=1)
+    current = await registry.claim(stopped.operation_id)
+    frozen = await registry.frozen_plan(current)
+    requests = []
+    foundation = inputs(platform_inputs)[3]
+
+    def deny(request):
+        requests.append(request)
+        return httpx.Response(403, text="<Error><Code>AccessDenied</Code></Error>")
+
+    async with httpx.AsyncClient(base_url=foundation.platform_config["storage_endpoint"],
+            transport=httpx.MockTransport(deny)) as http:
+        verifier = object_verifier(http, provider, platform_inputs, frozen)
+        verifier.storage = verifier.storage.model_copy(update={"source_group_id": "foreign-source-group"})
+        if change_provider:
+            provider.storage = verifier.storage
+        with pytest.raises(ProviderBlockedError, match="application_object_access_binding_conflict"):
+            await provider.retire_cloud(current, verifier)
+    assert len(cloud.mutations) == 4 and requests == []
+
+
 async def test_prepare_commits_real_revocable_login_and_reuses_shared_material(
     applications, platform_inputs, database_access, shared_ca,
 ):
