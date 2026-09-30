@@ -313,10 +313,21 @@ async def claim_task_image_materialization(
     cpu_arch: str,
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
     nebius_pool_id: str | None = None,
+    materialization_id: UUID | None = None,
+    expected_lease_epoch: int | None = None,
 ) -> TaskImageMaterialization | None:
-    """Atomically claim queued work or recover one expired lease."""
+    """Atomically claim queued work, or the exact selection admitted by a pool.
+
+    Exact selection never substitutes another queue head or performs unrelated
+    queue maintenance. Its caller still owns snapshot qualification, the durable
+    global-grant link, and commit/rollback; no network operation belongs here.
+    """
     from loom.nebius_rollout_guard import admission_open
 
+    if materialization_id is not None or expected_lease_epoch is not None:
+        if (not isinstance(materialization_id, UUID) or not materialization_id.int
+                or type(expected_lease_epoch) is not int or not 0 <= expected_lease_epoch < 2**63 - 1):
+            raise ValueError("exact materialization claim requires a valid ID and expected lease epoch")
     cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
@@ -326,31 +337,35 @@ async def claim_task_image_materialization(
 
     await require_task_bundle_transaction(session)
     scope: tuple[ColumnElement[bool], ...] = ()
+    if materialization_id is not None:
+        scope = (TaskImageMaterialization.id == materialization_id,
+                 TaskImageMaterialization.lease_epoch == expected_lease_epoch)
     if nebius_pool_id is not None:
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
-        scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
+        scope += (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
     if not await admission_open(session):
         return None
     now = datetime.now(UTC)
-    await session.execute(
-        update(TaskImageMaterialization)
-        .where(
-            *scope,
-            TaskImageMaterialization.state.in_(("claimed", "running")),
-            TaskImageMaterialization.lease_expires_at <= now,
-            TaskImageMaterialization.attempt_count >= TaskImageMaterialization.max_attempts,
+    if materialization_id is None:
+        await session.execute(
+            update(TaskImageMaterialization)
+            .where(
+                *scope,
+                TaskImageMaterialization.state.in_(("claimed", "running")),
+                TaskImageMaterialization.lease_expires_at <= now,
+                TaskImageMaterialization.attempt_count >= TaskImageMaterialization.max_attempts,
+            )
+            .values(
+                state="failed",
+                claimed_by=None,
+                lease_expires_at=None,
+                failure_reason="lease_expired",
+                failure_message="task image build lease expired at the attempt limit",
+                finished_at=now,
+                updated_at=now,
+            )
         )
-        .values(
-            state="failed",
-            claimed_by=None,
-            lease_expires_at=None,
-            failure_reason="lease_expired",
-            failure_message="task image build lease expired at the attempt limit",
-            finished_at=now,
-            updated_at=now,
-        )
-    )
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(
