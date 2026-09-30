@@ -2089,6 +2089,15 @@ with exact namespace UID checks and no automatic credential rotation. All target
 Deployments have zero replicas: these builders do not perform the protected
 cutover, install RBAC or activate admission.
 
+Runtime wiring also requires the published, signed execution profile, not just
+new application images. Its candidate/image/binary identities must match the
+global renderer catalog while retaining the environment's existing resource and
+capability policy. The shared API receives that profile, and control-plane/
+actuator image-admission keyrings are bound to the catalog together. This prevents
+a newly deployed API from continuing to compile tasks against a rejected old
+runtime. The protected caller still qualifies the publication and supplies the
+environment-qualified profile; the wiring does not invent admission signatures.
+
 The shared-development capacity CronJob is retained as the one pool observer,
 using its existing read-only Nebius credential and a dedicated observer token in
 that execution namespace. Its immutable configuration selects pool collection,

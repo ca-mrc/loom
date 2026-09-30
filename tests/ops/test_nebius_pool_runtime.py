@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -89,17 +90,42 @@ def runtime_inputs(platform_inputs, management_inputs):
 
 def test_shared_api_runtime_profile_matches_the_fixed_execution_catalog(runtime_inputs):
     from scripts.ops.nebius_pool_runtime import wire_participant
+    from tests.unit.test_service_execution_materialization import _provenance, _task, _trial
 
-    from loom.service_execution_materialization import load_service_execution_runtime_profile
+    from loom.execution_contract import workload_requirements_from_task
+    from loom.nebius_pool_priority import PoolSubmissionSourceV1
+    from loom.nebius_pool_workload import PoolExecutionPrepareV1
+    from loom.service_execution_materialization import (
+        compile_service_execution_plan,
+        load_service_execution_runtime_profile,
+    )
+    from loom_service.pool_management.render import prepare_pool_execution
 
     request, actuators, services, _ = runtime_inputs
     target = request.guards[0]
     result = wire_participant(request=request, participant_id=target.participant_id, management_origin="https://manage.example.com",
-        actuator=actuators[target.participant_id], service=services[target.participant_id])
+        actuator=actuators[target.participant_id], service=services[target.participant_id],
+        runtime_profile=desired_profile(request, services[target.participant_id]))
     actual = load_service_execution_runtime_profile(env(result["service"])["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
     assert actual.candidate_sha == "d" * 40
     assert actual.runtime_binary_sha256 == "sha256:" + "f" * 64
     assert actual.runtime_image_ref == request.registration.spec.profiles.execution[0].runtime_image_ref
+    task = _task()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={"docker_image": actual.task_image_ref})})
+    plan = compile_service_execution_plan(task=task, trial=_trial(), task_revision_sha256="sha256:" + "c" * 64,
+        source_provenance=_provenance(), profile=actual)
+    participant = request.registration.spec.participants[0]
+    source = PoolSubmissionSourceV1.model_validate_json(env(result["service"])["LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"]["value"])
+    now = datetime.now(UTC)
+    proposal = PoolExecutionPrepareV1(pool_id=participant.pool_id, admission_epoch=participant.admission_epoch,
+        participant_revision=participant.binding_revision,
+        key={"participant_id": participant.participant_id, "workload_kind": "trial", "local_work_id": uuid4(), "generation": 1},
+        target_id=participant.targets[0].target_id, deadline_at=now + timedelta(minutes=5), origin=source.origin(uuid4()),
+        execution={"lease_generation": 1, "execution_unit_key": uuid4(), "parent_lease_id": None,
+            "requirements": workload_requirements_from_task(task), "runtime": plan})
+    prepared = prepare_pool_execution(proposal, participant=participant,
+        profile=request.registration.spec.profiles.profiles().execution[participant.targets[0].profile_id], reservation_id=uuid4(), now=now)
+    assert prepared.job["metadata"]["namespace"] == participant.execution_namespace.name
 
 
 def test_manager_catalog_is_mounted_without_changing_existing_authorities(runtime_inputs, tmp_path, monkeypatch):
@@ -143,7 +169,8 @@ def test_all_participant_processes_consume_same_binding_and_preserve_data(runtim
         with monkeypatch.context() as patch:
             originals = copy.deepcopy((target.controller, actuators[target.participant_id], services[target.participant_id]))
             result = wire_participant(request=request, participant_id=target.participant_id, management_origin="https://manage.example.com",
-                actuator=actuators[target.participant_id], service=services[target.participant_id])
+                actuator=actuators[target.participant_id], service=services[target.participant_id],
+                runtime_profile=desired_profile(request, services[target.participant_id]))
             assert (target.controller, actuators[target.participant_id], services[target.participant_id]) == originals
             parsed = []
             for name, cls, prefix in (("control_plane", ControlPlaneSettings, "LOOM_CP_"),
@@ -164,6 +191,8 @@ def test_all_participant_processes_consume_same_binding_and_preserve_data(runtim
                 parsed.append(cls(_env_file=None))
             cp, actuator, service = parsed
             assert cp.global_pool == actuator.global_pool
+            assert all(json.loads(settings.execution_image_admission_public_keys_json) == request.registration.spec.profiles.image_admission_keyring
+                for settings in (cp, actuator))
             assert cp.global_pool.participant.participant_id == target.participant_id
             assert service.pool_submission_source.data_environment_id == cp.global_pool.participant.environment_id
             assert service.pool_submission_source.kind == "environment"
@@ -224,7 +253,30 @@ def test_runtime_wiring_refuses_unqualified_participant_inputs(runtime_inputs, d
     elif damage == "class":
         env(target.controller)["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"]["value"] = "development"
     with pytest.raises(ValueError):
-        wire_participant(request=request, participant_id=target.participant_id, management_origin=origin, actuator=actuator, service=service)
+        wire_participant(request=request, participant_id=target.participant_id, management_origin=origin, actuator=actuator, service=service,
+            runtime_profile=desired_profile(request, service))
+
+
+@pytest.mark.parametrize("damage", ["candidate_sha", "runtime_binary_sha256", "runtime_image_ref", "signature", "policy"])
+def test_runtime_profile_must_be_published_bound_and_preserve_environment_policy(runtime_inputs, damage):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _ = runtime_inputs
+    target = request.guards[0]
+    profile = desired_profile(request, services[target.participant_id])
+    if damage == "signature":
+        admission = profile.image_admission.admissions[0]
+        profile = profile.model_copy(update={"image_admission": profile.image_admission.model_copy(update={"admissions": (
+            admission.model_copy(update={"signature_base64": "A" * 88}), *profile.image_admission.admissions[1:])})})
+    else:
+        field, value = {"candidate_sha": ("candidate_sha", "1" * 40),
+            "runtime_binary_sha256": ("runtime_binary_sha256", "sha256:" + "1" * 64),
+            "runtime_image_ref": ("runtime_image_ref", "registry.example/runtime@sha256:" + "1" * 64),
+            "policy": ("max_artifact_bytes", 1)}[damage]
+        profile = profile.model_copy(update={field: value})
+    with pytest.raises(ValueError):
+        wire_participant(request=request, participant_id=target.participant_id, management_origin="https://manage.example.com",
+            actuator=actuators[target.participant_id], service=services[target.participant_id], runtime_profile=profile)
 
 
 @pytest.mark.parametrize("damage", ["namespace", "installation", "mode", "catalog", "mount", "owner", "uid"])

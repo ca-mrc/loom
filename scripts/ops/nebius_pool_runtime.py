@@ -7,6 +7,7 @@ or starting any target. Replays compare that retained original, not a new read.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,11 @@ from uuid import UUID
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 
+from loom.execution_image_admission import ImageAdmissionKeyring, verify_execution_image_admission
 from loom.nebius_platform_render import _obj
 from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.pool_management.installation_render import mount_machine_token
@@ -82,7 +85,8 @@ def wire_manager(*, request: PoolMigrationRequest, original: dict[str, Any]) -> 
 
 
 def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, management_origin: str,
-                     actuator: dict[str, Any], service: dict[str, Any]) -> dict[str, dict[str, Any]]:
+                     actuator: dict[str, Any], service: dict[str, Any],
+                     runtime_profile: ServiceExecutionRuntimeProfileV1) -> dict[str, dict[str, Any]]:
     try:
         migration_contract(request)
         spec = request.registration.spec
@@ -105,7 +109,26 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
                 or worker_env["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != participant.execution_namespace.name):
             raise ValueError
         target_id = worker_env["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
-        participant.target(target_id, "trial")
+        execution_target = participant.target(target_id, "trial")
+        execution_profile, = (row for row in spec.profiles.execution if row.profile_id == execution_target.profile_id)
+        runtime_profile = ServiceExecutionRuntimeProfileV1.model_validate(runtime_profile.model_dump())
+        previous_profile = ServiceExecutionRuntimeProfileV1.model_validate_json(api_env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
+        publication_fields = {"candidate_sha", "task_image_ref", "agent_image_ref", "runtime_image_ref", "runtime_binary_sha256", "image_admission"}
+        if ({key: value for key, value in previous_profile.model_dump().items() if key not in publication_fields}
+                != {key: value for key, value in runtime_profile.model_dump().items() if key not in publication_fields}
+                or (runtime_profile.candidate_sha, runtime_profile.execution_class_id, runtime_profile.runtime_image_ref, runtime_profile.runtime_binary_sha256)
+                    != (execution_profile.candidate_sha, execution_profile.execution_class_id, execution_profile.runtime_image_ref, execution_profile.runtime_binary_sha256)
+                or runtime_profile.candidate_sha != request.registration.candidate["candidate_sha"]
+                or runtime_profile.task_image_ref != _image(request, "service")
+                or runtime_profile.runtime_image_ref != _image(request, "execution_runtime")
+                or runtime_profile.logical_pool_id != cp_env["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID"]["value"]):
+            raise ValueError
+        agent_component = next((key for key in ("harbor_runtime", "worker") if key in request.registration.candidate["images"]), None)
+        if runtime_profile.agent_image_ref != (_image(request, agent_component) if agent_component else None):
+            raise ValueError
+        keyring_json = json.dumps(spec.profiles.image_admission_keyring, sort_keys=True, separators=(",", ":"))
+        verify_execution_image_admission(runtime_profile.image_admission, keyring=ImageAdmissionKeyring.from_json(keyring_json),
+            required_image_refs=[value for value in (runtime_profile.task_image_ref, runtime_profile.runtime_image_ref, runtime_profile.agent_image_ref) if value is not None])
         build_target = participant.target(target_id, "task_image_build")
         profile, = (row for row in spec.profiles.task_images if row.profile_id == build_target.profile_id)
         existing = NativeTaskImageSettings.model_validate_json(worker_env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]["value"])
@@ -123,6 +146,16 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         cp_container["env"].append({"name": cp_setting, "value": runtime.model_dump_json()})
         worker_container["env"].append({"name": worker_setting, "value": runtime.model_dump_json()})
         worker_env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]["value"] = profile.settings.model_dump_json()
+        api_env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"] = runtime_profile.model_dump_json()
+        for container, settings, prefix in ((cp_container, cp_env, "LOOM_CP_"),
+                (worker_container, worker_env, "LOOM_EXECUTION_ACTUATOR_")):
+            key = prefix + "EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON"
+            if key in settings:
+                if set(settings[key]) != {"name", "value"}:
+                    raise ValueError
+                settings[key]["value"] = keyring_json
+            else:
+                container["env"].append({"name": key, "value": keyring_json})
         source = PoolSubmissionSourceV1(kind="environment", data_environment_id=participant.environment_id, application=None)
         api_container["env"].append({"name": api_setting, "value": source.model_dump_json()})
         return {"control_plane": cp, "actuator": worker, "service": api}
