@@ -1,11 +1,23 @@
 # Harbor-embedded Terminus-2 runtime
 
-Loom's `terminus-2` agent runs pinned Harbor `Terminus2` **in-process inside
-the worker image**, not as a `loom-launcher` subprocess adapter. The worker
-routes `agent.name == "terminus-2"` to `LoomTerminus2Runtime`
-(`src/loom/agent/terminus2/runtime.py`).
+Loom runs pinned Harbor `Terminus2` in-process through two orchestration paths:
 
-## Pin and worker image
+- Local and worker-owned trials route `agent.name == "terminus-2"` to
+  `LoomTerminus2Runtime` in the worker image. They do not use a
+  `loom-launcher` subprocess adapter.
+- Automatic Nebius trials freeze a Terminus controller image and phase command
+  into the execution plan. The per-trial `execution` container invokes
+  `service_execution_sandbox_task terminus-2`; that hosted bridge reuses
+  `LoomTerminus2Runtime` with a lease-scoped Gateway client and a
+  `ServiceSandboxDriver` connected to the task-image sidecar over a private
+  Unix socket. It skips the worker `setup()` method and never installs packages
+  during the trial.
+
+The common sandbox and verifier lifecycle belongs to hosted execution, not to
+the Terminus harness. See
+[`hosted-agent-harness.md`](hosted-agent-harness.md) for the extension boundary.
+
+## Pins and runtime images
 
 | Constant | Value |
 |---|---|
@@ -13,8 +25,9 @@ routes `agent.name == "terminus-2"` to `LoomTerminus2Runtime`
 | Harbor runtime version | `0.18.0` |
 | Loom bridge revision | `1.0` |
 
-Harbor is installed only in `deploy/Dockerfile.worker` (not the main Loom
-package). Gate 1 evidence:
+Harbor is installed in `deploy/Dockerfile.worker` for the local/worker path and
+in `deploy/Dockerfile.harbor-runtime` for the native controller path. It is not
+installed by a task-authored script. Worker Gate 1 evidence includes:
 
 - `deploy/worker-image.lock` — frozen worker transitive deps after `pip check`
 - `deploy/worker-image.wheels.json` — SHA256 for critical wheels
@@ -78,7 +91,9 @@ Authored Dockerfile `WORKDIR` mismatches remain intake diagnostics until the tas
 declaration preserves the original location, including separately declared
 mutable state outside that workspace.
 
-## Runtime shape
+## Runtime shapes
+
+Local and worker-owned execution:
 
 ```
 Trial.run()
@@ -93,13 +108,38 @@ Trial.run()
             └─ appends typed terminus2_* events to Loom trajectory JSONL
 ```
 
+Automatic Nebius execution:
+
+```text
+execution lease with frozen runtime plan
+  -> Kubernetes Job
+     -> execution container (digest-pinned Harbor controller image)
+        -> loom-execution-runtime
+           -> service_execution_sandbox_task terminus-2
+              -> service_execution_terminus2.run_terminus2
+                 -> LoomTerminus2Runtime
+                 -> ServiceSandboxDriver
+                    | private Unix-socket RPC
+                    v
+     -> task-sandbox sidecar (digest-pinned task image)
+        -> loom-sandbox-runtime
+```
+
+The hosted controller owns Harbor, model calls, typed events and native Harbor
+artifacts. Terminal commands and task file operations execute in
+`task-sandbox`. Shared verification later reuses that sandbox. Separate mode
+commits the public workspace and has a deferred verifier-plan compiler, but the
+automatic child-lease reservation is not wired yet; its on-demand lifecycle is
+tracked by [#2212](https://github.com/qianyi-sun/loom/issues/2212).
+
 Harbor artifacts copied into the trial sandbox:
 
 - `.loom/agent/trajectory.json`
 - `.loom/agent/recording.cast`
 
-Step runner always includes `.loom/agent/**` in artifact patterns for
-`terminus-2` trials.
+The local step runner always includes `.loom/agent/**` in artifact patterns for
+`terminus-2` trials. The hosted compiler instead declares each canonical and
+native output path in the frozen runtime plan.
 
 ## Exception identity
 

@@ -58,9 +58,17 @@ from loom.verifier_runtime import resolve_verifier_env_mode
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GLOB_MAGIC = re.compile(r"[*?[]")
+_SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
 MAX_INPUT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_INPUT_FILES = 10_000
 MAX_INPUT_BYTES = 10 * 1024**3
+
+
+def _sandbox_phase_argv(mode: str) -> tuple[str, ...]:
+    return (
+        "python", "-I", "-m", _SANDBOX_CONTROLLER_MODULE,
+        mode, "--workspace", "/workspace",
+    )
 
 
 class _Strict(BaseModel):
@@ -863,8 +871,7 @@ def _compile_terminus_plan(
             role=role,
             # Keep Python imports and dependency configuration discovery outside
             # user-controlled task inputs, including dependencies that inspect cwd.
-            argv=("python", "-I", "-m", "loom.service_execution_sandbox_task", mode,
-                  "--workspace", "/workspace"),
+            argv=_sandbox_phase_argv(mode),
             working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
         )
     outputs = [RuntimeOutputDeclarationV1(
@@ -973,9 +980,6 @@ def compile_deferred_verifier_plan(
     verifier_sandbox = task_sandbox.model_copy(update={
         "role_name": "verifier-sandbox", "identity": identity,
     })
-    argv = tuple(
-        "verify-sandbox" if item == "terminus-2" else item for item in agent_plan.main.argv
-    )
     outputs = []
     for item in agent_plan.output_declarations:
         required = item.required
@@ -998,7 +1002,9 @@ def compile_deferred_verifier_plan(
             verifier_sandbox,
         ),
         "main": agent_plan.main.model_copy(update={
-            "role": "verifier", "argv": argv, "timeout_seconds": verifier_timeout_seconds,
+            "role": "verifier",
+            "argv": _sandbox_phase_argv("verify-sandbox"),
+            "timeout_seconds": verifier_timeout_seconds,
         }),
         "output_declarations": tuple(outputs),
         "resource_requests": None,
