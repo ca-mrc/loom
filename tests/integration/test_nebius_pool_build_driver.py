@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import select, update
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox
-from loom.db.schema import TaskImageMaterialization
+from loom.db.schema import TaskImageMaterialization, Trial
 from tests.integration.test_nebius_pool_build_outbox import counts, local_setup, outbox
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
 from tests.integration.test_nebius_pool_participant_http import client, setup
@@ -78,6 +78,21 @@ async def test_waiting_does_not_consume_attempt_and_cancellation_finishes(sessio
         assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
         await journal.request_cancel(request.key)
         assert (await driver.advance(request.key)).phase == "cancelled"
+    assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
+
+
+async def test_withdrawn_waiting_demand_is_cancelled_without_requiring_a_grant(sessions, tmp_path):
+    from loom_execution_actuator.pool_build_driver import PoolBuildDriver
+
+    app, token, _, request, journal = await selected(sessions, tmp_path, occupied_cpu=3000)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as http:
+        management = client(http, token)
+        driver = PoolBuildDriver(outbox=journal, management=management)
+        assert (await driver.advance(request.key)).phase == "selected"
+        async with sessions.begin() as session:
+            await session.execute(update(Trial).values(cancellation_requested_at=datetime.now(UTC)))
+        assert (await driver.advance(request.key)).phase == "cancelled"
+        assert (await management.status((await journal.get(request.key)).action)).phase == "cancelled_unstarted"
     assert await counts(sessions, request.key.local_work_id) == (0, 0, 0)
 
 
