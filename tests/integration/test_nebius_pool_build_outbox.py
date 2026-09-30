@@ -163,7 +163,7 @@ async def test_lost_unstarted_cancellation_reply_survives_restart(sessions):
         await journal.accept_grant(request.key, receipt.model_copy(update={"phase": "reserved"}))
 
 
-async def test_attached_claim_cannot_cancel_as_unstarted_or_swap_grants(sessions):
+async def test_attached_cancellation_intent_does_not_refund_or_swap_grants(sessions):
     participant, request, _ = await local_setup(sessions)
     journal = outbox(sessions, participant)
     await journal.remember(request)
@@ -171,9 +171,9 @@ async def test_attached_claim_cannot_cancel_as_unstarted_or_swap_grants(sessions
     attached = await journal.accept_grant(request.key, receipt)
     with pytest.raises(ValueError):
         await journal.accept_grant(request.key, grant(request))
-    with pytest.raises(ValueError):
-        await journal.request_cancel(request.key)
-    assert await journal.get(request.key) == attached
+    pending = await journal.request_cancel(request.key)
+    assert pending.phase == "cancel_pending" and pending.attempt_id == attached.attempt_id
+    assert await counts(sessions, request.key.local_work_id) == (1, 1, 1)
 
 
 async def test_request_and_claim_are_atomic_when_final_journal_write_fails(sessions):
