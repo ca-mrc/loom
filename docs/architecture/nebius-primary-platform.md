@@ -1572,6 +1572,13 @@ branch-bound candidate for that deployment until the conversion is qualified.
 
 ## Physical pool observation for managed environments
 
+Each environment binding lists its local target aliases; different environments
+may use the same alias. A gateway receipt binds one exact alias, so a Pod with a
+different alias cannot discount that reservation even when both aliases belong
+to the same environment. Alias order does not change the capture fingerprint.
+All aliases share the same one-time physical inventory rather than contributing
+separate copies of node capacity.
+
 `InClusterKubernetesCapacityReader.capture_pool` reads one Node/Pod/DaemonSet
 inventory for a protected physical-pool selector. It does not add per-environment
 node totals. Its `PoolObservationScope` contains registry-bound environment
@@ -1599,12 +1606,627 @@ Only the sanitized resource/identity projection leaves the reader; Pod payloads,
 environment values and commands are not evidence. A scope fingerprint binds the
 observation to the registry and gateway receipts used for that capture.
 
-This is a read-only library entrypoint, not live global admission. The caller must
-bind the selector to the actual native node group, combine fresh provider quota
-evidence, and use the management ledger to retain unobserved grants. Existing
-single-target collection remains unchanged. Managed hosted execution stays
+The production collector now has an explicit `collection_mode=pool` path. It
+requires a global pool UUID and separate management URL/observer credential,
+fetches one frozen scope, binds its selector to the configured native node group,
+and combines the existing native reader with one actual `capture_pool` inventory.
+Ready provider/cluster counts must agree; cold samples must match the native
+template. Existing single-target collection remains the default and is never an
+error fallback. A cancelled pool read retains its clients until the synchronous
+Kubernetes reads finish. This source integration is not installed global admission.
+The management ledger still retains unobserved grants. Managed hosted execution stays
 disabled until the shared ledger, local claim protocol and protected Job-write
 gateway are integrated and qualified together.
+
+## Global pool reservation journal
+
+Submission provenance is stamped from protected `LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON`
+configuration, not a public priority/origin parameter. Personal application rendering
+binds the exact application, incarnation, deployment generation, release and source
+digest. New batches, failed-case reruns, shared-run clones and artifact reuse record
+the current submitting service's origin with their new submission ID; reusing shared
+results does not give personal work shared-dev priority. The internal `submit:batch`
+producer carries that retained origin into child trials. Ordinary callers referencing
+a batch cannot inherit its origin. PostgreSQL prevents origin changes, including
+silently classifying an old NULL, and refuses a downgrade that would erase origins.
+Missing configuration/history remains unknown, not environment-priority work.
+For direct single-trial submission, the authenticated service commits a small
+immutable `nebius_pool_submissions` record before forwarding: server-issued UUID,
+exact forwarded-payload digest, submitting user/team and protected origin. The
+control plane independently authenticates the bearer or bound browser session/CSRF
+and checks this record against the actual payload/caller before its idempotency
+lookup. An HTTP origin or submission-ID assertion alone gives no priority. Public
+input cannot replace the service-generated header. Personal backends retain the
+existing trusted shared-development-DB access; this is not hostile-backend isolation.
+The service releases SQL/session-auth locks before HTTP. A retained handoff replay
+keeps its idempotency key; replay across application updates never overwrites the
+original Trial origin. As with other submissions, clients should supply an
+idempotency key to recover their own retry after a lost response. Missing
+configuration remains compatible/unknown; this producer coverage does not establish
+an installed global-admission or priority guarantee.
+
+The native build handoff derives its origin from the highest-class live eligible
+Trial consumer of that exact materialization, then oldest consumer within a class.
+It reuses the native demand filter, including explicitly bound direct Nebius trials;
+cancelled, terminal, wrong-pool, family/legacy-route and unknown-origin work cannot
+promote a shared image. Selection and grant attachment both recheck this origin.
+If eligible consumers change it before attachment, the unstarted grant is retained
+for cancellation without consuming an attempt; a new immutable selection generation
+is allowed only after that cancellation is confirmed. This local check does not
+replace management registration qualification or establish an installed controller.
+
+An authenticated unstarted cancellation may precede management prepare. In that
+case the manager retains an immutable `nebius_pool_cancellations` identity/digest
+record with a terminal receipt, but no resource envelope, namespace or render plan.
+Delayed same-body prepare returns that cancellation, even after intake closes or
+the deadline expires; changed-body replay conflicts. Existing started requests
+still require the stop/drain/cleanup protocol and cannot use this shortcut. Both
+SQL insertion paths share the global mutation lock and exclude a request and an
+early-cancellation record for the same participant/work key. Cancellation records
+cannot be changed, deleted or lost by downgrade. The local outbox can consequently
+finish a pre-prepare cancellation after a restart without consuming a build attempt.
+
+The management-side observation registry issues a persisted capture scope from
+registered participants and committed gateway Job receipts. A dedicated observer
+can publish exactly one provider/cluster snapshot for that scope; an identical
+replay returns its retained identity, not a fresh observation. Changed bodies,
+credentials, registration or physical node-group identity fail closed. New
+reservations do not invalidate an in-flight capture and cannot be inserted into
+its represented-Job list. Capture/observation rows are immutable and do not alter
+request phases or release capacity. Collection runs outside SQL transactions.
+The management-only `/internal/pools/v1/{pool_id}/captures` and `/observations`
+routes connect this registry to the production collector. Only a current dedicated
+pool-observer credential is accepted; ordinary users, admin/worker tokens and other
+machine roles cannot publish. HTTPS transport uses no redirects or automatic write
+retries, checks exact receipt identity/digest, and bounds streamed bodies to one
+MiB with a total request timeout. Validation errors do not echo inputs. The routes
+are absent from application APIs and confer no dispatch or cleanup authority.
+The same observation registry feeds transactional execution/build prepare; live
+installation still requires the protected collector/writer migration.
+
+The internal execution-prepare adapter accepts a typed runtime/requirements
+snapshot, not arbitrary Kubernetes documents or a caller's resource total. It
+qualifies the registered namespace/profile, execution-class compatibility and
+image signatures, then reuses the execution renderer and collector's scheduler
+arithmetic to measure the complete single-Pod envelope. Named RuntimeClasses need
+explicit protected overhead; absent requests cannot silently rely on API-server
+defaulting. The request digest retains origin and absolute deadline while the
+rendered remaining runtime changes with the time of activation. This adapter
+also passes the original absolute deadline to the trusted execution runtime.
+Delayed container startup cannot renew input, proxy or phase execution time;
+expired startup is rejected and whole-lease expiry prevents verifier handoff.
+The separate bounded output-commit context remains available for partial evidence.
+This adapter does not expose an endpoint, grant capacity, write a Job or establish installed
+global admission. The registry/gateway still must qualify current authority and
+freeze the first activation document before a Kubernetes write.
+
+The internal `pool_management.registry.prepare_execution` and `prepare_task_image`
+entrypoints combine their respective adapters
+with current machine/origin qualification and retained physical observations. One
+management-wide advisory transaction lock serializes grants across physical pools
+and shared provider quotas; callers must use READ COMMITTED and own the commit.
+No network call or Job creation occurs in this transaction. The rendered selector
+must match the protected physical pool, including its Nebius node-group ID.
+Provider account usage and distinct native groups remain quota floors. Ordinary
+CPU groups need no invented memory-quota identity when Nebius supplies none;
+physical per-node memory fit is still enforced. Observed
+Jobs discount only their exact captured reservation; later grants, foreign Pods,
+expired callers and cleanup-pending work remain charged.
+
+Fitting renewed waiting demand is ordered by trusted production, staging, shared
+development and personal-development class, then age. Waiters protect headroom
+without acquiring a reservation or consuming an attempt. Their original creation
+time stays fixed; renewal is fresh for 120 seconds, while the first actual grant
+has a separate timestamp for create-rate accounting. Impossible/stale waits do not
+block fitting work. Exact admitted replay returns its retained receipt without
+rerendering, refreshing a deadline or depending on currently free capacity.
+Both kinds share the same transaction, waiting queue and class/age order. Charged
+builds and earlier fitting build waiters also enforce pool-wide build concurrency;
+that limit does not reserve an idle execution share or consume a local build attempt.
+This is internal admission, not an activated global execution/build service.
+The task-image adapter accepts typed materialization
+selection and legacy or registered source identity, reuses the actual native
+prepare/build/publish renderer, and measures its sequential-init peak. Storage,
+registry, Secret, resource and runtime settings come only from its protected
+profile. Selection generation and prospective native lease epoch are distinct;
+Job/ConfigMap names use the global reservation identity. The adapter acquires no
+attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
+not its separate selection generation. Admission HTTP and the native outbox are
+connected locally. Execution outbox integration, installed gateway startup and
+protected writer migration are still required. Application-image builds remain a
+later consumer of the same ledger.
+
+`loom.nebius_pool_contract` binds request identity to a participant, workload kind,
+local work ID and generation. Equal local IDs in independent environment databases
+do not identify the same request. A reservation receipt retains its request digest,
+admission epoch, frozen plan and any observed Job UID. Waiting is not a reservation
+receipt; cancellation and uncertain external writes do not imply free capacity.
+
+The internal activation control locks the exact request, requalifies its current
+origin/profile and charged envelope, then freezes the actual execution Job or
+native-build Job/ConfigMap once. The absolute deadline is retained and first
+activation uses only the remaining runtime; replay returns the stored receipt,
+never a rerender or renewed allowance. Status does not renew waiting freshness.
+First activation also requires a distinct, immutable consent with an aware
+`not_after` deadline. Management checks it under the request lock and again at
+the intent write, bounds it by the workload deadline, and retains it in the frozen
+plan. Exact replay can recover an expired consent's already-committed intent;
+changed consent cannot renew it. Consent expiry does not release capacity or
+shorten an already-accepted workload's runtime deadline.
+Unstarted cancellation can atomically cancel waiting or reserved work, including
+while intake is closed; it cannot cancel an already activated intent into free
+capacity. Concurrent activation/cancellation has one winner. These functions own
+no commit and perform no external write. The management-only participant API
+exposes these operations under `/internal/pools/v1/{pool_id}` as `prepare`,
+`status`, `activate`, `cancel-unstarted`, `stop`, `drain`, and `native-runtime`. It requires a dedicated credential
+bound to that pool and participant; ordinary users, administrators, generic
+workers and observer/gateway credentials cannot substitute. Prepare and first
+activation require the protected runtime-profile catalog. The participant client
+uses bounded HTTPS requests, checks exact response identity, and never redirects
+or automatically retries uncertain writes. Execution-controller/output-drain
+integration and protected controller/gateway installation remain required before
+global admission can be enabled in the installation.
+
+Native runtime readback derives a bounded description from the retained activated
+plan, even when current profiles are unavailable. It returns the receipt, target,
+namespace name/UID, deterministic Job name, actual native lease epoch, original
+deadline, expected image repository and, when observed, the Job create-effect ID.
+It returns no manifests, source payload or credentials and performs no rerender or
+external write. The native epoch is distinct from the selection generation. A Job
+UID requires its matching observed gateway effect. The runtime controller must
+qualify read-only Kubernetes observations against these retained identities before
+using publication or failure evidence; readback alone does not implement that
+controller or prove a build completed.
+
+The native runtime consumer composes the durable handoff with read-only Kubernetes
+observation and the existing native publication/failure recorder. It checks the
+namespace UID before and after reads, the exact Job UID and reservation/plan/effect
+markers, and one controller-owned Pod. Logs are bounded/redacted and bracketed by
+Pod-UID readback. Partial Pod lists fail closed. No observed global Job UID means
+no speculative Kubernetes read or local create. The local claim, source and live
+demand are rechecked around external reads; current attempts are heartbeated while
+waiting, and stale/superseded attempts cannot publish results. Terminal or withdrawn
+work enters local `stop_pending`, retaining its capacity charge. The same local
+transaction freezes bounded output evidence and the exact stop/drain messages
+before management HTTP. Published images come from that attempt's append-only
+publication rows, not the materialization's combined history. Valid successful
+publication is committed; failed, cancelled or lost-lease output is unavailable.
+Restart replays the saved evidence, grace and cause after a lost stop/drain reply.
+This consumer is not yet installed: protected startup and writer
+migration remain required.
+
+Migration `0172` adds protected pool/participant registrations, immutable request
+journals and retained cleanup observations. PostgreSQL enforces unique request
+keys and participant-to-pool binding. Registration identities cannot be reassigned;
+binding changes require a newer revision, and epochs cannot move backwards.
+Requests cannot change their workload, envelope, deadline, namespace or frozen plan.
+Only never-started requests can become `cancelled_unstarted` without cleanup.
+Started requests remain charged through `cleanup_intent`; a late-discovered Job UID
+can be appended there but cannot then be replaced or removed. Release requires a
+cleanup observation recorded after cleanup intent and tied to the exact request,
+plan and namespace. Request and
+cleanup history cannot be deleted, and downgrade refuses retained pool history.
+
+The gateway effect table separately retains fixed write intent, an append-once
+dispatch identity/machine epoch, and immutable observed UID/resource version or
+definite rejection. Its composite foreign key binds the request, plan and namespace.
+A dispatched write cannot reset to prepared, move to another target or disappear.
+Database guards reject new create dispatch after intake closure, participant fencing,
+epoch change, cleanup intent or deadline expiry. Bound deletion can still dispatch
+with intake closed, but its observed UID must match the original deletion intent.
+Neither observed nor rejected effects release the capacity request.
+
+The internal fixed gateway journal owns its transactions and commits each one-use
+dispatch permit before returning permission for Kubernetes I/O. Dedicated gateway
+credentials authorize only their registered pool; callers supply request identities,
+not manifests. The HTTP adapter uses the frozen Job/ConfigMap, verifies namespace
+UIDs before and after readback, and compares exact workload fields while accepting
+qualified API defaults. Native Job creation also rechecks the live, observed
+ConfigMap UID and contents. A lost response followed by 404 never authorizes another
+create. UID-bound deletion derives its target from the retained create observation;
+neither a successful deletion nor an absent Job frees capacity.
+Absence and definite rejection require a bounded Kubernetes `Status` response
+matching the requested resource name, group, kind, status code and failure reason.
+Bare proxy errors or mismatched responses preserve uncertain effects and charged
+capacity; they cannot settle a dispatched create or authorize another write.
+
+Residual-Pod inventory scans the complete bound namespace with bounded pagination
+and one consistent list resource version. It qualifies original Job UID, name,
+reservation/plan/effect markers and local claim generation, including terminal and
+terminating Pods. Contradictory identities, partial lists and namespace replacement
+fail closed. This inventory is read-only, not deletion or release authority. The
+adapter's disposable-cluster tests qualify real API defaulting, restricted writes,
+Job-created Pods and object retirement; they do not qualify the protected installer
+or a running global worker.
+
+Residual Pod retirement is a separate fixed write in the same effect journal,
+keyed by Pod UID and bound to the retained Job create effect, plan and namespace.
+It requires output drain and observed Job deletion before dispatch, so deleting a
+Pod cannot ask an active Job to replace it. The gateway rechecks live ownership
+and markers before one UID-preconditioned, zero-grace DELETE; response loss never
+resets permission or retries the mutation. Replaced identities block, and existing
+finalizers remain intact. An absent Pod completes only its deletion record, not
+the reservation. Complete namespace/object absence and write-fencing qualification
+still precede capacity release.
+
+The fixed gateway's cleanup verifier now performs that release qualification.
+It snapshots the request, retained stop/drain and all effect identities/phases in
+one transaction. A dispatched but unobserved CREATE blocks release even after
+404. Prepared creates cannot acquire dispatch permission after cleanup intent;
+observed/rejected creates cannot acquire another permit. Outside SQL, the verifier
+checks the original namespace UID, exact Job and build ConfigMap absence, and a
+complete consistent namespace Pod inventory. Without an observed Job UID, any
+candidate by Job name, owner name, reservation or Job-name label blocks absence;
+the verifier does not invent a UID or delete unrelated Pods.
+
+Finalization rechecks current gateway credentials, exact snapshot identity and
+effect fingerprint, and a maximum 60-second observation window. It atomically
+retains the cleanup observation and releases only that reservation. A raced effect,
+stale snapshot, changed namespace, incomplete read or transaction failure leaves
+capacity charged. Concurrent/lost-reply recovery returns the same retained release
+receipt. These internal facts have no public submission endpoint. Unresolved
+CREATE uncertainty remains charged until qualified observation or protected
+writer-fencing recovery; the latter and installed gateway orchestration remain
+separate boundaries.
+
+The local gateway worker now orchestrates these same fixed operations. Its
+pool-scoped keyset scan rechecks current gateway authority and closes SQL before
+Kubernetes I/O. Creation orders the optional ConfigMap before the Job. Cleanup
+recovers dispatched creates by observation only, signals an observed Job before
+output drain, then retires the observed auxiliary and owned residual Pods and
+runs the qualified absence verifier. It never dispatches a prepared create during
+cleanup or resets an uncertain effect. A waiting or failed request cannot prevent
+later retained requests from being reconciled. Completed requests leave the scan.
+This worker is not yet connected to protected installed startup.
+
+The machine lifecycle API retains separate immutable stop and drain attestations
+bound to the exact request, reservation, frozen plan and native/execution lease
+generation. Stop fences new creates immediately and freezes termination grace,
+capped by the rendered Pod's grace and 300 seconds. The gateway can then send a
+UID-bound foreground Job deletion without waiting for output drain. Auxiliary
+deletion additionally requires the matching drain attestation: committed/unavailable
+output state, output generation, evidence digest and the exact stop digest. Native
+output generation must equal its build lease epoch. Neither acknowledgment nor a
+successful deletion frees capacity. Lost replies replay the same retained evidence.
+
+The execution cancellation adapter must derive these acknowledgments from the
+existing runtime's actual state: signal cancellation while partial-output uploads
+remain authorized, then confirm durable committed/unavailable output before final
+cleanup and release. The API is not itself proof of that local output state.
+The native runtime consumer supplies its own saved publication/failure evidence;
+it does not qualify execution output. The execution runtime adapter,
+and installed gateway startup remain unimplemented boundaries.
+The execution PID1 runtime enforces its original
+absolute deadline, but does not itself attest output drain or release capacity.
+
+Global native builds also enforce that same original absolute deadline across
+prepare, rootless build and publish. Each container runs the static
+`loom-build-deadline` supervisor as PID1; expired startup cannot launch its phase.
+The service image includes the supervisor, and prepare copies it into a separate
+8-MiB volume mounted read-only by the untrusted builder, without claim or Secret
+mounts. The guard disables same-UID process inspection, signals the phase process
+group at timeout/cancellation and allows at most ten seconds before exiting PID1;
+container teardown also retires descendants that changed process groups.
+Existing per-component and Kubernetes Job timeouts remain additional bounds.
+The small volume remains inside the existing aggregate Pod storage limit. Timeout
+is a result/stop condition, never proof that global capacity has been released.
+
+The native-build local outbox commits an immutable typed selection before contacting
+management. It keeps selection generation separate from build lease epoch and permits
+only one live selection per materialization, including across participant changes.
+The local native controller exposes a separate database-only heartbeat pass for
+attached, activation-pending and active attempts. It uses claimed-only keyset pages
+and the same current-owner/source/demand checks as runtime reconciliation, with no
+management or Kubernetes I/O. Slow admission cannot block this maintenance when
+scheduled independently by protected startup. Renewal cannot revive an expired
+claim, change saved activation consent or extend the original workload deadline;
+stopped, cancelled and superseded work is excluded. Installed scheduling remains
+part of the pending protected startup integration.
+Receipt acceptance rechecks the exact source snapshot, current demand, deadline,
+rollout guard and lease epoch, then atomically commits the existing build attempt
+and global reservation link. Waiting and stale selections consume no attempt;
+obsolete grants remain recorded for cancellation. Concurrent workers and restart
+replay the same selection and grant. A newer admission epoch can recover old records
+for cancellation, but cannot use them for a new claim. SQL guards retain request,
+receipt and claim identity; local history has no foreign keys to the management
+database. Attached claims can record cancellation intent without releasing capacity
+or refunding attempts. Only the exact manager `cancelled_unstarted` receipt permits
+the same still-current claim to return to queued and refund its attempt budget once.
+This retains its immutable attempt and lease epoch, records a truthful no-Job result,
+and commits the refund and terminal outbox evidence together. It cannot change a
+superseding claim or hide an existing native-build effect. If activation won the race,
+the grant remains charged and requires stop/drain reconciliation instead.
+Before requesting activation the outbox rechecks the exact current claim, source,
+live lease/demand, originating class and rollout intake, then saves consent bounded
+by that lease and the original runtime deadline. A heartbeat cannot extend saved
+consent. Local cancellation or stale ownership after manager activation retains
+the receipt as `stop_pending`, without a refund. The outbox preserves first
+activation evidence independently from the original reservation receipt.
+After manager-confirmed cleanup, the native controller retains the exact released
+receipt and marks only the original attempt and outbox terminal in one local
+transaction. It checks the retained activation, native identity and saved
+stop/drain/output evidence; neither a success result nor stop/drain acknowledgment
+alone can close the handoff. Release recovery never changes the materialization's
+result, retry budget or a newer claim. Exact replay preserves the receipt and first
+release timestamp. Released selections no longer occupy the local live-selection
+key or pending scan, so a later eligible retry can proceed with a new generation.
+SQL retains both the original activation and terminal release receipt.
+Reconciliation uses bounded keyset pages through the pass's initial high-water
+key, closing each database session before external work. Terminal entries cannot
+shift offsets and skip later builds, and a full first page of failing requests
+does not prevent later entries from being reconciled. Newer selections wait for
+the next pass.
+This primitive does not yet connect the installed controller and does not
+independently authorize an originating application.
+Database-backed HTTP tests connect this journal to real management prepare and
+activation; this is not evidence that installed controllers use it.
+The native handoff driver composes those committed steps with the participant
+client. It withdraws stale waiting demand before renewal, checks management status
+before activation, and recovers lost replies with the same selection/grant/attempt.
+It returns active or stop-pending work to the runtime reconciler; it never falls
+back to local capacity admission or direct Kubernetes writes.
+The queue selector derives requests from real native-consumer demand, the frozen
+materialization and its persisted originating submission. It prefers shared
+environment demand over personal-only demand, retaining age within each class;
+management still independently qualifies origin and makes the global admission
+decision. It excludes live selections, unreleased native effects, completed work,
+backoff and exhausted attempts. Unsupported source snapshots or lost selection
+races do not consume attempts or hide later candidates. Registered sources use
+the retained canonical specification and must pass source admission/pinning in
+the final outbox transaction. Generations advance from retained outbox history,
+independently of build lease epochs. A configured native controller selects one
+new candidate after reconciliation, then uses the same driver/runtime path.
+The installed startup and protected no-dual-writer transition are not yet connected.
+
+The service scheduler separates workload compilation from reservation. Compilation
+retains the existing image-readiness and configuration handling, but does not claim
+the Trial, consume an attempt, reserve admission/cost/capacity, or append a command.
+The legacy scheduler immediately reserves the compiled candidate. A global
+consumer must durably freeze its selected target and runtime before prepare, then
+recheck local authority when attaching the grant; compilation alone is not a lease.
+The execution outbox now retains that pre-claim proposal, including its prospective
+lease UUID, immutable request and Trial/source/target snapshot. Exact grant
+attachment rechecks eligibility and preserves existing local admission, image and
+cost checks; only physical provisioning uses the global reservation. The lease
+starts with its final reservation-qualified Job name. Claim and outbox attachment
+commit together, including a deferred database check. Stale input or local denial
+leaves an unclaimed cancellation intent; it cannot activate different work or
+silently acquire local capacity. The execution driver persists a non-renewable
+activation consent, capped at 30 seconds and the original execution deadline,
+before HTTP. Status recovers an accepted activation before any retry; local
+cancellation that loses to activation becomes stop-pending, not a release.
+Only the exact never-started cancellation receipt closes an attached unstarted
+lease and releases its local cost/admission. It retains that lease and attempt
+number; execution attempts are immutable identities, unlike native build retry
+budget counters. Participant-only execution runtime readback now returns the
+retained plan's namespace, Job, unit, generations, deadline and observed gateway
+effect identity, without manifests or credentials and without requiring current
+profiles. Its read-only Kubernetes adapter qualifies namespace UID before/after,
+the exact observed Job and sole controller-owned Pod before reusing existing
+execution normalization. A missing Job is only absence, never deletion or release
+authority. The local execution outbox separately commits immutable stop and drain
+messages before HTTP. Stop derives from existing lease revocation and does not
+wait for output; drain requires that lease's committed/unavailable output at its
+original resource generation, retaining the exact manifest/marker or unavailable
+evidence. Lost replies replay the same records and grace deadline. These messages
+do not close the output window, project deletion, or release capacity. Only the
+manager's exact released receipt, including its cleanup-observation reference,
+permits the local outbox to project deletion through the existing execution event
+handler. The receipt, local deletion and outbox completion commit atomically;
+a deferred database guard rejects global-lease deletion without retained release
+or never-started cancellation evidence. Replays preserve the old lease/attempt,
+and release permits the next queued attempt's distinct selection. The existing
+execution actuator now accepts this global resource adapter: bounded pending
+scans advance durable handoffs, qualify namespace/Job/Pod observations, and reuse
+the existing result finalization and usage recording. It sends stop before output
+drain, preserves the output deadline even without a locally observed Pod, and
+projects deletion only from the retained manager release. A missing Job never
+authorizes a new create. Global mode rejects legacy namespace watches and has no
+local provisioning or Kubernetes write fallback. The existing scheduler loop can
+now select global proposals from its normal queued-Trial eligibility contract;
+it preserves team fairness within shared/personal priority, skips live proposals
+and incompatible candidates, and never falls back to local reservation on an
+empty or failed global selection. Image-preparation and configuration failures
+retain their existing no-attempt terminal semantics. Node-share compilation now
+fetches participant/target/epoch-qualified sizing evidence from the management
+observation before opening local SQL. It uses measured allocatable minus resident
+DaemonSets, including compatible retained samples after scale-zero, never free
+resources or environment-local totals. The local proposal rechecks freshness and
+freezes the evidence and allocated runtime together. Missing evidence cannot fall
+back to local allocation. This sizing read grants nothing; the registry still
+checks current physical fit and provider quota for the rendered workload.
+
+Protected process configuration now selects these adapters at startup. The control
+plane's `service_execution_global_pool_json` and actuator's `global_pool` bind the
+same registered participant, data environment, logical pool, HTTPS management
+origin and private machine-token file. Configuration rejects mismatched scheduler,
+target or namespace identities. Global mode fences direct admin reservations,
+omits the legacy namespace watch and uses the native build outbox controller.
+Build lease maintenance runs independently of admission HTTP and participates in
+readiness. Shutdown cancels and awaits every controller loop before closing the
+management, Kubernetes or database clients, including when another loop fails.
+The actuator's bounded synchronous SDK reads can outlive coroutine cancellation;
+draining those threads before client closure remains a runtime qualification gap.
+These settings
+do not register participants, install profiles, grant Kubernetes authority or
+perform the protected writer migration.
+
+Management startup loads `pool_profiles_file`, a bounded installer-owned
+`loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
+build entries keyed by the registered profile UUID, plus public image-admission
+keys. The loader rejects duplicate identities/JSON fields, unknown fields,
+unqualified node groups or runtime overhead, and mutable trusted images without
+echoing configuration in diagnostics. Both entries reuse the existing renderers;
+no owner API can replace the catalog. The file grants neither registration nor
+Kubernetes authority. Without it, prepare and activation remain unavailable;
+retained status and cleanup do not depend on current rendering profiles.
+
+Protected management deployment inputs retain `pool_catalog_operation_id` after
+pool migration. The renderer mounts that exact operation's immutable catalog and
+preserves the pool manager's `Recreate` strategy. Ordinary image/config refreshes
+must retain the reference and its read-only mount; they cannot introduce, remove
+or rebind a pool catalog. An absent reference leaves historical serialization and
+rendering unchanged. Pool wiring advances each retained workload's same-image
+initialization containers with its main image and rejects foreign initializer images. These
+rendering checks do not establish a completed migration predecessor, catalog
+ownership or live writer fencing; the connected protected operation must prove
+those before applying the configuration.
+
+The fixed gateway has a separate `python -m loom_service.pool_management` process.
+`LOOM_POOL_GATEWAY_` settings bind its management database, pool/installation/
+machine UUIDs, admission epoch, private machine-token file and explicit projected
+Kubernetes connection. Startup checks the schema and dedicated gateway identity
+before opening Kubernetes credentials; only closed/global pool modes qualify.
+Every pass reopens the machine token and resolves current authority; each journal
+mutation rechecks it under the existing locks. Kubernetes requests renew the
+projected service-account token, verify the explicit CA/origin, and neither follow
+redirects nor use ambient proxy credentials. The process runs the existing fixed
+gateway worker, not caller manifests. `/readyz` requires a recent successful pass;
+failed authorization or reconciliation clears readiness. Server termination stops
+and drains background work before its HTTP clients and database engine close.
+The entrypoint does not provision its own RBAC or bypass the protected migration.
+
+Its fixed installation renderer separates configuration, gateway authority and
+workload phases. It renders the gateway Deployment with zero replicas and a
+dedicated ServiceAccount, projected rotating Kubernetes token/CA, and a distinct
+owner-only machine token copied by a non-root initializer. The machine token has
+no Kubernetes authority; the projected token is not a management API credential.
+Only the registered execution/build namespaces receive Job/ConfigMap create and
+delete plus Pod observation/cleanup rights. Cluster scope permits exact namespace
+identity reads, not namespace listing, Secrets or RBAC access. The protected
+migration still owns Secret delivery, old-writer fencing, manager catalog wiring,
+startup and admission activation; rendering these documents performs none of them.
+
+The protected runtime target builders preserve retained Deployment UIDs and
+database/storage Secret references while pinning the integrated candidate images.
+The manager mounts the immutable renderer catalog. Each shared control plane and
+actuator receives the same participant binding and a dedicated owner-only machine
+token; the shared API receives only its environment submission identity, never a
+machine token. Hash-qualified credential delivery is immutable and create-only,
+with exact namespace UID checks and no automatic credential rotation. All target
+Deployments have zero replicas: these builders do not perform the protected
+cutover, install RBAC or activate admission.
+
+Runtime wiring also requires the published, signed execution profile, not just
+new application images. Its candidate/image/binary identities must match the
+global renderer catalog while retaining the environment's existing resource and
+capability policy. The shared API receives that profile, and control-plane/
+actuator image-admission keyrings are bound to the catalog together. This prevents
+a newly deployed API from continuing to compile tasks against a rejected old
+runtime. The protected caller still qualifies the publication and supplies the
+environment-qualified profile; the wiring does not invent admission signatures.
+
+The shared-development capacity CronJob is retained as the one pool observer,
+using its existing read-only Nebius credential and a dedicated observer token in
+that execution namespace. Its immutable configuration selects pool collection,
+binds the exact node group and provider quota identities, and removes the legacy
+control-plane publication URL/token. The rendered CronJob remains suspended until
+the migration retires the other collectors and qualifies the global runtime.
+Participant reader-role targets replace the existing actuator/builder roles,
+allowing only scoped Job/Pod observation and native build logs, plus exact
+namespace identity reads. They grant no Job creation/deletion. Applying these
+roles alone is not proof that every old writer has been fenced; the protected
+migration must verify all effective bindings and old-process retirement.
+
+Initial registration uses the fixed `loom_service.pool_management.installation`
+Job and a versioned `loom.pool-installation.v1` configuration. It binds physical
+pool identity, exact participant namespaces/targets, the renderer catalog and
+dedicated machine credential hashes. The database transaction serializes with
+admission, rejects drift or revoked/expired authority, and registers the pool
+**closed**. Exact replay never rotates credentials, resets state or opens intake.
+Historical configurations remain readable after credential expiry; new writes
+check validity against the database clock. The Job reports only a bounded receipt
+after commit and receives no Kubernetes token or write role.
+
+The protected registration stage retains exact ConfigMap/Job identities and
+uncertain-create evidence. A missing response followed by absence does not permit
+another CREATE. Its read-only execution verifier requires the recorded Job and
+unique, unrestarted successful Pod, exact runtime/configuration, and matching
+closed-registration commit receipt. Changed identities, configuration, logs or
+final readback cannot qualify. Staging alone proves neither database registration nor writer retirement;
+the parent migration must qualify candidate publication, namespace ownership,
+successful runtime execution and the no-dual-writer barrier before opening intake.
+
+The migration's initial closure stage binds every qualified data participant and
+its retained control-plane Deployment/namespace identity. Environment classes do
+not imply a fixed number of installed databases. The protected preflight must
+qualify the complete installed participant/writer inventory; closure requires
+exactly one original controller guard per participant and rejects missing,
+duplicate or foreign guards. It uses the existing
+`nebius_rollout_guard`, retaining earlier idle guards while another environment is
+busy. A lost acquisition response requires exact owner/candidate observation; an
+open database after an uncertain acquisition does not authorize another command.
+The fixed command adapter qualifies the running Pod and ReplicaSet lineage and
+unchanged template before and after invoking the guard, with no release command.
+For recovery after controller retirement, a retained database binding selects the
+same namespace-local PostgreSQL StatefulSet and Service. The adapter verifies
+their identities and templates, the original controller's exact DB Secret
+UID/version and connection destination, and the ready StatefulSet Pod before and
+after the fixed read-only ownership query. Changed credentials, alternate database
+destinations or unqualified Pods fail closed. Acquisition still uses the original
+qualified controller; the database path never acquires or releases a guard. The
+protected parent must supply the binding before retiring that controller.
+This direct-database binding rejects an unresolved pooled-engine override; the
+parent must qualify pooled-to-backend correspondence before using that topology.
+An independent anchor and parent journal bind closure to registration; missing or
+changed recovery evidence cannot start another registration. Successful closure
+and registration explicitly leave writer migration incomplete. Controller
+retirement, RBAC changes, global runtime installation and activation remain later
+barriers; none is implied by a closed-registration receipt.
+
+The separate controller-retirement stage retains that closure evidence without
+replaying commands in control-plane Pods after stopping them. It suspends the
+recorded collectors, then scales the recorded actuators and control
+planes to zero, preserving their UIDs and Pod templates. Exact UID, resource
+version and spec preconditions bound each PATCH. Lost or unqualified responses
+retain write intent and permit readback only; only a complete Kubernetes conflict
+or invalid-request rejection permits another attempt. Complete namespace
+ReplicaSet/Job/Pod observations must prove drain, including terminating Pods and
+all collector container states. Replay rechecks earlier stopped workloads without
+writing. This stage neither changes RBAC nor activates a replacement writer;
+effective authority fencing and the connected protected installer remain required.
+
+An installed execution-only guest actuator belongs to its ordinary data
+participant, not another database, collector or builder. Retirement and runtime
+wiring require the complete registered target set. The supported guest sibling
+must retain its renderer-defined name, distinct UID, shared database references,
+ServiceAccount and ordinary Pod configuration, differing only in target identity,
+labels/affinity and absence of the native builder. Missing, duplicate or changed
+siblings reject the migration inputs. Its replacement remains stopped, receives
+the same participant credential and global binding, and does not acquire a build
+loop. Guest Pods must drain before retirement qualifies; replay checks them again.
+These checks do not replace installed database or effective writer qualification.
+
+The participant-role phase composes that retained retirement barrier with two
+fixed Role replacements per participant: the existing execution-actuator and
+task-image-builder roles in its namespaces. It preserves Role UIDs, bindings and
+unrelated metadata, changing only the recorded rules to the fixed reader rules
+and adding its operation marker. Exact preconditions, retained update intent and
+bounded readback handle lost replies without uncertain retries. It rechecks the
+stopped workloads and restricted roles on replay. It also obtains complete
+effective rules for each retained controller/collector ServiceAccount across all
+qualified management, data, execution and build namespaces. Fixed per-request
+impersonation includes the actual ServiceAccount groups; no runtime token or
+persisted probe is created. Named grants are included, so an extra binding cannot
+hide behind an unnamed access probe. Only explicit reader resources, discovery
+and standard self-inspection qualify; credential access, indirect writes,
+wildcards, incomplete rule resolution and evaluation errors reject the phase.
+Recovery repeats these nonpersisted authorization reviews without repeating
+confirmed Role writes. The operator must already have the required impersonation
+authority; unsupported resolution has no permissive fallback. The phase does not
+create bindings or gateway permissions, and its receipt still marks writer
+migration incomplete: the protected parent owns complete external-writer
+inventory and fresh qualification before activation. It never removes an
+unexpected grant automatically.
+
+Receipt storage and transition constraints alone are not Kubernetes cleanup proof
+or installed global admission. The fixed gateway verifier supplies the qualified
+absence/output-drain and settled-create evidence before recording cleanup.
+The registry authenticates dedicated machine identities and must
+validate all workload kinds and serialize physical-pool admission. The current
+single-environment controllers do not switch writers merely because these tables
+exist; connected admission, installation of the production pool collector, durable local handoff
+and protected no-dual-writer migration remain required before activation.
 
 ## Native task-image capacity fairness
 

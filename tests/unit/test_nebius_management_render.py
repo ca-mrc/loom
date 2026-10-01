@@ -65,6 +65,25 @@ def documents(result):
     return [doc for docs in result.files.values() for doc in docs]
 
 
+def test_absent_pool_binding_preserves_historical_serialized_inputs(management_inputs):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw, _, _ = management_inputs
+    original = ManagementDeployment.model_validate(raw)
+    explicit = ManagementDeployment.model_validate({**raw, 'pool_catalog_operation_id': None})
+    assert original.model_dump(mode='json') == explicit.model_dump(mode='json')
+    assert 'pool_catalog_operation_id' not in original.model_dump(mode='json')
+    assert json.loads(original.model_dump_json()) == original.model_dump(mode='json')
+    assert render(management_inputs) == render(({**raw, 'pool_catalog_operation_id': None}, *management_inputs[1:]))
+
+
+def test_pool_catalog_binding_rejects_nil_operation(management_inputs):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    with pytest.raises(ValueError):
+        ManagementDeployment.model_validate({**management_inputs[0], 'pool_catalog_operation_id': '00000000-0000-0000-0000-000000000000'})
+
+
 def pod(doc):
     spec = doc["spec"]
     if doc["kind"] == "CronJob":

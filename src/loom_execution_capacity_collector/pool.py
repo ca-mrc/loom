@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -20,6 +20,7 @@ from loom_execution_capacity_collector.contracts import ManagedPodPlacement
 _NAMESPACE = r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$"
 _LABEL_NAME = re.compile(r"^[A-Za-z0-9](?:[-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$")
 _DNS_LABEL = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_TargetId = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")]
 
 
 class PoolEnvironmentBinding(BaseModel):
@@ -29,7 +30,7 @@ class PoolEnvironmentBinding(BaseModel):
     incarnation: UUID
     execution_namespace: str = Field(pattern=_NAMESPACE)
     build_namespace: str = Field(pattern=_NAMESPACE)
-    target_id: str = Field(min_length=1, max_length=120)
+    target_ids: tuple[_TargetId, ...] = Field(min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def identities(self) -> PoolEnvironmentBinding:
@@ -37,6 +38,8 @@ class PoolEnvironmentBinding(BaseModel):
             raise ValueError("nil environment identity")
         if self.execution_namespace == self.build_namespace:
             raise ValueError("execution and build namespaces must differ")
+        if len(set(self.target_ids)) != len(self.target_ids):
+            raise ValueError("duplicate environment-local target")
         return self
 
 
@@ -49,6 +52,7 @@ class GatewayJobBinding(BaseModel):
     namespace: str = Field(pattern=_NAMESPACE)
     job_name: str = Field(min_length=1, max_length=253)
     job_uid: str = Field(min_length=1, max_length=253)
+    target_id: _TargetId
     workload_kind: Literal["trial", "verifier", "task_image_build"]
     lease_id: str = Field(min_length=1, max_length=160)
     generation: int = Field(gt=0, strict=True)
@@ -87,7 +91,6 @@ class PoolObservationScope(BaseModel):
         for values in (
             [row.environment_id for row in self.environments],
             [row.incarnation for row in self.environments],
-            [row.target_id for row in self.environments],
             [name for row in self.environments for name in (row.execution_namespace, row.build_namespace)],
             [row.reservation_id for row in self.jobs],
             [row.job_uid for row in self.jobs],
@@ -100,6 +103,8 @@ class PoolObservationScope(BaseModel):
             environment = environments.get(job.environment_id)
             if environment is None or environment.incarnation != job.incarnation:
                 raise ValueError("gateway Job has no matching environment incarnation")
+            if job.target_id not in environment.target_ids:
+                raise ValueError("gateway Job has no matching environment-local target")
             expected = (environment.build_namespace if job.workload_kind == "task_image_build"
                         else environment.execution_namespace)
             if job.namespace != expected:
@@ -120,6 +125,8 @@ class PoolPodClassifier:
         self.node_selector = ",".join(f"{key}={value}" for key, value in sorted(self.scope.node_selector.items()))
         payload = self.scope.model_dump(mode="json")
         payload["environments"] = sorted(payload["environments"], key=lambda row: row["environment_id"])
+        for environment in payload["environments"]:
+            environment["target_ids"] = sorted(environment["target_ids"])
         payload["jobs"] = sorted(payload["jobs"], key=lambda row: row["reservation_id"])
         self.fingerprint = "sha256:" + hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
@@ -161,7 +168,7 @@ class PoolPodClassifier:
         native = labels.get("app.kubernetes.io/component") == "task-image-builder"
         if native != (job.workload_kind == "task_image_build"):
             return None
-        if annotations.get("loom.openai.com/target-id") != environment.target_id:
+        if annotations.get("loom.openai.com/target-id") != job.target_id:
             return None
         identity: object
         if native:

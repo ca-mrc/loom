@@ -258,6 +258,36 @@ def test_input_manifest_restores_frozen_executable_modes(input_manifest_bundle, 
     assert all(body.closed for body in source.bodies)
 
 
+@pytest.mark.parametrize("source_kind", ["sidecar", "service-manifest"])
+def test_native_download_checks_registered_content_manifest_identity(source_bundle, tmp_path, source_kind):
+    from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+
+    claim, source = source_bundle
+    expected = capture_task_image_bundle_manifest(tmp_path / "original")
+    claim["task_source_provenance"]["bundle_content_manifest_sha256"] = expected.digest
+    if source_kind == "service-manifest":
+        provenance, _ = _publish_service_execution_input_manifest(
+            source, bucket="source", manifest_key="task-inputs/revision.json",
+            bundle_dir=tmp_path / "original", task_checksum_value=claim["task_checksum"])
+        claim["task_source_provenance"].update(provenance)
+        del source.objects["tasks/revision/" + BUNDLE_FILE_METADATA_NAME]
+    runtime.download_bundle(claim, source, tmp_path / "matching")
+    assert (tmp_path / "matching/run.sh").read_bytes() == b"#!/bin/sh\nexit 0\n"
+    # Legacy content and modes still match, but they do not authorize a different
+    # registered v2 source identity. Omitting this check silently accepts drift.
+    claim["task_source_provenance"]["bundle_content_manifest_sha256"] = "f" * 64
+    with pytest.raises(runtime.BuildPreparationError, match="registered content"):
+        runtime.download_bundle(claim, source, tmp_path / "different-registration")
+
+
+@pytest.mark.parametrize("digest", [None, "", "sha256:" + "a" * 64, "not-a-digest"])
+def test_present_invalid_content_identity_cannot_fall_back_to_legacy_download(source_bundle, tmp_path, digest):
+    claim, source = source_bundle
+    claim["task_source_provenance"]["bundle_content_manifest_sha256"] = digest
+    with pytest.raises(ValueError):
+        runtime.download_bundle(claim, source, tmp_path / "download")
+
+
 @pytest.mark.parametrize("change,match", [
     ("manifest_bytes", "frozen binding"),
     ("content", "content does not match"),

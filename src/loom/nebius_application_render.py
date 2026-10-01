@@ -35,6 +35,7 @@ from loom.nebius_platform_render import (
     _service,
     digest,
 )
+from loom.nebius_pool_priority import PoolApplicationOriginV1, PoolSubmissionSourceV1
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,12 @@ def render_application(
         "LOOM_SVC_PUBLIC_BASE_URL": "https://" + row.public_host,
         "LOOM_SVC_AUTH_LOCAL_HTTP": "false",
         "LOOM_SVC_AUTH_SESSION_AUDIENCE_JSON": row.session_audience.model_dump_json(),
+        "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON": PoolSubmissionSourceV1(
+            data_environment_id=row.data_environment_id, kind="application",
+            application=PoolApplicationOriginV1(application_id=row.application_id,
+                incarnation=row.incarnation, deployment_generation=row.deployment_generation,
+                release_id=release.release_id, source_digest=release.source_digest),
+        ).model_dump_json(),
         "LOOM_SVC_CONTROL_PLANE_URL": f"http://loom-control-plane.{data_ns}.svc:8080",
         "LOOM_SVC_GATEWAY_URL": f"http://loom-llm-gateway.{data_ns}.svc:9100",
         "LOOM_SVC_MINIO_ENDPOINT": config["storage_endpoint"], "LOOM_SVC_MINIO_REGION": config["region"],

@@ -23,6 +23,13 @@ registry output identity. Supported architecture and workload requirements must
 match the selected execution class; unsupported inputs must be rejected rather
 than weakened to fit a build.
 
+Credentialed preparation verifies downloaded bytes and restored executable modes
+before the untrusted build starts. When registration supplies
+`bundle_content_manifest_sha256`, the native reader recomputes that canonical
+manifest from the actual files and checks the registered identity, legacy revision
+and mode digest together. Malformed or mismatched strong identity cannot fall back
+to checksum-only validation. Sources without that field retain the legacy reader.
+
 ## Prepared service fixture components
 
 A build records the primary image as `task` and each built sidecar as

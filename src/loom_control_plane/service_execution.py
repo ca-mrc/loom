@@ -563,6 +563,7 @@ async def reserve_trial_execution(
     parent_lease_id: UUID | None = None,
     deadline_at: datetime,
     now: datetime | None = None,
+    pool_handoff_id: UUID | None = None,
 ) -> ServiceExecutionLease:
     """Atomically reserve a trial and append its durable create command."""
 
@@ -745,6 +746,14 @@ async def reserve_trial_execution(
     except ValueError as exc:
         raise ServiceExecutionConflict(str(exc)) from exc
 
+    global_identity = None
+    if pool_handoff_id is not None:
+        from loom_control_plane.pool_execution_handoff import qualify_execution_handoff
+
+        global_identity = await qualify_execution_handoff(session, handoff_id=pool_handoff_id,
+            request_id=request_id, trial=trial, target=target, requirements=requirements,
+            runtime=runtime_contract, deadline_at=deadline_at, now=current_time)
+
     allow_target_reselection = False
     if (
         execution_role == "attempt"
@@ -771,7 +780,7 @@ async def reserve_trial_execution(
         raise ServiceExecutionConflict("verifier parent lease binds a different execution route")
 
     generation = 1
-    lease_id = uuid4()
+    lease_id = global_identity[0] if global_identity is not None else uuid4()
     provider_scope, namespace_name, job_name, execution_unit_key = _execution_identity(
         trial_id=trial.id,
         attempt=attempt,
@@ -780,6 +789,8 @@ async def reserve_trial_execution(
         namespace_name=str(target.spec_json["namespace_name"]),
         target_id=target.id,
     )
+    if global_identity is not None:
+        job_name = global_identity[1]
     lease = ServiceExecutionLease(
         id=lease_id,
         request_id=request_id,
@@ -850,7 +861,8 @@ async def reserve_trial_execution(
     # Capacity waits remain queued: reservation, budget and admission writes are
     # rolled back together before any outbox command or execution attempt exists.
     # The actuator reuses this authorization when it eventually creates the Job.
-    await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time)
+    if global_identity is None:
+        await reserve_execution_provisioning(session, lease_id=lease.id, now=current_time)
     command_payload = {
         "schema_version": "loom.execution-command.v1",
         "lease_id": str(lease_id),

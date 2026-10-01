@@ -159,8 +159,11 @@ def register_api_routes(
     app.include_router(team_registrations.router, prefix="/api/v1")
     app.include_router(teams.router, prefix="/api/v1")
     if management:
+        from loom_service.pool_management.routes import router as pool_observer_router
+
         app.include_router(environments.router, prefix="/api/v1")
         app.include_router(applications.router, prefix="/api/v1")
+        app.include_router(pool_observer_router)
     if not management:
         app.include_router(managed_child.router, prefix="/api/v1")
         for workload_router in (
@@ -177,6 +180,11 @@ def register_api_routes(
 
 def create_app(settings: LoomServiceSettings) -> FastAPI:
     management = settings.service_mode == "management"
+    pool_profiles = None
+    if settings.pool_profiles_file is not None:
+        from loom_service.pool_management.profiles import load_pool_profiles
+
+        pool_profiles = load_pool_profiles(settings.pool_profiles_file)
     child_registration = load_child_registration(settings)
     workload_contract = None if management else _validated_v1_workload_contract(settings)
     # Fail deployment health immediately rather than discovering a malformed
@@ -204,6 +212,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
         app.state.settings = settings
         app.state.session_factory = session_factory
         async with contextlib.AsyncExitStack() as resources:
+            if pool_profiles is not None:
+                app.state.pool_profiles = pool_profiles
             if settings.environment_management_config_file is not None:
                 installation = ManagementInstallation.load(settings.environment_management_config_file)
                 client = httpx.AsyncClient(trust_env=False, timeout=30, follow_redirects=False)
@@ -414,6 +424,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 del app.state.application_login
             if hasattr(app.state, "session_factory"):
                 del app.state.session_factory
+            if hasattr(app.state, "pool_profiles"):
+                del app.state.pool_profiles
             for attribute in (
                 "_owned_management_http_client",
                 "_owned_service_gateway_client",

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Literal
 
-from loom_execution_capacity_collector.config import ExecutionCapacityCollectorSettings
+from loom_execution_capacity_collector.config import NebiusCapacitySourceSettings
 from loom_execution_capacity_collector.contracts import (
     CapacityPolicyBinding,
     NodeGroupPlacement,
@@ -80,7 +80,7 @@ class NebiusCapacityReader:
 
     def __init__(
         self,
-        settings: ExecutionCapacityCollectorSettings,
+        settings: NebiusCapacitySourceSettings,
         *,
         sdk: Any | None = None,
         quota_client: Any | None = None,
@@ -246,6 +246,10 @@ class NebiusCapacityReader:
     async def capture(self, policy: CapacityPolicyBinding) -> ProviderCapacitySnapshot:
         if not policy.enabled:
             raise NebiusObservationError("capacity policy is disabled")
+        return await self.capture_pool()
+
+    async def capture_pool(self) -> ProviderCapacitySnapshot:
+        """Read the configured native group without inventing a target policy."""
         from nebius.api.nebius.mk8s.v1 import (
             GetNodeGroupRequest,
         )

@@ -64,6 +64,9 @@ from loom_control_plane.task_image_execution import (
     configured_execution_service,
 )
 from loom_control_plane.task_lifecycle import cancel_and_drain_tasks as _cancel_and_drain_tasks
+from loom_execution_actuator.pool_client import PoolClient
+from loom_execution_actuator.pool_execution_outbox import PoolExecutionOutbox
+from loom_execution_actuator.pool_execution_selection import PoolExecutionSelector
 from loom_task_image_authority.execution_config import load_execution_admission_settings
 
 
@@ -165,6 +168,20 @@ def create_app(
             bucket=settings.artifacts_bucket,
         )
 
+        global_selector = None
+        if settings.service_execution_scheduler_enabled:
+            image_keyring = ImageAdmissionKeyring.from_json(settings.execution_image_admission_public_keys_json)
+            pool = settings.global_pool
+            if pool is not None:
+                management = PoolClient(origin=pool.management_origin, bearer_token_file=pool.bearer_token_file,
+                    timeout_seconds=pool.timeout_seconds)
+                resources.push_async_callback(management.close)
+                global_selector = PoolExecutionSelector(outbox=PoolExecutionOutbox(
+                    sessions=session_factory, participant=pool.participant, environment=pool.environment,
+                    logical_pool_id=pool.logical_pool_id, image_admission_keyring=image_keyring,
+                    maximum_deadline_seconds=settings.service_execution_scheduler_max_deadline_sec),
+                    allocation_reader=management)
+
         background_tasks: list[asyncio.Task[None]] = []
         service_execution_materializer_stop_event: asyncio.Event | None = None
 
@@ -174,7 +191,7 @@ def create_app(
             await _cancel_and_drain_tasks(background_tasks)
 
         # Register teardown before spawning: partial startup must drain work
-        # before the signer and either database engine can be disposed.
+        # before the management client, signer or database engines are closed.
         resources.push_async_callback(stop_background)
         # Worker heartbeat recovery belongs to the explicitly enabled local
         # execution path. Hosted executions are reconciled through their leases.
@@ -235,13 +252,12 @@ def create_app(
                     session_factory=session_factory,
                     environment=settings.service_execution_scheduler_environment,
                     pool_id=settings.service_execution_scheduler_pool_id,
-                    image_admission_keyring=ImageAdmissionKeyring.from_json(
-                        settings.execution_image_admission_public_keys_json
-                    ),
+                    image_admission_keyring=image_keyring,
                     interval_seconds=settings.service_execution_scheduler_interval_sec,
                     maximum_deadline_seconds=(
                         settings.service_execution_scheduler_max_deadline_sec
                     ),
+                    global_selector=global_selector,
                 ),
                 name="loom-cp-service-execution-scheduler",
             )

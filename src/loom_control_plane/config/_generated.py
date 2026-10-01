@@ -43,6 +43,7 @@ class ControlPlaneSettings(BaseSettings):
     minio_endpoint: str = "http://loom-minio:9000"
     minio_region: str = "us-east-1"
     minio_secret_key: SecretStr
+    service_execution_global_pool_json: str | None = None
     service_execution_materializer_claim_ttl_sec: float = 300.0
     service_execution_materializer_concurrency: int = 8
     service_execution_materializer_enabled: bool = True

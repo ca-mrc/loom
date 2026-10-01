@@ -27,6 +27,58 @@ def quota_identity(quota: QuotaResource) -> tuple[str, ...]:
     return (quota.parent_id, quota.region, quota.service, quota.name, quota.unit)
 
 
+def require_provider_quota_headroom(
+    current: CapacityPlacement, *, additional_nodes: int,
+    peers: Iterable[tuple[CapacityPlacement, int]],
+) -> None:
+    """Check qualified physical projections, independent of any database.
+
+    Callers must serialize every shared quota identity and qualify observation
+    scope/freshness and placement first. Account usage is not summed across
+    snapshots: use its highest observation, floored by distinct native groups,
+    then add unobserved node charges exactly once per physical group.
+    """
+    if isinstance(additional_nodes, bool) or not isinstance(additional_nodes, int) or additional_nodes < 0:
+        raise ValueError("additional_nodes must be a nonnegative integer")
+
+    def amounts(placement: CapacityPlacement) -> dict[str, int]:
+        raw = placement.node_group.raw_node
+        return {"nodes": 1, "vcpu": raw.cpu_millis, "memory": raw.memory_mib, "storage": raw.storage_mib}
+
+    charges = {key: additional_nodes * value for key, value in amounts(current).items()}
+    native_floor = {key: current.node_group.node_count * value for key, value in amounts(current).items()}
+    used = {key: quota.used for key, quota in current.quota_resources.items()}
+    limits = {key: quota.limit for key, quota in current.quota_resources.items()}
+    groups = {current.node_group.id}
+    node_ids = {node.uid for node in current.nodes}
+    provider_ids = {node.provider_id for node in current.nodes}
+    for peer, count in peers:
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError("additional_nodes must be a nonnegative integer")
+        shared = {
+            key for key, quota in current.quota_resources.items()
+            if key in peer.quota_resources and quota_identity(quota) == quota_identity(peer.quota_resources[key])
+        }
+        if not shared:
+            continue
+        if (peer.node_group.id in groups or node_ids & {node.uid for node in peer.nodes}
+                or provider_ids & {node.provider_id for node in peer.nodes}):
+            raise PlacementUnavailableError("execution_capacity_overlapping_targets")
+        groups.add(peer.node_group.id)
+        node_ids.update(node.uid for node in peer.nodes)
+        provider_ids.update(node.provider_id for node in peer.nodes)
+        for key in shared:
+            charges[key] += count * amounts(peer)[key]
+            native_floor[key] += peer.node_group.node_count * amounts(peer)[key]
+            used[key] = max(used[key], peer.quota_resources[key].used)
+            limits[key] = min(limits[key], peer.quota_resources[key].limit)
+    for key in ("nodes", "vcpu", "memory", "storage"):
+        if key not in current.quota_resources:
+            continue
+        if max(used[key], native_floor[key]) + charges[key] > limits[key]:
+            raise PlacementUnavailableError(f"execution_capacity_provider_quota_{key}_exceeded")
+
+
 def vector(value: ResourceTotals) -> tuple[int, int, int]:
     return value.cpu_millis, value.memory_mib, value.storage_mib
 

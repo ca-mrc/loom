@@ -24,6 +24,7 @@ from loom.db.schema import (
     TaskImageMaterializationAttempt,
 )
 from loom.nebius_kubernetes import NebiusKubernetesConnection, create_api_client
+from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.security.redaction import redact_text
 from loom.task_image_build_plan import derive_task_image_build_components
 from loom_control_plane.execution_capacity import (
@@ -181,6 +182,67 @@ class NativeBuildKubernetesApi:
                         job["builder_log"] = _safe_log(str(log))
                     except Exception:
                         pass  # An unscheduled Pod has no build log.
+            return job
+        return await asyncio.to_thread(run)
+
+    async def observe_pool(self, runtime: PoolNativeRuntimeV1, *, capture_logs: bool = False) -> dict[str, Any] | None:
+        """Read only a gateway-observed native identity; never adopt/create/delete."""
+        from loom_execution_actuator.pool_native_observation import qualify_native_observation
+
+        runtime = PoolNativeRuntimeV1.model_validate_json(runtime.model_dump_json())
+        if runtime.receipt.job_uid is None:
+            raise ValueError("pool_native_job_not_observed")
+
+        def namespace() -> None:
+            value = self._json(self._core.read_namespace(runtime.namespace.name, _request_timeout=20))
+            metadata = value.get("metadata", {})
+            if (value.get("kind") != "Namespace" or value.get("apiVersion") != "v1"
+                    or metadata.get("uid") != str(runtime.namespace.uid)
+                    or metadata.get("name") != runtime.namespace.name or metadata.get("deletionTimestamp")):
+                raise ValueError("pool_native_namespace_changed")
+
+        def run() -> dict[str, Any] | None:
+            namespace()
+            try:
+                job = self._json(self._batch.read_namespaced_job(runtime.job_name, runtime.namespace.name, _request_timeout=20))
+            except Exception as error:
+                if getattr(error, "status", None) != 404:
+                    raise
+                # Absence is not cleanup proof or permission to recreate. The
+                # gateway separately inventories residual Pods before release.
+                namespace()
+                return None
+            qualify_native_observation(job, runtime)
+            listing = self._json(self._core.list_namespaced_pod(runtime.namespace.name,
+                label_selector="job-name=" + runtime.job_name, limit=100, _request_timeout=20))
+            if (listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
+                    or not isinstance(listing.get("items"), list)
+                    or any(not isinstance(pod, dict) for pod in listing["items"])
+                    or listing.get("metadata", {}).get("continue")):
+                raise ValueError("pool_native_partial_pod_list")
+            # List item type metadata is legitimately omitted by Kubernetes.
+            # Inherit only from the qualified PodList, retaining explicit types.
+            job["pods"] = [{"apiVersion": "v1", "kind": "Pod", **pod} for pod in listing["items"]]
+            qualify_native_observation(job, runtime)
+            if job["pods"] and (capture_logs or job.get("status", {}).get("succeeded") or job.get("status", {}).get("failed")):
+                pod = job["pods"][0]
+
+                def current_pod() -> None:
+                    value = self._json(self._core.read_namespaced_pod(pod["metadata"]["name"], runtime.namespace.name, _request_timeout=20))
+                    qualify_native_observation({**job, "pods": [value]}, runtime)
+                    if value["metadata"]["uid"] != pod["metadata"]["uid"]:
+                        raise ValueError("pool_native_pod_changed")
+
+                current_pod()
+                try:
+                    log = self._core.read_namespaced_pod_log(pod["metadata"]["name"], runtime.namespace.name,
+                        container="build", tail_lines=100, limit_bytes=16384, _request_timeout=20)
+                except Exception:
+                    pass  # Logs may not exist yet; never fabricate a result.
+                else:
+                    job["builder_log"] = _safe_log(str(log))
+                current_pod()
+            namespace()
             return job
         return await asyncio.to_thread(run)
 
@@ -477,27 +539,8 @@ class NativeTaskImageController:
 
     async def _fail(self, session: AsyncSession, row: TaskImageMaterialization, reason: str, *,
                     retryable: bool, images: dict[str, str] | None = None, message: str | None = None) -> None:
-        safe_message = _safe_log(message or reason.replace("_", " "))[-2000:]
-        await fail_task_image_materialization(session, materialization_id=row.id, builder_id=self.builder_id,
-                                             lease_epoch=row.lease_epoch, retryable=retryable,
-                                             failure_reason=reason, failure_message=safe_message,
-                                             registry_images=images or {})
-        attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
-            TaskImageMaterializationAttempt.materialization_id == row.id,
-            TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch,
-        ))
-        if attempt is not None and attempt.native_build:
-            # The shared materialization clears its failure on the next claim.
-            # Retain this attempt's own result through retries and cleanup.
-            attempt.native_build = {**attempt.native_build, "failure_reason": reason, "failure_message": safe_message}
-            if reason == "build_cancelled":
-                # Evidence above uses the immutable attempt number. Only the
-                # charged retry budget is refundable; the epoch never goes back.
-                row.attempt_count -= 1
-                row.state = "queued"
-                row.next_attempt_at = None
-                row.finished_at = None
-                attempt.native_build = {**attempt.native_build, "retry_budget_refunded": True}
+        await fail_native_build(session, row, reason, builder_id=self.builder_id,
+            retryable=retryable, images=images, message=message)
 
     async def _lock_build(
         self, session: AsyncSession, attempt_id: UUID,
@@ -632,8 +675,6 @@ class NativeTaskImageController:
             await self._save_native(attempt_id, native)
 
     async def _record_result(self, attempt_id: UUID, observed: dict[str, Any]) -> None:
-        status = observed.get("status", {})
-        terminal = bool(status.get("succeeded") or status.get("failed"))
         async with self.sessions() as session, session.begin():
             await session.execute(_CAPACITY_ADMISSION_LOCK)
             row, attempt = await self._lock_build(session, attempt_id)
@@ -641,50 +682,82 @@ class NativeTaskImageController:
             if not self._owned(row, attempt):
                 return  # Next DB scan cleans the old epoch without touching its successor.
             assert row is not None
-            if row.state == "claimed":
-                await start_task_image_materialization(session, materialization_id=row.id, builder_id=self.builder_id,
-                                                       lease_epoch=attempt.lease_epoch)
-            try:
-                summary = build_observation(observed)
-                old_uid = attempt.native_build.get("pod_uid")
-                if old_uid and summary.get("pod_uid") not in (None, old_uid):
-                    raise ValueError("build Pod identity changed")
-            except ValueError:
-                await self._fail(session, row, "build_pod_identity_changed", retryable=False,
-                                 message="Native build created multiple Pods or replaced its recorded Pod")
-                return
-            native = {**attempt.native_build, **summary, "state": "terminal" if terminal else "pending"}
-            attempt.native_build = native
-            if not terminal:
-                return
-            images: dict[str, str] = {}
-            invalid = False
-            try:
-                images = publication_receipt(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
-                repository = json.loads(native["configmap"]["data"]["claim.json"])["registry_repository"]
-                if any(not re.fullmatch(re.escape(repository) + r"@sha256:[a-f0-9]{64}", ref) for ref in images.values()):
-                    raise ValueError("publication outside the frozen task repository")
-                if status.get("succeeded"):
-                    await complete_task_image_materialization(session, materialization_id=row.id, builder_id=self.builder_id,
-                                                             lease_epoch=attempt.lease_epoch, registry_images=images)
-                    return
-            except (ValueError, TypeError, KeyError):
-                invalid, images = True, {}
-            if status.get("succeeded") and invalid:
-                await self._fail(session, row, "build_publication_receipt_invalid", retryable=False,
-                                 message="Publisher receipt is missing, malformed, or differs from the frozen build identity/components/repository")
-            else:
-                phase = next((phase["name"] for phase in native.get("phases", [])
-                              if phase.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
-                failure = _native_failure(native)
-                reason, message, retryable = failure or (
-                    "build_" + phase + "_failed",
-                    ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
-                    if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
-                    phase != "build",
-                )
-                try:
-                    await self._fail(session, row, reason, retryable=retryable, images=images, message=message)
-                except TaskImageCompletionError:
-                    await self._fail(session, row, "build_publication_receipt_invalid", retryable=False,
-                                 message="Publisher receipt is missing, malformed, or differs from the frozen build identity/components/repository")
+            await record_native_build_result(session, row, attempt, builder_id=self.builder_id, observed=observed,
+                registry_repository=json.loads(attempt.native_build["configmap"]["data"]["claim.json"])["registry_repository"])
+
+
+async def fail_native_build(session: AsyncSession, row: TaskImageMaterialization, reason: str, *, builder_id: str,
+                            retryable: bool, images: dict[str, str] | None = None, message: str | None = None) -> None:
+    """Existing native failure semantics; caller owns claim qualification/commit."""
+    safe_message = _safe_log(message or reason.replace("_", " "))[-2000:]
+    await fail_task_image_materialization(session, materialization_id=row.id, builder_id=builder_id,
+        lease_epoch=row.lease_epoch, retryable=retryable, failure_reason=reason,
+        failure_message=safe_message, registry_images=images or {})
+    attempt = await session.scalar(select(TaskImageMaterializationAttempt).where(
+        TaskImageMaterializationAttempt.materialization_id == row.id,
+        TaskImageMaterializationAttempt.lease_epoch == row.lease_epoch))
+    if attempt is not None and attempt.native_build:
+        attempt.native_build = {**attempt.native_build, "failure_reason": reason, "failure_message": safe_message}
+        if reason == "build_cancelled":
+            # Refund only the retry budget, never the immutable attempt/epoch.
+            row.attempt_count -= 1
+            row.state, row.next_attempt_at, row.finished_at = "queued", None, None
+            attempt.native_build = {**attempt.native_build, "retry_budget_refunded": True}
+
+
+async def record_native_build_result(session: AsyncSession, row: TaskImageMaterialization,
+                                     attempt: TaskImageMaterializationAttempt, *, builder_id: str,
+                                     observed: dict[str, Any], registry_repository: str) -> None:
+    """Share publication/failure handling without coupling it to any Job writer.
+
+    Caller holds the materialization and attempt locks, qualifies the live lease
+    and source, and owns commit. The repository comes from retained authority.
+    """
+    assert attempt.native_build is not None
+    status = observed.get("status", {})
+    terminal = bool(status.get("succeeded") or status.get("failed"))
+    if row.state == "claimed":
+        await start_task_image_materialization(session, materialization_id=row.id,
+            builder_id=builder_id, lease_epoch=attempt.lease_epoch)
+    try:
+        summary = build_observation(observed)
+        old_uid = attempt.native_build.get("pod_uid")
+        if old_uid and summary.get("pod_uid") not in (None, old_uid):
+            raise ValueError("build Pod identity changed")
+    except ValueError:
+        await fail_native_build(session, row, "build_pod_identity_changed", builder_id=builder_id, retryable=False,
+            message="Native build created multiple Pods or replaced its recorded Pod")
+        return
+    native = {**attempt.native_build, **summary, "state": "terminal" if terminal else "pending"}
+    attempt.native_build = native
+    if not terminal:
+        return
+    images: dict[str, str] = {}
+    invalid = False
+    try:
+        images = publication_receipt(observed, materialization_id=row.id, lease_epoch=attempt.lease_epoch)
+        if any(not re.fullmatch(re.escape(registry_repository) + r"@sha256:[a-f0-9]{64}", ref) for ref in images.values()):
+            raise ValueError("publication outside the frozen task repository")
+        if status.get("succeeded"):
+            await complete_task_image_materialization(session, materialization_id=row.id,
+                builder_id=builder_id, lease_epoch=attempt.lease_epoch, registry_images=images)
+            return
+    except (ValueError, TypeError, KeyError):
+        invalid, images = True, {}
+    invalid_message = "Publisher receipt is missing, malformed, or differs from the frozen build identity/components/repository"
+    if status.get("succeeded") and invalid:
+        await fail_native_build(session, row, "build_publication_receipt_invalid", builder_id=builder_id,
+            retryable=False, message=invalid_message)
+    else:
+        phase = next((phase["name"] for phase in native.get("phases", [])
+            if phase.get("state", {}).get("terminated", {}).get("exitCode", 0)), "job")
+        reason, message, retryable = _native_failure(native) or (
+            "build_" + phase + "_failed",
+            ("Native build phase " + phase + " failed. " + native.get("builder_log", ""))
+            if phase == "build" else "Native build phase " + phase + " failed: " + _phase_error(observed, phase),
+            phase != "build")
+        try:
+            await fail_native_build(session, row, reason, builder_id=builder_id, retryable=retryable, images=images, message=message)
+        except TaskImageCompletionError:
+            await fail_native_build(session, row, "build_publication_receipt_invalid", builder_id=builder_id,
+                retryable=False, message=invalid_message)

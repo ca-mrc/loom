@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import and_, exists, or_, select, text, update
+from sqlalchemy import Select, and_, exists, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -248,45 +248,49 @@ def _lease_deadline(*, now: datetime, lease_seconds: float) -> datetime:
     return now + timedelta(seconds=lease_seconds)
 
 
-def _nebius_demand_exists(row: Any, *, pool_id: str) -> ColumnElement[bool]:
+def nebius_task_image_consumers(row: Any, *, pool_id: str) -> Select[tuple[Trial]]:
     # Mirror the durable service scheduler's consumer path. A build remains
     # useful during scheduling backoff or transient target unavailability.
     # Use the frozen task binding, never a later revision of the catalog Task.
     binding = row.task_config["service_execution"]
-    return and_(
-        row.cpu_arch == "x86_64",
-        exists(
-            select(1)
-            .select_from(TrialTaskImageMaterialization)
-            .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
-            .join(Batch, Batch.id == Trial.batch_id)
-            .where(
-                TrialTaskImageMaterialization.materialization_id == row.id,
-                Trial.task_id == row.task_id,
-                Trial.team_id == Batch.team_id,
-                Trial.state.not_in(_TERMINAL_TRIAL_STATES),
-                Trial.cancellation_requested_at.is_(None),
-                Trial.family_key.is_(None),
-                Batch.backend == "nebius",
-                Batch.state.not_in(("finished", "cancelled")),
-                Trial.requires_caps["worker_pool"].astext == pool_id,
-                or_(
-                    Trial.execution_route_pool_name.is_(None),
-                    and_(
-                        Trial.execution_route_pool_name == pool_id,
-                        Trial.execution_route_json["selected_adapter_kind"].astext == "kubernetes_job",
-                    ),
+    return (
+        select(Trial)
+        .select_from(TrialTaskImageMaterialization)
+        .join(Trial, Trial.id == TrialTaskImageMaterialization.trial_id)
+        .outerjoin(Batch, Batch.id == Trial.batch_id)
+        .where(
+            row.cpu_arch == "x86_64",
+            TrialTaskImageMaterialization.materialization_id == row.id,
+            Trial.task_id == row.task_id,
+            Trial.state.not_in(_TERMINAL_TRIAL_STATES),
+            Trial.cancellation_requested_at.is_(None),
+            Trial.family_key.is_(None),
+            or_(
+                and_(Trial.batch_id.is_(None), Trial.requires_caps["backend"].astext == "nebius"),
+                and_(Trial.team_id == Batch.team_id, Batch.backend == "nebius",
+                     Batch.state.not_in(("finished", "cancelled"))),
+            ),
+            Trial.requires_caps["worker_pool"].astext == pool_id,
+            or_(
+                Trial.execution_route_pool_name.is_(None),
+                and_(
+                    Trial.execution_route_pool_name == pool_id,
+                    Trial.execution_route_json["selected_adapter_kind"].astext == "kubernetes_job",
                 ),
-                or_(
-                    binding["logical_pool_id"].astext == pool_id,
-                    and_(
-                        binding.astext.is_(None),
-                        Batch.service_execution_runtime_profile["logical_pool_id"].astext == pool_id,
-                    ),
+            ),
+            or_(
+                binding["logical_pool_id"].astext == pool_id,
+                and_(
+                    binding.astext.is_(None),
+                    Batch.service_execution_runtime_profile["logical_pool_id"].astext == pool_id,
                 ),
-            )
-        ),
+            ),
+        )
     )
+
+
+def _nebius_demand_exists(row: Any, *, pool_id: str) -> ColumnElement[bool]:
+    return nebius_task_image_consumers(row, pool_id=pool_id).exists()
 
 
 async def has_nebius_task_image_demand(
@@ -313,10 +317,21 @@ async def claim_task_image_materialization(
     cpu_arch: str,
     lease_seconds: float = DEFAULT_TASK_IMAGE_LEASE_SECONDS,
     nebius_pool_id: str | None = None,
+    materialization_id: UUID | None = None,
+    expected_lease_epoch: int | None = None,
 ) -> TaskImageMaterialization | None:
-    """Atomically claim queued work or recover one expired lease."""
+    """Atomically claim queued work, or the exact selection admitted by a pool.
+
+    Exact selection never substitutes another queue head or performs unrelated
+    queue maintenance. Its caller still owns snapshot qualification, the durable
+    global-grant link, and commit/rollback; no network operation belongs here.
+    """
     from loom.nebius_rollout_guard import admission_open
 
+    if materialization_id is not None or expected_lease_epoch is not None:
+        if (not isinstance(materialization_id, UUID) or not materialization_id.int
+                or type(expected_lease_epoch) is not int or not 0 <= expected_lease_epoch < 2**63 - 1):
+            raise ValueError("exact materialization claim requires a valid ID and expected lease epoch")
     cpu_arch = execution_cpu_arch(cpu_arch)
     _assert_no_pending_task_image_writes(session)
     # Queue maintenance writes precede candidate selection. Establish retained
@@ -326,31 +341,35 @@ async def claim_task_image_materialization(
 
     await require_task_bundle_transaction(session)
     scope: tuple[ColumnElement[bool], ...] = ()
+    if materialization_id is not None:
+        scope = (TaskImageMaterialization.id == materialization_id,
+                 TaskImageMaterialization.lease_epoch == expected_lease_epoch)
     if nebius_pool_id is not None:
         if not nebius_pool_id.strip():
             raise ValueError("nebius_pool_id must not be empty")
-        scope = (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
+        scope += (_nebius_demand_exists(TaskImageMaterialization, pool_id=nebius_pool_id),)
     if not await admission_open(session):
         return None
     now = datetime.now(UTC)
-    await session.execute(
-        update(TaskImageMaterialization)
-        .where(
-            *scope,
-            TaskImageMaterialization.state.in_(("claimed", "running")),
-            TaskImageMaterialization.lease_expires_at <= now,
-            TaskImageMaterialization.attempt_count >= TaskImageMaterialization.max_attempts,
+    if materialization_id is None:
+        await session.execute(
+            update(TaskImageMaterialization)
+            .where(
+                *scope,
+                TaskImageMaterialization.state.in_(("claimed", "running")),
+                TaskImageMaterialization.lease_expires_at <= now,
+                TaskImageMaterialization.attempt_count >= TaskImageMaterialization.max_attempts,
+            )
+            .values(
+                state="failed",
+                claimed_by=None,
+                lease_expires_at=None,
+                failure_reason="lease_expired",
+                failure_message="task image build lease expired at the attempt limit",
+                finished_at=now,
+                updated_at=now,
+            )
         )
-        .values(
-            state="failed",
-            claimed_by=None,
-            lease_expires_at=None,
-            failure_reason="lease_expired",
-            failure_message="task image build lease expired at the attempt limit",
-            finished_at=now,
-            updated_at=now,
-        )
-    )
     row = await session.scalar(
         select(TaskImageMaterialization)
         .where(

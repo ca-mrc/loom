@@ -522,16 +522,21 @@ def public_smoke(origin: str, environment: str) -> None:
             time.sleep(5)
 
 
+def rollout_guard_observation_sql(*, owner: str, candidate: str) -> str:
+    """Fixed read-only recovery query, also usable after the controller stops."""
+    owner_literal = "'" + owner.replace("'", "''") + "'"
+    candidate_literal = "'" + candidate.replace("'", "''") + "'"
+    return ("BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; "
+            "SELECT json_build_object('status', COALESCE((SELECT CASE WHEN owner = "
+            + owner_literal + " AND candidate_sha = " + candidate_literal
+            + " THEN 'held' ELSE 'skipped_locked' END FROM public.nebius_rollout_guard WHERE id = 1), 'open')); ROLLBACK;")
+
+
 def rollout_guard(kube: Kubectl, namespace: str, action: str, owner: str, candidate: str) -> dict[str, Any]:
     if action == "observe":
         # The service being repaired may not have a running Pod. Read the
         # durable database directly; observation never changes the guard.
-        owner_literal = "'" + owner.replace("'", "''") + "'"
-        candidate_literal = "'" + candidate.replace("'", "''") + "'"
-        query = ("BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; "
-                 "SELECT json_build_object('status', COALESCE((SELECT CASE WHEN owner = "
-                 + owner_literal + " AND candidate_sha = " + candidate_literal
-                 + " THEN 'held' ELSE 'skipped_locked' END FROM public.nebius_rollout_guard WHERE id = 1), 'open')); ROLLBACK;")
+        query = rollout_guard_observation_sql(owner=owner, candidate=candidate)
         output = kube.run("exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql",
                           "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query)
     else:

@@ -217,6 +217,9 @@ def test_conversion_preserves_history_and_reaches_dev(
                 # 0153 adds nullable diagnostics; historical rows retain their
                 # original data and must not acquire invented observations.
                 row["scheduling_observation"] = None
+                # 0172 preserves unknown historical origin; migration must not
+                # promote old work into any environment's scheduling priority.
+                row["pool_origin"] = None
             if revision not in {"0135", "0136"}:
                 for row in before["task_image_materialization_attempts"]:
                     row["native_build"] = None

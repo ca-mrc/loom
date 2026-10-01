@@ -118,6 +118,30 @@ def _pod_request(pod: Any) -> ResourceTotals:
     return _add(effective, _resources(getattr(pod.spec, "overhead", None) or {}))
 
 
+def rendered_pod_resources(spec: dict[str, Any]) -> ResourceTotals:
+    """Apply the collector's scheduler arithmetic to a fixed, pre-admission Pod.
+
+    Renderers must explicitly request every resource; silently relying on API
+    limit-to-request defaulting could undercount a Job before its Pod appears.
+    RuntimeClass overhead must be supplied by the qualified protected profile.
+    """
+    def container(raw: dict[str, Any]) -> SimpleNamespace:
+        resources = raw.get("resources") or {}
+        requests = resources.get("requests")
+        if (not isinstance(requests, dict)
+                or any(requests.get(name) is None for name in ("cpu", "memory", "ephemeral-storage"))):
+            raise KubernetesObservationError("rendered Pod resource requests are incomplete")
+        return SimpleNamespace(resources=SimpleNamespace(requests=requests), restart_policy=raw.get("restartPolicy"))
+
+    if not spec.get("containers"):
+        raise KubernetesObservationError("rendered Pod has no containers")
+    return _pod_request(SimpleNamespace(spec=SimpleNamespace(
+        containers=[container(row) for row in spec["containers"]],
+        init_containers=[container(row) for row in spec.get("initContainers", [])],
+        resources=spec.get("resources"), overhead=spec.get("overhead"),
+    )))
+
+
 def _pool_resize_unqualified(raw: dict[str, Any], pod_request: ResourceTotals) -> bool:
     """Do not admit against freed spec resources while kubelet still holds them.
 
@@ -748,10 +772,24 @@ class InClusterKubernetesCapacityReader:
         from loom_execution_capacity_collector.pool import PoolPodClassifier
 
         pool = PoolPodClassifier(scope)
-        return await asyncio.to_thread(
+        reading = asyncio.create_task(asyncio.to_thread(
             self._capture_sync, namespace="", target_id="",
             node_label_selector=pool.node_selector, pool=pool,
-        )
+        ))
+        try:
+            return await asyncio.shield(reading)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop the SDK read. Keep ownership
+            # until its bounded calls finish before outer cleanup closes clients.
+            while not reading.done():
+                try:
+                    await asyncio.shield(reading)
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # Retrieve a concurrent SDK failure without replacing cancellation.
+            if not reading.cancelled():
+                reading.exception()
+            raise
 
 
 __all__ = ["InClusterKubernetesCapacityReader", "KubernetesObservationError"]

@@ -317,6 +317,18 @@ def test_fresh_bootstrap_repeat_and_database_privileges(
         )
         with psycopg.connect(url.render_as_string(hide_password=False)) as connection:
             assert connection.execute("SELECT count(*) FROM execution_targets").fetchone() == (0,)
+            # Invoker-rights lease guards inspect global release evidence even
+            # while this bootstrap retains the pre-cutover execution path.
+            connection.execute("SELECT 1 FROM nebius_pool_execution_outbox LIMIT 0")
+            connection.commit()
+            for statement in (
+                "INSERT INTO nebius_pool_execution_outbox DEFAULT VALUES",
+                "UPDATE nebius_pool_execution_outbox SET phase=phase",
+                "DELETE FROM nebius_pool_execution_outbox",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(statement)
+                connection.rollback()
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute("DELETE FROM users")
             connection.rollback()

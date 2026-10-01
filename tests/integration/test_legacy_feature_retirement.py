@@ -25,7 +25,7 @@ def _config(url: str) -> Config:
     return cfg
 
 
-def test_fresh_head_has_only_retained_candidates_and_reversible_empty_retirement(
+def test_published_retirement_preserves_rows_and_reverses_empty_retirement(
     isolated_migration_postgres_url: str,
 ) -> None:
     engine = create_engine(isolated_migration_postgres_url)
@@ -45,13 +45,15 @@ def test_fresh_head_has_only_retained_candidates_and_reversible_empty_retirement
             """), {"id": trial, "team": team})
             for name in ("teams", "tasks", "trials"):
                 before[name] = connection.execute(text(f"SELECT to_jsonb(t) FROM {name} t")).scalars().all()
-        command.upgrade(cfg, "head")
+        # This is the published retirement's row-preservation contract. Later
+        # migrations may deliberately add columns (for example pool_origin).
+        command.upgrade(cfg, "0171")
         with engine.connect() as connection:
             for name, rows in before.items():
                 assert connection.execute(text(f"SELECT to_jsonb(t) FROM {name} t")).scalars().all() == rows
         assert set(inspect(engine).get_table_names()) & set(CANDIDATES) == RETAINED
         command.downgrade(cfg, "0170")
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0171")
     finally:
         engine.dispose()
 
@@ -127,7 +129,7 @@ def test_downgrade_matches_postgres_dump_restore_of_the_original_catalog() -> No
         with psycopg.connect(reference_dsn) as connection:
             connection.execute("SET TRANSACTION READ ONLY")
             before = read_application_schema_inventory(connection, role_bindings={"test": "application-owner"})
-        command.upgrade(cfg, "head")
+        command.upgrade(cfg, "0171")
         command.downgrade(cfg, "0170")
         with psycopg.connect(reference_dsn) as connection:
             connection.execute("SET TRANSACTION READ ONLY")

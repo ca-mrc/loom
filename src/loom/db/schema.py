@@ -59,6 +59,21 @@ from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnviron
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
 )
+from loom.db.nebius_pool_outbox_schema import NebiusPoolBuildOutbox as NebiusPoolBuildOutbox
+from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox as NebiusPoolExecutionOutbox
+from loom.db.nebius_pool_outbox_schema import NebiusPoolSubmission as NebiusPoolSubmission
+from loom.db.nebius_pool_schema import NebiusPoolBinding as NebiusPoolBinding
+from loom.db.nebius_pool_schema import NebiusPoolCancellation as NebiusPoolCancellation
+from loom.db.nebius_pool_schema import NebiusPoolCapture as NebiusPoolCapture
+from loom.db.nebius_pool_schema import (
+    NebiusPoolCleanupObservation as NebiusPoolCleanupObservation,
+)
+from loom.db.nebius_pool_schema import NebiusPoolEffect as NebiusPoolEffect
+from loom.db.nebius_pool_schema import NebiusPoolMachine as NebiusPoolMachine
+from loom.db.nebius_pool_schema import NebiusPoolMachineCredential as NebiusPoolMachineCredential
+from loom.db.nebius_pool_schema import NebiusPoolObservation as NebiusPoolObservation
+from loom.db.nebius_pool_schema import NebiusPoolParticipant as NebiusPoolParticipant
+from loom.db.nebius_pool_schema import NebiusPoolRequest as NebiusPoolRequest
 
 
 class Team(Base):
@@ -3501,6 +3516,7 @@ class Batch(Base):
 
     __tablename__ = "batches"
     __table_args__ = (
+        CheckConstraint("pool_origin IS NULL OR jsonb_typeof(pool_origin) = 'object'", name="batches_pool_origin_check"),
         CheckConstraint(
             "budget_policy IN ('none', 'soft', 'hard')",
             name="batches_budget_policy_check",
@@ -3519,6 +3535,7 @@ class Batch(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
+    pool_origin: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     team_id: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("teams.id"),
@@ -3751,6 +3768,7 @@ class Batch(Base):
 
 class Trial(Base):
     __tablename__ = "trials"
+    pool_origin: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     __table_args__ = (
         CheckConstraint(
             "legacy_claim_id IS NULL OR "
