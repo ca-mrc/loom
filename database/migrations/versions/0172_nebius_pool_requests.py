@@ -888,12 +888,15 @@ CREATE TABLE nebius_pool_observations (
 
 def downgrade() -> None:
     op.execute("""
+        -- Removing FKs/triggers also locks their existing parent tables. Take
+        -- those locks explicitly with NOWAIT before any journal is removed.
         LOCK TABLE nebius_pool_bindings, nebius_pool_participants, nebius_pool_requests,
                    nebius_pool_cleanup_observations, nebius_pool_machines,
                    nebius_pool_machine_credentials, nebius_pool_captures,
                    nebius_pool_observations, nebius_pool_effects, nebius_pool_build_outbox,
                    nebius_pool_submissions, nebius_pool_cancellations, nebius_pool_execution_outbox,
-                   batches, trials IN ACCESS EXCLUSIVE MODE NOWAIT;
+                   batches, trials, execution_leases, task_image_materializations,
+                   task_image_materialization_attempts IN ACCESS EXCLUSIVE MODE NOWAIT;
         DO $$ BEGIN
             IF EXISTS (SELECT 1 FROM nebius_pool_bindings)
                OR EXISTS (SELECT 1 FROM nebius_pool_participants)

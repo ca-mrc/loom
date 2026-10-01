@@ -22,10 +22,10 @@ import pytest
 import urllib3
 from alembic import command
 from minio import Minio
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import ORMExecuteState, defer, load_only
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
@@ -74,19 +74,30 @@ from tests.integration.test_service_execution_leases import (
 from tests.support.minio_images import prepare_test_image
 
 
-class _HistoricalTaskSnapshotSession(AsyncSession):
-    """Read only the Task snapshot columns that existed in schema 0157."""
+class _HistoricalSnapshotSession(AsyncSession):
+    """Read the real Task/Trial snapshots available in schema 0157."""
 
-    async def get(self, entity: Any, ident: Any, **kwargs: Any) -> Any:
-        if entity is Task:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # scalar/select and get use different AsyncSession entrypoints. One
+        # per-session ORM hook covers them without affecting head-schema tests.
+        event.listen(self.sync_session, "do_orm_execute", self._historical_projection)
+
+    @staticmethod
+    def _historical_projection(state: ORMExecuteState) -> None:
+        if not state.is_select:
+            return
+        entities = [item.get("entity") for item in state.statement.column_descriptions]
+        if Task in entities:
             # Current Task metadata may contain columns added after the historical
             # schema. Keep the real snapshot resolver, but use its old projection;
             # fail if the replay starts depending on any other Task field.
-            kwargs["options"] = [
-                *(kwargs.get("options") or ()),
-                load_only(Task.id, Task.config, Task.source, Task.source_provenance, raiseload=True),
-            ]
-        return await super().get(entity, ident, **kwargs)
+            state.statement = state.statement.options(
+                load_only(Task.id, Task.config, Task.source, Task.source_provenance, raiseload=True))
+        if Trial in entities:
+            # 0172's origin is intentionally absent on this historical schema.
+            # Recovery must not depend on it, synthesize it, or lazy-load it.
+            state.statement = state.statement.options(defer(Trial.pool_origin, raiseload=True))
 
 
 @pytest.fixture
@@ -583,8 +594,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             if archival_history_upgrade:
                 await asyncio.to_thread(command.downgrade, _config(isolated_migration_postgres_url), "0157")
                 sessions = async_sessionmaker(
-                    engine, class_=_HistoricalTaskSnapshotSession, expire_on_commit=False,
+                    engine, class_=_HistoricalSnapshotSession, expire_on_commit=False,
                 )
+                # The bound method above retained the head-schema factory.
+                # Reconstruct it with the same explicit historical projection.
+                retry = materializer().retry_legacy_verifier_archive
             requeues = await asyncio.gather(*(
                 retry(lease_id=lease.id, team_id=lease.team_id)
                 for _ in range(2)
