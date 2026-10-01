@@ -2256,6 +2256,9 @@ producer before further mutations, including partial replacement recovery.
 Kubernetes previews qualify defaults before UID/resource-version/spec-fenced
 updates; uncertain updates are observed, never retried. Immutable material and
 gateway resource creation retain the existing single-create journals. The
+final closed-stage readback freshly qualifies every recorded material,
+configuration, authority and gateway identity after runtime replacement; drift
+is rejected without repair or recreation. The
 `pool_runtime_staged_closed` result still marks writer migration incomplete: all
 replacement Deployments remain at zero and the single collector remains suspended.
 Protected entry qualification, runtime activation, rollback and completed

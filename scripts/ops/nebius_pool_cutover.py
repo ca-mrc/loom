@@ -344,6 +344,22 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
             api.qualify_quiescence()
             for guard in migration.guards:
                 api.qualify_runtime_access(guard.participant_id, "observe")
+            # Replacement can take long enough for a previously qualified
+            # gateway/catalog/credential to drift. Recheck every retained stage
+            # with GETs only; completion must not silently repair or recreate it.
+            for phase, checksum in record["phases"].items():
+                child = state / phase / "stage.json"
+                if checksum is None or _hash(child) != checksum:
+                    raise ValueError
+                staged = json.loads(private_state._private_read(child, limit=4 * 1024**2))
+                for item in staged["resources"].values():
+                    if item["status"] != "created":
+                        raise ValueError
+                    api.resources.verify_identity(migration.registration.binding)
+                    actual = api.resources.get_resource(item["desired"])
+                    if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                        raise ValueError
+            api.resources.verify_identity(migration.registration.binding)
             return result("pool_runtime_staged_closed")
     except Exception:
         raise ValueError("pool_cutover_unconfirmed_preserve_evidence") from None
