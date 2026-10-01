@@ -75,6 +75,72 @@ def test_completed_upgrade_yields_bound_retained_runtime_without_writes(complete
     assert {value['kind'] for value in result.retained.values()} >= {'ConfigMap', 'Secret', 'Job', 'RoleBinding', 'ValidatingAdmissionPolicy'}
 
 
+def history_credential(root):
+    from scripts.ops.nebius_management_material import _documents
+
+    material = json.loads((root.upgrade.original_state / 'bootstrap/material/material.json').read_text())
+    credential = _documents(material['material'], root.upgrade.setup.binding, material['operation_id'])['loom-platform-db']
+    credential['metadata'].update(uid=material['resources']['loom-platform-db']['uid'], resourceVersion='100')
+    return credential
+
+
+def test_pool_history_target_comes_from_completed_original_database_and_current_manager(completed_upgrade):
+    from scripts.ops.nebius_pool_origin_history import derive_management_history_target
+
+    root = load(completed_upgrade[0])
+    before = {path: path.read_bytes() for path in root.history}
+    credential = history_credential(root)
+    target = derive_management_history_target(original=root, predecessor=root, credential=credential)
+    record = json.loads((root.upgrade.original_state / 'database/stage.json').read_text())
+    assert target.controller == root.active
+    assert target.namespace == root.upgrade.setup.binding.namespace
+    assert str(target.namespace_uid) == root.upgrade.setup.binding.namespace_uid
+    assert target.database.statefulset['metadata']['uid'] == record['resources']['StatefulSet:' + target.namespace + ':loom-postgres']['uid']
+    assert str(target.database.credential_uid) == credential['metadata']['uid']
+    assert target.database.credential_resource_version == '100'
+    assert {path: path.read_bytes() for path in root.history} == before
+
+
+def test_pool_history_target_preserves_a_completed_refresh_and_original_database(completed_upgrade):
+    from scripts.ops.nebius_pool_origin_history import derive_management_history_target
+
+    root = load(completed_upgrade[0])
+    selector, _ = complete_refresh(root)
+    predecessor = load_refresh(selector, root)
+    before = {path: path.read_bytes() for path in predecessor.history}
+    target = derive_management_history_target(original=root, predecessor=predecessor, credential=history_credential(root))
+    assert target.controller == predecessor.active
+    assert target.controller != root.active
+    assert {path: path.read_bytes() for path in predecessor.history} == before
+
+
+@pytest.mark.parametrize('damage', ['uid', 'value', 'missing_version', 'history', 'predecessor'])
+def test_pool_history_target_denies_foreign_credentials_or_lost_completed_history(completed_upgrade, damage):
+    from dataclasses import replace
+
+    from scripts.ops.nebius_pool_origin_history import derive_management_history_target
+
+    root = load(completed_upgrade[0])
+    credential = history_credential(root)
+    predecessor = root
+    if damage == 'uid':
+        credential['metadata']['uid'] = str(uuid4())
+    elif damage == 'value':
+        credential['data']['service-url'] = 'Zm9yZWlnbi1wcml2YXRlLW1hcmtlcg=='
+    elif damage == 'missing_version':
+        credential['metadata'].pop('resourceVersion')
+    elif damage == 'history':
+        path = root.upgrade.original_state / 'database/stage.json'
+        path.write_bytes(path.read_bytes() + b'\n')
+    else:
+        active = copy.deepcopy(root.active)
+        active['metadata']['uid'] = str(uuid4())
+        predecessor = replace(root, active=active)
+    with pytest.raises(ValueError) as error:
+        derive_management_history_target(original=root, predecessor=predecessor, credential=credential)
+    assert 'private-marker' not in str(error.value)
+
+
 def refresh_case(root, predecessor=None):
     """Prepare the real parent request, without staging or cutover."""
     from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
