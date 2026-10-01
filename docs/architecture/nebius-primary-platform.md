@@ -2281,7 +2281,24 @@ overrides cannot silently close a different database. Only the challenge and
 response appear in arguments; no URL, password or configuration is emitted.
 Retained images need no new CLI option. Recovery still observes ownership through
 the qualified PostgreSQL Pod and never retries an uncertain acquisition. This
-check qualifies the acquisition backend, not every already-running API/actuator.
+check qualifies the acquisition backend. The private reader entry additionally
+checks every retained participant control plane, shared API and ordinary/guest
+actuator before yielding operator access. The actuator's namespace-local copied
+database Secret has its own pinned UID/resource version in the migration contract;
+it is not assumed identical to the platform Secret. Each original running consumer
+must have the retained Deployment/ReplicaSet/Pod lineage and load the exact
+effective URL resolved from its pinned Secret. The fixed read-only probe uses that
+image's real typed settings and a fresh HMAC; it opens no SQL connection and emits
+no credential. The resolved destination must be the already-qualified participant
+PostgreSQL backend, not another database or an unresolved pool/proxy.
+Recovery derives workload state from the same anchored parent validation used by
+the cutover, plus the retained closed-registration and retirement journals. It
+accepts only the original or precisely recorded stopped/rewired template. A state
+file or zero replicas alone never bypasses the running check. Recorded stopped
+consumers retain backend and credential-reference checks without trying to execute
+in retired Pods; drain and successor startup remain separate mandatory barriers.
+This entry qualification does not prove the complete external-writer inventory or
+an installed global activation.
 The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
 same-named replacement is not evidence of retired access. The queue includes

@@ -151,6 +151,100 @@ def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[st
         "documents": {key: value for key, value in documents.items() if key != "producers"}}
 
 
+def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
+                         state: Path, anchor: Path) -> dict[str, Any] | None:
+    """The same anchored recovery validation serves preflight and mutation."""
+    if (state != state.resolve() or anchor != anchor.resolve() or state == anchor
+            or state in anchor.parents or anchor in state.parents):
+        raise ValueError
+    migration = request.fencing.retirement.migration
+    operation = str(migration.registration.spec.operation_id)
+    identity = {"schema": "loom.nebius-pool-cutover.v1", "operation_id": operation,
+        "state_dir": str(state), "contract_sha256": digest(_contract(request, documents))}
+    marker, path = anchor / (operation + "-cutover.json"), state / "cutover.json"
+    if not marker.exists() and not marker.is_symlink():
+        if state.exists() or state.is_symlink():
+            raise ValueError
+        return None
+    if json.loads(private_state._private_read(marker)) != identity:
+        raise ValueError
+    record = json.loads(private_state._private_read(path, limit=4 * 1024**2))
+    if (not isinstance(record, dict) or set(record) != {*identity, "producers", "fenced", "runtime_access", "phases", "runtime"}
+            or any(record[key] != value for key, value in identity.items())
+            or set(record["producers"]) != set(documents["producers"])
+            or set(record["runtime"]) != set(documents["runtime"])
+            or not isinstance(record["runtime_access"], dict)
+            or set(record["runtime_access"]) != {str(row.participant_id) for row in migration.guards}
+            or any(value not in {"prepared", "intent", "staged"} for value in record["runtime_access"].values())
+            or not set(record["phases"]) <= {"material", "configuration", "authority", "workload"}):
+        raise ValueError
+    for group, targets in (("producers", documents["stopped"]), ("runtime", documents["runtime"])):
+        for key, item in record[group].items():
+            if (set(item) != {"phase", "expected"} or item["phase"] not in {"prepared", "intent", "stopped"}
+                    or (item["phase"] == "prepared") != (item["expected"] is None)):
+                raise ValueError
+            if item["expected"] is not None and _qualified_defaulted(targets[key], item["expected"]) != item["expected"]:
+                raise ValueError
+    writer_state, writer_anchor = state / "writers", state / "writer-anchor"
+    if record["fenced"] is not None:
+        if (not isinstance(record["fenced"], dict)
+                or set(record["fenced"]) != {"migration.json", "retirement.json", "role-fencing.json"}
+                or any(_hash(writer_state / name) != checksum for name, checksum in record["fenced"].items())):
+            raise ValueError
+        _closed(migration, writer_state, writer_anchor)
+    elif (any(value != "prepared" for value in record["runtime_access"].values()) or record["phases"]
+            or any(item["phase"] != "prepared" for item in record["runtime"].values())):
+        raise ValueError
+    for phase, checksum in record["phases"].items():
+        if checksum is not None and _hash(state / phase / "stage.json") != checksum:
+            raise ValueError
+    return record
+
+
+def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path) -> dict[str, dict[str, Any]]:
+    """Read only: derive each original or exactly journal-qualified successor.
+
+    This is not drain, runtime-health or database evidence. It selects the right
+    workload for those checks without requiring a retired Pod to run again.
+    An unanchored state file or a zero replica count is never migration evidence.
+    """
+    try:
+        documents = cutover_documents(request)
+        originals = retirement_documents(request.fencing.retirement)
+        expected = {**originals, **documents["producers"]}
+        record = _read_cutover_record(request, documents, state_dir, anchor_dir)
+        if record is None:
+            return copy.deepcopy(expected)
+        for key, item in record["producers"].items():
+            if item["phase"] != "prepared":
+                expected[key] = item["expected"]
+        state, anchor = state_dir / "writers", state_dir / "writer-anchor"
+        operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+        marker, path = anchor / (operation + "-retirement.json"), state / "retirement.json"
+        if marker.exists() or marker.is_symlink():
+            identity = {"schema": "loom.nebius-pool-retirement.v1", "operation_id": operation, "state_dir": str(state),
+                "closure_sha256": _closed(request.fencing.retirement.migration, state, anchor),
+                "originals_sha256": digest({key: {"uid": _uid(row), "document": _stable(row)} for key, row in originals.items()})}
+            child = json.loads(private_state._private_read(path, limit=4 * 1024**2))
+            if (json.loads(private_state._private_read(marker)) != identity
+                    or set(child) != {*identity, "workloads"}
+                    or any(child[key] != value for key, value in identity.items())
+                    or set(child["workloads"]) != set(originals)
+                    or any(value not in {"prepared", "intent", "stopped"} for value in child["workloads"].values())):
+                raise ValueError
+            for key, phase in child["workloads"].items():
+                if phase != "prepared":
+                    expected[key] = stopped_document(request.fencing.retirement, key)
+        elif path.exists() or path.is_symlink() or record["fenced"] is not None:
+            raise ValueError
+        for key, item in record["runtime"].items():
+            if item["phase"] != "prepared":
+                expected[key] = item["expected"]
+        return copy.deepcopy(expected)
+    except Exception:
+        raise ValueError("pool_workload_recovery_unqualified") from None
+
+
 def _updates(*, api: PoolCutoverAPI, originals: dict[str, Any], targets: dict[str, Any],
              items: dict[str, Any], save: Callable[[], None], pending: str) -> str | None:
     for key, original in originals.items():
@@ -211,41 +305,8 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
         writer_state, writer_anchor = state / "writers", state / "writer-anchor"
         with private_state._locked_state(anchor):
             path, marker = state / "cutover.json", anchor / (operation + "-cutover.json")
-            if marker.exists() or marker.is_symlink():
-                if json.loads(private_state._private_read(marker)) != identity:
-                    raise ValueError
-                record = json.loads(private_state._private_read(path, limit=4 * 1024**2))
-                if (set(record) != {*identity, "producers", "fenced", "runtime_access", "phases", "runtime"}
-                        or any(record[key] != value for key, value in identity.items())
-                        or set(record["producers"]) != set(documents["producers"])
-                        or set(record["runtime"]) != set(documents["runtime"])
-                        or not isinstance(record["runtime_access"], dict)
-                        or set(record["runtime_access"]) != {str(row.participant_id) for row in migration.guards}
-                        or any(value not in {"prepared", "intent", "staged"} for value in record["runtime_access"].values())
-                        or not set(record["phases"]) <= {"material", "configuration", "authority", "workload"}):
-                    raise ValueError
-                for group, targets in (("producers", documents["stopped"]), ("runtime", documents["runtime"])):
-                    for key, item in record[group].items():
-                        if (set(item) != {"phase", "expected"} or item["phase"] not in {"prepared", "intent", "stopped"}
-                                or (item["phase"] == "prepared") != (item["expected"] is None)):
-                            raise ValueError
-                        if item["expected"] is not None and _qualified_defaulted(targets[key], item["expected"]) != item["expected"]:
-                            raise ValueError
-                if record["fenced"] is not None:
-                    if (not isinstance(record["fenced"], dict)
-                            or set(record["fenced"]) != {"migration.json", "retirement.json", "role-fencing.json"}
-                            or any(_hash(writer_state / name) != checksum for name, checksum in record["fenced"].items())):
-                        raise ValueError
-                    _closed(migration, writer_state, writer_anchor)
-                elif (any(value != "prepared" for value in record["runtime_access"].values()) or record["phases"]
-                        or any(item["phase"] != "prepared" for item in record["runtime"].values())):
-                    raise ValueError
-                for phase, checksum in record["phases"].items():
-                    if checksum is not None and _hash(state / phase / "stage.json") != checksum:
-                        raise ValueError
-            else:
-                if state.exists() or state.is_symlink():
-                    raise ValueError
+            record = _read_cutover_record(request, documents, state, anchor)
+            if record is None:
                 api.preflight(request)
                 private_state._atomic_json(marker, identity)
                 private_state._private_directory(state)

@@ -1,10 +1,11 @@
 """Private cutover publication and bound readers; no command or activation.
 
-The protected installer must still supply installed inventory/backend
+The protected installer must still supply complete installed writer/schema
 qualification, activation, rollback and successor-refresh completion. This module
-resolves protected publication before connecting completed history to the existing
-database readers. It imports no ambient kubeconfig and replays no old installation.
-No live writes occur here.
+resolves protected publication, binds completed history and qualifies retained
+participant runtimes/backends before yielding the existing database readers.
+It imports no ambient kubeconfig and replays no old installation. No live writes
+occur here.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
 from scripts.ops.nebius_management_prerequisites import HTTPSManagementPrerequisites
 from scripts.ops.nebius_management_refresh_predecessor import (
@@ -35,10 +37,18 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_refresh,
     load_completed_upgrade,
 )
-from scripts.ops.nebius_pool_cutover import PoolCutoverRequest, cutover_documents
+from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_cutover import (
+    PoolCutoverRequest,
+    cutover_documents,
+    retained_cutover_workloads,
+)
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import PoolGuardTarget, PoolMigrationRequest
-from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_migration_guard import (
+    KubectlPoolGuardAPI,
+    qualify_database_destination,
+)
 from scripts.ops.nebius_pool_origin_history import (
     KubectlPoolHistoryAPI,
     derive_management_history_target,
@@ -148,7 +158,8 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
                 or inputs.candidate.get("candidate_sha") != operation["candidate"]
                 or inputs.profile.get("candidate_sha") != operation["candidate"]
                 or inputs.publication.source_sha != operation["candidate"]
-                or any(target.database is None for target in inputs.guards)):
+                or any(target.database is None or target.database.actuator_credential_uid is None
+                    or target.database.actuator_credential_resource_version is None for target in inputs.guards)):
             raise ValueError
         migration = PoolMigrationRequest(PoolRegistrationRequest(spec, binding, inputs.candidate), inputs.guards)
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
@@ -178,6 +189,60 @@ class ConnectedPoolReaders:
     token: str
     guards: KubectlPoolGuardAPI
     history: KubectlPoolHistoryAPI
+
+
+def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
+    """Match every retained participant consumer to its actual database.
+
+    Fresh operations require original running Pods. Recovery instead selects
+    exact journaled stopped/rewired templates and checks their retained database
+    references; the cutover parent still owns drain and later startup acceptance.
+    No state file is created and no stopped workload is restarted by this read.
+    """
+    try:
+        migration = context.request.fencing.retirement.migration
+        if guards.request != migration or load_pool_cutover_inputs(context.operation) != context:
+            raise ValueError
+        state, anchor = Path(context.operation["state_dir"]), Path(context.operation["anchor_dir"])
+        expected = retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor)
+        for target in migration.guards:
+            database = target.database
+            if database is None or database.actuator_credential_uid is None or database.actuator_credential_resource_version is None:
+                raise ValueError
+            participant, = (row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+            service, = (row for row in context.request.services if row["metadata"]["namespace"] == target.namespace)
+            actuators = tuple(row for row in context.request.fencing.retirement.actuators
+                if row["metadata"]["namespace"] == participant.execution_namespace.name)
+            for original in (target.controller, service, *actuators):
+                namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
+                desired = expected[_key(original)]
+                current = guards._get("deployment", name, namespace)
+                if not _matches(current, desired, _uid(original)):
+                    raise ValueError
+                actuator = namespace != target.namespace
+                uid = database.actuator_credential_uid if actuator else database.credential_uid
+                version = database.actuator_credential_resource_version if actuator else database.credential_resource_version
+                if desired["spec"]["replicas"] == 1:
+                    guards.qualify_runtime_database(target, original=original,
+                        credential_uid=uid, credential_resource_version=version)
+                else:
+                    if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] != 0:
+                        raise ValueError
+                    backend = guards._database(target)
+                    variable = "LOOM_EXECUTION_ACTUATOR_DB_URL" if actuator else "LOOM_CP_DB_URL" if name == "loom-control-plane" else "LOOM_SVC_DB_URL"
+                    url = guards._workload_database_url(original, url_variable=variable,
+                        credential_uid=uid, credential_resource_version=version)
+                    qualify_database_destination(url, target.namespace)
+                    if (_uid(guards._database(target)) != _uid(backend)
+                            or guards._workload_database_url(original, url_variable=variable,
+                                credential_uid=uid, credential_resource_version=version) != url
+                            or not _matches(guards._get("deployment", name, namespace), desired, _uid(original))):
+                        raise ValueError
+        if (retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor) != expected
+                or load_pool_cutover_inputs(context.operation) != context):
+            raise ValueError
+    except Exception:
+        raise EntryError("pool cutover runtime databases unqualified") from None
 
 
 async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.AsyncClient) -> None:
@@ -270,6 +335,9 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
                 guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
+                qualify_pool_runtime_databases(context, guards)
+            except EntryError:
+                raise
             except Exception:
                 raise EntryError("pool cutover operator readers unqualified") from None
             # Do not replace the parent's stage-qualified recovery error with a

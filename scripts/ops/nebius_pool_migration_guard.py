@@ -17,6 +17,7 @@ import secrets
 import subprocess
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlencode
 from uuid import UUID
 
 from pydantic import PostgresDsn
@@ -71,6 +72,33 @@ except Exception:
     raise SystemExit(1)
 """
 
+# Read-only: use each retained image's real settings, including its normal
+# environment/.env precedence. No connection, import-selected module, SQL or
+# credential appears in the command interface or its diagnostic output.
+_BOUND_DATABASE_COMMAND = """import hmac, json, sys
+try:
+    if len(sys.argv) != 4:
+        raise ValueError()
+    if sys.argv[1] == "controller":
+        from loom_control_plane.config import ControlPlaneSettings
+        value = ControlPlaneSettings().db_engine_url
+    elif sys.argv[1] == "service":
+        from loom_service.config import LoomServiceSettings
+        value = LoomServiceSettings().db_engine_url
+    elif sys.argv[1] == "actuator":
+        from loom_execution_actuator.config import ExecutionActuatorSettings
+        value = ExecutionActuatorSettings().db_url
+    else:
+        raise ValueError()
+    actual = hmac.new(bytes.fromhex(sys.argv[2]), value.encode(), "sha256").hexdigest()
+    if not hmac.compare_digest(actual, sys.argv[3]):
+        raise ValueError()
+    print(json.dumps({"status": "qualified"}))
+except Exception:
+    print("Pool runtime database unqualified", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
 
 class PoolDatabaseReadTarget(Protocol):
     """Retained namespace-local database scope; not authority to acquire a guard."""
@@ -83,6 +111,55 @@ class PoolDatabaseReadTarget(Protocol):
     def controller(self) -> dict[str, Any]: ...
     @property
     def database(self) -> PoolGuardDatabase | None: ...
+
+
+def qualify_database_destination(url: str, namespace: str) -> None:
+    """Only the directly qualified namespace-local backend, not a proxy alias."""
+    destination = make_url(url)
+    if (destination.drivername not in {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
+            or destination.host != f"loom-postgres.{namespace}.svc" or destination.port not in (None, 5432)
+            or destination.database != "loom" or not destination.username or not destination.password
+            or destination.query.keys() - {"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"}
+            or any(not isinstance(value, str) for value in destination.query.values())):
+        raise ValueError("pool database destination unqualified")
+
+
+def _runtime_pod_spec(actual: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+    """Normalize only Kubernetes's standard, explicitly requested token mount.
+
+    ServiceAccount admission changes Pods, not Deployment/ReplicaSet templates.
+    Never treat an arbitrary projected volume or an extra mount as a default.
+    """
+    value = copy.deepcopy(actual)
+    retained = {row["name"] for row in expected.get("volumes", [])}
+    added = [row for row in value.get("volumes", []) if row["name"] not in retained]
+    if not added:
+        return value
+    if expected.get("automountServiceAccountToken") is not True or len(added) != 1:
+        raise ValueError
+    volume, = added
+    name = volume["name"]
+    if (re.fullmatch(r"kube-api-access-[a-z0-9]{5}", name) is None
+            or volume != {"name": name, "projected": {"defaultMode": 420, "sources": [
+                {"serviceAccountToken": {"expirationSeconds": 3607, "path": "token"}},
+                {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+                {"downwardAPI": {"items": [{"path": "namespace", "fieldRef": {
+                    "apiVersion": "v1", "fieldPath": "metadata.namespace"}}]}},
+            ]}}):
+        raise ValueError
+    for field in ("containers", "initContainers"):
+        for container, wanted in zip(value.get(field, []), expected.get(field, []), strict=True):
+            mount, = (row for row in container.get("volumeMounts", []) if row["name"] == name)
+            if (mount != {"name": name, "readOnly": True, "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"}
+                    or mount["readOnly"] is not True):
+                raise ValueError
+            container["volumeMounts"].remove(mount)
+            if not container["volumeMounts"] and "volumeMounts" not in wanted:
+                del container["volumeMounts"]
+    value["volumes"].remove(volume)
+    if not value["volumes"] and "volumes" not in expected:
+        del value["volumes"]
+    return value
 
 
 def _backlog_cursor(value: str | None) -> str:
@@ -343,10 +420,28 @@ class KubectlPoolGuardAPI:
         if actual != {"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": True}:
             raise ValueError
 
-    def _runtime(self, target: PoolGuardTarget) -> dict[str, Any]:
+    def _runtime(self, target: PoolGuardTarget, *, original: dict[str, Any] | None = None) -> dict[str, Any]:
         self._namespaces(target)
-        original = target.controller
-        controller = self._get("deployment", "loom-control-plane", target.namespace)
+        original = target.controller if original is None else original
+        namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
+        if namespace != target.namespace:
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            if namespace != participant.execution_namespace.name:
+                raise ValueError
+            current = self._get("namespace", namespace)
+            if (current.get("apiVersion") != "v1" or current.get("kind") != "Namespace"
+                    or current["metadata"].get("name") != namespace or _uid(current) != str(participant.execution_namespace.uid)):
+                raise ValueError
+            _snapshot(current)
+        selector = original["spec"]["selector"]
+        if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
+                or set(selector) != {"matchLabels"} or len(selector["matchLabels"]) != 1
+                or type(original["spec"].get("replicas")) is not int or original["spec"]["replicas"] != 1):
+            raise ValueError
+        label, = selector["matchLabels"]
+        if label not in {"app", "app.kubernetes.io/name"} or selector["matchLabels"][label] != name:
+            raise ValueError
+        controller = self._get("deployment", name, namespace)
         if _uid(controller) != _uid(original) or _snapshot(controller) != _snapshot(original):
             raise ValueError
         status = controller.get("status", {})
@@ -354,7 +449,8 @@ class KubectlPoolGuardAPI:
                 or any(type(status.get(key)) is not int or status[key] != 1
                     for key in ("replicas", "updatedReplicas", "availableReplicas", "readyReplicas"))):
             raise ValueError
-        listing = self._pods(target.namespace, "loom-control-plane")
+        query = urlencode({"labelSelector": label + "=" + name, "limit": 100})
+        listing = self._run(["get", "--raw", f"/api/v1/namespaces/{namespace}/pods?{query}"])
         if (listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
                 or listing.get("metadata", {}).get("continue") or not listing.get("metadata", {}).get("resourceVersion")
                 or len(listing.get("items", [])) != 1):
@@ -362,21 +458,22 @@ class KubectlPoolGuardAPI:
         pod = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
         meta = pod["metadata"]
         _uid(pod)
-        if (pod["apiVersion"] != "v1" or pod["kind"] != "Pod" or meta.get("namespace") != target.namespace
+        if (pod["apiVersion"] != "v1" or pod["kind"] != "Pod" or meta.get("namespace") != namespace
                 or meta.get("deletionTimestamp") or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", meta["name"])
-                or meta.get("labels", {}).get("app") != "loom-control-plane"):
+                or meta.get("labels", {}).get(label) != name):
             raise ValueError
         owners = meta.get("ownerReferences", [])
         if len(owners) != 1 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", owners[0]["name"]):
             raise ValueError
-        replica = self._get("replicaset", owners[0]["name"], target.namespace)
+        replica = self._get("replicaset", owners[0]["name"], namespace)
         if (replica.get("apiVersion") != "apps/v1" or replica.get("kind") != "ReplicaSet"
-                or replica["metadata"].get("namespace") != target.namespace
+                or replica["metadata"].get("namespace") != namespace
                 or replica["metadata"].get("name") != owners[0]["name"] or replica["metadata"].get("deletionTimestamp")):
             raise ValueError
-        self._owner(replica, kind="Deployment", name="loom-control-plane", uid=_uid(controller))
+        self._owner(replica, kind="Deployment", name=name, uid=_uid(controller))
         self._owner(pod, kind="ReplicaSet", name=replica["metadata"]["name"], uid=_uid(replica))
-        expected, actual = controller["spec"]["template"]["spec"], pod["spec"]
+        expected = controller["spec"]["template"]["spec"]
+        actual = _runtime_pod_spec(pod["spec"], expected)
         if (not _matches_backup_template(replica["spec"]["template"]["spec"], expected)
                 or not _matches_backup_template(actual, expected)
                 or actual.get("initContainers", []) != expected.get("initContainers", [])
@@ -385,7 +482,8 @@ class KubectlPoolGuardAPI:
                 or actual.get("serviceAccountName", "default") != expected.get("serviceAccountName", "default")
                 or any(actual.get(field, False) != expected.get(field, False)
                     for field in ("hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"))
-                or len(expected["containers"]) != 1 or expected["containers"][0]["name"] != "loom-control-plane"
+                or len(expected["containers"]) != 1
+                or (name in {"loom-control-plane", "loom-service"} and expected["containers"][0]["name"] != name)
                 or pod.get("status", {}).get("phase") != "Running"):
             raise ValueError
         for container, wanted in zip(actual["containers"], expected["containers"], strict=True):
@@ -393,7 +491,7 @@ class KubectlPoolGuardAPI:
                     or container.get("securityContext", {}) != wanted.get("securityContext", {})):
                 raise ValueError
         states = pod["status"].get("containerStatuses", [])
-        if len(states) != 1 or states[0].get("name") != "loom-control-plane" or states[0].get("ready") is not True:
+        if len(states) != 1 or states[0].get("name") != expected["containers"][0]["name"] or states[0].get("ready") is not True:
             raise ValueError
         self._namespaces(target)
         return pod
@@ -405,7 +503,13 @@ class KubectlPoolGuardAPI:
         binding = target.database
         if binding is None:
             raise ValueError
-        containers = target.controller["spec"]["template"]["spec"]["containers"]
+        return self._workload_database_url(target.controller, url_variable=url_variable,
+            credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version)
+
+    def _workload_database_url(self, original: dict[str, Any], *, url_variable: str,
+                               credential_uid: UUID, credential_resource_version: str) -> str:
+        namespace = original["metadata"]["namespace"]
+        containers = original["spec"]["template"]["spec"]["containers"]
         if len(containers) != 1 or containers[0].get("envFrom"):
             raise ValueError
         environment = containers[0]["env"]
@@ -426,28 +530,71 @@ class KubectlPoolGuardAPI:
                 or any(not isinstance(reference[key], str) or not re.fullmatch(r"[a-zA-Z0-9._-]{1,253}", reference[key])
                     for key in ("name", "key"))):
             raise ValueError
-        secret = self._get("secret", reference["name"], target.namespace)
+        secret = self._get("secret", reference["name"], namespace)
         if (secret.get("apiVersion") != "v1" or secret.get("kind") != "Secret"
-                or secret["metadata"].get("namespace") != target.namespace or secret["metadata"].get("name") != reference["name"]
-                or _uid(secret) != str(binding.credential_uid)
-                or secret["metadata"].get("resourceVersion") != binding.credential_resource_version
+                or secret["metadata"].get("namespace") != namespace or secret["metadata"].get("name") != reference["name"]
+                or not credential_uid.int or _uid(secret) != str(credential_uid)
+                or not credential_resource_version or secret["metadata"].get("resourceVersion") != credential_resource_version
                 or secret["metadata"].get("deletionTimestamp") or secret["metadata"].get("ownerReferences")):
             raise ValueError
         return base64.b64decode(secret["data"][reference["key"]], validate=True).decode()
 
+    def qualify_runtime_database(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                 credential_uid: UUID, credential_resource_version: str) -> None:
+        """Prove one retained running consumer uses this participant's backend.
+
+        The protected parent supplies the original workload and pinned credential
+        identity. Stopped/journaled replacement workloads are a different phase;
+        zero replicas are never accepted as runtime correspondence here.
+        """
+        try:
+            if (target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
+            container, = original["spec"]["template"]["spec"]["containers"]
+            if namespace == target.namespace and name in {"loom-control-plane", "loom-service"}:
+                if (container["name"] != name or (name == "loom-control-plane" and original != target.controller)
+                        or credential_uid != target.database.credential_uid
+                        or credential_resource_version != target.database.credential_resource_version):
+                    raise ValueError
+                component = "controller" if name == "loom-control-plane" else "service"
+                variable = "LOOM_CP_DB_URL" if component == "controller" else "LOOM_SVC_DB_URL"
+            elif (namespace == participant.execution_namespace.name and container["name"] == "actuator"
+                    and name in {"loom-execution-actuator", *(row.target_id + "-actuator" for row in participant.targets)}):
+                component, variable = "actuator", "LOOM_EXECUTION_ACTUATOR_DB_URL"
+            else:
+                raise ValueError
+            before_database = self._database(target)
+            before = self._runtime(target, original=original)
+            url = self._workload_database_url(original, url_variable=variable,
+                credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+            qualify_database_destination(url, target.namespace)
+            # CP/API use PostgresDsn; the actuator intentionally retains a str.
+            expected_url = url if component == "actuator" else str(PostgresDsn(url))
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce), expected_url.encode(), "sha256").hexdigest()
+            report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
+                "python", "-c", _BOUND_DATABASE_COMMAND, component, nonce, response])
+            if (report != {"status": "qualified"}
+                    or _uid(self._runtime(target, original=original)) != _uid(before)
+                    or self._workload_database_url(original, url_variable=variable,
+                        credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url
+                    or _uid(self._database(target)) != _uid(before_database)):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError("runtime_database") from None
+
     def _database(self, target: PoolDatabaseReadTarget, *,
                   url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> dict[str, Any]:
         """Bind a read to the original controller's namespace-local database."""
-        url = make_url(self._database_url(target, url_variable=url_variable))
+        url = self._database_url(target, url_variable=url_variable)
         binding = target.database
         if binding is None:
             raise ValueError
-        if (url.drivername not in {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
-                or url.host != f"loom-postgres.{target.namespace}.svc" or url.port not in (None, 5432)
-                or url.database != "loom" or not url.username or not url.password
-                or url.query.keys() - {"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"}
-                or any(not isinstance(value, str) for value in url.query.values())):
-            raise ValueError
+        qualify_database_destination(url, target.namespace)
         database = self._get("statefulset", "loom-postgres", target.namespace)
         service = self._get("service", "loom-postgres", target.namespace)
         for actual, wanted in ((database, binding.statefulset), (service, binding.service)):
