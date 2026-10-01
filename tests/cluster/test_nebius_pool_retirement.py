@@ -163,14 +163,38 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
             with HTTPSPoolRoleFenceAPI(request=fencing, retirement=api, api_server=configuration.host, ssl_context=tls) as roles_api:
                 methods.clear()
                 roles_api.client.event_hooks["request"].append(lambda message: methods.append(message.method))
+                # An unexpected group binding grants a named write that unnamed
+                # access-review probes would miss. Role replacement alone must
+                # not declare this identity fenced.
+                extra_namespace = migration.registration.spec.participants[1].build_namespace.name
+                source_namespace = migration.registration.spec.participants[0].execution_namespace.name
+                await asyncio.to_thread(rbac.create_namespaced_role, extra_namespace, {
+                    "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": {"name": "extra-writer"},
+                    "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["patch"], "resourceNames": ["retained-job"]}]})
+                extra_binding = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": {"name": "extra-writer"},
+                    "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "extra-writer"},
+                    "subjects": [{"apiGroup": "rbac.authorization.k8s.io", "kind": "Group", "name": "system:serviceaccounts:" + source_namespace}]}
+                await asyncio.to_thread(rbac.create_namespaced_role_binding, extra_namespace, extra_binding)
+                with pytest.raises(ValueError):
+                    await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
+                        state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+                assert methods.count("PATCH") == 6
+                await asyncio.to_thread(rbac.delete_namespaced_role_binding, "extra-writer", extra_namespace)
+                methods.clear()
                 result = await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
                     state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
                 assert result["status"] == "participant_roles_restricted" and result["writer_migration_complete"] is False
-                assert methods.count("PATCH") == 6
+                assert set(methods) == {"GET", "POST"}
                 methods.clear()
                 assert await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
                     state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor") == result
-                assert set(methods) == {"GET"}
+                assert set(methods) == {"GET", "POST"}  # Nonpersisted authorization reviews only.
+                await asyncio.to_thread(rbac.create_namespaced_role_binding, extra_namespace, extra_binding)
+                with pytest.raises(ValueError):
+                    await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
+                        state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+                assert "PATCH" not in methods
+                await asyncio.to_thread(rbac.delete_namespaced_role_binding, "extra-writer", extra_namespace)
         # These use real issued runtime tokens, not operator impersonation or
         # inspection of rendered rules. No probe Job is persisted.
         import httpx

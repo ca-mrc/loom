@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import copy
+import json
+import ssl
 from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+import httpx
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_runtime import participant_readonly_roles
 from tests.ops.test_nebius_pool_retirement import initialize
@@ -32,6 +35,11 @@ class Roles:
         self.roles = {_key(row): copy.deepcopy(row) for row in request.originals}
         self.patches = []
         self.failure = None
+        self.extra_authority = False
+
+    def verify_readonly(self):
+        if self.extra_authority:
+            raise ValueError("private-marker")
 
     def read_role(self, key):
         return copy.deepcopy(self.roles[key])
@@ -84,6 +92,149 @@ def test_changed_original_role_is_rejected_before_stopping_any_controller(fencin
     with pytest.raises(ValueError):
         run(fencing_inputs, api, tmp_path)
     assert api.patches == [] and api.retirement.patches == []
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_extra_effective_grant_blocks_fencing_even_when_recorded_roles_are_readonly(fencing_inputs, tmp_path, replay):
+    api = Roles(fencing_inputs, initialize(fencing_inputs.retirement, tmp_path))
+    if replay:
+        run(fencing_inputs, api, tmp_path)
+    api.extra_authority = True
+    with pytest.raises(ValueError) as error:
+        run(fencing_inputs, api, tmp_path)
+    assert "private-marker" not in str(error.value)
+    assert len(api.patches) == 6
+    api.extra_authority = False
+    assert run(fencing_inputs, api, tmp_path)["status"] == "participant_roles_restricted"
+    assert len(api.patches) == 6  # Recovery observes; it does not repeat role writes.
+
+
+def rules_review(namespace="loom-nebius-exec-0"):
+    return {"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+        "spec": {"namespace": namespace}, "status": {"incomplete": False,
+            "resourceRules": [
+                {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["nodes", "pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["namespaces"], "verbs": ["get"], "resourceNames": [namespace]},
+                {"apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectaccessreviews", "selfsubjectrulesreviews"], "verbs": ["create"]},
+                {"apiGroups": ["authentication.k8s.io"], "resources": ["selfsubjectreviews"], "verbs": ["create"]}],
+            "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": ["/api", "/apis/*", "/version"]}]}}
+
+
+def test_complete_reader_rules_include_named_reads_and_standard_self_inspection():
+    from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
+
+    qualify_pool_reader_rules(rules_review(), namespace="loom-nebius-exec-0")
+
+
+@pytest.mark.parametrize("damage", ["write", "named_write", "pod_create", "deployment", "exec", "secret",
+    "impersonation", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write",
+    "incomplete", "missing_incomplete", "false_string", "evaluation_error", "namespace", "kind", "missing_rules", "malformed_rule"])
+def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(damage):
+    from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
+
+    review = rules_review()
+    rules = review["status"]["resourceRules"]
+    extras = {
+        "write": {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create"]},
+        "named_write": {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["patch"], "resourceNames": ["retained-job"]},
+        "pod_create": {"apiGroups": [""], "resources": ["pods"], "verbs": ["create"]},
+        "deployment": {"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"]},
+        "exec": {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["get"]},
+        "secret": {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]},
+        "impersonation": {"apiGroups": [""], "resources": ["serviceaccounts"], "verbs": ["impersonate"]},
+        "token": {"apiGroups": [""], "resources": ["serviceaccounts/token"], "verbs": ["create"]},
+        "wildcard_resource": {"apiGroups": [""], "resources": ["*"], "verbs": ["get"]},
+        "wildcard_group": {"apiGroups": ["*"], "resources": ["pods"], "verbs": ["get"]},
+        "wildcard_verb": {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["*"]},
+        "malformed_rule": {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": "get"},
+    }
+    if damage in extras:
+        rules.append(extras[damage])
+    elif damage == "nonresource_write":
+        review["status"]["nonResourceRules"][0]["verbs"] = ["post"]
+    elif damage in {"incomplete", "false_string"}:
+        review["status"]["incomplete"] = True if damage == "incomplete" else "false"
+    elif damage == "missing_incomplete":
+        del review["status"]["incomplete"]
+    elif damage == "evaluation_error":
+        review["status"]["evaluationError"] = "private-marker"
+    elif damage == "namespace":
+        review["spec"]["namespace"] = "foreign"
+    elif damage == "kind":
+        review["kind"] = "SubjectAccessReview"
+    else:
+        del review["status"]["resourceRules"]
+    with pytest.raises(ValueError) as error:
+        qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
+    assert "private-marker" not in str(error.value)
+
+
+@pytest.mark.parametrize("failure", [None, "grant", "incomplete", "transport", "oversized", "namespace"])
+def test_https_reviews_only_retained_identities_with_real_groups_and_never_retries(fencing_inputs, failure):
+    from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
+    from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
+    from tests.ops.test_nebius_pool_retirement_live import Guards
+
+    request = fencing_inputs
+    binding = request.retirement.migration.registration.binding
+    namespaces = {binding.namespace: binding.namespace_uid,
+        **{row.namespace: str(row.namespace_uid) for row in request.retirement.migration.guards},
+        **{ns.name: str(ns.uid) for row in request.retirement.migration.registration.spec.participants
+            for ns in (row.execution_namespace, row.build_namespace)}}
+    identities = {f"system:serviceaccount:loom-nebius-{component}-{index}:{account}"
+        for index in range(3) for component, account in (
+            ("platform", "loom-platform"), ("exec", "loom-execution-actuator"), ("exec", "loom-execution-capacity-collector"))}
+    observed = []
+
+    def respond(message):
+        if message.method == "GET":
+            name = message.url.path.removeprefix("/api/v1/namespaces/")
+            assert "Impersonate-User" not in message.headers
+            uid = binding.kube_system_uid if name == "kube-system" else namespaces[name]
+            return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": name, "uid": str(uuid4()) if failure == "namespace" else uid,
+                "resourceVersion": "1", "labels": {"loom.nebius/management-installation": binding.installation_id}}})
+        assert message.method == "POST" and message.url.path == "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"
+        subject = message.headers["Impersonate-User"]
+        assert subject in identities
+        account_namespace = subject.split(":")[2]
+        assert set(message.headers.get_list("Impersonate-Group")) == {
+            "system:authenticated", "system:serviceaccounts", "system:serviceaccounts:" + account_namespace}
+        body = json.loads(message.content)
+        namespace = body["spec"]["namespace"]
+        assert namespace in namespaces and body == {"apiVersion": "authorization.k8s.io/v1",
+            "kind": "SelfSubjectRulesReview", "spec": {"namespace": namespace}}
+        observed.append((subject, namespace))
+        review = rules_review(namespace)
+        if failure == "grant":
+            review["status"]["resourceRules"].append({"apiGroups": ["batch"], "resources": ["jobs"],
+                "verbs": ["patch"], "resourceNames": ["old-job"]})
+        elif failure == "incomplete":
+            review["status"]["incomplete"] = True
+        elif failure == "transport":
+            raise httpx.ReadError("private-marker")
+        elif failure == "oversized":
+            return httpx.Response(201, content=b" " * (4 * 1024**2 + 1))
+        return httpx.Response(201, json=review)
+
+    with HTTPSPoolRetirementAPI(request=request.retirement, guards=Guards(request.retirement),
+            api_server="https://cluster.example", ssl_context=ssl.create_default_context()) as retirement:
+        retirement.client.close()
+        retirement.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond))
+        with HTTPSPoolRoleFenceAPI(request=request, retirement=retirement,
+                api_server="https://cluster.example", ssl_context=ssl.create_default_context()) as api:
+            api.client.close()
+            api.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond))
+            if failure:
+                with pytest.raises(ValueError) as error:
+                    api.verify_readonly()
+                assert "private-marker" not in str(error.value)
+                assert len(observed) == (0 if failure == "namespace" else 1)
+            else:
+                api.verify_readonly()
+                assert set(observed) == {(subject, namespace) for subject in identities for namespace in namespaces}
+                assert len(observed) == len(identities) * len(namespaces)
 
 
 @pytest.mark.parametrize("failure", ["before", "after", "conflict"])
