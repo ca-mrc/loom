@@ -193,6 +193,42 @@ def test_runtime_role_stage_denies_drift_unknown_receipts_and_arbitrary_actions(
     assert sum(args[0] == 'exec' for args in state.calls) == (0 if damage in {'database_uid', 'release', 'config'} else 1)
 
 
+@pytest.mark.parametrize('damage', ['database_uid', 'after_drift', 'extra_report', 'config', 'cursor', 'origin', 'environment', 'source'])
+def test_cutover_database_pages_bind_identity_and_reject_unsafe_receipts(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    participant = next(row for row in state.request.registration.spec.participants
+        if row.participant_id == state.target.participant_id)
+    identity = str(uuid4())
+    report = {'status': 'observed', 'schema_revision': '0172', 'rows': [{
+        'key': 'batch:' + identity, 'source_matches': True, 'origin': {
+            'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
+            'submission_id': identity, 'kind': 'environment', 'application': None}}]}
+    after = None
+    if damage == 'database_uid':
+        state.database['metadata']['uid'] = str(uuid4())
+    elif damage == 'after_drift':
+        state.after_drift = True
+    elif damage == 'extra_report':
+        report['private-marker'] = 'unqualified'
+    elif damage == 'config':
+        api.kubeconfig.write_text('changed-private-config')
+    elif damage == 'cursor':
+        after = "batch:';DELETE FROM trials;--"
+    elif damage == 'origin':
+        report['rows'][0]['origin'] = None
+    elif damage == 'environment':
+        report['rows'][0]['origin']['data_environment_id'] = str(uuid4())
+    else:
+        report['rows'][0]['source_matches'] = False
+    state.exec_hook = lambda query: report
+    with pytest.raises(PoolMigrationError) as error:
+        api.cutover_readiness_page(state.target, after=after)
+    assert 'private-marker' not in str(error.value)
+    assert sum(args[0] == 'exec' for args in state.calls) == (0 if damage in {'database_uid', 'config', 'cursor'} else 1)
+
+
 def test_database_observer_never_exposes_unqualified_query_output(database_guard):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 

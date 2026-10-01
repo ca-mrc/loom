@@ -111,12 +111,19 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                 assert self.guard(target, "observe")["status"] == "held"
                 return {"status": "staged" if action == "stage" else "qualified"}
 
+            def cutover_readiness_page(self, target, *, after):
+                assert target in self.request.guards and after is None
+                return {"status": "observed", "schema_revision": "0172", "rows": []}
+
         class Checks:
             def preflight(self, actual):
                 assert actual == request
 
             def qualify_quiescence(self):
                 pass  # No business DB or personal access exists in this fixture.
+
+            def qualify_pending_origins(self, target, origins):
+                assert target in migration.guards and origins == ()
 
         guards = Guards(migration)
         configuration = core.api_client.configuration
@@ -133,7 +140,8 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                     state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
                 if result["status"] == "pool_runtime_staged_closed":
                     break
-                assert result["status"] in {"pending_producer_drain", "pending_drain", "pending_runtime_drain"}
+                assert result["status"] in {"pending_producer_update", "pending_producer_drain", "pending_drain",
+                    "pending_runtime_update", "pending_runtime_drain"}
                 assert time.monotonic() < deadline, "actual cutover did not converge"
                 await asyncio.sleep(0.5)
             assert result["writer_migration_complete"] is False

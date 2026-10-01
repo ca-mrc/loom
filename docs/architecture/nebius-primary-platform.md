@@ -2245,7 +2245,18 @@ replacement. Targets are generated from the retained manager, complete shared
 API/actuator roster and one development collector; arbitrary manifests are not
 inputs. Producer Pod drain is followed by independent application-access,
 schema-readiness and queued-origin qualification. It cannot manufacture provenance
-for a legacy queue. Runtime ACL intent is retained separately per participant;
+for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
+work state and personal-access quiescence through each retained database Pod,
+qualifying its StatefulSet, Service, Secret version and Pod identity before and
+after every read-only page. The personal-access readiness routine must retain
+the installed body, language, owner and security/search-path attributes; a
+same-named replacement is not evidence of retired access. The queue includes
+delayed trials/build consumers and unfanned native batches; quota, retry and target backoff do not hide future
+work. Unknown origins, inconsistent inherited batch origins and ambiguous legacy
+batches cannot be backfilled or silently assigned shared-development priority.
+Every observed origin still requires independent management-registration/history
+qualification before the parent advances; JSON parsing is not that authority.
+Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 
 Once runtime replacement starts, recovery must not replay the original retirement

@@ -28,9 +28,119 @@ from scripts.ops.nebius_pool_migration import (
 )
 from sqlalchemy.engine import make_url
 
+from loom.nebius_application_database import _MIGRATION_READY
 from loom.nebius_platform_render import digest
+from loom.nebius_pool_contract import PoolParticipantV1
+from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+
+def _backlog_cursor(value: str | None) -> str:
+    if value is None:
+        return ""
+    kind, identity = value.split(":")
+    if kind not in {"batch", "trial"} or str(UUID(identity)) != identity or not UUID(identity).int:
+        raise ValueError("pool_backlog_cursor_unqualified")
+    return value
+
+
+def pool_cutover_readiness_sql(*, owner: str, candidate: str, logical_pool_id: str, after: str | None) -> str:
+    """Read one fixed page; no SQL, credentials or queue mutations from callers.
+
+    Retry/target/quota backoff is deliberately not a filter: retained work may
+    become eligible after reopening. Include unfanned native batches as well as
+    trial/build consumers. A legacy batch without a frozen pool is ambiguous,
+    not proof that it belongs to another physical pool; require its original
+    provenance or drain it through the retained path.
+    """
+    if (str(UUID(owner)) != owner or not UUID(owner).int or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", logical_pool_id) is None):
+        raise ValueError("pool_cutover_database_scope_unqualified")
+    cursor = _backlog_cursor(after)
+    readiness_sha256 = hashlib.sha256(_MIGRATION_READY.encode()).hexdigest()
+    return f"""BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
+DO $pool_cutover_readiness$
+DECLARE access_ready BOOLEAN;
+BEGIN
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0172'
+    THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
+    IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
+        SELECT 1 FROM public.nebius_rollout_guard
+        WHERE id<>1 OR owner<>'{owner}' OR candidate_sha<>'{candidate}'
+    ) OR EXISTS (SELECT 1 FROM ({ACTIVITY_SQL}) activity
+        WHERE trials<>0 OR executions<>0 OR builds<>0 OR build_cleanup<>0)
+      OR EXISTS (SELECT 1 FROM public.nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released'))
+      OR EXISTS (SELECT 1 FROM public.nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released'))
+    THEN RAISE EXCEPTION 'pool cutover database not idle'; END IF;
+    IF to_regnamespace('loom_application_access') IS NOT NULL THEN
+        IF NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+            WHERE p.oid=to_regprocedure('loom_application_access.migration_ready()')
+              AND p.proowner=n.nspowner AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+              AND p.prorettype='boolean'::regtype AND p.prosecdef
+              AND p.proconfig=ARRAY['search_path=pg_catalog, pg_temp']::text[]
+              AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='{readiness_sha256}')
+        THEN RAISE EXCEPTION 'pool cutover access guard unavailable'; END IF;
+        EXECUTE 'SELECT loom_application_access.migration_ready()' INTO access_ready;
+        IF access_ready IS DISTINCT FROM TRUE
+        THEN RAISE EXCEPTION 'pool cutover application access active'; END IF;
+    END IF;
+END $pool_cutover_readiness$;
+WITH pending AS (
+    SELECT 'batch:' || b.id::text AS key, b.pool_origin AS origin,
+           COALESCE(b.pool_origin->>'submission_id'=b.id::text,FALSE) AS source_matches
+      FROM public.batches b
+     WHERE b.backend='nebius' AND b.state NOT IN ('finished','cancelled')
+       AND (b.service_execution_runtime_profile IS NULL
+            OR b.service_execution_runtime_profile->>'logical_pool_id'='{logical_pool_id}')
+    UNION ALL
+    SELECT 'trial:' || t.id::text AS key, t.pool_origin AS origin,
+           CASE WHEN t.batch_id IS NULL THEN TRUE
+                ELSE COALESCE(t.team_id=b.team_id AND t.pool_origin=b.pool_origin
+                     AND t.pool_origin->>'submission_id'=b.id::text,FALSE) END AS source_matches
+      FROM public.trials t LEFT JOIN public.batches b ON b.id=t.batch_id
+     WHERE t.state NOT IN ('succeeded','failed','cancelled') AND t.cancellation_requested_at IS NULL
+       AND t.family_key IS NULL AND t.requires_caps->>'worker_pool'='{logical_pool_id}'
+       AND (t.execution_route_pool_name IS NULL OR t.execution_route_pool_name='{logical_pool_id}')
+       AND ((t.batch_id IS NULL AND t.requires_caps->>'backend'='nebius')
+            OR (t.batch_id IS NOT NULL AND b.backend='nebius'))
+), page AS (
+    SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
+     ORDER BY key COLLATE "C" LIMIT 128
+)
+SELECT json_build_object('status','observed','schema_revision','0172',
+    'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
+ROLLBACK;
+"""
+
+
+def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV1, after: str | None) -> tuple[PoolWorkOriginV1, ...]:
+    """Check a bound page, not management's retained application history.
+
+    The connected caller must separately qualify every personal origin against
+    the management registry. Parsing or a fixed SQL read is not that authority.
+    """
+    cursor = _backlog_cursor(after)
+    if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
+            or report["status"] != "observed" or report["schema_revision"] != "0172"
+            or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
+        raise ValueError("pool_cutover_database_report_unqualified")
+    origins = []
+    for row in report["rows"]:
+        if (not isinstance(row, dict) or set(row) != {"key", "origin", "source_matches"}
+                or row["source_matches"] is not True or not isinstance(row["key"], str)):
+            raise ValueError("pool_cutover_pending_source_unqualified")
+        key = _backlog_cursor(row["key"])
+        if key <= cursor:
+            raise ValueError("pool_cutover_pending_page_unqualified")
+        cursor = key
+        origin = PoolWorkOriginV1.model_validate(row["origin"])
+        pool_request_priority(participant, origin, workload_kind="trial")
+        if key.startswith("batch:") and str(origin.submission_id) != key.removeprefix("batch:"):
+            raise ValueError("pool_cutover_pending_source_unqualified")
+        origins.append(origin)
+    return tuple(origins)
 
 
 def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
@@ -386,3 +496,32 @@ class KubectlPoolGuardAPI:
             return report
         except Exception:
             raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe"} else "runtime_role_scope") from None
+
+    def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]:
+        """Read frozen schema/access/backlog through the exact retained DB Pod.
+
+        This neither migrates the schema nor revokes application keys. Unqualified
+        backlog must retain its original origin or finish under the old path;
+        this observer never backfills, adopts, cancels or retries a write.
+        """
+        try:
+            if (target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            environment = target.controller["spec"]["template"]["spec"]["containers"][0]["env"]
+            pool, = (row for row in environment if row["name"] == "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID")
+            if set(pool) != {"name", "value"}:
+                raise ValueError
+            query = pool_cutover_readiness_sql(owner=str(self.request.registration.spec.operation_id),
+                candidate=self.request.registration.candidate["candidate_sha"], logical_pool_id=pool["value"], after=after)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            qualify_cutover_readiness_page(report, participant=participant, after=after)
+            if _uid(self._database(target)) != _uid(before):
+                raise ValueError
+            return report
+        except Exception:
+            raise PoolMigrationError("cutover_readiness") from None

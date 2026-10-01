@@ -28,6 +28,7 @@ from scripts.ops.nebius_pool_migration import (
     PoolMigrationAPI,
     PoolMigrationRequest,
 )
+from scripts.ops.nebius_pool_migration_guard import qualify_cutover_readiness_page
 from scripts.ops.nebius_pool_retirement import (
     qualify_closed_workload_drain,
     retirement_documents,
@@ -37,17 +38,22 @@ from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
 from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 
 from loom.nebius_platform_render import digest
+from loom.nebius_pool_priority import PoolWorkOriginV1
 
 
 class PoolCutoverChecks(Protocol):
     def preflight(self, request: PoolCutoverRequest) -> None: ...
     def qualify_quiescence(self) -> None: ...
+    def qualify_pending_origins(self, target: PoolGuardTarget, origins: tuple[PoolWorkOriginV1, ...]) -> None:
+        """Qualify retained management registration/history, not just JSON shape."""
+        ...
 
 
 class PoolCutoverGuards(Protocol):
     request: PoolMigrationRequest
     def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]: ...
     def runtime_role(self, target: PoolGuardTarget, action: str) -> dict[str, Any]: ...
+    def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]: ...
 
 
 class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
@@ -129,6 +135,17 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
 
     def qualify_quiescence(self) -> None:
         self._scope()
+        for target in self.guards.request.guards:
+            participant, = (row for row in self.guards.request.registration.spec.participants
+                if row.participant_id == target.participant_id)
+            after = None
+            while True:
+                report = self.guards.cutover_readiness_page(target, after=after)
+                origins = qualify_cutover_readiness_page(report, participant=participant, after=after)
+                self.checks.qualify_pending_origins(target, origins)
+                if len(report["rows"]) < 128:
+                    break
+                after = report["rows"][-1]["key"]
         self.checks.qualify_quiescence()
 
     def qualify_runtime_access(self, participant_id: UUID, action: str) -> None:

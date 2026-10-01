@@ -49,12 +49,12 @@ def cutover_database(database_guard, isolated_migration_postgres_url):
             engine.dispose()
 
 
-def seed_cutover_backlog(state, connection, *, known=True, direct=False, **trial_values):
+def seed_cutover_backlog(fixture_state, connection, *, known=True, direct=False, **trial_values):
     from loom.db.schema import Batch, Task, Team, Trial
 
-    participant = next(row for row in state.request.registration.spec.participants
-        if row.participant_id == state.target.participant_id)
-    pool_id = next(row['value'] for row in state.target.controller['spec']['template']['spec']['containers'][0]['env']
+    participant = next(row for row in fixture_state.request.registration.spec.participants
+        if row.participant_id == fixture_state.target.participant_id)
+    pool_id = next(row['value'] for row in fixture_state.target.controller['spec']['template']['spec']['containers'][0]['env']
         if row['name'] == 'LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID')
     team_id, batch_id, trial_id = uuid4(), uuid4(), uuid4()
     task_id = 'cutover-backlog/' + uuid4().hex
@@ -130,7 +130,7 @@ def test_cutover_detects_unfanned_batch_before_any_trial_exists(cutover_database
 
 
 @pytest.mark.parametrize('values', [
-    {'state': 'succeeded'}, {'state': 'failed'}, {'state': 'cancelled'},
+    {'state': 'succeeded', 'result': {}}, {'state': 'failed'}, {'state': 'cancelled'},
     {'cancellation_requested_at': datetime(2026, 10, 1, tzinfo=UTC)},
     {'requires_caps': {'backend': 'nebius', 'worker_pool': 'foreign-pool'}},
     {'requires_caps': {'backend': 'docker', 'worker_pool': 'foreign-pool'}},
@@ -159,6 +159,51 @@ def test_cutover_qualifies_schema_guard_and_disconnected_application_credentials
         # No personal application session exists. A still-valid key can create
         # one later, so stopping application Pods is not credential retirement.
         migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0172')
+    with pytest.raises(PoolMigrationError):
+        api.cutover_readiness_page(state.target, after=None)
+
+
+def test_cutover_accepts_retired_and_drained_application_access_without_erasing_history(cutover_database, migration_access):
+    api, state, connection, _ = cutover_database
+    access = migration_access[2]
+    application, incarnation = uuid4(), uuid4()
+    access.grant(application, incarnation, 1, token_urlsafe(48), schema_revision='0172')
+    access.revoke(application, incarnation, 1)
+    assert access.drain(application, incarnation, 1)
+    history = connection.execute('SELECT * FROM loom_application_access.generations').fetchall()
+    assert api.cutover_readiness_page(state.target, after=None)['rows'] == []
+    assert connection.execute('SELECT * FROM loom_application_access.generations').fetchall() == history
+
+
+def test_cutover_reads_every_pending_batch_across_fixed_readonly_pages(cutover_database):
+    from loom.db.schema import Batch, Team
+
+    api, state, _, engine = cutover_database
+    participant = next(row for row in state.request.registration.spec.participants
+        if row.participant_id == state.target.participant_id)
+    team, identities = uuid4(), sorted(str(uuid4()) for _ in range(129))
+    with engine.begin() as connection:
+        connection.execute(insert(Team).values(id=team, name=str(team)))
+        for identity in identities:
+            connection.execute(insert(Batch).values(id=identity, team_id=team, name='paged-pending', backend='nebius',
+                task_filter={}, trial_config={}, created_by_token_prefix='test', pool_origin={
+                    'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
+                    'submission_id': identity, 'kind': 'environment', 'application': None}))
+    first = api.cutover_readiness_page(state.target, after=None)
+    assert len(first['rows']) == 128
+    second = api.cutover_readiness_page(state.target, after=first['rows'][-1]['key'])
+    assert [row['key'] for row in first['rows'] + second['rows']] == ['batch:' + value for value in identities]
+    assert len(second['rows']) == 1
+
+
+def test_cutover_does_not_trust_a_replaced_application_readiness_routine(cutover_database, migration_access):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state, connection, _ = cutover_database
+    migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0172')
+    connection.execute("""CREATE OR REPLACE FUNCTION loom_application_access.migration_ready() RETURNS boolean
+        LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS 'BEGIN RETURN TRUE; END'""")
+    assert connection.execute('SELECT loom_application_access.migration_ready()').fetchone() == (True,)
     with pytest.raises(PoolMigrationError):
         api.cutover_readiness_page(state.target, after=None)
 
