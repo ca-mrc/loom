@@ -1,6 +1,11 @@
 import re
 import shlex
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+from loom.dockerfile_instructions import dockerfile_instructions
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -103,3 +108,45 @@ def test_service_image_contains_digest_pinned_kubectl_for_personal_lifecycle() -
 
     assert "registry.k8s.io/kubectl:v1.36.2@sha256:" in text
     assert "COPY --from=kubectl /bin/kubectl /usr/local/bin/kubectl" in text
+
+
+def test_actuator_image_copied_source_imports_both_processes_without_checkout_fallback(tmp_path: Path) -> None:
+    """A source-tree import must not hide a missing slim-image dependency."""
+    for instruction in dockerfile_instructions((ROOT / "deploy/Dockerfile.execution-actuator").read_text()):
+        if instruction.keyword != "COPY":
+            continue
+        *sources, destination = shlex.split(instruction.arguments)
+        if not destination.startswith("./src/"):
+            continue
+        target = tmp_path / destination
+        target.mkdir(parents=True, exist_ok=True)
+        for source in sources:
+            path = ROOT / source
+            if path.is_dir():
+                shutil.copytree(path, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+            else:
+                shutil.copy2(path, target / path.name)
+    script = """
+import importlib.abc
+import importlib.machinery
+import pathlib
+import sys
+source = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(source))
+class PackagedSourceOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {
+            'loom', 'loom_control_plane', 'loom_service',
+            'loom_execution_actuator', 'loom_execution_capacity_collector',
+        }:
+            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+            if spec is None or spec.origin is None or not pathlib.Path(spec.origin).is_relative_to(source):
+                raise ModuleNotFoundError('missing image dependency: ' + fullname)
+            return spec
+sys.meta_path.insert(0, PackagedSourceOnly())
+import loom_execution_actuator.__main__
+import loom_execution_capacity_collector.__main__
+"""
+    result = subprocess.run([sys.executable, "-I", "-c", script, str(tmp_path / "src")],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
