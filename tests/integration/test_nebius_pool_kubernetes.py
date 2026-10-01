@@ -15,6 +15,16 @@ from tests.integration.test_nebius_pool_gateway_journal import setup
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
+def error_response(request, status):
+    parts = request.url.path.split("/")
+    resource = parts[-1] if request.method == "POST" else parts[-2]
+    name = json.loads(request.content)["metadata"]["name"] if request.method == "POST" else parts[-1]
+    return httpx.Response(status, json={"apiVersion": "v1", "kind": "Status", "status": "Failure", "code": status,
+        "reason": {404: "NotFound", 409: "AlreadyExists" if request.method == "POST" else "Conflict", 422: "Invalid"}[status],
+        "message": "SENSITIVE API ERROR", "details": {"name": name, "kind": resource,
+            "group": "batch" if request.url.path.startswith("/apis/batch/") else ""}})
+
+
 class KubernetesAPI:
     """Only external HTTP is doubled; render, auth, transactions and journal are real."""
 
@@ -31,6 +41,7 @@ class KubernetesAPI:
         self.read_status = 200
         self.hold_deletion = False
         self.lose_delete_reply = False
+        self.qualified_errors = True
 
     def __call__(self, request):
         self.requests.append((request.method, request.url.path))
@@ -40,9 +51,9 @@ class KubernetesAPI:
             self.deletes.append((path, options))
             current = self.objects.get(path)
             if current is None:
-                return httpx.Response(404)
+                return error_response(request, 404)
             if options["preconditions"]["uid"] != current["metadata"]["uid"]:
-                return httpx.Response(409)
+                return error_response(request, 409)
             if not self.hold_deletion:
                 del self.objects[path]
             if self.lose_delete_reply:
@@ -52,6 +63,8 @@ class KubernetesAPI:
             document = json.loads(request.content)
             self.writes.append(document)
             if self.post_status != 201:
+                if self.qualified_errors and self.post_status in {409, 422}:
+                    return error_response(request, self.post_status)
                 return httpx.Response(self.post_status, text="SENSITIVE API ERROR")
             document["metadata"].update(uid=str(uuid4()), resourceVersion="11")
             if document["kind"] == "Job":
@@ -85,7 +98,7 @@ class KubernetesAPI:
                 "name": path.rsplit("/", 1)[-1], "uid": str(self.namespace_uid), "resourceVersion": "10"}})
         value = copy.deepcopy(self.objects.get(path))
         if value is None or self.hide_objects:
-            return httpx.Response(404)
+            return error_response(request, 404) if self.qualified_errors else httpx.Response(404)
         if self.damage:
             self.damage(value)
         return httpx.Response(200, json=value)
@@ -177,6 +190,56 @@ async def test_write_failure_is_secret_free_and_never_retried(sessions, status):
             effect = (await session.scalars(select(NebiusPoolEffect))).one()
             assert effect.phase == ("rejected" if status in {409, 422} else "dispatched")
             assert (await session.get(NebiusPoolRequest, receipt.reservation_id)).phase == "create_intent"
+
+
+@pytest.mark.parametrize("status", [409, 422])
+async def test_unqualified_rejection_retains_uncertain_create_without_retry(sessions, status):
+    from loom_service.pool_management.kubernetes import PoolKubernetesError
+
+    gateway, api, principal, receipt, http = await provider(sessions)
+    api.post_status, api.qualified_errors = status, False
+    async with http:
+        for _ in range(2):
+            with pytest.raises(PoolKubernetesError) as error:
+                await gateway.create(principal, receipt.reservation_id, kind="Job")
+            assert "SENSITIVE" not in str(error.value)
+        async with sessions() as session:
+            effect = (await session.scalars(select(NebiusPoolEffect))).one()
+            assert effect.phase == "dispatched" and effect.rejection_status is None
+        assert len(api.writes) == 1
+
+
+@pytest.mark.parametrize("status", [404, 409, 422])
+@pytest.mark.parametrize("damage", ["code", "reason", "status", "details", "name", "group", "resource"])
+async def test_error_response_must_be_kubernetes_failure_for_the_exact_resource(sessions, status, damage):
+    from loom_service.pool_management.kubernetes import PoolKubernetesError, PoolKubernetesRejectedError
+
+    gateway, _api, _principal, _receipt, original = await provider(sessions)
+    await original.aclose()
+    method = "GET" if status == 404 else "POST"
+    path = "/apis/batch/v1/namespaces/test/jobs" + ("/expected" if method == "GET" else "")
+    document = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "expected"}}
+
+    def respond(request):
+        response = error_response(request, status)
+        value = response.json()
+        if damage == "code":
+            value["code"] = 500
+        elif damage == "reason":
+            value["reason"] = "InternalError"
+        elif damage == "status":
+            value["status"] = "Success"
+        elif damage == "details":
+            del value["details"]
+        else:
+            value["details"]["kind" if damage == "resource" else damage] = "foreign"
+        return httpx.Response(status, json=value)
+
+    async with httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(respond)) as http:
+        gateway.http = http
+        with pytest.raises(PoolKubernetesError) as error:
+            await gateway._request(method, path, document if method == "POST" else None)
+        assert not isinstance(error.value, PoolKubernetesRejectedError)
 
 
 @pytest.mark.parametrize("when", ["before", "after"])

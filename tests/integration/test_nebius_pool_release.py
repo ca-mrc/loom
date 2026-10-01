@@ -112,6 +112,29 @@ async def test_uncertain_dispatched_create_is_not_released_by_404_or_drain(sessi
     assert row.phase == "cleanup_intent" and not evidence and len(api.writes) == 1
 
 
+@pytest.mark.parametrize("status", [404, 409, 422])
+async def test_proxy_absence_or_rejection_cannot_release_occupied_capacity(sessions, status):
+    from loom_service.pool_management.kubernetes import PoolKubernetesError
+
+    if status == 404:
+        gateway, api, principal, receipt, http, _, _ = await stopped(sessions)
+    else:
+        gateway, api, principal, receipt, original = await provider(sessions)
+        api.post_status, api.qualified_errors = status, False
+        with pytest.raises(PoolKubernetesError):
+            await gateway.create(principal, receipt.reservation_id, kind="Job")
+        await begin_cleanup(sessions, receipt.reservation_id)
+        await original.aclose()
+        http = httpx.AsyncClient(base_url="https://kubernetes.example", transport=httpx.MockTransport(InventoryAPI(api, [])))
+        gateway.http = http
+    api.qualified_errors = False
+    async with http:
+        with pytest.raises(ValueError):
+            await gateway.verify_cleanup(principal, receipt.reservation_id)
+    row, evidence = await retained(sessions, receipt)
+    assert row.phase == "cleanup_intent" and row.cleanup_observation_id is None and not evidence
+
+
 @pytest.mark.parametrize("change", ["effect", "credential"])
 async def test_state_or_authority_change_during_inventory_requires_new_proof(sessions, change):
     from loom_service.pool_management.pod_inventory import PoolPodReference
