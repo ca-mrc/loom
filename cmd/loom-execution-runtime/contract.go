@@ -138,6 +138,7 @@ type nodeResourceAllocation struct {
 type plan struct {
 	NodeResourceAllocation     *nodeResourceAllocation    `json:"node_resource_allocation,omitempty"`
 	TaskEgress                 *storedTaskEgress          `json:"task_egress,omitempty"`
+	EffectiveNetworkPolicy     json.RawMessage            `json:"effective_network_policy,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
 	TaskRevisionSHA256         string                     `json:"task_revision_sha256"`
@@ -249,6 +250,9 @@ func (p plan) validate() error {
 		if err := p.TaskEgress.validate(); err != nil {
 			return err
 		}
+	}
+	if err := p.validateEffectiveNetworkPolicy(); err != nil {
+		return err
 	}
 	if p.SchemaVersion != "loom.execution-runtime-plan.v1" || !candidate.MatchString(p.CandidateSHA) {
 		return fmt.Errorf("invalid schema version or candidate SHA")

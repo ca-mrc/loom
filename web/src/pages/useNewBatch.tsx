@@ -272,6 +272,7 @@ export function useNewBatch() {
     staleTime: 30 * 1000,
   });
 
+  const [networkPolicyPreviewWanted, setNetworkPolicyPreviewWanted] = useState(false);
   const previewTaskFilter = useMemo(() => {
     if (subsetKind === "explicit") {
       return parsed.ids.length > 0 && !parsed.error
@@ -308,7 +309,10 @@ export function useNewBatch() {
       agent_names: previewAgentNames,
       ...(currentTeamId ? { team_id: currentTeamId } : {}),
     }),
-    enabled: currentTeamId !== null && previewTaskFilter !== null && previewNetworkPolicy.ok,
+    // The preview is shown only in Advanced settings; a selected policy also
+    // needs it for submit validation.
+    enabled: (networkPolicyPreviewWanted || advanced.networkPolicy !== "")
+      && currentTeamId !== null && previewTaskFilter !== null && previewNetworkPolicy.ok,
     staleTime: 30 * 1000,
   });
 
@@ -782,6 +786,7 @@ export function useNewBatch() {
     countSummary,
     advanced,
     networkPolicyPreview,
+    requestNetworkPolicyPreview: () => setNetworkPolicyPreviewWanted(true),
     setAdv,
     toggleRetryReason,
     addRow,

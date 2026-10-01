@@ -75,6 +75,7 @@ from loom.execution_runtime_contract import (
     RuntimeTaskInputV1,
     SidecarContainerV1,
 )
+from loom.models.networking import GatewayOnly
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.service_execution_materialization import (
@@ -4731,7 +4732,9 @@ async def test_actuator_requeues_only_unstarted_unschedulable_at_deadline(
             assert quota is not None
             quota.max_attempts_ceiling = 1 if exhausted else 3
             lease = await _reserve(
-                session, trial_id=trial_id, target=target, now=now, deadline_seconds=60
+                session, trial_id=trial_id, target=target, now=now, deadline_seconds=60,
+                requirements=_requirements().model_copy(
+                    update={"effective_network_policy": GatewayOnly()}),
             )
             await session.commit()
         actuator = ExecutionActuator(
