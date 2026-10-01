@@ -27,6 +27,7 @@ from loom_control_plane.execution_placement import (
     cold_sample,
     plan_placement,
     quota_identity,
+    require_provider_quota_headroom,
 )
 from loom_execution_capacity_collector.contracts import (
     CapacityPlacement,
@@ -759,17 +760,7 @@ async def admit_capacity_resources(
     # are keyed by their native quota identities (SSD can be shared by CPU/GPU).
     # Recompute unobserved demand per node group; never add different pools' free
     # CPU and RAM together or assume a shared lock alone prevents double spend.
-    charges = {
-        key: total_nodes * amount
-        for key, amount in {
-            "nodes": 1,
-            "vcpu": raw.cpu_millis,
-            "memory": raw.memory_mib,
-            "storage": raw.storage_mib,
-        }.items()
-    }
-    quota_used = {key: quota.used for key, quota in placement.quota_resources.items()}
-    quota_limit = {key: quota.limit for key, quota in placement.quota_resources.items()}
+    peer_projections: list[tuple[CapacityPlacement, int]] = []
     other_targets = (
         (
             await session.execute(
@@ -784,18 +775,6 @@ async def admit_capacity_resources(
         .scalars()
         .all()
     )
-    native_floor = {
-        key: placement.node_group.node_count * amount
-        for key, amount in {
-            "nodes": 1,
-            "vcpu": raw.cpu_millis,
-            "memory": raw.memory_mib,
-            "storage": raw.storage_mib,
-        }.items()
-    }
-    all_node_ids = {node.uid for node in placement.nodes}
-    all_provider_ids = {node.provider_id for node in placement.nodes}
-    seen_groups = {placement.node_group.id}
     seen_owners = {group.owner.id}
     for other_target in other_targets:
         other_group = await resolve_capacity_targets(session, other_target)
@@ -846,15 +825,6 @@ async def admit_capacity_resources(
             if not has_active:
                 continue
             raise ExecutionProvisioningBlockedError("execution_capacity_shared_observation_stale")
-        if (
-            other.node_group.id in seen_groups
-            or {node.uid for node in other.nodes} & all_node_ids
-            or {node.provider_id for node in other.nodes} & all_provider_ids
-        ):
-            raise ExecutionProvisioningBlockedError("execution_capacity_overlapping_targets")
-        seen_groups.add(other.node_group.id)
-        all_node_ids.update(node.uid for node in other.nodes)
-        all_provider_ids.update(node.provider_id for node in other.nodes)
         try:
             other_plan = plan_placement(
                 other,
@@ -866,26 +836,11 @@ async def admit_capacity_resources(
             raise ExecutionProvisioningBlockedError(
                 "execution_capacity_shared_placement_unknown"
             ) from exc
-        amounts = {
-            "nodes": 1,
-            "vcpu": other.node_group.raw_node.cpu_millis,
-            "memory": other.node_group.raw_node.memory_mib,
-            "storage": other.node_group.raw_node.storage_mib,
-        }
-        for key in shared:
-            charges[key] += other_plan.additional_nodes * amounts[key]
-            native_floor[key] += other.node_group.node_count * amounts[key]
-            # Independent observations are not atomic with external account use.
-            # Conservatively retain the highest usage / lowest quota snapshot.
-            quota_used[key] = max(quota_used[key], other.quota_resources[key].used)
-            quota_limit[key] = min(quota_limit[key], other.quota_resources[key].limit)
-    for key in ("nodes", "vcpu", "memory", "storage"):
-        if key not in placement.quota_resources:
-            continue
-        if max(quota_used[key], native_floor[key]) + charges[key] > quota_limit[key]:
-            raise ExecutionProvisioningBlockedError(
-                f"execution_capacity_provider_quota_{key}_exceeded"
-            )
+        peer_projections.append((other, other_plan.additional_nodes))
+    try:
+        require_provider_quota_headroom(placement, additional_nodes=total_nodes, peers=peer_projections)
+    except PlacementUnavailableError as exc:
+        raise ExecutionProvisioningBlockedError(str(exc)) from exc
     decision_reason = "existing_allocatable" if actual_projected.additional_nodes == 0 else "bounded_scale_headroom"
     payload = {
         "target_id": target.id,

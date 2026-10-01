@@ -36,6 +36,8 @@ from loom.service_execution_materialization import (
     service_execution_input_binding,
 )
 from loom.task_image_build_plan import derive_task_image_build_components
+from loom.task_image_bundle_manifest import capture_task_image_bundle_manifest
+from loom.task_image_materialization import task_bundle_content_manifest_digest
 from loom.trajectory.storage import (
     BUNDLE_FILE_METADATA_NAME,
     _parse_bundle_file_metadata,
@@ -211,6 +213,7 @@ def _input_manifest_modes(
 
 
 def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None:
+    registered_digest = task_bundle_content_manifest_digest(claim["task_source_provenance"])
     prefix = claim["task_source"].split("/", 3)[3]
     objects: list[str] = []
     total = 0
@@ -254,6 +257,19 @@ def download_bundle(claim: dict[str, Any], client: Any, directory: Path) -> None
         metadata.unlink()
     for relative, mode in modes.items():
         (directory / relative).chmod(mode)
+    if registered_digest:
+        # Reuse the registration algorithm on the actual downloaded bytes and
+        # restored modes. Legacy checksum/mode checks alone do not bind the v2
+        # identity, including canonical file paths, lengths and per-file hashes.
+        try:
+            measured = capture_task_image_bundle_manifest(directory)
+        except ValueError:
+            raise BuildPreparationError("task bundle does not match registered content") from None
+        if (measured.digest != registered_digest or measured.task_checksum != claim["task_checksum"]
+                or claim["task_source_provenance"].get("bundle_file_metadata_sha256")
+                != "sha256:" + measured.bundle_file_metadata_sha256):
+            raise BuildPreparationError("task bundle does not match registered content")
+        return
     # This is the source transfer boundary; downstream phases use these bytes.
     if sha256_of_dir(directory) != claim["task_checksum"]:
         raise BuildPreparationError("task bundle content does not match its frozen revision")

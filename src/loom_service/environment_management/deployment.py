@@ -51,6 +51,9 @@ class ManagementDeployment(BaseModel):
     postgres_storage_gi: int = Field(ge=10, le=1024, strict=True)
     backup_bucket: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$")
     installation: ManagementInstallation
+    # The protected pool migration supplies this reference. Omission preserves
+    # historical input digests and is not permission to discover a live catalog.
+    pool_catalog_operation_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     _public_host = field_validator("public_host")(_hostname)
 
@@ -60,6 +63,8 @@ class ManagementDeployment(BaseModel):
         config = foundation.platform_config
         if self.installation_id.int == 0:
             raise ValueError("management installation requires a non-nil identity")
+        if self.pool_catalog_operation_id is not None and self.pool_catalog_operation_id.int == 0:
+            raise ValueError("pool catalog requires a non-nil operation identity")
         authority = foundation.namespace_authority
         if authority is not None and (authority.installation_id != self.installation_id or authority.namespace != self.namespace):
             raise ValueError("namespace authority differs from management installation")
@@ -101,6 +106,19 @@ class RenderedManagement:
     files: dict[str, list[dict[str, Any]]]
     revision: str
     platform_envelope: PlatformEnvelope
+
+
+def mount_pool_profiles(pod: dict[str, Any], *, operation_id: UUID) -> None:
+    """Mount only the immutable catalog retained by the protected pool operation."""
+    container, = pod["containers"]
+    pod.setdefault("volumes", []).append({"name": "pool-profiles", "configMap": {
+        "name": "loom-pool-profiles-" + operation_id.hex,
+        "items": [{"key": "profiles.json", "path": "profiles.json"}],
+    }})
+    container.setdefault("volumeMounts", []).append({
+        "name": "pool-profiles", "mountPath": "/var/run/loom-pool-profiles", "readOnly": True,
+    })
+    container["env"].append({"name": "LOOM_SVC_POOL_PROFILES_FILE", "value": "/var/run/loom-pool-profiles/profiles.json"})
 
 
 def render_management(
@@ -223,6 +241,9 @@ def render_management(
         pod["volumes"][-1]["secret"]["items"] = [
             {"key": key, "path": key} for key in ("manager-dsn", "shared.json", "ca.crt")
         ]
+    if deployment.pool_catalog_operation_id is not None:
+        mount_pool_profiles(pod, operation_id=deployment.pool_catalog_operation_id)
+        service["spec"]["strategy"] = {"type": "Recreate"}
     migration = files["30-migrate.yaml"][0]
     migration["metadata"]["name"] = "loom-management-migrate-" + revision.removeprefix("sha256:")[:12]
     migration_pod = migration["spec"]["template"]["spec"]

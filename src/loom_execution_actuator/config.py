@@ -4,6 +4,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from loom.nebius_kubernetes import NebiusKubernetesConnection, connection_from_fields
+from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 
 
@@ -20,6 +21,16 @@ class ExecutionActuatorSettings(BaseSettings):
     @model_validator(mode="after")
     def _remote_kubernetes_complete(self) -> "ExecutionActuatorSettings":
         _ = self.kubernetes_connection
+        if self.global_pool is not None:
+            participant = self.global_pool.participant
+            participant.target(self.target_id, "trial")
+            if participant.execution_namespace.name != self.namespace:
+                raise ValueError("global execution namespace binding differs")
+            if self.task_image_builder is not None:
+                participant.target(self.target_id, "task_image_build")
+                if (participant.build_namespace.name != self.task_image_builder.namespace
+                        or self.global_pool.logical_pool_id != self.task_image_builder.pool_id):
+                    raise ValueError("global native build binding differs")
         return self
 
     @property
@@ -31,6 +42,8 @@ class ExecutionActuatorSettings(BaseSettings):
         )
 
     db_url: str
+    global_pool: PoolRuntimeSettings | None = None
+    execution_image_admission_public_keys_json: str = '{"schema_version":1,"keys":[]}'
     task_image_builder: NativeTaskImageSettings | None = None
     controller_id: str = Field(min_length=1, max_length=120)
     target_id: str = Field(min_length=1, max_length=80)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -45,6 +45,9 @@ from loom_execution_actuator.metrics import (
     KUBERNETES_WATCH_RESTARTS_TOTAL,
     RESOURCE_USAGE_ERRORS_TOTAL,
 )
+from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
+from loom_execution_actuator.pool_execution_resources import PoolExecutionResources
+from loom_execution_actuator.pool_outbox import PoolHandoffError
 from loom_execution_actuator.renderer import ExecutionTargetRuntime, render_execution_job
 from loom_execution_actuator.resource_usage import ResourceSample, persist_native_usage, pod_samples
 
@@ -91,6 +94,7 @@ class ExecutionActuator:
         command_limit: int = 20,
         command_lease_seconds: int = 60,
         delete_grace_seconds: int = 30,
+        pool_resources: PoolExecutionResources | None = None,
     ) -> None:
         if not controller_id or len(controller_id) > 120:
             raise ValueError("invalid controller_id")
@@ -103,6 +107,11 @@ class ExecutionActuator:
         self._delete_grace_seconds = delete_grace_seconds
         self._watch_resource_version: str | None = None
         self._usage_cache: dict[str, tuple[datetime, dict[str, Any] | None]] = {}
+        if pool_resources is not None and (pool_resources.target_id != target.target_id
+                or pool_resources.namespace.name != target.namespace
+                or cast(object, pool_resources.kubernetes) is not kubernetes):
+            raise ValueError("global execution resource binding differs from actuator")
+        self._pool_resources = pool_resources
 
     async def run_commands_once(self, *, now: datetime | None = None) -> int:
         current_time = now or datetime.now(UTC)
@@ -234,6 +243,10 @@ class ExecutionActuator:
         *,
         now: datetime,
     ) -> None:
+        if self._pool_resources is not None and observation.normalized_state in {
+            NormalizedJobState.DELETED, NormalizedJobState.MISSING, NormalizedJobState.ABSENT,
+        }:
+            raise ActuatorContractError("global deletion requires retained manager release")
         self._validate_observation(lease, observation)
         if (
             observation.normalized_state == NormalizedJobState.DELETED
@@ -309,6 +322,8 @@ class ExecutionActuator:
             await session.commit()
 
     async def _get(self, lease: ServiceExecutionLease) -> KubernetesJobObservation | None:
+        if self._pool_resources is not None:
+            return await self._pool_resources.observe(lease)
         with KUBERNETES_API_SECONDS.labels(operation="get").time():
             return await self._kubernetes.get_job(
                 namespace=self._target.namespace,
@@ -317,7 +332,9 @@ class ExecutionActuator:
 
     async def _create(
         self, lease: ServiceExecutionLease, *, now: datetime
-    ) -> KubernetesJobObservation:
+    ) -> KubernetesJobObservation | None:
+        if self._pool_resources is not None:
+            return await self._pool_resources.create(lease)
         existing = await self._get(lease)
         if existing is not None:
             self._validate_observation(lease, existing)
@@ -381,6 +398,9 @@ class ExecutionActuator:
         # Cancellation must signal the runtime now, but leave its output-only
         # authority open while SIGTERM drains and uploads partial evidence.
         # Reconciliation closes the window after commit or the existing deadline.
+        if self._pool_resources is not None:
+            await self._cleanup_pool(lease, now=now)
+            return
         grace_seconds = self._delete_grace_seconds
         if cancel_immediately:
             if lease.cleanup_deadline_at is not None:
@@ -394,6 +414,17 @@ class ExecutionActuator:
                 expected_uid=observation.job_uid,
                 grace_period_seconds=grace_seconds,
             )
+
+    async def _cleanup_pool(self, lease: ServiceExecutionLease, *, now: datetime) -> None:
+        assert self._pool_resources is not None
+        current = await self._lease(lease.id)
+        if current.desired_state == "deleted":
+            return
+        await self._pool_resources.stop(current)
+        # No local Pod UID is not proof that an activated Job has no running Pod.
+        # Keep the full existing output window unless durable output already closed it.
+        await self._close_output_before_delete(current, now=now)
+        await self._pool_resources.drain(await self._lease(lease.id))
 
     async def _ack(
         self,
@@ -423,6 +454,8 @@ class ExecutionActuator:
             delay = 5
             max_deliveries = 100
             code = "output_pending"
+        elif isinstance(exc, PoolRequestUnconfirmedError):
+            delay, max_deliveries, code = 5, 100, "pool_request_unconfirmed"
         elif isinstance(exc, ExecutionProvisioningBlockedError):
             delay = exc.retry_after_seconds
             max_deliveries = 100
@@ -467,7 +500,8 @@ class ExecutionActuator:
             observation: KubernetesJobObservation | None = None
             if command.command_type == "create":
                 observation = await self._create(lease, now=now)
-                await self._persist_observation(lease, observation, now=now)
+                if observation is not None:
+                    await self._persist_observation(lease, observation, now=now)
             elif command.command_type in _DELETE_COMMANDS:
                 observation = await self._get(lease)
                 if observation is not None:
@@ -477,6 +511,8 @@ class ExecutionActuator:
                         now=now,
                         cancel_immediately=command.command_type == "cancel",
                     )
+                elif self._pool_resources is not None:
+                    await self._cleanup_pool(lease, now=now)
                 else:
                     observation = KubernetesJobObservation(
                         namespace=self._target.namespace,
@@ -492,6 +528,8 @@ class ExecutionActuator:
             elif command.command_type in {"start", "finalize"}:
                 observation = await self._get(lease)
                 if observation is None:
+                    if self._pool_resources is not None:
+                        raise PoolRequestUnconfirmedError
                     raise ActuatorContractError("expected Kubernetes Job is missing")
                 if command.command_type == "start" and lease.desired_state == "finalize":
                     # Output commit may durably queue start and finalize before
@@ -518,11 +556,15 @@ class ExecutionActuator:
             ExecutionProvisioningBlockedError,
             KubernetesApiError,
             ServiceExecutionConflict,
+            PoolRequestUnconfirmedError,
+            PoolHandoffError,
         ) as exc:
             await self._defer(command, exc, now=now)
 
     async def reconcile_full_once(self, *, now: datetime | None = None) -> int:
         current_time = now or datetime.now(UTC)
+        if self._pool_resources is not None:
+            return await self._reconcile_pool(now=current_time)
         try:
             with KUBERNETES_API_SECONDS.labels(operation="list").time():
                 inventory = await self._kubernetes.list_jobs(
@@ -623,7 +665,45 @@ class ExecutionActuator:
             await session.commit()
         return drift
 
+    async def _reconcile_pool(self, *, now: datetime) -> int:
+        assert self._pool_resources is not None
+        resources = self._pool_resources
+        await resources.probe()
+        # Qualified namespace reachability remains fresh even with an empty queue.
+        async with self._sessions.begin() as session:
+            await refresh_execution_target_health(session, target_id=self._target.target_id, observed_at=now)
+        drift = 0
+        async for pending in resources.driver.outbox.iter_pending(target_id=self._target.target_id):
+            try:
+                saved = await resources.advance(pending.request.key)
+                if saved.lease_id is None or saved.phase in {"cancelled", "released"}:
+                    continue
+                lease = await self._lease(saved.lease_id)
+                observation = await self._get(lease)
+                if observation is not None:
+                    await self._persist_observation(lease, observation, now=now)
+                current = await self._lease(lease.id)
+                if current.desired_state in _CLEANUP_DESIRED_STATES:
+                    if observation is not None:
+                        await self._delete(current, observation, now=now, cancel_immediately=current.desired_state == "cancel")
+                    else:
+                        await self._cleanup_pool(current, now=now)
+                elif current.desired_state != "deleted" and observation is None:
+                    drift += 1
+            except _ExecutionOutputPendingError:
+                drift += 1
+            except (ActuatorContractError, KubernetesApiError, ServiceExecutionConflict,
+                    PoolHandoffError, PoolRequestUnconfirmedError) as exc:
+                drift += 1
+                _LOG.warning("Global execution reconciliation deferred lease=%s error=%s",
+                    pending.request.key.local_work_id, type(exc).__name__)
+        KUBERNETES_ORPHAN_COUNT.set(drift)
+        KUBERNETES_RECONCILE_CONVERGED.set(1 if drift == 0 else 0)
+        return drift
+
     async def watch_once(self, *, timeout_seconds: int = 15) -> int:
+        if self._pool_resources is not None:
+            raise ActuatorContractError("global execution requires qualified reconciliation, not namespace watches")
         try:
             observations = await self._kubernetes.watch_jobs(
                 namespace=self._target.namespace,
