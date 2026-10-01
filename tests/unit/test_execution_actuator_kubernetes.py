@@ -859,30 +859,51 @@ async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatc
     from kubernetes import client
     from urllib3.response import HTTPResponse
 
-    api_client = client.ApiClient()
+    import httpx
+
+    configuration = client.Configuration()
+    configuration.host = "https://api.example.test"
+    configuration.ssl_ca_cert = "/qualified/cluster-ca.pem"
+    configuration.api_key["authorization"] = "fixture-runtime-token"
+    configuration.api_key_prefix["authorization"] = "Bearer"
+    api_client = client.ApiClient(configuration)
     responses = []
-    released = []
 
     def request(*args, **kwargs):
         assert args[0] == "GET"
-        assert "/nodes/node-1/proxy/stats%2Fsummary" in args[1]
-        response = HTTPResponse(
-            body=b'{"pods":'
-            if malformed
-            else b'{"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
-            status=200,
-            preload_content=False,
-        )
-        original_release = response.release_conn
+        assert args[1] == "https://api.example.test/api/v1/nodes/node-1"
+        return HTTPResponse(body=json.dumps({"apiVersion": "v1", "kind": "Node",
+            "metadata": {"name": "node-1", "uid": "node-uid"},
+            "status": {"addresses": [{"type": "InternalIP", "address": "10.23.0.4"}]}}).encode(),
+            status=200)
 
-        def release():
-            released.append(response)
-            original_release()
+    class SummaryHTTP:
+        def __init__(self, **kwargs):
+            assert kwargs["verify"].verify_mode == ssl.CERT_REQUIRED
+            assert kwargs["verify"].check_hostname is True
+            assert kwargs["trust_env"] is False and kwargs["follow_redirects"] is False
 
-        monkeypatch.setattr(response, "release_conn", release)
-        responses.append(response)
-        return response
+        def __enter__(self):
+            return self
 
+        def __exit__(self, *_):
+            return None
+
+        def get(self, url, **kwargs):
+            assert url == "https://10.23.0.4:10250/stats/summary"
+            assert kwargs["headers"] == {"Authorization": "Bearer fixture-runtime-token"}
+            response = httpx.Response(200, content=b'{"pods":' if malformed else
+                b'{"node":{"nodeName":"node-1"},"pods":[{"podRef":{"uid":"pod-1","namespace":"ns"}}]}',
+                request=httpx.Request("GET", url))
+            responses.append(response)
+            return response
+
+    # Only the TLS trust-file read and network boundary are doubled. The real
+    # Kubernetes node deserializer, endpoint selection and HTTP JSON decoder run.
+    import ssl
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setattr(httpx, "Client", SummaryHTTP)
     monkeypatch.setattr(api_client, "request", request)
     api = InClusterKubernetesJobApi(
         client_module=client,
@@ -890,8 +911,6 @@ async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatc
         core_api=client.CoreV1Api(api_client),
     )
     try:
-        # Exercise the real generated Core API and ApiClient deserializer. Its
-        # declared response_type='str' turns a parsed dict into Python repr.
         if malformed:
             from loom_execution_actuator.contracts import KubernetesApiError
 
@@ -900,8 +919,66 @@ async def test_resource_summary_reads_json_before_sdk_string_coercion(monkeypatc
             assert isinstance(error.value.__cause__, json.JSONDecodeError)
         else:
             result = await api.resource_summary(node_name="node-1")
-            assert result == {"pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
+            assert result == {"node": {"nodeName": "node-1"},
+                "pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
         assert len(responses) == 1
-        assert released == responses
+    finally:
+        api_client.close()
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "0.0.0.0", "8.8.8.8", "10.0.0.1@evil.test"])
+async def test_resource_summary_rejects_unqualified_node_endpoint_before_transport(address, monkeypatch):
+    import httpx
+    from kubernetes import client
+
+    from loom_execution_actuator.contracts import KubernetesApiError
+
+    configuration = client.Configuration()
+    configuration.ssl_ca_cert = "/qualified/cluster-ca.pem"
+    configuration.api_key["authorization"] = "fixture-runtime-token"
+    configuration.api_key_prefix["authorization"] = "Bearer"
+    api_client = client.ApiClient(configuration)
+    core = _ns(api_client=api_client, read_node=lambda **_: _ns(metadata=_ns(name="node-1", uid="node-uid", deletion_timestamp=None),
+        status=_ns(addresses=[_ns(type="InternalIP", address=address)])))
+    def forbidden_transport(*_, **__):
+        pytest.fail("unqualified endpoint reached telemetry transport")
+
+    monkeypatch.setattr(httpx, "Client", forbidden_transport)
+    api = InClusterKubernetesJobApi(client_module=_ns(), batch_api=_ns(), core_api=core)
+    try:
+        with pytest.raises(KubernetesApiError):
+            await api.resource_summary(node_name="node-1")
+    finally:
+        api_client.close()
+
+
+async def test_resource_summary_never_uses_proxy_even_if_direct_summary_is_denied(monkeypatch):
+    import httpx
+    from kubernetes import client
+
+    from loom_execution_actuator.contracts import KubernetesApiError
+
+    configuration = client.Configuration()
+    configuration.ssl_ca_cert = "/qualified/cluster-ca.pem"
+    configuration.api_key["authorization"] = "fixture-runtime-token"
+    configuration.api_key_prefix["authorization"] = "Bearer"
+    api_client = client.ApiClient(configuration)
+    node = _ns(metadata=_ns(name="node-1", uid="node-uid", deletion_timestamp=None),
+        status=_ns(addresses=[_ns(type="InternalIP", address="10.23.0.4")]))
+    # A denied direct read must not fall back to the authority being retired.
+    def forbidden_proxy(**_):
+        pytest.fail("unsafe node-proxy fallback")
+
+    core = _ns(api_client=api_client, read_node=lambda **_: node,
+        connect_get_node_proxy_with_path=forbidden_proxy)
+    import ssl
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setattr(httpx.Client, "get", lambda _self, url, **_: httpx.Response(403,
+        request=httpx.Request("GET", url)))
+    api = InClusterKubernetesJobApi(client_module=_ns(), batch_api=_ns(), core_api=core)
+    try:
+        with pytest.raises(KubernetesApiError):
+            await api.resource_summary(node_name="node-1")
     finally:
         api_client.close()

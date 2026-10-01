@@ -5,9 +5,12 @@ import asyncio
 import copy
 import os
 import ssl
+import time
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_pool_collector_runtime import collector_inputs as collector_inputs
@@ -18,6 +21,70 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
     reason="requires explicitly disposable Kubernetes")
+
+
+@pytest.mark.timeout(180)
+async def test_real_kubelet_stats_remain_available_without_proxy_or_execution_authority():
+    from kubernetes import client
+
+    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+
+    container = await asyncio.to_thread(_start_k3s, node_name="stats-node", ephemeral_storage_floor="1Gi")
+    scoped_client = None
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        rbac = client.RbacAuthorizationV1Api(core.api_client)
+        namespace = "pool-usage"
+        await asyncio.to_thread(core.create_namespace, {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}})
+        await asyncio.to_thread(core.create_namespaced_service_account, namespace,
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "loom-execution-actuator"}})
+        documents = list(yaml.safe_load_all((Path(__file__).resolve().parents[2]
+            / "deploy/k8s/nebius-execution-actuator.yaml").read_text()))
+        role, = (row for row in documents if row["kind"] == "ClusterRole")
+        binding, = (row for row in documents if row["kind"] == "ClusterRoleBinding")
+        binding["subjects"][0]["namespace"] = namespace
+        await asyncio.to_thread(rbac.create_cluster_role, role)
+        await asyncio.to_thread(rbac.create_cluster_role_binding, binding)
+        issued = await asyncio.to_thread(core.create_namespaced_service_account_token, "loom-execution-actuator", namespace,
+            client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
+        configuration = client.Configuration()
+        configuration.host = core.api_client.configuration.host
+        configuration.ssl_ca_cert = core.api_client.configuration.ssl_ca_cert
+        configuration.api_key["authorization"] = issued.status.token
+        configuration.api_key_prefix["authorization"] = "Bearer"
+        scoped_client = client.ApiClient(configuration)  # No administrator certificate.
+        actuator = InClusterKubernetesJobApi(client_module=client,
+            core_api=client.CoreV1Api(scoped_client), batch_api=client.BatchV1Api(scoped_client))
+        # Node bootstrap and the first cgroup sample follow API discovery.
+        deadline = time.monotonic() + 30
+        while True:
+            nodes = await asyncio.to_thread(core.list_node)
+            if nodes.items:
+                break
+            assert time.monotonic() < deadline, "disposable node did not register"
+            await asyncio.sleep(1)
+        summary = await actuator.resource_summary(node_name="stats-node")
+        assert summary["node"]["nodeName"] == "stats-node"
+        assert summary["node"]["cpu"]["usageCoreNanoSeconds"] >= 0
+        assert summary["node"]["memory"]["workingSetBytes"] >= 0
+        assert summary["node"]["fs"]["usedBytes"] >= 0
+        async with httpx.AsyncClient(base_url=configuration.host,
+                verify=ssl.create_default_context(cafile=configuration.ssl_ca_cert), trust_env=False,
+                headers={"Authorization": "Bearer " + issued.status.token}, timeout=20) as http:
+            assert (await http.get("/api/v1/nodes/stats-node/proxy/stats/summary")).status_code == 403
+            assert (await http.get("/api/v1/namespaces/" + namespace + "/secrets")).status_code == 403
+            assert (await http.post("/api/v1/namespaces/" + namespace + "/pods/missing/exec")).status_code == 403
+        node = nodes.items[0]
+        address, = (row.address for row in node.status.addresses if row.type == "InternalIP")
+        async with httpx.AsyncClient(base_url="https://" + address + ":10250",
+                verify=ssl.create_default_context(cafile=configuration.ssl_ca_cert), trust_env=False,
+                headers={"Authorization": "Bearer " + issued.status.token}, timeout=20) as kubelet:
+            assert (await kubelet.get("/pods")).status_code == 403
+            assert (await kubelet.get("/exec/pool-usage/missing/execution")).status_code == 403
+    finally:
+        if scoped_client is not None:
+            scoped_client.close()
+        await asyncio.to_thread(container.stop)
 
 
 @pytest.mark.timeout(180)
