@@ -46,6 +46,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.execution_diagnosis_store import execution_failure_groups
+from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
@@ -2690,12 +2691,16 @@ async def rerun_failed_batch(
     runtime_profile_json = json.dumps(b.service_execution_runtime_profile or {})
     if request_payload.use_current_runtime:
         selections = combinations or [rerun_trial_config]
+        # Re-resolving the deployed controller is the pinned-versions feature.
         if b.backend != NEBIUS_BACKEND or any(
-            item.get("agent_name") != "terminus-2" for item in selections
+            (spec := hosted_harness(item.get("agent_name"))) is None
+            or not spec.supports("pinned_versions")
+            for item in selections
         ):
             reject_submission(
                 reason="invalid_input", status_code=400,
-                detail="current runtime rerun supports only native Nebius terminus-2",
+                detail="current runtime rerun supports only native Nebius "
+                + ", ".join(harnesses_supporting("pinned_versions")),
             )
         # A missing explicit version selects the deployment-owned controller,
         # exactly as an ordinary new submission does. Never mutate the parent.

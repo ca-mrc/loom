@@ -22,7 +22,6 @@ from pydantic import (
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_contract import (
-    SANDBOX_CONTROLLER_AGENT_NAMES,
     evaluate_execution_admission,
     nebius_cpu_execution_class,
     nebius_guest_execution_class,
@@ -47,6 +46,14 @@ from loom.execution_runtime_contract import (
     SidecarContainerV1,
     TaskExecutionResourceRequestsV1,
 )
+from loom.hosted_harness import (
+    NATIVE_EXECUTION_AGENT_NAMES,
+    SANDBOX_CONTROLLER_MODULE,
+    HostedHarnessSpec,
+    harnesses_supporting,
+    hosted_harness,
+    is_workspace_harness,
+)
 from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
@@ -55,14 +62,6 @@ from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.verifier_runtime import resolve_verifier_env_mode
-
-# Harnesses the native (Nebius) execution path can run today. OpenHands and
-# Codex are supported product entries but are not yet connected to native
-# execution (#2054); the catalog and submission paths reuse this set so they
-# report that instead of claiming readiness.
-NATIVE_EXECUTION_AGENT_NAMES: frozenset[str] = frozenset(
-    {"direct-completion", "litellm", *SANDBOX_CONTROLLER_AGENT_NAMES},
-)
 
 
 def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
@@ -77,7 +76,7 @@ def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
     """
     env = task.environment
     return (
-        trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES
+        not is_workspace_harness(trial.agent_name)
         and env.docker_image is None
         and env.dockerfile is None
     )
@@ -97,15 +96,14 @@ def resolve_runner_task_image(task: TaskConfig, task_image_ref: str) -> TaskConf
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GLOB_MAGIC = re.compile(r"[*?[]")
-_SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
 MAX_INPUT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_INPUT_FILES = 10_000
 MAX_INPUT_BYTES = 10 * 1024**3
 
 
-def _sandbox_phase_argv(mode: str) -> tuple[str, ...]:
+def _sandbox_phase_argv(mode: str, module: str = SANDBOX_CONTROLLER_MODULE) -> tuple[str, ...]:
     return (
-        "python", "-I", "-m", _SANDBOX_CONTROLLER_MODULE,
+        "python", "-I", "-m", module,
         mode, "--workspace", "/workspace",
     )
 
@@ -403,13 +401,12 @@ def automatic_service_execution_rejections(
     task = normalize_steps(task)
     declared_rejections = task_runtime_rejections(task, agent_name=trial.agent_name)
     env = task.environment
-    # Checks keyed on `terminus` belong to the Harbor harness; checks keyed on
-    # `controller` belong to the private-sandbox path Oracle shares with it.
-    terminus = trial.agent_name == "terminus-2"
-    oracle = trial.agent_name == "oracle"
-    controller = trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
+    # The harness spec supplies only harness-owned facts; checks keyed on
+    # `controller` belong to the common private-sandbox path (#2288).
+    spec = hosted_harness(trial.agent_name)
+    controller = spec is not None and spec.workspace
     reasons: list[str] = list(declared_rejections)
-    if task.agent.continue_until_timeout and not terminus:
+    if task.agent.continue_until_timeout and not (spec and spec.supports("agent_continuation")):
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(
         env.execution_requirements, supported_capabilities=supported_capabilities,
@@ -495,12 +492,12 @@ def automatic_service_execution_rejections(
         reasons.append("custom_verifier_identity_unsupported")
     if len(task.steps) != 1 or task.multi_step is not None:
         reasons.append("single_step_required")
-    if trial.agent_name not in NATIVE_EXECUTION_AGENT_NAMES:
+    if spec is None or not spec.natively_runnable:
         reasons.append("direct_completion_required")
-    if oracle:
-        # The reference solver never calls a model (#2054).
+    if spec is not None and spec.model == "forbidden":
+        # e.g. Oracle's reference solver never calls a model (#2054).
         if trial.agent_model is not None or trial.request_params:
-            reasons.append("oracle_model_forbidden")
+            reasons.append("harness_model_forbidden")
     elif trial.agent_model is None or trial.agent_model.source != "api":
         reasons.append("api_model_required")
     if trial.extra_mcp_servers or trial.extra_skills or trial.multi_model is not None:
@@ -577,7 +574,7 @@ def compile_service_execution_plan(
     ):
         raise ValueError("fixture execution requires the frozen task's prepared component grant")
     if task_image_grant is not None:
-        if (trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES
+        if (not is_workspace_harness(trial.agent_name)
             or task.environment.dockerfile is None
             or task_revision_sha256 != "sha256:" + task_image_grant.task_checksum
             or task != TaskConfig.model_validate(task_image_grant.task_config)
@@ -595,7 +592,8 @@ def compile_service_execution_plan(
     )
     if reasons:
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
-    controller = trial.agent_name in SANDBOX_CONTROLLER_AGENT_NAMES
+    spec = hosted_harness(trial.agent_name)
+    assert spec is not None  # admission rejected unknown harnesses above
     if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
@@ -631,9 +629,9 @@ def compile_service_execution_plan(
             "verifier": task.verifier.model_dump(mode="json"),
         }
     )
-    if controller:
+    if spec.workspace:
         return _compile_terminus_plan(
-            task=task, trial=trial, task_revision_sha256=task_revision_sha256,
+            spec=spec, task=task, trial=trial, task_revision_sha256=task_revision_sha256,
             profile=profile, binding=binding, command_identity=command_identity,
             output_paths=output_paths,
             resource_requests=resource_requests,
@@ -734,7 +732,7 @@ def compile_service_execution_plan(
         output_declarations=output_declarations,
         main=ProcessPhaseV1(
             role="agent",
-            argv=("python", "-m", "loom.service_execution_task", "direct-completion"),
+            argv=("python", "-m", spec.controller_module, spec.controller_phase),
             working_directory="/workspace",
             timeout_seconds=round(
                 (trial.override_agent_timeout_sec or task.agent.timeout_sec)
@@ -752,6 +750,14 @@ def compile_service_execution_plan(
 def controller_image_for_trial(
     profile: ServiceExecutionRuntimeProfileV1, trial: TrialConfig,
 ) -> str | None:
+    """The trusted controller image the harness spec binds (#2295).
+
+    None fails closed: an unknown harness, a harness that runs in the service
+    runner image, a missing deployment controller or an unpinned version.
+    """
+    spec = hosted_harness(trial.agent_name)
+    if spec is None or spec.controller_image != "harness-controller":
+        return None
     if trial.agent_version is None:
         return profile.agent_image_ref
     for binding in profile.agent_runtime_bindings:
@@ -767,9 +773,14 @@ def validate_task_resource_requests(
     """Validate a batch-scoped request against the unchanged source task limits."""
     if override.task_revision_sha256 != task_revision_sha256:
         raise ValueError("task resource requests source revision does not match")
-    if (trial.agent_name != "terminus-2" or task.service_execution is not None
+    spec = hosted_harness(trial.agent_name)
+    if (spec is None or not spec.supports("task_resource_requests")
+            or task.service_execution is not None
             or controller_image_for_trial(profile, trial) is None):
-        raise ValueError("task resource requests require automatic native terminus-2 execution")
+        raise ValueError(
+            "task resource requests require automatic native "
+            + ", ".join(harnesses_supporting("task_resource_requests")) + " execution",
+        )
     env = task.environment
     if env.cpus is None or env.memory_mb is None or env.storage_mb is None:
         raise ValueError("task resource requests require explicit task limits")
@@ -829,11 +840,13 @@ def runtime_profile_rejections(
             return ("task_identity_runtime_unavailable",)
     if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
         return ("task_egress_runtime_unavailable",)
+    spec = hosted_harness(trial.agent_name)
     if trial.agent_version is not None and (
-        trial.agent_name != "terminus-2" or controller_image_for_trial(profile, trial) is None
+        spec is None or not spec.supports("pinned_versions")
+        or controller_image_for_trial(profile, trial) is None
     ):
         return ("agent_version_not_in_runtime_profile",)
-    if trial.agent_name not in SANDBOX_CONTROLLER_AGENT_NAMES:
+    if spec is None or spec.controller_image == "service-runner":
         # A pinned image must be the deployed runner image; a task that leaves
         # it unset runs in whichever runner image the plan freezes (#2054).
         return (() if uses_runner_task_image(task, trial)
@@ -863,15 +876,17 @@ def _plan_admissions(
 
 
 def _compile_terminus_plan(
-    *, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
+    *, spec: HostedHarnessSpec, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
     profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
     command_identity: str, output_paths: list[str],
     task_image_materialization_id: UUID | None = None,
     resource_requests: ExecutionResourceRequestsV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
-    """Reuse the trusted controller with private native task/verifier sandboxes.
+    """The private-sandbox compiler shared by every workspace harness.
 
-    Terminus-2 runs Harbor there; Oracle runs the task's reference solution.
+    The harness spec supplies its controller binding and native outputs; the
+    remaining sandbox, verifier and output construction is extracted into a
+    harness-neutral planner by #2296.
     """
     env = task.environment
     agent_image = controller_image_for_trial(profile, trial)
@@ -929,23 +944,22 @@ def _compile_terminus_plan(
             role=role,
             # Keep Python imports and dependency configuration discovery outside
             # user-controlled task inputs, including dependencies that inspect cwd.
-            argv=_sandbox_phase_argv(mode),
+            argv=_sandbox_phase_argv(mode, spec.controller_module),
             working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
         )
     outputs = [RuntimeOutputDeclarationV1(
         source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",
         kind="task_artifact", required=path in task.steps[0].required_artifacts,
     ) for path in output_paths]
-    harbor_outputs = (
-        ("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
-        ("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
-    ) if trial.agent_name == "terminus-2" else ()
+    harness_outputs = tuple(
+        (item.source_path, item.relative_path, item.kind, item.required) for item in spec.native_outputs
+    )
     for source, target, kind, required in (
         ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
         ("agent/usage.json", "accounting/usage.json", "usage", True),
         ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
         ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
-        *harbor_outputs,
+        *harness_outputs,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
         ("verifier/output.json", "verifier/output.json", "verifier", shared),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
@@ -1016,7 +1030,7 @@ def _compile_terminus_plan(
             manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
             total_bytes=binding.total_bytes,
         ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
-        main=phase("agent", trial.agent_name, agent_timeout),
+        main=phase("agent", spec.controller_phase, agent_timeout),
         verifier_execution="in_attempt" if colocated_verifier else "separate_execution",
         verifier_after_agent_timeout=shared and guest_execution is None,
         in_place_verifier=shared and guest_execution is None,
@@ -1078,6 +1092,9 @@ __all__ = [
     "MAX_INPUT_BYTES",
     "MAX_INPUT_FILES",
     "MAX_INPUT_MANIFEST_BYTES",
+    # Re-exported for existing importers; derived from the typed hosted harness
+    # specs (#2288), so admission and catalog readiness cannot disagree.
+    "NATIVE_EXECUTION_AGENT_NAMES",
     "ControllerComputeResourcesV1",
     "RuntimeTaskInputV1",
     "ServiceExecutionInputBindingV1",

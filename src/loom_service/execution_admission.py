@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from loom.agent_runtime_registry import resolve_agent_runtimes
 from loom.db.schema import Task
+from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -102,18 +103,26 @@ async def freeze_task_resource_requests(
         for raw in combinations
         for item in (raw if isinstance(raw, Combination) else Combination.model_validate(raw),)
     ] or [trial_config]
-    terminus_only = all(item.get("agent_name") == "terminus-2" for item in selections)
-    if overrides and not terminus_only:
-        raise HTTPException(status_code=400, detail="task_resource_requests supports only terminus-2")
+    # Measured resource requests are a harness feature, not a topology (#2288).
+    requests_supported = all(
+        (spec := hosted_harness(item.get("agent_name"))) is not None
+        and spec.supports("task_resource_requests")
+        for item in selections
+    )
+    if overrides and not requests_supported:
+        raise HTTPException(
+            status_code=400,
+            detail="task_resource_requests supports only " + ", ".join(harnesses_supporting("task_resource_requests")),
+        )
     requests = {
         task_id: entry for task_id, entry in profile.task_resource_requests.items()
-        if task_id in task_ids and terminus_only
+        if task_id in task_ids and requests_supported
     }
     requests.update(overrides)
     # Node-share profiles resolve memory from target capacity at admission.
     # The retired fixed template must not reject small source declarations first.
     baseline = (profile.default_task_resource_requests
-                if terminus_only and profile.resource_allocation_policy is None else None)
+                if requests_supported and profile.resource_allocation_policy is None else None)
     selected_ids = set(task_ids) if baseline is not None else set(requests)
     if not selected_ids:
         return profile.model_copy(update={"task_resource_requests": {}})

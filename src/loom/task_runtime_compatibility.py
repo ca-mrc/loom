@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from loom.hosted_harness import hosted_harness
 from loom.models.task import TaskConfig
 
 
 def task_runtime_rejections(task: TaskConfig, *, agent_name: str | None = None) -> tuple[str, ...]:
     reasons = [f"{issue.path}:{issue.line}: {issue.code}" for issue in task.import_blockers]
-    if task.solution_environment and agent_name == "oracle":
+    spec = hosted_harness(agent_name)
+    if task.solution_environment and spec is not None and spec.stages_solution:
         reasons.append("solution_environment: oracle_environment_variables_runtime_unavailable")
     environments = [("environment", task.environment)]
     if task.verifier.environment is not None:
