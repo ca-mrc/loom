@@ -42,10 +42,11 @@ def global_role_database(platform_database):  # noqa: F811 -- imported shared fi
         yield make_url(database).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
-@pytest.mark.parametrize("kind", ["execution", "build"])
+@pytest.mark.parametrize("kind", ["execution", "build", "registered-build"])
 async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
     global_role_database: str,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
     kind: str,
 ) -> None:
     from scripts.ops import nebius_pool_migration_guard as migration
@@ -123,9 +124,36 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 environment="staging", logical_pool_id="nebius-cpu", image_admission_keyring=IMAGE_ADMISSION_KEYRING)
             key = proposal.request.key
         else:
-            participant, request, _ = await local_setup(owners)
+            participant, request, trial_id = await local_setup(owners)
             journal = outbox(actuators, participant)
-            assert (await journal.remember(request)).phase == "selected"
+            if kind == "registered-build":
+                from sqlalchemy import update
+
+                from loom.db.schema import Task, TrialTaskImageMaterialization
+                from loom.task_image_materialization import ensure_task_image_materializations
+                from tests.integration.test_nebius_pool_build_selection import selector
+                from tests.integration.test_task_bundle_source_journal import _module, _publish, _receipts, _spec, _upload
+
+                spec = _spec(tmp_path)
+                ticket = await _upload(owners, spec)
+                await _receipts(owners, ticket)
+                await _publish(owners, ticket)
+                async with owners.begin() as session:
+                    task = Task(id=spec.catalog_task_id, checksum=spec.manifest.task_checksum,
+                        config=spec.task_config, source=spec.source_uri, source_provenance=spec.provenance)
+                    session.add(task)
+                    await session.flush()
+                    image = (await ensure_task_image_materializations(session, task_row=task))[0]
+                    await session.execute(update(Trial).where(Trial.id == trial_id).values(task_id=spec.catalog_task_id))
+                    session.add(TrialTaskImageMaterialization(trial_id=trial_id, materialization_id=image.id))
+                    await session.flush()
+                    await _module().release_task_bundle_reference(session, source_id=spec.id,
+                        reference_kind="materialization", owner_id=str(image.id))
+                saved = await selector(journal).select_next()
+                assert saved is not None and saved.request.build.source.kind == "registered"
+                request = saved.request
+            else:
+                assert (await journal.remember(request)).phase == "selected"
             receipt = build_grant(request)
             attached = await journal.accept_grant(request.key, receipt)
             assert attached.phase == "attached"
@@ -149,6 +177,10 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 "DELETE FROM nebius_pool_build_outbox",
                 "UPDATE nebius_pool_bindings SET mode='global'",
                 "SELECT * FROM nebius_pool_machine_credentials",
+                "UPDATE task_bundle_sources SET spec_json='{}'::jsonb",
+                "UPDATE task_bundle_source_incarnations SET state='retired'",
+                "INSERT INTO task_bundle_source_writes DEFAULT VALUES",
+                "DELETE FROM task_bundle_source_references",
                 "DELETE FROM tokens",
                 "CREATE ROLE global_actuator_escape",
             ):
