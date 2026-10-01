@@ -5,7 +5,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
@@ -64,6 +64,43 @@ async def test_personal_priority_keeps_original_version_after_suspend_without_mu
         assert await qualify_pool_origin(session, principal, origin, target_id="nebius-default", workload_kind="task_image_build") == 3
     assert await registry.get_operation(operation.operation_id, principal=alice) == before
     assert (await registry.get_operation(stopped.operation_id, principal=alice)).phase == "pending"
+
+
+async def test_cutover_can_qualify_retained_application_history_without_opening_the_pool(applications):
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom_service.pool_management.origin import qualify_retained_pool_origin
+
+    factory, principal, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='origin-retirement',
+        action='suspend', expected_generation=1)
+    async with factory.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == binding.pool_id).values(mode='closed'))
+    async with factory() as session:
+        await session.execute(text('SET TRANSACTION READ ONLY'))
+        assert await qualify_retained_pool_origin(session, origin, participant=binding,
+            cluster_id=plan['prepared'].registration.cluster_id, workload_kind='trial') == 3
+        assert (await session.get(NebiusPoolBinding, binding.pool_id)).mode == 'closed'
+        assert not session.new and not session.dirty and not session.deleted
+    assert (await registry.get_operation(operation.operation_id, principal=alice)).phase == 'superseded'
+
+
+@pytest.mark.parametrize('damage', ['source', 'cluster', 'environment', 'generation'])
+async def test_cutover_origin_history_denies_unregistered_source_and_wrong_binding(applications, damage):
+    from loom_service.pool_management.origin import PoolOriginError, qualify_retained_pool_origin
+
+    factory, _, binding, origin, _, _, _, plan = await setup_origin(applications)
+    cluster = plan['prepared'].registration.cluster_id
+    if damage == 'source':
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update={'source_digest': 'sha256:' + 'f' * 64})})
+    elif damage == 'cluster':
+        cluster = 'mk8scluster-foreign'
+    elif damage == 'environment':
+        binding = binding.model_copy(update={'environment_id': uuid4()})
+    else:
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update={'deployment_generation': 50})})
+    async with factory() as session:
+        with pytest.raises(PoolOriginError):
+            await qualify_retained_pool_origin(session, origin, participant=binding, cluster_id=cluster, workload_kind='trial')
 
 
 @pytest.mark.parametrize("field,value", [
