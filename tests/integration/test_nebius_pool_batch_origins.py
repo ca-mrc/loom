@@ -29,9 +29,11 @@ async def test_public_batch_records_exact_application_origin_and_ignores_payload
     app, token, _ = camp_setup
     installed = source()
     configure(app, installed)
+    # Test process provenance using this fixture's task, not unrelated benchmark
+    # rows that publication tests may retain in the session-scoped database.
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
         response = await client.post("/api/v1/batches", headers={"Authorization": "Bearer " + token}, json={
-            "name": "origin-test", "purpose": "evaluation", "task_filter": {"license": "MIT"}, "trial_config": {"agent": {"name": "oracle"}},
+            "name": "origin-test", "purpose": "evaluation", "task_filter": {"task_ids": ["local/mit-0"]}, "trial_config": {"agent": {"name": "oracle"}},
             "pool_origin": source("environment"), "priority": "production"})
     assert response.status_code == 201, response.text
     identity = response.json()["batch_id"]
@@ -69,7 +71,7 @@ async def test_missing_template_is_unknown_not_silently_shared(camp_setup):
     app, token, _ = camp_setup
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
         response = await client.post("/api/v1/batches", headers={"Authorization": "Bearer " + token}, json={
-            "name": "legacy-origin", "purpose": "evaluation", "task_filter": {"license": "MIT"}, "trial_config": {"agent": {"name": "oracle"}},
+            "name": "legacy-origin", "purpose": "evaluation", "task_filter": {"task_ids": ["local/mit-0"]}, "trial_config": {"agent": {"name": "oracle"}},
             "pool_origin": {"submission_id": str(uuid4()), "kind": "environment"}})
     assert response.status_code == 201, response.text
     assert await origin(app, response.json()["batch_id"]) is None
