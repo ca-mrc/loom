@@ -420,11 +420,13 @@ class KubectlPoolGuardAPI:
         if actual != {"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": True}:
             raise ValueError
 
-    def _runtime(self, target: PoolGuardTarget, *, original: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _runtime(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any] | None = None) -> dict[str, Any]:
         self._namespaces(target)
         original = target.controller if original is None else original
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         if namespace != target.namespace:
+            if not isinstance(target, PoolGuardTarget):
+                raise ValueError
             participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
             if namespace != participant.execution_namespace.name:
                 raise ValueError
@@ -567,25 +569,35 @@ class KubectlPoolGuardAPI:
                 component, variable = "actuator", "LOOM_EXECUTION_ACTUATOR_DB_URL"
             else:
                 raise ValueError
-            before_database = self._database(target)
-            before = self._runtime(target, original=original)
-            url = self._workload_database_url(original, url_variable=variable,
+            self._qualify_runtime_binding(target, original=original, component=component, url_variable=variable,
                 credential_uid=credential_uid, credential_resource_version=credential_resource_version)
-            qualify_database_destination(url, target.namespace)
-            # CP/API use PostgresDsn; the actuator intentionally retains a str.
-            expected_url = url if component == "actuator" else str(PostgresDsn(url))
-            nonce = secrets.token_hex(32)
-            response = hmac.new(bytes.fromhex(nonce), expected_url.encode(), "sha256").hexdigest()
-            report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
-                "python", "-c", _BOUND_DATABASE_COMMAND, component, nonce, response])
-            if (report != {"status": "qualified"}
-                    or _uid(self._runtime(target, original=original)) != _uid(before)
-                    or self._workload_database_url(original, url_variable=variable,
-                        credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url
-                    or _uid(self._database(target)) != _uid(before_database)):
-                raise ValueError
         except Exception:
             raise PoolMigrationError("runtime_database") from None
+
+    def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
+                                 component: str, url_variable: str, credential_uid: UUID,
+                                 credential_resource_version: str,
+                                 database_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> None:
+        """Shared read-only probe; callers first qualify their fixed target scope."""
+        namespace = original["metadata"]["namespace"]
+        container, = original["spec"]["template"]["spec"]["containers"]
+        before_database = self._database(target, url_variable=database_variable)
+        before = self._runtime(target, original=original)
+        url = self._workload_database_url(original, url_variable=url_variable,
+            credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+        qualify_database_destination(url, target.namespace)
+        # CP/API use PostgresDsn; the actuator intentionally retains a str.
+        expected_url = url if component == "actuator" else str(PostgresDsn(url))
+        nonce = secrets.token_hex(32)
+        response = hmac.new(bytes.fromhex(nonce), expected_url.encode(), "sha256").hexdigest()
+        report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
+            "python", "-c", _BOUND_DATABASE_COMMAND, component, nonce, response])
+        if (report != {"status": "qualified"}
+                or _uid(self._runtime(target, original=original)) != _uid(before)
+                or self._workload_database_url(original, url_variable=url_variable,
+                    credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url
+                or _uid(self._database(target, url_variable=database_variable)) != _uid(before_database)):
+            raise ValueError
 
     def _database(self, target: PoolDatabaseReadTarget, *,
                   url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> dict[str, Any]:

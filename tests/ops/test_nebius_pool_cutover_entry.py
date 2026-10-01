@@ -541,7 +541,8 @@ def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(p
         assert len(reads) == 2
 
 
-@pytest.mark.parametrize('damage', [None, 'ambient', 'cluster', 'group', 'project', 'quota', 'unavailable', 'config', 'late_config', 'credentials'])
+@pytest.mark.parametrize('damage', [None, 'ambient', 'cluster', 'group', 'project', 'quota', 'quota_binding',
+    'missing_setting', 'unavailable', 'config', 'late_config', 'credentials'])
 def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collector_inputs, platform_inputs, tmp_path, monkeypatch, damage):
     """Only SDK and Kubernetes transports are doubled; native quota parsing runs."""
     from types import SimpleNamespace
@@ -552,7 +553,12 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
     from nebius.sdk import SDK
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_management_entry import EntryError
-    from tests.unit.test_execution_capacity_collector import _enum, _node_group_spec, _platform_client, _quota
+    from tests.unit.test_execution_capacity_collector import (
+        _enum,
+        _node_group_spec,
+        _platform_client,
+        _quota,
+    )
 
     migration, _, configmap = copy.deepcopy(collector_inputs)
     spec = migration.registration.spec
@@ -577,6 +583,11 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         configmap['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID'] = 'foreign-project'
     elif damage == 'quota':
         quotas[0].status.unit = 'foreign-unit'
+    elif damage == 'quota_binding':
+        spec.quota_identities['nodes'] = (*spec.quota_identities['nodes'][:-1], 'foreign-unit')
+    elif damage == 'missing_setting':
+        del configmap['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID']
+        monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID', config['project_id'])
     elif damage == 'unavailable':
         group.status.state = _enum('DELETING')
     elif damage == 'ambient':

@@ -3,7 +3,7 @@
 The protected installer must still supply complete installed writer/schema
 qualification, activation, rollback and successor-refresh completion. This module
 resolves protected publication, binds completed history and qualifies retained
-participant runtimes/backends before yielding the existing database readers.
+runtime databases and the physical provider before yielding the existing readers.
 It imports no ambient kubeconfig and replays no old installation. No live writes
 occur here.
 """
@@ -59,6 +59,9 @@ from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
 
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+from loom_control_plane.execution_placement import quota_identity
+from loom_execution_capacity_collector.config import NebiusCapacitySourceSettings
+from loom_execution_capacity_collector.nebius import NebiusCapacityReader
 from loom_service.environment_management.candidates import (
     GitHubCandidateCatalog,
     ProtectedPublication,
@@ -245,6 +248,106 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
         raise EntryError("pool cutover runtime databases unqualified") from None
 
 
+def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlPoolHistoryAPI) -> None:
+    """Use the predecessor's management binding, never a participant credential."""
+    try:
+        history.qualify_binding(context.request.fencing.retirement.migration, context.request.manager)
+        if load_pool_cutover_inputs(context.operation) != context:
+            raise ValueError
+        state, anchor = Path(context.operation["state_dir"]), Path(context.operation["anchor_dir"])
+        expected = retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor)
+        original, target = context.request.manager, history.target
+        desired = expected[_key(original)]
+        current = history._get("deployment", "loom-service", target.namespace)
+        if not _matches(current, desired, _uid(original)):
+            raise ValueError
+        if desired["spec"]["replicas"] == 1:
+            history.qualify_manager_database()
+        else:
+            if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] != 0:
+                raise ValueError
+            backend = history._database(target, url_variable="LOOM_SVC_DB_URL")
+            binding = target.database
+            url = history._workload_database_url(original, url_variable="LOOM_SVC_DB_URL",
+                credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version)
+            qualify_database_destination(url, target.namespace)
+            if (_uid(history._database(target, url_variable="LOOM_SVC_DB_URL")) != _uid(backend)
+                    or history._workload_database_url(original, url_variable="LOOM_SVC_DB_URL",
+                        credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version) != url
+                    or not _matches(history._get("deployment", "loom-service", target.namespace), desired, _uid(original))):
+                raise ValueError
+        if (retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor) != expected
+                or load_pool_cutover_inputs(context.operation) != context):
+            raise ValueError
+    except Exception:
+        raise EntryError("pool cutover management database unqualified") from None
+
+
+def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites) -> None:
+    """Resolve the retained collector's physical group and native quota scope.
+
+    This read neither requests nodes nor reserves a share of provider headroom.
+    A scale-zero group is valid; actual workload fit/telemetry belongs to startup.
+    The operator credential stays local and is never copied into the collector.
+    """
+    try:
+        original = context.request.collector_config
+        namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
+        path = "/api/v1/namespaces/" + namespace + "/configmaps/" + name
+        current = base._request("GET", path)
+        if current is None or not _matches(current, original, _uid(original)):
+            raise ValueError
+        raw, spec = original["data"], context.inputs.installation
+        foundation = context.original.deployment.installation.foundation.platform_config
+        credential = context.original.original_inputs.operator_cloud_credentials
+        before = _private(credential, 1024**2)
+        values: dict[str, Any] = {}
+        for field, definition in NebiusCapacitySourceSettings.model_fields.items():
+            key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_" + field.upper()
+            if field == "nebius_credentials_file":
+                values[field] = credential
+            elif field.startswith("kubernetes_"):
+                if raw.get(key):
+                    raise ValueError
+                values[field] = None
+            elif key in raw:
+                values[field] = raw[key]
+            elif not definition.is_required():
+                values[field] = definition.default
+            else:
+                raise ValueError
+        # Every field is explicit: ambient collector variables cannot override
+        # this protected read or supply a missing ConfigMap setting.
+        settings = NebiusCapacitySourceSettings(_env_file=None, **values)
+        if ((settings.nebius_project_id, settings.nebius_quota_parent_id, settings.nebius_region,
+                settings.nebius_node_group_id, spec.cluster_id) != (
+                    foundation["project_id"], foundation["quota_parent_id"], foundation["region"],
+                    foundation["execution_node_group_id"], foundation["cluster_id"])
+                or spec.node_group_id != settings.nebius_node_group_id):
+            raise ValueError
+
+        async def observe() -> None:
+            async with asyncio.timeout(120):
+                reader = NebiusCapacityReader(settings)
+                try:
+                    snapshot = await reader.capture_pool(expected_cluster_id=spec.cluster_id)
+                    if (snapshot.node_group is None or snapshot.node_group.id != spec.node_group_id
+                            or {key: quota_identity(value) for key, value in snapshot.quota_resources.items()} != spec.quota_identities
+                            or snapshot.provider_capacity_state != "available"
+                            or snapshot.autoscaler_state not in {"ready", "scaling"}):
+                        raise ValueError
+                finally:
+                    await reader.close()
+
+        asyncio.run(observe())
+        current = base._request("GET", path)
+        if (_private(credential, 1024**2) != before
+                or current is None or not _matches(current, original, _uid(original))):
+            raise ValueError
+    except Exception:
+        raise EntryError("pool cutover provider unqualified") from None
+
+
 async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.AsyncClient) -> None:
     """Resolve protected bytes using predecessor trust, never the supplied catalog.
 
@@ -336,6 +439,10 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
                 qualify_pool_runtime_databases(context, guards)
+                qualify_pool_manager_database(context, history)
+                qualify_pool_provider(context, base)
+                if load_pool_cutover_inputs(context.operation) != context:
+                    raise ValueError
             except EntryError:
                 raise
             except Exception:

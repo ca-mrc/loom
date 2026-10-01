@@ -235,3 +235,17 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         """The cutover's retained producer must be this history source's manager."""
         if request != self.request or manager != self.target.controller:
             raise PoolMigrationError("management_history_binding")
+
+    def qualify_manager_database(self) -> None:
+        """Bind the running predecessor manager to its distinct retained backend."""
+        try:
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            database = self.target.database
+            self._qualify_runtime_binding(self.target, original=self.target.controller, component="service",
+                url_variable="LOOM_SVC_DB_URL", database_variable="LOOM_SVC_DB_URL",
+                credential_uid=database.credential_uid, credential_resource_version=database.credential_resource_version)
+        except Exception:
+            raise PoolMigrationError("management_runtime_database") from None

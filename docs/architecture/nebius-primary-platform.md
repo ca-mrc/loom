@@ -2297,8 +2297,17 @@ accepts only the original or precisely recorded stopped/rewired template. A stat
 file or zero replicas alone never bypasses the running check. Recorded stopped
 consumers retain backend and credential-reference checks without trying to execute
 in retired Pods; drain and successor startup remain separate mandatory barriers.
-This entry qualification does not prove the complete external-writer inventory or
-an installed global activation.
+The predecessor manager is independently bound to its management database by the
+same real-settings probe and phase-aware recovery checks, never by a participant
+credential. Before returning operator access, the entry also rereads the retained
+collector ConfigMap and uses the production Nebius reader to qualify its actual
+node group, parent cluster and native quota identities against the protected
+foundation. Ambient collector settings cannot supply or override these inputs;
+changed ConfigMap identity/content or operator credential fails qualification.
+The read accepts a scale-zero pool and does not reserve headroom, request nodes or
+introduce a per-environment budget. Workload fit and direct-kubelet telemetry still
+require startup qualification. These checks do not prove the complete external-
+writer inventory or an installed global activation.
 The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
 same-named replacement is not evidence of retired access. The queue includes
