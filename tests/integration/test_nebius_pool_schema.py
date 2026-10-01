@@ -7,8 +7,29 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, delete, insert, inspect, select, update
+from sqlalchemy import create_engine, delete, insert, inspect, select, text, update
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
+
+
+@pytest.mark.parametrize("table", ["execution_leases", "task_image_materializations", "task_image_materialization_attempts"])
+def test_pool_downgrade_refuses_parent_read_locks_without_waiting(isolated_migration_postgres_url, table):
+    # A separate connection retains a real read lock. The safety deadline turns
+    # an accidental blocking DDL into a diagnostic error, not a hanging test;
+    # only PostgreSQL's NOWAIT rejection satisfies the assertion.
+    url = make_url(isolated_migration_postgres_url).update_query_dict({"options": "-c statement_timeout=2000"})
+    config = Config("database/migrations/alembic.ini")
+    config.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False).replace("%", "%%"))
+    engine = create_engine(isolated_migration_postgres_url)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(f'LOCK TABLE "{table}" IN ACCESS SHARE MODE')
+            with pytest.raises(DBAPIError, match="could not obtain lock"):
+                command.downgrade(config, "0171")
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0172"
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture
