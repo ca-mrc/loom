@@ -477,6 +477,7 @@ class InClusterKubernetesJobApi:
                     container=name,
                     tail_lines=100,
                     limit_bytes=4096,
+                    _request_timeout=20,
                 )
             except Exception:
                 continue
@@ -558,8 +559,23 @@ class InClusterKubernetesJobApi:
                         or not isinstance(listing.items, list) or listing.metadata._continue):
                     raise ValueError("pool_execution_partial_pod_list")
                 qualify_execution_observation(job, listing.items, runtime)
+                observed = _normalize(job, listing.items)
+                if observed.normalized_state == NormalizedJobState.FAILED and listing.items:
+                    pod = listing.items[0]
+
+                    def current_pod() -> None:
+                        current = self._core.read_namespaced_pod(pod.metadata.name, runtime.namespace.name,
+                            _request_timeout=20)
+                        qualify_execution_observation(job, [current], runtime)
+                        if current.metadata.uid != pod.metadata.uid:
+                            raise ValueError("pool_execution_log_pod_changed")
+
+                    current_pod()
+                    excerpts = self._log_excerpts(runtime.namespace.name, pod)
+                    current_pod()
+                    observed = observed.model_copy(update={"container_logs": excerpts})
                 self._pool_namespace(runtime.namespace)
-                return _normalize(job, listing.items)
+                return observed
             except KubernetesApiError:
                 raise
             except (ValueError, TypeError, AttributeError):

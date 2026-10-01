@@ -2048,6 +2048,10 @@ management, Kubernetes or database clients, including when another loop fails.
 Global namespace/workload/log reads and usage sampling retain ownership through
 cancellation until their bounded SDK calls finish, before client closure.
 Cancellation still propagates if an SDK call fails during that drain.
+Failed execution observations retain the ordinary scrubbed container-log excerpts,
+with bounded reads and exact Pod UID/ownership checks before and after fetching
+logs. An unavailable log does not erase the failure observation. Participant reader
+roles permit log GETs only in their execution/build namespaces, never Pod exec.
 These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.

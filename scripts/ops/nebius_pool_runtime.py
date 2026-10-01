@@ -352,9 +352,8 @@ The existing node-usage reader is unchanged; CPs need no Kubernetes permission.
                 (participant.build_namespace.name, "loom-task-image-builder")):
             role = _obj("Role", name, namespace, api="rbac.authorization.k8s.io/v1")
             role["rules"] = [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get"]},
-                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}]
-            if namespace == participant.build_namespace.name:
-                role["rules"].append({"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]})
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]}]
             binding = _obj("RoleBinding", name, namespace, api="rbac.authorization.k8s.io/v1")
             binding.update(subjects=[subject.copy()], roleRef={"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name})
             documents.extend((role, binding))
