@@ -68,7 +68,7 @@ async def execution_failure_groups(
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     for lease in leases:
         diagnosis = await read_execution_failure(session, lease)
-        if diagnosis is None:
+        if diagnosis is None or diagnosis["reason"] != "oom_killed":
             continue
         trial = await session.get(Trial, lease.trial_id)
         assert trial is not None

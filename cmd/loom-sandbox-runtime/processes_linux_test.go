@@ -74,6 +74,7 @@ func TestProcessStatusUsesEffectiveUIDAndRejectsInvalidInspection(t *testing.T) 
 		{"missing_state", "Uid:\t65532\t65532\t65532\t65532\n", "", errCleanupProcRead},
 		{"truncated_uid", "State:\tS\nUid:\t65532\t65532\n", "", errCleanupProcRead},
 		{"invalid_uid", "State:\tS\nUid:\t65532\tbad\t65532\t65532\n", "", errCleanupProcRead},
+		{"bad_signal_mask", "State:\tS (sleeping)\nUid:\t65532\t65532\t65532\t65532\nSigPnd:\tzz\n", "", errCleanupProcRead},
 		{"negative_uid", "State:\tS\nUid:\t65532\t-1\t65532\t65532\n", "", errCleanupProcRead},
 		{"empty", "", "", errCleanupProcRead},
 	}
@@ -99,6 +100,48 @@ func TestProcessStatusUsesEffectiveUIDAndRejectsInvalidInspection(t *testing.T) 
 	}
 	if _, err := sandboxProcessState(directory, 65532); !errors.Is(err, errCleanupProcRead) {
 		t.Fatalf("ignored read failure: %v", err)
+	}
+}
+
+func TestSignalClassificationSeparatesExitFromRefusal(t *testing.T) {
+	if errno, kind := classifySignal(nil); errno != 0 || kind != signalSent {
+		t.Fatalf("successful kill: errno=%d kind=%d", errno, kind)
+	}
+	if _, kind := classifySignal(syscall.ESRCH); kind != signalGone {
+		t.Fatalf("exited process was not ESRCH: %d", kind)
+	}
+	if errno, kind := classifySignal(syscall.EPERM); kind != signalDenied || errno != int(syscall.EPERM) {
+		t.Fatalf("refused kill: errno=%d kind=%d", errno, kind)
+	}
+	if _, kind := classifySignal(syscall.EINVAL); kind != signalFailed {
+		t.Fatalf("other signal error was not a signal failure: %d", kind)
+	}
+}
+
+func TestCleanupSnapshotReadsPendingSignalAndWaitChannel(t *testing.T) {
+	directory := t.TempDir()
+	status := "State:\tD (disk sleep)\nPPid:\t1\nUid:\t0\t0\t0\t0\nShdPnd:\t0000000000000100\n"
+	if err := os.WriteFile(filepath.Join(directory, "status"), []byte(status), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "wchan"), []byte("wait_on_bit\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := inspectSandboxProcess(directory, 0)
+	if err != nil || snapshot.State != "D" || !snapshot.SignalPending || snapshot.UID != 0 || snapshot.ParentPID != 1 {
+		t.Fatalf("snapshot identity: %#v %v", snapshot, err)
+	}
+	snapshot.PID = 31
+	snapshot.WaitChannel = boundedWaitChannel(directory)
+	header, ok := snapshot.diagnostic()
+	if !ok || header != "pid=31;ppid=1;state=D;uid=0;wchan=wait_on_bit;kill_errno=0;sigkill_pending=1" {
+		t.Fatalf("published snapshot: %q %v", header, ok)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "wchan"), []byte("../secret command"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if boundedWaitChannel(directory) != "unavailable" {
+		t.Fatal("unsafe wait channel published")
 	}
 }
 

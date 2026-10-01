@@ -199,3 +199,45 @@ async def test_delayed_oom_replaces_generic_cause_but_preserves_outcome_and_outp
             _print_diagnosis_report(report.json())
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize("termination", [
+    {"reason": "Error", "exit_code": 1},
+    None,
+])
+async def test_non_oom_termination_keeps_runtime_cause(postgres_url, termination):
+    from loom.execution_diagnosis_store import execution_failure_groups, read_execution_failure
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now,
+                                   runtime_contract=_runtime_contract(now=now))
+            for state in ("start", "finalize"):
+                await enqueue_execution_transition(session, lease_id=lease.id,
+                    expected_generation=lease.generation, desired_state=state, now=now)
+            await record_execution_event(session, lease_id=lease.id, generation=lease.generation,
+                ordinal=1, event_kind="finalized", observed_at=now,
+                payload={"trial_state": "failed", "failure_reason": "runtime_error",
+                         "failure_message": "controller exited"})
+            container = {"name": "execution", "restart_count": 0}
+            if termination is not None:
+                container["current_termination"] = {
+                    **termination, "started_at": now.isoformat(), "finished_at": now.isoformat(),
+                }
+            await record_execution_event(session, lease_id=lease.id, generation=lease.generation,
+                ordinal=2, event_kind="kubernetes_observed", observed_at=now + timedelta(seconds=1),
+                payload={"normalized_state": "failed", "job_uid": "job", "pod_uid": "pod",
+                         "container_diagnostics": [container]})
+            current = await session.get(ServiceExecutionLease, lease.id)
+            trial = await session.get(Trial, trial_id)
+            diagnosis = await read_execution_failure(session, current)
+            assert diagnosis is not None and diagnosis["reason"] != "oom_killed"
+            assert current.error_code != "oom_killed"
+            assert trial.failure_reason == "runtime_error"
+            assert await execution_failure_groups(session, trial_id=trial_id) == []
+    finally:
+        await engine.dispose()

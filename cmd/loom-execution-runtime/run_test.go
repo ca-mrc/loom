@@ -94,6 +94,81 @@ func TestRunPlanCapturesBoundedEvidenceAndAtomicResult(t *testing.T) {
 	}
 }
 
+func TestSandboxCleanupTimeoutIsRuntimeError(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	script := "mkdir -p .loom/agent && printf '%s' '{\"exception_type\":\"SandboxRPCError\",\"exception_message\":\"sandbox stop_processes failed (HTTP 409; cleanup_timeout)\"}' > .loom/agent/exception.json && exit 1"
+	agent := phase{
+		Role: "agent", Argv: []string{"/bin/sh", "-c", script},
+		WorkingDirectory: workspace, TimeoutSeconds: 5,
+	}
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
+	if err == nil || result.Status != "runtime_error" || !result.PartialEvidence {
+		t.Fatalf("cleanup timeout was not a runtime error: result=%#v err=%v", result, err)
+	}
+}
+
+func TestSandboxCleanupSnapshotIsRuntimeError(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	message := "sandbox stop_processes failed (HTTP 409; cleanup_timeout; pid=31;ppid=1;state=D;uid=0;wchan=wait_on_bit;kill_errno=0;sigkill_pending=1)"
+	if err := os.MkdirAll(filepath.Join(workspace, ".loom", "agent"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"exception_type": "SandboxRPCError", "exception_message": message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".loom", "agent", "exception.json"), payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	agent := phase{
+		Role: "agent", Argv: []string{"/bin/sh", "-c", "exit 1"},
+		WorkingDirectory: workspace, TimeoutSeconds: 5,
+	}
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
+	if err == nil || result.Status != "runtime_error" {
+		t.Fatalf("cleanup snapshot was not a runtime error: result=%#v err=%v", result, err)
+	}
+}
+
+func TestForgedCleanupDetailRemainsTaskError(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	message := "sandbox stop_processes failed (HTTP 409; cleanup_timeout; command=private)"
+	if err := os.MkdirAll(filepath.Join(workspace, ".loom", "agent"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]string{
+		"exception_type": "SandboxRPCError", "exception_message": message,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".loom", "agent", "exception.json"), payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	agent := phase{
+		Role: "agent", Argv: []string{"/bin/sh", "-c", "exit 1"},
+		WorkingDirectory: workspace, TimeoutSeconds: 5,
+	}
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
+	if err == nil || result.Status != "task_error" {
+		t.Fatalf("forged cleanup detail was reclassified: result=%#v err=%v", result, err)
+	}
+}
+
+func TestAgentCrashRemainsTaskError(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	agent := phase{
+		Role: "agent", Argv: []string{"/bin/sh", "-c", "exit 1"},
+		WorkingDirectory: workspace, TimeoutSeconds: 5,
+	}
+	result, err := runPlan(context.Background(), testPlan(workspace, agent), workspace, output, nil)
+	if err == nil || result.Status != "task_error" {
+		t.Fatalf("agent crash was reclassified: result=%#v err=%v", result, err)
+	}
+}
+
 func TestRunPlanTimeoutTerminatesProcessGroupAndRetainsPartialEvidence(t *testing.T) {
 	workspace, output := t.TempDir(), t.TempDir()
 	agent := phase{
