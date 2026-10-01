@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
@@ -50,6 +50,7 @@ from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.networking import (
     NetworkPolicy,
+    UnsupportedNetworkPolicyOverrideError,
     hosted_http_egress,
     resolve_effective_network_policy,
 )
@@ -360,30 +361,43 @@ async def _batch_network_policy_evidence(
         await session.execute(select(Task.id, Task.config).where(Task.id.in_(task_ids)))
     ).all()
     requested_raw = trial_config.get("baseline_network_policy_override")
-    requested = (
-        _NETWORK_POLICY_ADAPTER.validate_python(requested_raw)
-        if requested_raw is not None
-        else None
-    )
+    try:
+        requested = (
+            _NETWORK_POLICY_ADAPTER.validate_python(requested_raw)
+            if requested_raw is not None
+            else None
+        )
+    except ValidationError:
+        requested = None
     authored: list[tuple[str, NetworkPolicy]] = []
     resolved: list[tuple[str, NetworkPolicy]] = []
+    unavailable: list[str] = []
+    # Batch detail must stay readable for historical or partial task configs;
+    # those tasks are reported rather than failing the whole response.
     for task_id, raw_config in rows:
-        task = TaskConfig.model_validate(raw_config)
+        try:
+            task = TaskConfig.model_validate(raw_config)
+        except ValidationError:
+            unavailable.append(str(task_id))
+            continue
         authored.append((str(task_id), task.environment.baseline_network_policy))
-        resolved.append((
-            str(task_id),
-            resolve_effective_network_policy(
+        try:
+            effective = resolve_effective_network_policy(
                 baseline=task.environment.baseline_network_policy,
                 supported=task.environment.network_policies_supported,
                 override=requested,
-            ),
-        ))
+            )
+        except UnsupportedNetworkPolicyOverrideError:
+            unavailable.append(str(task_id))
+            continue
+        resolved.append((str(task_id), effective))
     return {
         "authored_defaults": _network_policy_groups(authored),
         "requested_override": (
             requested.model_dump(mode="json") if requested is not None else None
         ),
         "resolved_effective": _network_policy_groups(resolved),
+        "unavailable_task_ids": sorted(unavailable),
     }
 
 

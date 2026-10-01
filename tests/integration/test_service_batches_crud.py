@@ -440,6 +440,7 @@ async def test_post_batch_materializes_count(
             "policy": {"kind": "public"},
             "task_ids": ["local/mit-0", "local/mit-1", "local/mit-2"],
         }],
+        "unavailable_task_ids": [],
     }
     async with app.state.session_factory() as session:
         batch, authority = (

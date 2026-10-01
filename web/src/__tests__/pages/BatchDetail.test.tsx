@@ -37,6 +37,7 @@ const BATCH_BODY: BatchBody = {
     resolved_effective: [
       { policy: { kind: "public-web" }, task_ids: ["humaneval/0", "humaneval/1", "humaneval/2"] },
     ],
+    unavailable_task_ids: ["humaneval/3"],
   },
   backend: "docker",
   combinations: [
@@ -323,6 +324,7 @@ describe("BatchDetail run plan", () => {
     expect(screen.getByText("Defaults only")).toBeInTheDocument();
     expect(screen.getByText("gateway-only (1 task); public-web (2 tasks)")).toBeInTheDocument();
     expect(screen.getByText("public-web (3 tasks)")).toBeInTheDocument();
+    expect(screen.getByText(/Policy unavailable for 1 task\(s\)/)).toBeInTheDocument();
     expect(screen.queryByText("task_filter")).not.toBeInTheDocument();
     expect(screen.queryByText("trial_config")).not.toBeInTheDocument();
   });

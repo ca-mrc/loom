@@ -42,6 +42,7 @@ from loom.db.schema import (
     TrialTaskImageMaterialization,
 )
 from loom.execution_runtime_contract import RuntimeOutputDeclarationV1
+from loom.models.networking import GatewayOnly
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_document, digest_bytes
 from loom.service_execution_terminus_trace import terminus_usage
@@ -67,6 +68,7 @@ from tests.integration.minio_test_images import MINIO_TEST_IMAGE
 from tests.integration.test_migration_service_execution_materialization import _config
 from tests.integration.test_service_execution_leases import (
     _complete_output_contract,
+    _requirements,
     _reserve,
     _runtime_result_payload,
     _seed_ready_trial,
@@ -264,6 +266,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 })
             lease = await _reserve(
                 session, trial_id=trial_id, target=target, now=now, runtime_contract=plan,
+                requirements=_requirements().model_copy(
+                    update={"effective_network_policy": GatewayOnly()}),
             )
             if prepared_snapshot:
                 # A successful claim freezes the snapshot; subsequent readiness

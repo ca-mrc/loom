@@ -1,5 +1,6 @@
 import { Input } from "../components/Input";
-import { RETRY_REASONS, clampFloat, clampInt, type AdvancedState } from "./newBatch/advancedConfig";
+import type { AdvancedState } from "./newBatch/advancedConfig";
+import { RETRY_REASONS, clampFloat, clampInt } from "./newBatch/advancedInputs";
 import { FieldLabel, Help } from "./NewBatchFields";
 
 import type { NewBatchViewState } from "./useNewBatch";

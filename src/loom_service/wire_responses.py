@@ -668,6 +668,7 @@ class BatchDetailNetworkPolicyEvidence(TypedDict):
     authored_defaults: list[BatchDetailNetworkPolicyGroup]
     requested_override: dict[str, Any] | None
     resolved_effective: list[BatchDetailNetworkPolicyGroup]
+    unavailable_task_ids: NotRequired[list[str]]
 
 
 @with_config(ConfigDict(extra="allow"))

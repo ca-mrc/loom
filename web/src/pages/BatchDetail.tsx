@@ -321,6 +321,13 @@ export default function BatchDetail(): JSX.Element {
                   </dd>
                 </div>
               </dl>
+              {c.network_policy.unavailable_task_ids?.length ? (
+                <p className="mt-2 text-xs text-amber-700">
+                  Policy unavailable for {c.network_policy.unavailable_task_ids.length} task(s):{" "}
+                  {c.network_policy.unavailable_task_ids.slice(0, 8).join(", ")}
+                  {c.network_policy.unavailable_task_ids.length > 8 ? "…" : ""}
+                </p>
+              ) : null}
             </section>
           ) : null}
 

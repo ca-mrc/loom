@@ -3230,6 +3230,8 @@ export interface components {
             } | null;
             /** Resolved Effective */
             resolved_effective: components["schemas"]["BatchDetailNetworkPolicyGroup"][];
+            /** Unavailable Task Ids */
+            unavailable_task_ids?: string[];
         } & {
             [key: string]: unknown;
         };

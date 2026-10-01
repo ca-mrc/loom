@@ -3,7 +3,7 @@ import { Button } from "../components/Button";
 import ErrorState from "../components/ErrorState";
 import { Card } from "../components/Card";
 import { Input, Textarea } from "../components/Input";
-import { clampInt } from "./newBatch/advancedConfig";
+import { clampInt } from "./newBatch/advancedInputs";
 import { BenchmarkPicker } from "./newBatch/BenchmarkPicker";
 import { type SubsetKind } from "./newBatch/formState";
 import { TagFiltersCard } from "./newBatch/TagFiltersCard";
