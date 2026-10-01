@@ -571,7 +571,32 @@ def cutover_binding_inventory(cutover_inputs):
     return inventories
 
 
-def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified_hook=None, journal=None):
+def writer_workload_inventory(request, *, originals=None):
+    from scripts.ops.nebius_pool_retirement import retirement_documents
+
+    rows = {resource: [] for resource in ("deployments", "replicasets", "statefulsets", "daemonsets",
+        "replicationcontrollers", "cronjobs", "jobs", "pods")}
+    if originals is None:
+        originals = (*retirement_documents(request.fencing.retirement).values(), request.manager, *request.services)
+    for document in originals:
+        rows["cronjobs" if document["kind"] == "CronJob" else "deployments"].append(copy.deepcopy(document))
+    return rows
+
+
+def writer_descendant(parent, kind, *, name=None):
+    """A typed Kubernetes owner chain, not a label-based permission exemption."""
+    template = (parent["spec"]["jobTemplate"]["spec"]["template"] if parent["kind"] == "CronJob"
+        else parent["spec"]["template"])
+    return {"apiVersion": "v1" if kind == "Pod" else "batch/v1" if kind == "Job" else "apps/v1", "kind": kind,
+        "metadata": {"name": name or parent["metadata"]["name"] + "-child", "namespace": parent["metadata"]["namespace"],
+            "uid": str(uuid4()), "resourceVersion": "1", "ownerReferences": [{"apiVersion": parent["apiVersion"],
+                "kind": parent["kind"], "name": parent["metadata"]["name"], "uid": parent["metadata"]["uid"],
+                "controller": True, "blockOwnerDeletion": True}]},
+        "spec": copy.deepcopy(template["spec"]) if kind == "Pod" else {"template": copy.deepcopy(template)}}
+
+
+def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified_hook=None, journal=None,
+                      workloads=None, workload_page_mode=None):
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 
     migration = request.fencing.retirement.migration
@@ -582,6 +607,10 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
             for ns in (row.execution_namespace, row.build_namespace)}}
     kinds = {"roles": "Role", "clusterroles": "ClusterRole", "rolebindings": "RoleBinding",
         "clusterrolebindings": "ClusterRoleBinding"}
+    workload_kinds = {"deployments": "Deployment", "replicasets": "ReplicaSet", "statefulsets": "StatefulSet",
+        "daemonsets": "DaemonSet", "replicationcontrollers": "ReplicationController", "cronjobs": "CronJob",
+        "jobs": "Job", "pods": "Pod"}
+    workloads = writer_workload_inventory(request) if workloads is None else workloads
     calls = []
 
     def respond(message):
@@ -594,12 +623,15 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
                     "loom.nebius/management-installation": migration.registration.binding.installation_id,
                     "pod-security.kubernetes.io/enforce": "restricted"}}})
         resource = message.url.path.rsplit("/", 1)[-1]
-        assert message.url.path == "/apis/rbac.authorization.k8s.io/v1/" + resource
+        version = ("rbac.authorization.k8s.io/v1" if resource in kinds else
+            "v1" if resource in {"pods", "replicationcontrollers"} else
+            "batch/v1" if resource in {"jobs", "cronjobs"} else "apps/v1")
+        assert message.url.path == ("/api/" if version == "v1" else "/apis/") + version + "/" + resource
         continuation = message.url.params.get("continue")
         assert dict(message.url.params) == {"limit": "100", **({"continue": "next"} if continuation else {}),
             **({"resourceVersion": "7", "resourceVersionMatch": "Exact"} if resource != "roles" and not continuation else {})}
         metadata = {"resourceVersion": "7"}
-        entries = inventories[resource]
+        entries = inventories[resource] if resource in kinds else workloads[resource]
         if page_mode and resource == "rolebindings":
             if not continuation:
                 metadata["continue"], entries = "next", entries[:1]
@@ -609,8 +641,17 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
                     metadata["resourceVersion"] = "8"
                 elif page_mode == "repeated_token":
                     metadata["continue"] = "next"
-        return httpx.Response(200, json={"apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": kinds[resource] + "List", "metadata": metadata, "items": entries})
+        if workload_page_mode and resource == "pods":
+            if not continuation:
+                metadata["continue"], entries = "next", entries[:1]
+            else:
+                entries = entries[1:]
+                if workload_page_mode == "changed_version":
+                    metadata["resourceVersion"] = "8"
+                elif workload_page_mode == "repeated_token":
+                    metadata["continue"] = "next"
+        return httpx.Response(200, json={"apiVersion": version,
+            "kind": (kinds | workload_kinds)[resource] + "List", "metadata": metadata, "items": entries})
 
     external = CutoverAPI(request)
     if qualified_hook is not None:
@@ -795,8 +836,161 @@ def test_gateway_writer_permissions_require_actual_retained_cutover_stage_proof(
             parent.write_text(json.dumps(record))
     if damage in {None, "intent"}:
         before = {path: path.read_bytes() for path in (tmp_path / "cutover").rglob("*.json")}
-        binding_preflight(request, tokens, rows, journal=journal)
+        binding_preflight(request, tokens, rows, journal=journal,
+            workloads=writer_workload_inventory(request, originals=external.documents.values()))
         assert {path: path.read_bytes() for path in before} == before
     else:
         with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
             binding_preflight(request, tokens, rows, journal=journal)
+
+
+@pytest.mark.parametrize("resource,kind", [("deployments", "Deployment"), ("replicasets", "ReplicaSet"),
+    ("statefulsets", "StatefulSet"), ("daemonsets", "DaemonSet"), ("replicationcontrollers", "ReplicationController"),
+    ("cronjobs", "CronJob"), ("jobs", "Job"), ("pods", "Pod")])
+def test_retiring_writer_identity_cannot_be_shared_with_unregistered_workload(
+        cutover_inputs, cutover_binding_inventory, resource, kind):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    original = request.fencing.retirement.actuators[0]
+    template = copy.deepcopy(original["spec"]["template"])
+    spec = {"template": template, "replicas": 0}
+    if kind == "CronJob":
+        spec = {"suspend": True, "jobTemplate": {"spec": {"template": template}}}
+    elif kind == "Pod":
+        spec = template["spec"]
+    elif kind == "Job":
+        spec = {"suspend": True, "template": template}
+    rows[resource].append({"apiVersion": "v1" if kind in {"Pod", "ReplicationController"}
+        else "batch/v1" if kind in {"Job", "CronJob"} else "apps/v1", "kind": kind,
+        "metadata": {"name": "unregistered", "namespace": original["metadata"]["namespace"],
+            "uid": str(uuid4()), "resourceVersion": "1"}, "spec": spec,
+        "status": {"phase": "Succeeded"}})
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("damage", [None, "owner_uid", "owner_name", "owner_kind", "owner_version", "not_controller",
+    "second_owner", "foreign_namespace", "wrong_account", "missing_parent", "cycle", "direct_pod"])
+def test_only_complete_typed_retained_writer_descendant_lineage_qualifies(
+        cutover_inputs, cutover_binding_inventory, damage):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    replica = writer_descendant(request.fencing.retirement.actuators[0], "ReplicaSet")
+    pod = writer_descendant(replica, "Pod")
+    rows["replicasets"].append(replica)
+    rows["pods"].append(pod)
+    owner = pod["metadata"]["ownerReferences"][0]
+    if damage == "owner_uid":
+        owner["uid"] = str(uuid4())
+    elif damage == "owner_name":
+        owner["name"] = "different-name"
+    elif damage == "owner_kind":
+        owner["kind"] = "Job"
+    elif damage == "owner_version":
+        owner["apiVersion"] = "batch/v1"
+    elif damage == "not_controller":
+        owner["controller"] = False
+    elif damage == "second_owner":
+        pod["metadata"]["ownerReferences"].append(copy.deepcopy(owner))
+    elif damage == "foreign_namespace":
+        replica["metadata"]["namespace"] = "foreign"
+    elif damage == "wrong_account":
+        replica["spec"]["template"]["spec"]["serviceAccountName"] = "foreign-account"
+    elif damage == "missing_parent":
+        rows["replicasets"].clear()
+    elif damage == "cycle":
+        replica["metadata"]["ownerReferences"] = copy.deepcopy(pod["metadata"]["ownerReferences"])
+    elif damage == "direct_pod":
+        pod["metadata"]["ownerReferences"] = copy.deepcopy(replica["metadata"]["ownerReferences"])
+    if damage is None:
+        calls = binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+        assert {row.url.path.rsplit("/", 1)[-1] for row in calls} >= set(rows)
+        assert all("fieldSelector" not in row.url.params for row in calls if row.url.path == "/api/v1/pods")
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+def test_retained_collector_job_history_is_inventoried_without_requiring_deletion(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    job = writer_descendant(request.fencing.retirement.collectors[0], "Job")
+    job["status"] = {"conditions": [{"type": "Complete", "status": "True"}]}
+    pod = writer_descendant(job, "Pod")
+    pod["status"] = {"phase": "Succeeded"}
+    rows["jobs"].append(job)
+    rows["pods"].append(pod)
+    binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("damage", ["missing_root", "replaced_root", "drifted_root", "unanchored_stopped_root",
+    "duplicate_uid", "duplicate_key", "invalid_account"])
+def test_writer_workload_inventory_requires_exact_retained_roots_and_unique_objects(
+        cutover_inputs, cutover_binding_inventory, damage):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    original = rows["deployments"][0]
+    if damage == "missing_root":
+        rows["deployments"].pop(0)
+    elif damage == "replaced_root":
+        original["metadata"]["uid"] = str(uuid4())
+    elif damage == "drifted_root":
+        original["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign.invalid/image:latest"
+    elif damage == "unanchored_stopped_root":
+        original["spec"]["replicas"] = 0
+    elif damage in {"duplicate_uid", "duplicate_key"}:
+        duplicate = copy.deepcopy(original)
+        duplicate["metadata"]["name" if damage == "duplicate_uid" else "uid"] = "duplicate" if damage == "duplicate_uid" else str(uuid4())
+        rows["deployments"].append(duplicate)
+    else:
+        pod = writer_descendant(writer_descendant(original, "ReplicaSet"), "Pod")
+        pod["spec"]["serviceAccountName"] = []
+        rows["pods"].append(pod)
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("mode", ["complete", "late_foreign", "changed_version", "repeated_token"])
+def test_writer_workload_inventory_cannot_ignore_terminal_pods_or_later_pages(
+        cutover_inputs, cutover_binding_inventory, mode):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    replica = writer_descendant(request.fencing.retirement.actuators[0], "ReplicaSet")
+    rows["replicasets"].append(replica)
+    for index in range(2):
+        pod = writer_descendant(replica, "Pod", name=f"historical-{index}")
+        pod["status"] = {"phase": "Succeeded"}
+        rows["pods"].append(pod)
+    if mode == "late_foreign":
+        rows["pods"][-1]["metadata"].pop("ownerReferences")
+    if mode == "complete":
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows, workload_page_mode=mode)
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows, workload_page_mode=mode)
+
+
+def test_retained_identity_workload_drift_during_preflight_is_rejected(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+
+    def unexpected_controller():
+        extra = copy.deepcopy(request.fencing.retirement.actuators[0])
+        extra["metadata"].update(name="concurrent-writer", uid=str(uuid4()))
+        extra["spec"]["replicas"] = 0
+        rows["deployments"].append(extra)
+
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows, qualified_hook=unexpected_controller)
+
+
+def test_writer_workload_inventory_preserves_foreign_identities_even_with_equal_account_names(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    extra = copy.deepcopy(request.fencing.retirement.actuators[0])
+    extra["metadata"].update(namespace="unrelated-physical-pool", uid=str(uuid4()))
+    rows["deployments"].append(extra)
+    binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
