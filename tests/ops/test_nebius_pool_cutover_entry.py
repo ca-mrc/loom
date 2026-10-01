@@ -232,18 +232,28 @@ def connected_cutover_entry(private_cutover, monkeypatch):
 
     context = entry.load_pool_cutover_inputs(private_cutover[0])
     migration = context.request.fencing.retirement.migration
-    observed = {"probes": [], "guard_calls": [], "guard_status": "held", "failure": None, "closed": False}
+    observed = {"probes": [], "guard_calls": [], "guard_status": "held", "failure": None, "closed": False,
+        "database_reads": [], "database_failure": None}
     def guard(target, action):
         assert target in migration.guards and action in {"acquire", "observe"}
         observed["guard_calls"].append((target.participant_id, action))
         return {"status": observed["guard_status"]}
     def history_binding(actual, manager):
         assert actual == migration and manager == context.request.manager
+    def database_page(target, *, after):
+        assert target in migration.guards and after is None
+        observed["database_reads"].append("participant")
+        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else "0172", "rows": []}
+    def history_page(target, origins):
+        assert target in migration.guards and origins == ()
+        observed["database_reads"].append("manager")
+        if observed["database_failure"] == "manager":
+            raise ValueError("pool management history schema unqualified")
     readers = entry.ConnectedPoolReaders(
         base=SimpleNamespace(api_server=context.original.original_inputs.operator_connection.endpoint),
         ssl_context=ssl.create_default_context(), token="entry-test-operator-token",
-        guards=SimpleNamespace(request=migration, guard=guard),
-        history=SimpleNamespace(qualify_binding=history_binding))
+        guards=SimpleNamespace(request=migration, guard=guard, cutover_readiness_page=database_page),
+        history=SimpleNamespace(qualify_binding=history_binding, qualify_pending_origins=history_page))
     @contextmanager
     def connect(actual):
         assert actual == context
@@ -258,6 +268,9 @@ def connected_cutover_entry(private_cutover, monkeypatch):
             observed["probes"].append(name)
             if observed["failure"] == name:
                 raise entry.EntryError("private-probe-marker")
+            if observed["failure"] == "during_read" and name == "provider":
+                path = Path(context.operation["inputs_path"])
+                path.write_bytes(path.read_bytes() + b"\n")
         return qualify
     monkeypatch.setattr(entry, "qualify_pool_runtime_databases", probe("participants", readers.guards))
     monkeypatch.setattr(entry, "qualify_pool_manager_database", probe("manager", readers.history))
@@ -265,7 +278,62 @@ def connected_cutover_entry(private_cutover, monkeypatch):
     return context, readers, observed
 
 
-@pytest.mark.parametrize("damage", [None, "participants", "manager", "provider", "private_inputs"])
+@pytest.mark.parametrize("boundary", [None, "participant", "manager"])
+def test_concrete_migration_and_parent_qualify_databases_before_downtime(connected_cutover_entry, boundary):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from tests.ops.test_nebius_pool_cutover import (
+        cutover_binding_inventory,
+        writer_workload_inventory,
+    )
+
+    context, _, observed = connected_cutover_entry
+    request = context.request
+    migration = request.fencing.retirement.migration
+    binding = migration.registration.binding
+    observed["database_failure"] = boundary
+    inventories = cutover_binding_inventory.__wrapped__((request, context.tokens)) | writer_workload_inventory(request)
+    for documents in inventories.values():
+        for document in documents:
+            # Completed history omits server versions; a real API inventory
+            # always supplies one. Do not mutate the retained input snapshot.
+            document["metadata"].setdefault("resourceVersion", "7")
+    namespaces = {binding.namespace: binding.namespace_uid, "kube-system": binding.kube_system_uid,
+        **{row.namespace: str(row.namespace_uid) for row in migration.guards},
+        **{ns.name: str(ns.uid) for row in migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace)}}
+    methods = []
+    kinds = {"roles": "Role", "clusterroles": "ClusterRole", "rolebindings": "RoleBinding", "clusterrolebindings": "ClusterRoleBinding",
+        "deployments": "Deployment", "replicasets": "ReplicaSet", "statefulsets": "StatefulSet", "daemonsets": "DaemonSet",
+        "replicationcontrollers": "ReplicationController", "cronjobs": "CronJob", "jobs": "Job", "pods": "Pod"}
+    def respond(message):
+        methods.append(message.method)
+        assert message.method == "GET"
+        name = message.url.path.rsplit("/", 1)[-1]
+        if message.url.path.startswith("/api/v1/namespaces/"):
+            return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": name, "uid": namespaces[name], "labels": {"loom.nebius/management-installation": binding.installation_id,
+                    "pod-security.kubernetes.io/enforce": "restricted"}}})
+        version = "rbac.authorization.k8s.io/v1" if "role" in name else "batch/v1" if name in {"cronjobs", "jobs"} else (
+            "v1" if name in {"pods", "replicationcontrollers"} else "apps/v1")
+        return httpx.Response(200, json={"apiVersion": version, "kind": kinds[name] + "List",
+            "metadata": {"resourceVersion": "7"}, "items": inventories[name]})
+    with entry.connected_pool_api(context) as api:
+        api.client.close()
+        api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
+        if boundary:
+            with pytest.raises(ValueError, match="preserve_evidence"):
+                stage_pool_cutover(request=request, tokens=context.tokens, api=api,
+                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"]))
+        else:
+            api.migration.preflight(migration)
+    assert observed["database_reads"] == (["participant"] if boundary == "participant" else
+        ["participant", "manager"] if boundary == "manager" else ["participant", "manager"] * len(migration.guards))
+    assert observed["guard_calls"] == [] and observed["closed"]
+    assert methods and all(method == "GET" for method in methods)
+    assert not Path(context.operation["state_dir"]).exists()
+
+
+@pytest.mark.parametrize("damage", [None, "participants", "manager", "provider", "private_inputs", "during_read"])
 def test_concrete_cutover_checks_requalify_the_bound_readers(connected_cutover_entry, damage):
     from scripts.ops import nebius_pool_cutover_entry as entry
 
@@ -299,6 +367,10 @@ def test_connected_registration_stages_once_and_does_not_confuse_creation_with_s
 
     context, _, observed = connected_cutover_entry
     state = Path(context.operation["state_dir"]) / "writers" / "registration"
+    # The journaled parent creates these private phase directories before
+    # invoking its registration child. This test isolates that child's effects.
+    state.parent.parent.mkdir(mode=0o700)
+    state.parent.mkdir(mode=0o700)
     fake = PhaseAPI(context.request.fencing.retirement.migration.registration.binding)
     fake.failure = failure
     with entry.connected_pool_api(context) as api:

@@ -1,11 +1,11 @@
-"""Private cutover publication and bound readers; no command or activation.
+"""Private cutover publication and fixed API composition; no command or activation.
 
-The protected installer must still supply complete installed writer/schema
-qualification, activation, rollback and successor-refresh completion. This module
-resolves protected publication, binds completed history and qualifies retained
-runtime databases and the physical provider before yielding the existing readers.
-It imports no ambient kubeconfig and replays no old installation. No live writes
-occur here.
+The protected installer still owns installed participant completeness, successor
+startup, activation, rollback and durable refresh. This module resolves protected
+publication, binds completed history, qualifies retained runtime databases and
+the physical provider, and composes the journaled closed-cutover API. It imports
+no ambient kubeconfig and replays no old installation. Only the fixed registration
+adapter can stage its Job under held guards; the parent owns mutation ordering.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import hashlib
 import json
 import re
 import ssl
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +43,7 @@ from scripts.ops.nebius_pool_cutover import (
     cutover_documents,
     retained_cutover_workloads,
 )
+from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import PoolGuardTarget, PoolMigrationRequest
 from scripts.ops.nebius_pool_migration_guard import (
@@ -54,7 +55,11 @@ from scripts.ops.nebius_pool_origin_history import (
     derive_management_history_target,
 )
 from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
-from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
+from scripts.ops.nebius_pool_registration import (
+    HTTPSPoolRegistrationAPI,
+    PoolRegistrationRequest,
+    stage_pool_registration,
+)
 from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
 
@@ -195,6 +200,76 @@ class ConnectedPoolReaders:
     token: str
     guards: KubectlPoolGuardAPI
     history: KubectlPoolHistoryAPI
+
+
+@dataclass(frozen=True, repr=False)
+class PoolCutoverEntryChecks:
+    """Requalify the same protected scope at each parent's preflight barrier."""
+
+    context: PoolCutoverContext
+    readers: ConnectedPoolReaders
+
+    def current(self) -> None:
+        try:
+            context, readers = self.context, self.readers
+            migration = context.request.fencing.retirement.migration
+            if (load_pool_cutover_inputs(context.operation) != context
+                    or readers.guards.request != migration
+                    or readers.base.api_server.rstrip("/") != context.original.original_inputs.operator_connection.endpoint.rstrip("/")):
+                raise ValueError
+            readers.history.qualify_binding(migration, context.request.manager)
+        except Exception:
+            raise EntryError("pool cutover connected scope unqualified") from None
+
+    def preflight(self, request: PoolCutoverRequest) -> None:
+        try:
+            if request != self.context.request:
+                raise ValueError
+            self.current()
+            qualify_pool_runtime_databases(self.context, self.readers.guards)
+            qualify_pool_manager_database(self.context, self.readers.history)
+            qualify_pool_provider(self.context, self.readers.base)
+            self.current()
+        except Exception:
+            raise EntryError("pool cutover connected prerequisites unqualified") from None
+
+    def qualify_quiescence(self) -> None:
+        # The HTTPS parent independently checks schema, retired application
+        # access and origin history through the fixed READ ONLY database pages.
+        # Keep the physical/runtime/private bindings current at that same barrier.
+        self.preflight(self.context.request)
+
+
+@dataclass(frozen=True, repr=False)
+class _ConnectedPoolMigration:
+    checks: PoolCutoverEntryChecks
+    registration: HTTPSPoolRegistrationAPI
+    qualify: Callable[[], None]
+
+    def preflight(self, request: PoolMigrationRequest) -> None:
+        if request != self.checks.context.request.fencing.retirement.migration:
+            raise EntryError("pool cutover migration scope differs")
+        self.qualify()
+
+    def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
+        self.checks.current()
+        migration = self.checks.context.request.fencing.retirement.migration
+        if target not in migration.guards or action not in {"observe", "acquire"}:
+            raise EntryError("pool cutover guard scope differs")
+        return self.checks.readers.guards.guard(target, action)
+
+    def register(self, state_dir: Path) -> dict[str, Any] | None:
+        self.checks.current()
+        context = self.checks.context
+        migration = context.request.fencing.retirement.migration
+        if (state_dir != Path(context.operation["state_dir"]) / "writers" / "registration"
+                or self.registration.request != migration.registration
+                or any(self.guard(target, "observe").get("status") != "held" for target in migration.guards)):
+            raise EntryError("pool cutover registration scope unqualified")
+        stage_pool_registration(request=migration.registration, api=self.registration, state_dir=state_dir)
+        # A created Job is not a committed registration receipt. The existing
+        # proof reader checks its actual Pod, successful exit and bounded log.
+        return self.registration.registration_report(state_dir)
 
 
 def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
@@ -453,3 +528,25 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
             # Do not replace the parent's stage-qualified recovery error with a
             # connection diagnostic. The temporary authority is erased either way.
             yield ConnectedPoolReaders(base, trust, token, guards, history)
+
+
+@contextmanager
+def connected_pool_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolCutoverAPI]:
+    """Compose the fixed parent and children with one qualified operator scope.
+
+    The protected handler must call the journaled parent; this factory creates
+    no cluster resource and opens no intake. No injectable operator commands,
+    checks, registration targets or alternative state directories are accepted.
+    Credentials and all child HTTP clients expire with this context.
+    """
+    with connected_pool_readers(context) as readers:
+        checks = PoolCutoverEntryChecks(context, readers)
+        checks.current()
+        with HTTPSPoolRegistrationAPI(request=context.request.fencing.retirement.migration.registration,
+                api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token) as registration:
+            migration = _ConnectedPoolMigration(checks, registration, lambda: api.preflight(context.request))
+            with HTTPSPoolCutoverAPI(request=context.request, tokens=context.tokens,
+                    migration=migration, guards=readers.guards, checks=checks, history=readers.history,
+                    api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token,
+                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"])) as api:
+                yield api

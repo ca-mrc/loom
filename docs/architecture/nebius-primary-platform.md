@@ -2382,6 +2382,24 @@ the remote read before obtaining operator credentials. Complete installed writer
 inventory qualification is still required; parsing publication labels is never
 approval. No operational cutover command or admission activation is exposed by
 this reader context.
+
+The fixed connected cutover API now composes these readers with concrete
+private/runtime/provider checks and the existing guard and registration adapters.
+Its child migration preflight invokes the same parent inventory and readiness
+checks. Schema, application-access and original queued-origin qualification run
+before producer downtime as well as after producer drain, including management
+history qualification for empty participant queues. A schema mismatch requires
+the ordinary protected upgrade and its backup contract, followed by refreshed
+cutover inputs; this path does not introduce another DDL mechanism.
+Registration uses only the operation's fixed `writers/registration` journal,
+requires every participant guard to remain held, and preserves the existing
+uncertain-create readback rules. A created Job remains pending until its actual
+successful Pod and committed registration receipt qualify. Private inputs and
+reader bindings are rechecked at the concrete barriers; all child HTTPS clients
+and temporary reader credentials close with the context. Creating this context
+does not stage resources or open intake. A protected workflow operation,
+installed participant completeness, collector startup, activation, rollback and
+durable successor refresh remain required for an operational global cutover.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 

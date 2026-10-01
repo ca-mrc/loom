@@ -166,6 +166,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         self._scope()
         self.qualify_writer_bindings()
         self.checks.preflight(request)
+        self._qualify_database_readiness()
         self.qualify_writer_bindings()
 
     def _recorded_writer_authority(self, inventory: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
@@ -279,8 +280,13 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         except Exception:
             raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None
 
-    def qualify_quiescence(self) -> None:
-        self._scope()
+    def _qualify_database_readiness(self) -> None:
+        """Readiness precedes downtime and is rechecked after producers drain.
+
+        Reuse the fixed schema/access/backlog queries; this path neither applies
+        DDL nor retires application credentials. Even an empty participant queue
+        still qualifies the distinct management database and its schema.
+        """
         for target in self.guards.request.guards:
             participant, = (row for row in self.guards.request.registration.spec.participants
                 if row.participant_id == target.participant_id)
@@ -292,6 +298,10 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                 if len(report["rows"]) < 128:
                     break
                 after = report["rows"][-1]["key"]
+
+    def qualify_quiescence(self) -> None:
+        self._scope()
+        self._qualify_database_readiness()
         self.checks.qualify_quiescence()
 
     def qualify_runtime_access(self, participant_id: UUID, action: str) -> None:
