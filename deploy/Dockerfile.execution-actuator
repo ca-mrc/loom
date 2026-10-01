@@ -22,6 +22,11 @@ COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execu
     src/loom/task_bundle_source_journal.py src/loom/task_bundle_source_storage.py \
     src/loom/task_image_bundle_manifest.py src/loom/terminal_bench_normalize.py \
     src/loom/harbor_task_import.py src/loom/task_runtime_compatibility.py ./src/loom/
+COPY src/loom/nebius_pool_allocation.py src/loom/nebius_pool_contract.py \
+    src/loom/nebius_pool_execution_runtime.py src/loom/nebius_pool_lifecycle.py \
+    src/loom/nebius_pool_native_runtime.py src/loom/nebius_pool_priority.py \
+    src/loom/nebius_pool_settings.py src/loom/nebius_pool_task_image.py \
+    src/loom/nebius_pool_workload.py src/loom/execution_resource_allocation.py ./src/loom/
 COPY src/loom/driver/__init__.py src/loom/driver/task_image.py ./src/loom/driver/
 COPY src/loom/family_run/__init__.py src/loom/family_run/spec.py ./src/loom/family_run/
 COPY src/loom/trajectory/__init__.py src/loom/trajectory/storage.py ./src/loom/trajectory/
@@ -39,6 +44,8 @@ COPY src/loom_control_plane/__init__.py src/loom_control_plane/execution_admissi
     src/loom_control_plane/task_image_materializations.py src/loom_control_plane/task_image_capacity.py \
     src/loom_control_plane/task_image_capacity_wait.py \
     src/loom_control_plane/metrics.py src/loom_control_plane/service_execution.py \
+    src/loom_control_plane/service_execution_scheduler.py \
+    src/loom_control_plane/execution_resource_allocation.py src/loom_control_plane/pool_execution_handoff.py \
     ./src/loom_control_plane/
 COPY src/loom_execution_actuator ./src/loom_execution_actuator
 COPY src/loom_execution_capacity_collector ./src/loom_execution_capacity_collector
