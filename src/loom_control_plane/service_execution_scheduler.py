@@ -9,8 +9,10 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from sqlalchemy import select, text, update
+from sqlalchemy import Text, exists, select, text, update
+from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from loom.db.schema import (
     ServiceExecutionLease,
@@ -31,8 +33,11 @@ from loom.models.trial import TrialConfig
 from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
+    build_verifier_handoff_manifest,
+    compile_deferred_verifier_plan,
     compile_service_execution_plan,
     resolve_runner_task_image,
+    verifier_handoff_input,
 )
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
@@ -41,10 +46,25 @@ from loom.task_image_materialization import (
 from loom.verifier_runtime import apply_legacy_verifier_default
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
-from loom_control_plane.service_execution import reserve_trial_execution
+from loom_control_plane.service_execution import (
+    ServiceExecutionConflict,
+    mark_verifier_unavailable,
+    reserve_trial_execution,
+)
+from loom_control_plane.service_execution_output import (
+    ServiceExecutionBrokerError,
+    committed_handoff_files,
+)
+from loom_control_plane.service_execution_task_snapshot import (
+    ServiceExecutionTaskSnapshotError,
+    resolve_service_execution_task_snapshot,
+)
 
 _LOG = logging.getLogger(__name__)
 _RESERVATION_REQUEST_NAMESPACE = UUID("aaf78d09-4268-4dc5-81ee-4c2408ce2611")
+# A handed-off attempt waits for capacity like any queued work, but not forever:
+# its committed workspace is graded or the Trial fails as verifier_unavailable.
+VERIFIER_HANDOFF_TIMEOUT = timedelta(minutes=30)
 
 
 class ServiceExecutionConfigurationError(ValueError):
@@ -428,6 +448,130 @@ async def _reserve_service_candidate(
     raise ExecutionProvisioningBlockedError("execution_target_unavailable", retry_after_seconds=15)
 
 
+async def reserve_next_verifier_executions(
+    session: AsyncSession,
+    *,
+    pool_id: str,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int = 7200,
+    now: datetime | None = None,
+    limit: int = 32,
+) -> list[ServiceExecutionLease]:
+    """Reserve the deferred verifier of each attempt whose pod has released capacity.
+
+    Stateless and idempotent: the request id derives from the parent lease and
+    child plan, and one verifier per attempt is a database constraint.
+    """
+
+    current_time = (now or datetime.now(UTC)).astimezone(UTC)
+    child = aliased(ServiceExecutionLease)
+    candidates = (await session.execute(
+        select(ServiceExecutionLease, Trial)
+        .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+        .where(
+            ServiceExecutionLease.execution_role == "attempt",
+            ServiceExecutionLease.selected_pool_id == pool_id,
+            ServiceExecutionLease.output_commit_state == "committed",
+            ServiceExecutionLease.finalized_at.is_not(None),
+            ServiceExecutionLease.cleanup_state == "complete",
+            ServiceExecutionLease.deleted_at.is_not(None),
+            ServiceExecutionLease.runtime_contract_json["verifier_execution"].astext
+            == "separate_execution",
+            Trial.state.in_(("claimed", "running")),
+            Trial.attempt_count == ServiceExecutionLease.attempt,
+            Trial.cancellation_requested_at.is_(None),
+            Trial.result["verifier_execution"]["state"].astext == "pending",
+            Trial.result["verifier_execution"]["parent_lease_id"].astext
+            == sql_cast(ServiceExecutionLease.id, Text),
+            ~exists().where(
+                child.parent_lease_id == ServiceExecutionLease.id,
+                child.execution_role == "verifier",
+            ),
+        )
+        .order_by(ServiceExecutionLease.deleted_at, ServiceExecutionLease.id)
+        .limit(limit)
+        .with_for_update(of=Trial, skip_locked=True)
+    )).all()
+    reserved: list[ServiceExecutionLease] = []
+    for parent, trial in candidates:
+        try:
+            async with session.begin_nested():
+                reserved.append(await _reserve_verifier_candidate(
+                    session, parent=parent, trial=trial,
+                    image_admission_keyring=image_admission_keyring,
+                    maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time,
+                ))
+        except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
+            # Capacity, rollout and target health are waits, bounded per handoff.
+            if parent.deleted_at is not None and current_time - parent.deleted_at >= VERIFIER_HANDOFF_TIMEOUT:
+                _fail_verifier_handoff(trial, reason=getattr(exc, "reason", None) or str(exc),
+                                       now=current_time)
+            else:
+                _LOG.info("service_execution_verifier_wait", extra={
+                    "trial_id": str(trial.id), "reason": getattr(exc, "reason", None) or str(exc),
+                })
+        except (ServiceExecutionBrokerError, ServiceExecutionTaskSnapshotError, ServiceExecutionConfigurationError,
+                ValueError) as exc:
+            _fail_verifier_handoff(trial, reason=str(exc), now=current_time)
+    return reserved
+
+
+def _fail_verifier_handoff(trial: Trial, *, reason: str, now: datetime) -> None:
+    mark_verifier_unavailable(trial, None, reason=reason)
+    trial.state = "failed"
+    trial.finished_at = now
+    trial.failure_message = f"deferred verifier could not be reserved: {reason}"[:2000]
+    _LOG.warning("service_execution_verifier_unavailable", extra={
+        "trial_id": str(trial.id), "reason": reason,
+    })
+
+
+async def _reserve_verifier_candidate(
+    session: AsyncSession,
+    *,
+    parent: ServiceExecutionLease,
+    trial: Trial,
+    image_admission_keyring: ImageAdmissionKeyring,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> ServiceExecutionLease:
+    if parent.target_id is None:
+        raise ServiceExecutionConflict("verifier parent has no execution target")
+    agent_plan = ExecutionRuntimePlanV1.model_validate(parent.runtime_contract_json)
+    snapshot = await resolve_service_execution_task_snapshot(session, lease=parent, trial=trial)
+    task = TaskConfig.model_validate(snapshot.config)
+    trial_config = TrialConfig.model_validate(trial.config)
+    files, _ = await committed_handoff_files(session, parent=parent)
+    handoff = verifier_handoff_input(build_verifier_handoff_manifest(
+        task_revision_sha256=agent_plan.task_revision_sha256, committed_files=files,
+    ))
+    verifier_timeout = ((trial_config.override_verifier_timeout_sec or task.verifier.timeout_sec)
+                        * trial_config.verifier_timeout_multiplier)
+    plan = compile_deferred_verifier_plan(
+        agent_plan, task, verifier_timeout_seconds=round(verifier_timeout), handoff_input=handoff,
+    )
+    # The verifier's own budget starts at this reservation, not at the agent's.
+    deadline_at = _deadline(plan, now=current_time, maximum_seconds=maximum_deadline_seconds)
+    return await reserve_trial_execution(
+        session,
+        request_id=canonical_uuid5(_RESERVATION_REQUEST_NAMESPACE, {
+            "schema_version": "loom.service-execution-verifier-request.v1",
+            "parent_lease_id": str(parent.id),
+            "runtime_contract_sha256": canonical_digest(plan.canonical_payload()),
+        }),
+        trial_id=trial.id,
+        execution_class_id=plan.execution_class_id,
+        target_id=parent.target_id,
+        requirements=WorkloadRequirementsV1.model_validate(parent.workload_requirements_json),
+        runtime_contract=plan,
+        image_admission_keyring=image_admission_keyring,
+        routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
+        parent_lease_id=parent.id,
+        deadline_at=deadline_at,
+        now=current_time,
+    )
+
+
 async def run_service_execution_scheduler_loop(
     *,
     session_factory: Any,
@@ -442,6 +586,20 @@ async def run_service_execution_scheduler_loop(
 
     while True:
         try:
+            # Deferred verifiers reuse an existing route and admitted capacity,
+            # so both local and global admission modes reserve them here.
+            async with session_factory() as session:
+                verifiers = await reserve_next_verifier_executions(
+                    session,
+                    pool_id=pool_id,
+                    image_admission_keyring=image_admission_keyring,
+                    maximum_deadline_seconds=maximum_deadline_seconds,
+                )
+                await session.commit()
+            for verifier in verifiers:
+                _LOG.info("service_execution_verifier_reserved", extra={
+                    "trial_id": str(verifier.trial_id), "parent_lease_id": str(verifier.parent_lease_id),
+                })
             if global_selector is not None:
                 # A selection is not a lease. Empty/failed global selection never
                 # falls through to the environment-local capacity writer.
@@ -471,4 +629,8 @@ async def run_service_execution_scheduler_loop(
         await asyncio.sleep(interval_seconds)
 
 
-__all__ = ["reserve_next_service_execution", "run_service_execution_scheduler_loop"]
+__all__ = [
+    "reserve_next_service_execution",
+    "reserve_next_verifier_executions",
+    "run_service_execution_scheduler_loop",
+]

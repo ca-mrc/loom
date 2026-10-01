@@ -11,7 +11,7 @@ from uuid import uuid4
 import pytest
 
 from loom.errors import AgentError
-from loom.execution_runtime_contract import ExecutionRuntimeResultV1
+from loom.execution_runtime_contract import ExecutionRuntimeResultV1, RuntimeHandoffInputV1
 from loom.models.exec import ExecResult
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -128,7 +128,7 @@ def test_oracle_plan_runs_the_oracle_phase_in_a_private_sandbox() -> None:
 def test_oracle_preserves_separate_and_shared_verifier_modes() -> None:
     task, separate = _plan()
     assert separate.verifier_execution == "separate_execution"
-    verifier = compile_deferred_verifier_plan(separate, task, verifier_timeout_seconds=60)
+    verifier = compile_deferred_verifier_plan(separate, task, verifier_timeout_seconds=60, handoff_input=_HANDOFF)
     assert verifier.main.argv[4] == "verify-sandbox"
 
     _, shared = _plan(_oracle(verifier_env_mode="shared"))
@@ -416,3 +416,8 @@ def test_workspace_reference_solution_passes_its_verifier(tmp_path: Path) -> Non
     assert verify("after") == {"report": 1.0, "reproduced": 1.0}
     (root / "reports" / "totals.json").write_text('{"apple": 9.0, "pear": 8}')
     assert verify("float") == {"report": 0.0, "reproduced": 1.0}
+
+
+_HANDOFF = RuntimeHandoffInputV1(
+    manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
+)

@@ -62,7 +62,6 @@ func TestPreparedImageRequiresValidControllerBinding(t *testing.T) {
 	for name, mutate := range map[string]func(*plan){
 		"missing agent": func(p *plan) { p.AgentImageRef = nil },
 		"empty agent":   func(p *plan) { empty := ""; p.AgentImageRef = &empty },
-		"verifier role": func(p *plan) { p.ExecutionRole = "verifier"; p.Main.Role = "verifier" },
 		"precomposed":   func(p *plan) { p.Composition = "precomposed" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -72,6 +71,18 @@ func TestPreparedImageRequiresValidControllerBinding(t *testing.T) {
 				t.Fatal("invalid prepared-image controller binding accepted")
 			}
 		})
+	}
+}
+
+func TestDeferredVerifierGradesOnTheAttemptsPreparedImage(t *testing.T) {
+	p := preparedTaskPlan()
+	p.ExecutionRole = "verifier"
+	p.Main.Role = "verifier"
+	p.VerifierExecution = "skipped"
+	p.Verifier = nil
+	p.Sidecars = p.Sidecars[1:]
+	if err := p.validate(); err != nil {
+		t.Fatalf("deferred verifier on a prepared image was rejected: %v", err)
 	}
 }
 

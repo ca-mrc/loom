@@ -657,10 +657,23 @@ async def reserve_trial_execution(
             or parent_contract.task_revision_sha256 != runtime_contract.task_revision_sha256
         ):
             raise ServiceExecutionConflict("verifier parent lease is not eligible")
-        if parent_lease.observed_state not in {"finalizing", "finalized"}:
+        if (
+            parent_lease.output_commit_state != "committed"
+            or parent_lease.finalized_at is None
+            or parent_lease.observed_state not in {"finalizing", "finalized", "deleted"}
+            or _verifier_handoff(trial, parent_lease) is None
+        ):
             raise ServiceExecutionConflict("verifier parent result is not ready")
         if parent_lease.cleanup_state != "complete":
             raise ServiceExecutionConflict("verifier parent cleanup is not complete")
+        if (
+            trial.state not in {"claimed", "running"}
+            or trial.attempt_count != parent_lease.attempt
+            or trial.cancellation_requested_at is not None
+        ):
+            raise ServiceExecutionConflict("trial is not awaiting its verifier")
+        if runtime_contract.handoff_input is None:
+            raise ServiceExecutionConflict("verifier execution requires a workspace handoff")
         attempt = parent_lease.attempt
     if deadline_at <= current_time:
         raise ServiceExecutionConflict("execution deadline must be in the future")
@@ -1076,6 +1089,25 @@ async def _acknowledge_native_cancellation(
     )
 
 
+async def _cancel_awaiting_verifier(session: AsyncSession, *, trial_id: UUID, now: datetime) -> None:
+    """Close a handed-off attempt whose verifier lease was never reserved."""
+    trial = await session.get(Trial, trial_id, with_for_update=True)
+    handoff = (trial.result or {}).get("verifier_execution") if trial is not None else None
+    if (
+        trial is None
+        or trial.state not in {"claimed", "running"}
+        or trial.cancellation_requested_at is None
+        or not isinstance(handoff, dict)
+        or handoff.get("state") != "pending"
+    ):
+        return
+    trial.result = {**(trial.result or {}), "cancelled": True}
+    trial.state = "cancelled"
+    trial.finished_at = now
+    trial.failure_reason = "cancelled"
+    trial.failure_message = "service execution cancelled before verification"
+
+
 async def request_trial_execution_cancellation(
     session: AsyncSession,
     *,
@@ -1089,14 +1121,18 @@ async def request_trial_execution_cancellation(
             select(ServiceExecutionLease)
             .where(
                 ServiceExecutionLease.trial_id == trial_id,
-                ServiceExecutionLease.execution_role == "attempt",
                 ServiceExecutionLease.deleted_at.is_(None),
             )
-            .order_by(ServiceExecutionLease.attempt.desc())
+            # A live deferred verifier is the attempt's current execution.
+            .order_by(
+                ServiceExecutionLease.attempt.desc(),
+                (ServiceExecutionLease.execution_role == "verifier").desc(),
+            )
             .limit(1)
         )
     ).scalar_one_or_none()
     if lease is None:
+        await _cancel_awaiting_verifier(session, trial_id=trial_id, now=now or datetime.now(UTC))
         await _acknowledge_native_cancellation(session, trial_id=trial_id)
         return None
     if lease.desired_state in {"create", "start"}:
@@ -1582,12 +1618,18 @@ async def record_execution_event(
         if (
             finalized_trial is None
             or not isinstance(trial_state, str)
-            or trial_state not in {"materializing", "succeeded", "failed", "cancelled"}
+            or trial_state not in {"running", "materializing", "succeeded", "failed", "cancelled"}
         ):
             raise ServiceExecutionConflict("finalized event lacks a valid trial state")
-        if finalized_trial.state in _TERMINAL_TRIAL_STATES and trial_state == "materializing":
+        if finalized_trial.state in _TERMINAL_TRIAL_STATES and trial_state in {"running", "materializing"}:
             raise ServiceExecutionConflict("finalized event cannot reopen a terminal trial")
-        if trial_state in {"materializing", "succeeded"} and not isinstance(
+        if trial_state == "running" and not (
+            defers_verification(lease)
+            and isinstance(payload.get("result"), dict)
+            and _verifier_handoff_result(payload["result"], lease)
+        ):
+            raise ServiceExecutionConflict("only a verifier handoff keeps its trial running")
+        if trial_state in {"running", "materializing", "succeeded"} and not isinstance(
             payload.get("result"), dict
         ):
             raise ServiceExecutionConflict("successful compute finalization requires a result")
@@ -1596,7 +1638,6 @@ async def record_execution_event(
         advances_projection
         and lease.desired_state == "delete_pending"
         and lease.finalized_at is None
-        and lease.execution_role == "attempt"
         and lease.output_commit_state == "committed"
         and (
             event_kind == "deleted"
@@ -1632,7 +1673,6 @@ async def record_execution_event(
         advances_projection
         and lease.desired_state == "cancel"
         and lease.finalized_at is None
-        and lease.execution_role == "attempt"
         and lease.output_commit_state in {"committed", "unavailable"}
         and (
             event_kind == "deleted"
@@ -1873,7 +1913,7 @@ async def record_execution_event(
             if isinstance(final_payload.get("failure_message"), str)
             else None
         )
-        trial.finished_at = None if trial_state == "materializing" else observed_at
+        trial.finished_at = None if trial_state in {"running", "materializing"} else observed_at
     if event_kind == "deleted" and advances_projection:
         lease.desired_state = "deleted"
         lease.deleted_at = observed_at
@@ -2117,6 +2157,8 @@ async def _committed_result_finalization_payload(
     if result_event is None:
         raise ServiceExecutionConflict("finalizing execution has no committed runtime result")
     runtime_result = ExecutionRuntimeResultV1.model_validate(result_event.payload_json)
+    if lease.execution_role == "verifier":
+        return await _verifier_finalization_payload(session, lease=lease, runtime_result=runtime_result)
     result: dict[str, Any] = {
         "schema_version": "loom.service-execution-trial-result.v1",
         "runtime_result": runtime_result.model_dump(mode="json"),
@@ -2125,6 +2167,28 @@ async def _committed_result_finalization_payload(
         "output_manifest_sha256": lease.output_manifest_sha256,
         "output_marker_sha256": lease.output_marker_sha256,
     }
+    if runtime_result.status == "succeeded" and defers_verification(lease):
+        trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+        if trial is None:
+            raise ServiceExecutionConflict("trial not found")
+        if trial.cancellation_requested_at is not None or trial.state in _TERMINAL_TRIAL_STATES:
+            return {
+                "trial_state": "cancelled",
+                "result": {**result, "cancelled": True},
+                "failure_reason": "cancelled",
+                "failure_message": "service execution cancelled before verification",
+            }
+        # The agent's evidence is committed; its own verifier lease grades it
+        # after this pod releases capacity.
+        return {
+            "trial_state": "running",
+            "result": {
+                **result,
+                "verifier_execution": {"state": "pending", "parent_lease_id": str(lease.id)},
+            },
+            "failure_reason": None,
+            "failure_message": None,
+        }
     if runtime_result.status == "succeeded":
         trial_state = "materializing"
         failure_reason = None
@@ -2138,6 +2202,91 @@ async def _committed_result_finalization_payload(
         "result": result,
         "failure_reason": failure_reason,
         "failure_message": failure_message,
+    }
+
+
+def defers_verification(lease: ServiceExecutionLease) -> bool:
+    """A separate-mode attempt whose grading belongs to a child verifier lease."""
+    contract = lease.runtime_contract_json or {}
+    return (
+        lease.execution_role == "attempt"
+        and contract.get("execution_role") == "attempt"
+        and contract.get("verifier_execution") == "separate_execution"
+    )
+
+
+def mark_verifier_unavailable(trial: Trial, lease: ServiceExecutionLease | None, *, reason: str) -> None:
+    result = dict(trial.result or {})
+    handoff = dict(result.get("verifier_execution") or {})
+    handoff.update({"state": "unavailable", "reason": reason[:120]})
+    if lease is not None:
+        handoff["lease_id"] = str(lease.id)
+    result["verifier_execution"] = handoff
+    trial.result = result
+    trial.failure_reason = "verifier_unavailable"
+
+
+def _verifier_handoff_result(result: dict[str, Any], parent: ServiceExecutionLease) -> bool:
+    handoff = result.get("verifier_execution")
+    return (
+        isinstance(handoff, dict)
+        and handoff.get("state") == "pending"
+        and handoff.get("parent_lease_id") == str(parent.id)
+        and result.get("reward") is None
+    )
+
+
+def _verifier_handoff(trial: Trial, parent: ServiceExecutionLease) -> dict[str, Any] | None:
+    handoff = (trial.result or {}).get("verifier_execution")
+    if (
+        not isinstance(handoff, dict)
+        or handoff.get("state") != "pending"
+        or handoff.get("parent_lease_id") != str(parent.id)
+        or not defers_verification(parent)
+    ):
+        return None
+    return handoff
+
+
+async def _verifier_finalization_payload(
+    session: AsyncSession, *, lease: ServiceExecutionLease, runtime_result: ExecutionRuntimeResultV1,
+) -> dict[str, Any]:
+    """The verifier owns the reward and terminal state of its parent's attempt."""
+
+    trial = await session.get(Trial, lease.trial_id, with_for_update=True)
+    parent = (
+        await session.get(ServiceExecutionLease, lease.parent_lease_id)
+        if lease.parent_lease_id is not None else None
+    )
+    if trial is None or parent is None or not isinstance(trial.result, dict):
+        raise ServiceExecutionConflict("verifier has no awaiting parent attempt")
+    handoff = trial.result.get("verifier_execution")
+    if not isinstance(handoff, dict) or handoff.get("parent_lease_id") != str(parent.id):
+        raise ServiceExecutionConflict("verifier has no awaiting parent attempt")
+    result = {
+        **trial.result,
+        "reward": runtime_result.verifier_rewards,
+        "aggregate_reward": aggregate_reward_scalar(runtime_result.verifier_rewards),
+        "verifier_execution": {
+            "state": "committed",
+            "parent_lease_id": str(parent.id),
+            "lease_id": str(lease.id),
+            "runtime_result": runtime_result.model_dump(mode="json"),
+            "output_manifest_sha256": lease.output_manifest_sha256,
+            "output_marker_sha256": lease.output_marker_sha256,
+        },
+    }
+    if runtime_result.status == "succeeded":
+        return {"trial_state": "materializing", "result": result,
+                "failure_reason": None, "failure_message": None}
+    if runtime_result.status == "cancelled":
+        return {"trial_state": "cancelled", "result": {**result, "cancelled": True},
+                "failure_reason": "cancelled", "failure_message": "service execution cancelled"}
+    return {
+        "trial_state": "failed",
+        "result": result,
+        "failure_reason": "verifier_error",
+        "failure_message": f"deferred verifier runtime reported {runtime_result.status}",
     }
 
 
@@ -2170,7 +2319,10 @@ async def recover_deleted_committed_trial(
     trial.result = payload["result"]
     trial.failure_reason = payload["failure_reason"]
     trial.failure_message = payload["failure_message"]
-    trial.finished_at = None if trial.state == "materializing" else observed_at
+    trial.finished_at = None if trial.state in {"materializing", "running"} else observed_at
+    if trial.state == "running":
+        # A handed-off attempt is closed; its verifier lease now owns the Trial.
+        lease.finalized_at = observed_at
 
 
 async def finalize_committed_service_execution(
@@ -2230,8 +2382,7 @@ async def finalize_failed_service_execution(
     if lease.generation != generation:
         raise ServiceExecutionFenceError("execution generation is stale")
     if (
-        lease.execution_role != "attempt"
-        or lease.desired_state not in {"create", "start"}
+        lease.desired_state not in {"create", "start"}
         or lease.revoked_at is not None
         or lease.finalized_at is not None
         or lease.observed_state != "failed"
@@ -2293,6 +2444,10 @@ async def finalize_failed_service_execution(
     trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
     trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
     trial.finished_at = observed_at
+    if lease.execution_role == "verifier":
+        # The agent's committed attempt is still archived; only grading is lost.
+        mark_verifier_unavailable(trial, lease, reason=lease.error_code or "native_execution_failed")
+        trial.failure_message = message
     await enqueue_execution_transition(
         session,
         lease_id=lease.id,

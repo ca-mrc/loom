@@ -14,6 +14,7 @@ from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom_control_plane.service_execution_output import (
+    ResolvedServiceExecutionHandoff,
     ServiceExecutionBrokerError,
     ServiceExecutionFileCompleteV1,
     ServiceExecutionOutputCommitV1,
@@ -23,6 +24,7 @@ from loom_control_plane.service_execution_output import (
     VerifiedExecutionPod,
     authorize_service_execution_peer,
     mint_service_execution_peer_token,
+    resolve_service_execution_handoff,
     resolve_service_execution_input,
 )
 
@@ -263,6 +265,65 @@ async def get_service_execution_input_file(
             "Content-Length": str(item.size_bytes),
             "X-Loom-Content-SHA256": item.sha256,
         },
+    )
+
+
+async def _resolved_handoff(
+    request: Request, lease_id: UUID, generation: int, role: str,
+) -> ResolvedServiceExecutionHandoff:
+    identity = _peer(lease_id, generation, role)
+    if identity.execution_role != "verifier":
+        raise HTTPException(status_code=403, detail="verifier_handoff_scope_invalid")
+    lease = await _authorize(request, identity, purpose="input")
+    async with request.app.state.session_factory() as session:
+        try:
+            return await resolve_service_execution_handoff(session, lease=lease)
+        except ServiceExecutionBrokerError as exc:
+            raise _broker_http(exc) from exc
+
+
+@router.get("/inputs/handoff/manifest")
+async def get_service_execution_handoff_manifest(
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    role: RoleHeader,
+) -> Response:
+    resolved = await _resolved_handoff(request, lease_id, generation, role)
+    return Response(
+        content=resolved.manifest_body,
+        media_type="application/json",
+        headers={
+            "X-Loom-Content-SHA256": "sha256:" + hashlib.sha256(resolved.manifest_body).hexdigest()
+        },
+    )
+
+
+@router.get("/inputs/handoff/files/{file_index}")
+async def get_service_execution_handoff_file(
+    file_index: int,
+    request: Request,
+    lease_id: LeaseIdHeader,
+    generation: GenerationHeader,
+    role: RoleHeader,
+) -> StreamingResponse:
+    resolved = await _resolved_handoff(request, lease_id, generation, role)
+    if file_index < 0 or file_index >= len(resolved.manifest.files):
+        raise HTTPException(status_code=404, detail="verifier_handoff_file_not_found")
+    item = resolved.manifest.files[file_index]
+    store = request.app.state.output_source_store
+    bucket = request.app.state.output_source_bucket
+    key = resolved.source_keys[file_index]
+    try:
+        facts = await store.stat_object(bucket=bucket, key=key)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="verifier_handoff_object_unavailable") from exc
+    if facts.content_length != item.size_bytes:
+        raise HTTPException(status_code=409, detail="verifier_handoff_object_drift")
+    return StreamingResponse(
+        store.stream_object(bucket=bucket, key=key, chunk_size=1024 * 1024),
+        media_type="application/octet-stream",
+        headers={"Content-Length": str(item.size_bytes), "X-Loom-Content-SHA256": item.sha256},
     )
 
 

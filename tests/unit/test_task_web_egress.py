@@ -7,7 +7,11 @@ import pytest
 from pydantic import ValidationError
 
 from loom.execution_contract import workload_requirements_from_task
-from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, validate_runtime_plan_requirements
+from loom.execution_runtime_contract import (
+    TASK_EGRESS_OUTPUT,
+    RuntimeHandoffInputV1,
+    validate_runtime_plan_requirements,
+)
 from loom.models.networking import PublicWeb, WebAllowlist, WebDestination
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -76,7 +80,7 @@ def test_trial_override_is_frozen_across_agent_and_deferred_verifier_plans() -> 
     with pytest.raises(ValidationError, match="differs from the plan"):
         type(plan).model_validate(drifted)
 
-    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120)
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120, handoff_input=_HANDOFF)
     assert verifier.effective_network_policy == plan.effective_network_policy
     assert verifier.main.environment == plan.main.environment
 
@@ -170,3 +174,8 @@ def test_class_capability_must_explicitly_admit_web_egress() -> None:
     decision = evaluate_execution_admission(requirements, NEBIUS_CPU_WEB_EXECUTION_CLASS_V1)
     assert decision.compatible
     assert decision.execution_class_id != legacy.class_id
+
+
+_HANDOFF = RuntimeHandoffInputV1(
+    manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
+)

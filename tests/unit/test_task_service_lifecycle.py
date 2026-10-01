@@ -7,7 +7,6 @@ from pydantic import ValidationError
 from loom.models.exec import ExecResult
 from loom.models.task import TaskConfig
 from loom.service_execution_materialization import (
-    compile_deferred_verifier_plan,
     compile_service_execution_plan,
     runtime_profile_rejections,
 )
@@ -104,11 +103,9 @@ def test_long_readiness_does_not_extend_compiled_phase_budgets():
         source_provenance=_provenance(), task_revision_sha256=_REVISION,
     )
     assert plan.main.timeout_seconds == 900
-    assert plan.verifier is None
-    deferred = compile_deferred_verifier_plan(
-        plan, task, verifier_timeout_seconds=round(task.verifier.timeout_sec),
-    )
-    assert deferred.main.timeout_seconds == 120
+    # Live services cannot outlive the agent pod, so their verifier grades in it.
+    assert plan.verifier_execution == "in_attempt"
+    assert plan.verifier is not None and plan.verifier.timeout_seconds == 120
 
 
 @pytest.mark.asyncio

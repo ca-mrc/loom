@@ -4,7 +4,11 @@ import json
 
 import pytest
 
-from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, ExecutionRuntimePlanV1
+from loom.execution_runtime_contract import (
+    TASK_EGRESS_OUTPUT,
+    ExecutionRuntimePlanV1,
+    RuntimeHandoffInputV1,
+)
 from loom.models.task import TaskConfig
 from loom.service_execution_materialization import (
     automatic_service_execution_rejections,
@@ -93,8 +97,33 @@ def test_verifier_identity_is_preserved_separately():
     )
     assert [item.identity.run_as_user for item in plan.sidecars] == [1001]
     from loom.service_execution_materialization import compile_deferred_verifier_plan
-    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120)
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120, handoff_input=_HANDOFF)
     assert verifier.sidecars[-1].identity.run_as_user == 0
+
+
+def test_deferred_verifier_owns_only_verifier_outputs_and_the_attempt_skips_the_rewards_fence():
+    from loom.service_execution_materialization import compile_deferred_verifier_plan
+    from loom_control_plane.service_execution_output import _defers_verification
+
+    task, trial, profile = _identity_task("1001:1002", "/home/miles", verifier_user="root")
+    profile = profile.model_copy(update={"supports_task_identity": True})
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256="sha256:" + "c" * 64,
+    )
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120, handoff_input=_HANDOFF)
+    assert verifier.handoff_input == _HANDOFF
+    assert not any(
+        item.relative_path.startswith(("trajectory/", "accounting/", "artifacts/workspace"))
+        for item in verifier.output_declarations
+    )
+    assert [item.relative_path for item in verifier.output_declarations if item.required] == [
+        "verifier/output.json",
+    ]
+    assert plan.verifier_execution == "separate_execution"
+    assert _defers_verification(plan)
+    assert not _defers_verification(plan.model_copy(update={"verifier_execution": "in_attempt"}))
+    assert not _defers_verification(verifier)
 
 
 def test_identity_cannot_apply_to_an_ordinary_sidecar_or_the_controller():
@@ -144,3 +173,8 @@ def test_explicit_template_cannot_bypass_automatic_capability_readiness(declarat
         template["output_declarations"].append(TASK_EGRESS_OUTPUT.model_dump(mode="json"))
     with pytest.raises(ValueError, match="automatic native execution"):
         TaskConfig.model_validate(payload)
+
+
+_HANDOFF = RuntimeHandoffInputV1(
+    manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
+)
