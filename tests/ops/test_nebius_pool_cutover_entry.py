@@ -65,11 +65,11 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 
 @pytest.fixture
-def management_inputs(base_management_inputs):
+def management_inputs(platform_inputs):
     """Install test trust before generating completed history, never rewrite it."""
     import base64
 
-    deployment, candidate, profile = copy.deepcopy(base_management_inputs)
+    deployment, candidate, profile = copy.deepcopy(base_management_inputs.__wrapped__(platform_inputs))
     key = IMAGE_ADMISSION_KEYRING._keys["test-builder"]
     deployment["installation"]["keyring"] = {"schema_version": 1, "keys": [{
         "signing_key_id": "test-builder", "public_key_base64": base64.b64encode(
@@ -123,15 +123,16 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
         row["runtime_image_ref"] = candidate["images"]["execution_runtime"]["image_ref"]
     for row in spec["profiles"]["task_images"]:
         row["settings"]["service_image"] = candidate["images"]["service"]["image_ref"]
+    image_admission = signed_image_admission_bundle(tuple(candidate["images"][image]["image_ref"]
+        for image in ("service", "execution_runtime", "harbor_runtime"))).model_dump(mode="json")
     profiles = {}
     for identity, row in request.profiles.items():
         desired = row.model_dump(mode="json")
         for field, image in (("task_image_ref", "service"), ("runtime_image_ref", "execution_runtime"), ("agent_image_ref", "harbor_runtime")):
             desired[field] = candidate["images"][image]["image_ref"]
-        desired["image_admission"] = signed_image_admission_bundle(tuple(desired[key] for key in (
-            "task_image_ref", "runtime_image_ref", "agent_image_ref"))).model_dump(mode="json")
+        desired["image_admission"] = copy.deepcopy(image_admission)
         profiles[str(identity)] = desired
-    profile = profiles[str(development.participant_id)]
+    profile = copy.deepcopy(profiles[str(development.participant_id)])
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as bundle:
         bundle.writestr("candidate.json", json.dumps(candidate))
@@ -200,6 +201,8 @@ def publication_http(private_cutover, monkeypatch):
                 return httpx.Response(302, headers={"Location": "https://loom.blob.core.windows.net/artifact?sig=private-marker"})
             return httpx.Response(200, json=responses[path])
         assert request.url.host == "loom.blob.core.windows.net" and "Authorization" not in request.headers
+        if state.get("during_read"):
+            state.pop("during_read")()
         return httpx.Response(200, content=state["payload"])
     client = httpx.AsyncClient
     transport = httpx.MockTransport(respond)
@@ -347,7 +350,8 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
 
 
 @pytest.mark.parametrize("damage", ["failed_run", "unmerged", "failed_gate", "forged_app", "expired",
-    "tampered_artifact", "candidate_bytes", "profile_bytes", "registry", "keyring"])
+    "tampered_artifact", "candidate_bytes", "profile_bytes", "registry", "keyring",
+    "participant_signature", "catalog_trust", "private_drift"])
 def test_cutover_requires_actual_publication_before_operator_credentials(private_cutover, publication_http, monkeypatch, damage):
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_management_entry import EntryError
@@ -372,11 +376,31 @@ def test_cutover_requires_actual_publication_before_operator_credentials(private
         payload["candidate"]["source_archive_sha256"] = "sha256:" + "e" * 64
         save_private(metadata, payload)
     elif damage == "profile_bytes":
-        payload["profile"]["supports_task_web_egress"] = not payload["profile"]["supports_task_web_egress"]
+        payload["profile"]["supports_task_web_egress"] = not payload["profile"].get("supports_task_web_egress", False)
         save_private(metadata, payload)
     elif damage == "registry":
         payload["candidate"]["registry_prefix"] = "cr.eu-north1.nebius.cloud/foreign"
         save_private(metadata, payload)
+    elif damage == "participant_signature":
+        profile = next(iter(payload["profiles"].values()))
+        # Valid same-key evidence for the same images is still not the exact
+        # protected publication being installed.
+        profile["image_admission"] = signed_image_admission_bundle(tuple(profile[key] for key in (
+            "task_image_ref", "runtime_image_ref", "agent_image_ref"))).model_dump(mode="json")
+        save_private(metadata, payload)
+    elif damage == "catalog_trust":
+        import base64
+
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        key = Ed25519PrivateKey.from_private_bytes(b"\x19" * 32).public_key()
+        payload["installation"]["profiles"]["image_admission_keyring"]["keys"].append({
+            "signing_key_id": "foreign-publisher", "public_key_base64": base64.b64encode(
+                key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()})
+        save_private(metadata, payload)
+    elif damage == "private_drift":
+        state["during_read"] = lambda: Path(metadata["inputs_path"]).write_bytes(
+            Path(metadata["inputs_path"]).read_bytes() + b"\n")
     else:
         payload["profile"]["image_admission"]["admissions"][0]["signing_key_id"] = "foreign-publisher"
         archive = io.BytesIO()

@@ -1,14 +1,17 @@
-"""Private cutover inputs and bound readers; no operational command or activation.
+"""Private cutover publication and bound readers; no command or activation.
 
-The protected installer must still supply installed inventory/publication/backend
+The protected installer must still supply installed inventory/backend
 qualification, activation, rollback and successor-refresh completion. This module
-connects completed history to the existing database readers without importing an
-ambient kubeconfig or replaying an old installation. No live writes occur here.
+resolves protected publication before connecting completed history to the existing
+database readers. It imports no ambient kubeconfig and replays no old installation.
+No live writes occur here.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import json
 import re
 import ssl
 from collections.abc import Iterator
@@ -19,6 +22,7 @@ from tempfile import TemporaryDirectory
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
@@ -43,8 +47,13 @@ from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
 
+from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
-from loom_service.environment_management.candidates import ProtectedPublication, _json
+from loom_service.environment_management.candidates import (
+    GitHubCandidateCatalog,
+    ProtectedPublication,
+    _json,
+)
 from loom_service.pool_management.installation import PoolInstallation
 
 
@@ -171,6 +180,48 @@ class ConnectedPoolReaders:
     history: KubectlPoolHistoryAPI
 
 
+async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.AsyncClient) -> None:
+    """Resolve protected bytes using predecessor trust, never the supplied catalog.
+
+    Publication can replace signed code/image fields but not each participant's
+    retained environment policy. The existing runtime renderer checks the latter;
+    all replaced fields must now agree with the same authenticated publication.
+    """
+    try:
+        inputs = context.inputs
+        installation = context.predecessor.deployment.installation
+        if inputs.installation.profiles.image_admission_keyring != installation.keyring:
+            raise ValueError
+        catalog = GitHubCandidateCatalog(http,
+            token=context.original.upgrade.original.material["loom-management-publications"]["token"],
+            publications=[inputs.publication], registry_prefix=installation.registry_prefix,
+            keyring=ImageAdmissionKeyring.from_json(json.dumps(installation.keyring)))
+        selected = await catalog.resolve(inputs.publication.candidate_id)
+        if (selected.candidate != inputs.candidate or selected.profile != inputs.profile
+                or context.request.fencing.retirement.migration.registration.candidate != selected.candidate):
+            raise ValueError
+        runtime = ServiceExecutionRuntimeProfileV1.model_validate(selected.profile)
+        fields = ("candidate_sha", "task_image_ref", "runtime_image_ref", "agent_image_ref",
+            "runtime_binary_sha256", "image_admission")
+        for profile in context.request.profiles.values():
+            if any(getattr(profile, field) != getattr(runtime, field) for field in fields):
+                raise ValueError
+        if (any((row.candidate_sha, row.runtime_image_ref, row.runtime_binary_sha256) != (
+                    runtime.candidate_sha, runtime.runtime_image_ref, runtime.runtime_binary_sha256)
+                for row in inputs.installation.profiles.execution)
+                or any(row.settings.service_image != runtime.task_image_ref
+                    for row in inputs.installation.profiles.task_images)):
+            raise ValueError
+    except Exception:
+        raise EntryError("pool cutover publication unqualified") from None
+
+
+async def _connected_publication(context: PoolCutoverContext) -> None:
+    async with asyncio.timeout(180):
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=False, timeout=30) as http:
+            await qualify_pool_publication(context, http)
+
+
 @contextmanager
 def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoolReaders]:
     """One qualified native authority for HTTPS and fixed SQL transports.
@@ -183,6 +234,13 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
     """
     if load_pool_cutover_inputs(context.operation) != context:
         raise EntryError("pool cutover context changed before connection")
+    try:
+        asyncio.run(_connected_publication(context))
+    except Exception:
+        raise EntryError("pool cutover publication unqualified") from None
+    # Remote qualification is not permission to use drifted private inputs.
+    if load_pool_cutover_inputs(context.operation) != context:
+        raise EntryError("pool cutover context changed during publication")
     original = context.original
     connection = original.original_inputs.operator_connection
     authority = _private(connection.ca_file, 1024**2)

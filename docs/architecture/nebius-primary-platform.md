@@ -2282,10 +2282,17 @@ readers to the same explicit native API endpoint, CA and short-lived bearer. A
 fresh private kubeconfig embeds only that authority, never ingress credentials,
 ambient contexts, exec plugins or client certificates; it is removed on exit,
 including parent failures. The gateway runtime separately uses its projected
-service-account authority at the fixed in-cluster endpoint. These private inputs
-still require actual protected publication and complete installed writer/inventory
-qualification; parsing a supplied publication is not approval. No operational
-cutover command or admission activation is exposed by this reader context.
+service-account authority at the fixed in-cluster endpoint. The reader context also
+resolves the exact protected GitHub publication before obtaining operator authority:
+successful publication attempt, merged squash identity, current-head Actions-app
+gates, artifact digest and signed runtime bytes must agree. Trust comes from the
+completed manager predecessor, not the supplied pool catalog. Every participant's
+replacement image/signature fields must match those publication bytes while its
+retained environment policy stays unchanged. Private inputs are reloaded after
+the remote read before obtaining operator credentials. Complete installed writer/
+inventory qualification is still required; parsing publication labels is never
+approval. No operational cutover command or admission activation is exposed by
+this reader context.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 
