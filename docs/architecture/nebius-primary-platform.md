@@ -2249,6 +2249,14 @@ accepts only GET on `nodes/stats`, not node proxy or execution authority.
 The connected protected preflight must prove installed kubelet reachability,
 certificate trust and summary authorization before controller retirement.
 
+The standalone platform rollout checks for existing global participant settings
+and retained pool-retirement markers before any mutation and again under its idle
+guard. It refuses to overwrite these with legacy controller configuration or
+direct-writer roles, including a cutover that completes between those checks.
+This fail-closed boundary does not implement the protected successor refresh:
+durable runtime/catalog/token bindings and staged database permissions still must
+be preserved and qualified by that connected path before global activation.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.

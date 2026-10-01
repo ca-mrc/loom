@@ -156,7 +156,7 @@ def test_ordinary_rollout_cannot_strip_global_pool_binding_or_restore_local_writ
     # old standalone renderer. The protected successor owns its recovery.
     kube.objects["deployment", process] = {"spec": {"template": {"spec": {
         "containers": [{"env": [{"name": setting, "value": "incomplete-global-binding"}]}]}}}}
-    with pytest.raises(deploy.DeploymentError, match="pool.*protected"):
+    with pytest.raises(deploy.DeploymentError, match=r"pool.*protected"):
         deploy.preflight(kube, manifest, config, files, config["cluster_id"])
     assert not any(command[0] in {"apply", "patch", "delete", "exec", "create"} for command in kube.commands)
 
@@ -175,7 +175,7 @@ def test_pool_cutover_between_preflight_and_idle_guard_cannot_restore_local_writ
 
     kube = InterleavedPoolCutover(config, files, database=True)
     monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
-    with pytest.raises(deploy.DeploymentError, match="pool.*protected"):
+    with pytest.raises(deploy.DeploymentError, match=r"pool.*protected"):
         deploy.deploy(args, kube=kube)
     assert not any(command[0] in {"apply", "patch", "delete", "create"} for command in kube.commands)
     assert any(command[0] == "exec" and "release" in command for command in kube.commands)

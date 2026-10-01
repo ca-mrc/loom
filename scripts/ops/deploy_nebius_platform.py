@@ -441,6 +441,32 @@ def migration_readiness(kube: Kubectl, namespace: str, expected_head: str | None
     return {"migration_needed": needed}
 
 
+def verify_standalone_pool_boundary(kube: Kubectl, config: dict[str, Any]) -> None:
+    """The legacy standalone renderer cannot retire or overwrite global wiring.
+
+    This is a safety barrier, not the protected pool refresh implementation.
+    Check again under the idle guard: a cutover can complete after preflight.
+    """
+    from loom.nebius_guest_target import guest_target_id
+
+    processes = [(config["namespace"], name) for name in ("loom-service", "loom-control-plane")]
+    processes.append((config["execution_namespace"], "loom-execution-actuator"))
+    guest = guest_target_id(config)
+    if guest is not None:
+        processes.append((config["execution_namespace"], guest + "-actuator"))
+    settings = {"LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON", "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL",
+        "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"}
+    for namespace, name in processes:
+        current = kube.get("deployment", name, namespace)
+        annotations = current.get("metadata", {}).get("annotations", {})
+        if "loom.nebius/pool-retirement-operation" in annotations or any(
+            row.get("name") in settings
+            for container in current.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
+            for row in container.get("env", [])
+        ):
+            raise DeploymentError("pool runtime preservation requires its protected cutover or refresh")
+
+
 def preflight(
     kube: Kubectl,
     manifest: dict[str, Any],
@@ -450,6 +476,7 @@ def preflight(
 ) -> dict[str, Any]:
     verify_cluster_identity(kube, config, expected_cluster_id)
     verify_ingress_mode(kube, config)
+    verify_standalone_pool_boundary(kube, config)
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -777,6 +804,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # A same-candidate ingress cutover may have finished after preflight
             # but before we acquired the shared rollout guard.
             verify_ingress_mode(kube, config)
+            verify_standalone_pool_boundary(kube, config)
             current = kube.get("configmap", "loom-platform-config", ns)
             validate_target_replacement(current, config, retire_target)
             if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
