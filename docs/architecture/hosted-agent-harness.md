@@ -53,7 +53,10 @@ environment it actually needs:
 ## Harness specification
 
 Every hosted harness is a typed `HostedHarnessSpec` in
-`src/loom/hosted_harness.py` ([#2288](https://github.com/qianyi-sun/loom/issues/2288)).
+`src/loom/hosted_harness.py` ([#2295](https://github.com/qianyi-sun/loom/issues/2295), part of
+[#2288](https://github.com/qianyi-sun/loom/issues/2288)). The spec is trusted
+platform configuration; tasks and trial payloads cannot supply a controller,
+entry point, evidence contract or capability.
 Admission, the catalog, verifier topology, the compiler, the controller
 dispatcher and the materializer read the spec, not the agent name. A spec
 declares only harness-owned facts:
@@ -61,16 +64,29 @@ declares only harness-owned facts:
 | Field | Meaning |
 |---|---|
 | `execution_kind` | `response-only` (no task sandbox) or `workspace` (private task sandbox). Private-solution harnesses are `workspace` with `stages_solution`. |
-| `controller_phase` | The frozen `plan.main` phase. Unique per execution kind; `verify-sandbox` is reserved. |
-| `model` | `required`, or `forbidden` for a model-free baseline (`harness_model_forbidden`). |
+| `controller_module`, `controller_phase` | The trusted entry point frozen into `plan.main`: `python -m <module> <phase>`. Response-only harnesses use `loom.service_execution_task`; workspace harnesses use `loom.service_execution_sandbox_task`, which also owns the fixed `verify-sandbox` phase. Phases are unique per execution kind. |
+| `controller_image` | `service-runner` (the deployed runner image frozen as the plan's task image) or `harness-controller` (the deployment's digest-pinned controller image, or a pinned version's). A missing controller binding fails closed at submission (`terminus_controller_unavailable`) and at compilation. |
+| `model`, `gateway_protocol` | `required` with exactly one Gateway wire format (today `openai-chat-completions`), or `forbidden` with none for a model-free baseline (`harness_model_forbidden`). |
+| `readiness` | Hosted support state. An `unavailable` harness stays in the product catalog but is not natively runnable. |
 | `stages_solution` | Private-solution input policy. Allowed only when `model` is `forbidden`. |
 | `features` | Behaviour only some harnesses implement: `agent_continuation`, `pinned_versions`, `task_resource_requests`. |
-| `required_driver_capabilities` | Sandbox-driver operations the controller phase uses. If they exceed `NATIVE_SANDBOX_DRIVER_CAPABILITIES`, the harness is not natively runnable and admission fails closed. |
+| `required_driver_capabilities` | Sandbox-driver operations the controller phase uses. If they exceed `NATIVE_SANDBOX_DRIVER_CAPABILITIES`, the harness is not natively runnable and admission fails closed (`direct_completion_required`). |
 | `native_outputs` | Harness-owned evidence files the plan declares (for example Harbor's trajectory). Common outputs are the planner's. |
 | `trace_format` | How the materializer validates the trace and usage (`completion-calls`, `terminus`, `oracle`). |
 
 `NATIVE_EXECUTION_AGENT_NAMES` is derived from the registry, so the catalog
-and admission cannot disagree. Unknown names have no spec and are rejected.
+and admission cannot disagree. Unknown names have no spec and are rejected;
+they never reach the response-only compiler or a controller as a fallback.
+
+The spec does not own or select network policy, shared versus separate
+verification, execution or isolation class, Kubernetes topology, resources or
+lease lifecycle. Those remain platform policy.
+
+`tests/unit/test_hosted_harness_plan_parity.py` pins the canonical plans for
+direct-completion, `litellm`, runner-image tasks, and Terminus-2 and Oracle in
+shared, separate and guest shapes. The fixture was generated from the
+pre-migration code. Regenerate it only for an intentional, documented plan
+change.
 
 Two historical name checks remain on purpose. The task-only topology
 projection (callers without a trial) keeps its stored `terminus-2`
@@ -103,10 +119,14 @@ rejection code remains `direct_completion_required`; do not interpret that code
 as a fallback or rewrite. Hosted APIs may reject the unsupported selection
 earlier with a user-facing availability message.
 
-`_compile_private_sandbox_plan` is the one common planner for every workspace
-harness. It takes only the spec's `controller_phase` and `native_outputs`; the
-sandboxes, identities, resources, verifier topology, egress, deferred-plan
-contract and common outputs are the platform's. To add a workspace harness:
+The private-sandbox compiler is still `_compile_terminus_plan`, shared by
+Terminus-2 and Oracle. It takes the controller binding and native outputs from
+the spec. Extracting its platform-owned sandbox, verifier, guest and output
+construction into a harness-neutral planner is
+[#2296](https://github.com/qianyi-sun/loom/issues/2296). Until then, keep it as
+the single private-sandbox compiler.
+
+To add a workspace harness:
 
 1. Add its `HostedHarnessSpec` to the registry.
 2. Implement its phase in `service_execution_sandbox_task.run_agent` and add

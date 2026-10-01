@@ -48,6 +48,7 @@ from loom.execution_runtime_contract import (
 )
 from loom.hosted_harness import (
     NATIVE_EXECUTION_AGENT_NAMES,
+    SANDBOX_CONTROLLER_MODULE,
     HostedHarnessSpec,
     harnesses_supporting,
     hosted_harness,
@@ -95,15 +96,14 @@ def resolve_runner_task_image(task: TaskConfig, task_image_ref: str) -> TaskConf
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GLOB_MAGIC = re.compile(r"[*?[]")
-_SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
 MAX_INPUT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_INPUT_FILES = 10_000
 MAX_INPUT_BYTES = 10 * 1024**3
 
 
-def _sandbox_phase_argv(mode: str) -> tuple[str, ...]:
+def _sandbox_phase_argv(mode: str, module: str = SANDBOX_CONTROLLER_MODULE) -> tuple[str, ...]:
     return (
-        "python", "-I", "-m", _SANDBOX_CONTROLLER_MODULE,
+        "python", "-I", "-m", module,
         mode, "--workspace", "/workspace",
     )
 
@@ -630,7 +630,7 @@ def compile_service_execution_plan(
         }
     )
     if spec.workspace:
-        return _compile_private_sandbox_plan(
+        return _compile_terminus_plan(
             spec=spec, task=task, trial=trial, task_revision_sha256=task_revision_sha256,
             profile=profile, binding=binding, command_identity=command_identity,
             output_paths=output_paths,
@@ -732,7 +732,7 @@ def compile_service_execution_plan(
         output_declarations=output_declarations,
         main=ProcessPhaseV1(
             role="agent",
-            argv=("python", "-m", "loom.service_execution_task", spec.controller_phase),
+            argv=("python", "-m", spec.controller_module, spec.controller_phase),
             working_directory="/workspace",
             timeout_seconds=round(
                 (trial.override_agent_timeout_sec or task.agent.timeout_sec)
@@ -750,6 +750,14 @@ def compile_service_execution_plan(
 def controller_image_for_trial(
     profile: ServiceExecutionRuntimeProfileV1, trial: TrialConfig,
 ) -> str | None:
+    """The trusted controller image the harness spec binds (#2295).
+
+    None fails closed: an unknown harness, a harness that runs in the service
+    runner image, a missing deployment controller or an unpinned version.
+    """
+    spec = hosted_harness(trial.agent_name)
+    if spec is None or spec.controller_image != "harness-controller":
+        return None
     if trial.agent_version is None:
         return profile.agent_image_ref
     for binding in profile.agent_runtime_bindings:
@@ -838,7 +846,7 @@ def runtime_profile_rejections(
         or controller_image_for_trial(profile, trial) is None
     ):
         return ("agent_version_not_in_runtime_profile",)
-    if spec is None or not spec.workspace:
+    if spec is None or spec.controller_image == "service-runner":
         # A pinned image must be the deployed runner image; a task that leaves
         # it unset runs in whichever runner image the plan freezes (#2054).
         return (() if uses_runner_task_image(task, trial)
@@ -867,18 +875,18 @@ def _plan_admissions(
     ))
 
 
-def _compile_private_sandbox_plan(
+def _compile_terminus_plan(
     *, spec: HostedHarnessSpec, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
     profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
     command_identity: str, output_paths: list[str],
     task_image_materialization_id: UUID | None = None,
     resource_requests: ExecutionResourceRequestsV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
-    """The common private-sandbox planner for every workspace harness (#2288).
+    """The private-sandbox compiler shared by every workspace harness.
 
-    The platform owns the task/verifier sandboxes, identities, resources,
-    verifier topology, egress and common outputs. The harness spec supplies
-    only its controller phase and native outputs.
+    The harness spec supplies its controller binding and native outputs; the
+    remaining sandbox, verifier and output construction is extracted into a
+    harness-neutral planner by #2296.
     """
     env = task.environment
     agent_image = controller_image_for_trial(profile, trial)
@@ -936,7 +944,7 @@ def _compile_private_sandbox_plan(
             role=role,
             # Keep Python imports and dependency configuration discovery outside
             # user-controlled task inputs, including dependencies that inspect cwd.
-            argv=_sandbox_phase_argv(mode),
+            argv=_sandbox_phase_argv(mode, spec.controller_module),
             working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
         )
     outputs = [RuntimeOutputDeclarationV1(

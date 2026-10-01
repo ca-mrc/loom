@@ -26,6 +26,18 @@ DriverCapability = Literal["exec", "exec_streaming", "upload", "download"]
 TraceFormat = Literal["completion-calls", "terminus", "oracle"]
 # Behaviour that only some harnesses implement, independent of topology.
 HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource_requests"]
+# Which trusted image runs the controller phase. `service-runner`: the
+# deployed runner image frozen as the plan's task image. `harness-controller`:
+# the deployment's digest-pinned controller image (or a pinned version's).
+ControllerImage = Literal["service-runner", "harness-controller"]
+# The Gateway wire format the harness speaks; None for a model-free harness.
+GatewayProtocol = Literal["openai-chat-completions"]
+Readiness = Literal["ready", "unavailable"]
+
+# Trusted controller entry points. The sandbox module also owns the fixed
+# `verify-sandbox` phase, so every workspace harness runs through it.
+RESPONSE_RUNNER_MODULE = "loom.service_execution_task"
+SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
 
 # Operations `ServiceSandboxDriver` implements today. A harness that needs
 # more (e.g. `exec_streaming` for launcher agents) is not natively runnable.
@@ -48,12 +60,17 @@ class NativeOutput:
 class HostedHarnessSpec:
     name: str
     execution_kind: ExecutionKind
-    # `plan.main` phase: `loom.service_execution_task <phase>` for response-only,
-    # `loom.service_execution_sandbox_task <phase>` for workspace harnesses.
+    # Trusted controller binding: `python -m <controller_module> <controller_phase>`
+    # in `controller_image`. Tasks and trials can never supply these.
+    controller_module: str
     controller_phase: str
+    controller_image: ControllerImage
     model: ModelUse
+    gateway_protocol: GatewayProtocol | None
     trace_format: TraceFormat
     aliases: tuple[str, ...] = ()
+    # Hosted support state, independent of product catalog support.
+    readiness: Readiness = "ready"
     # Private-solution input policy: stage `solution/**` into this harness's
     # own task sandbox only, and remove it before the snapshot and grading.
     stages_solution: bool = False
@@ -63,6 +80,14 @@ class HostedHarnessSpec:
     names: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
+        expected = (
+            (RESPONSE_RUNNER_MODULE, "service-runner") if self.execution_kind == "response-only"
+            else (SANDBOX_CONTROLLER_MODULE, "harness-controller")
+        )
+        if (self.controller_module, self.controller_image) != expected:
+            raise ValueError(f"{self.name}: {self.execution_kind} harnesses bind {expected}")
+        if (self.model == "required") != (self.gateway_protocol is not None):
+            raise ValueError(f"{self.name}: a model-backed harness declares exactly one Gateway protocol")
         if self.execution_kind == "response-only" and (
             self.stages_solution or self.required_driver_capabilities or self.native_outputs
         ):
@@ -79,7 +104,10 @@ class HostedHarnessSpec:
 
     @property
     def natively_runnable(self) -> bool:
-        return self.required_driver_capabilities <= NATIVE_SANDBOX_DRIVER_CAPABILITIES
+        return (
+            self.readiness == "ready"
+            and self.required_driver_capabilities <= NATIVE_SANDBOX_DRIVER_CAPABILITIES
+        )
 
     def supports(self, feature: HarnessFeature) -> bool:
         return feature in self.features
@@ -91,16 +119,23 @@ DIRECT_COMPLETION = HostedHarnessSpec(
     name="direct-completion",
     aliases=("litellm",),
     execution_kind="response-only",
+    controller_module=RESPONSE_RUNNER_MODULE,
     controller_phase="direct-completion",
+    controller_image="service-runner",
     model="required",
+    gateway_protocol="openai-chat-completions",
     trace_format="completion-calls",
 )
 
 TERMINUS_2 = HostedHarnessSpec(
     name="terminus-2",
     execution_kind="workspace",
+    controller_module=SANDBOX_CONTROLLER_MODULE,
     controller_phase="terminus-2",
+    controller_image="harness-controller",
     model="required",
+    # Harbor calls the Gateway's OpenAI facade through LiteLLM.
+    gateway_protocol="openai-chat-completions",
     trace_format="terminus",
     features=frozenset({"agent_continuation", "pinned_versions", "task_resource_requests"}),
     required_driver_capabilities=_SANDBOX_DRIVER,
@@ -113,8 +148,11 @@ TERMINUS_2 = HostedHarnessSpec(
 ORACLE = HostedHarnessSpec(
     name="oracle",
     execution_kind="workspace",
+    controller_module=SANDBOX_CONTROLLER_MODULE,
     controller_phase="oracle",
+    controller_image="harness-controller",
     model="forbidden",
+    gateway_protocol=None,
     trace_format="oracle",
     stages_solution=True,
     required_driver_capabilities=_SANDBOX_DRIVER,
@@ -169,13 +207,18 @@ __all__ = [
     "NATIVE_EXECUTION_AGENT_NAMES",
     "NATIVE_SANDBOX_DRIVER_CAPABILITIES",
     "ORACLE",
+    "RESPONSE_RUNNER_MODULE",
+    "SANDBOX_CONTROLLER_MODULE",
     "TERMINUS_2",
+    "ControllerImage",
     "DriverCapability",
     "ExecutionKind",
+    "GatewayProtocol",
     "HarnessFeature",
     "HostedHarnessSpec",
     "ModelUse",
     "NativeOutput",
+    "Readiness",
     "TraceFormat",
     "harnesses_supporting",
     "hosted_harness",
