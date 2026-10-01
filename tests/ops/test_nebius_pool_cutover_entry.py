@@ -221,6 +221,127 @@ def save_private(metadata, payload):
     metadata["inputs_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.fixture
+def connected_cutover_entry(private_cutover, monkeypatch):
+    """The already-qualified reader transport is doubled, not the new assembly."""
+    import ssl
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+
+    context = entry.load_pool_cutover_inputs(private_cutover[0])
+    migration = context.request.fencing.retirement.migration
+    observed = {"probes": [], "guard_calls": [], "guard_status": "held", "failure": None, "closed": False}
+    def guard(target, action):
+        assert target in migration.guards and action in {"acquire", "observe"}
+        observed["guard_calls"].append((target.participant_id, action))
+        return {"status": observed["guard_status"]}
+    def history_binding(actual, manager):
+        assert actual == migration and manager == context.request.manager
+    readers = entry.ConnectedPoolReaders(
+        base=SimpleNamespace(api_server=context.original.original_inputs.operator_connection.endpoint),
+        ssl_context=ssl.create_default_context(), token="entry-test-operator-token",
+        guards=SimpleNamespace(request=migration, guard=guard),
+        history=SimpleNamespace(qualify_binding=history_binding))
+    @contextmanager
+    def connect(actual):
+        assert actual == context
+        try:
+            yield readers
+        finally:
+            observed["closed"] = True
+    monkeypatch.setattr(entry, "connected_pool_readers", connect)
+    def probe(name, expected):
+        def qualify(actual, reader):
+            assert actual == context and reader is expected
+            observed["probes"].append(name)
+            if observed["failure"] == name:
+                raise entry.EntryError("private-probe-marker")
+        return qualify
+    monkeypatch.setattr(entry, "qualify_pool_runtime_databases", probe("participants", readers.guards))
+    monkeypatch.setattr(entry, "qualify_pool_manager_database", probe("manager", readers.history))
+    monkeypatch.setattr(entry, "qualify_pool_provider", probe("provider", readers.base))
+    return context, readers, observed
+
+
+@pytest.mark.parametrize("damage", [None, "participants", "manager", "provider", "private_inputs"])
+def test_concrete_cutover_checks_requalify_the_bound_readers(connected_cutover_entry, damage):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+
+    context, _, observed = connected_cutover_entry
+    with entry.connected_pool_api(context) as api:
+        assert api.state_dir == Path(context.operation["state_dir"])
+        assert api.anchor_dir == Path(context.operation["anchor_dir"])
+        observed["failure"] = damage
+        if damage == "private_inputs":
+            path = Path(context.operation["inputs_path"])
+            path.write_bytes(path.read_bytes() + b"\n")
+        if damage:
+            with pytest.raises(entry.EntryError) as error:
+                api.checks.preflight(context.request)
+            assert "private-probe-marker" not in str(error.value)
+        else:
+            api.checks.preflight(context.request)
+            assert observed["probes"] == ["participants", "manager", "provider"]
+            api.checks.qualify_quiescence()
+            assert observed["probes"] == ["participants", "manager", "provider"] * 2
+        assert not Path(context.operation["state_dir"]).exists()
+        assert observed["guard_calls"] == []
+    assert observed["closed"]
+    assert all(transport.client.is_closed for transport in (api, api.retirement, api.fencing, api.migration.registration))
+
+
+@pytest.mark.parametrize("failure", [None, "before", "after"])
+def test_connected_registration_stages_once_and_does_not_confuse_creation_with_success(connected_cutover_entry, failure):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    context, _, observed = connected_cutover_entry
+    state = Path(context.operation["state_dir"]) / "writers" / "registration"
+    fake = PhaseAPI(context.request.fencing.retirement.migration.registration.binding)
+    fake.failure = failure
+    with entry.connected_pool_api(context) as api:
+        # Only external Kubernetes reads/writes are doubled. The fixed stage,
+        # journal, uncertain-create recovery and registration proof are real.
+        registration = api.migration.registration
+        for name in ("verify_identity", "get_resource", "default_resource", "create_resource"):
+            setattr(registration, name, getattr(fake, name))
+        if failure == "before":
+            for _ in range(2):
+                with pytest.raises(ValueError):
+                    api.migration.register(state)
+            assert len(fake.creates) == 1
+        else:
+            assert api.migration.register(state) is None
+            assert api.migration.register(state) is None
+            assert len(fake.creates) == 2
+            record = json.loads((state / "stage.json").read_text())
+            assert record["phase"] == "pool-registration"
+            assert {row["desired"]["kind"] for row in record["resources"].values()} == {"ConfigMap", "Job"}
+            assert all(row["status"] == "created" for row in record["resources"].values())
+        assert observed["guard_calls"] and all(action == "observe" for _, action in observed["guard_calls"])
+
+
+@pytest.mark.parametrize("damage", ["path", "guard_open", "private_inputs"])
+def test_connected_registration_refuses_unbound_or_open_state_without_writes(connected_cutover_entry, damage):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+
+    context, _, observed = connected_cutover_entry
+    state = Path(context.operation["state_dir"]) / "writers" / "registration"
+    with entry.connected_pool_api(context) as api:
+        if damage == "path":
+            state = state.parent / "foreign-registration"
+        elif damage == "guard_open":
+            observed["guard_status"] = "open"
+        else:
+            path = Path(context.operation["inputs_path"])
+            path.write_bytes(path.read_bytes() + b"\n")
+        with pytest.raises(entry.EntryError):
+            api.migration.register(state)
+        assert not state.exists()
+
+
 def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private_cutover):
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
 
