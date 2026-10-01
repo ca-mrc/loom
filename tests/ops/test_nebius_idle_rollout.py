@@ -178,8 +178,6 @@ def test_recovery_rejects_evidence_binding_mismatch_before_deploy(monkeypatch, t
     data = {"environment.json": json.dumps(config), "profile.json": json.dumps({"candidate_sha": "a" * 40}),
             "keyring.json": "{}"}
     monkeypatch.setattr(rollout, "Kubectl", lambda path: SimpleNamespace(get=lambda *args: {"data": data}))
-    monkeypatch.setattr(rollout, "build_platform", lambda *args, **kwargs: {})
-    monkeypatch.setattr(rollout, "write_platform", lambda *args, **kwargs: None)
     monkeypatch.setattr(rollout, "deploy", lambda *args, **kwargs: pytest.fail("must not deploy mismatched recovery"))
     args = SimpleNamespace(kubeconfig=tmp_path / "unused", namespace=config["namespace"],
                            publication_dir=tmp_path, candidate="a" * 40, evidence_dir=tmp_path,
@@ -276,9 +274,8 @@ def wrapper_inputs(monkeypatch, tmp_path, *, current="a" * 40, record=None, gith
     data = {"environment.json": json.dumps(config), "profile.json": json.dumps({"candidate_sha": current}),
             "keyring.json": "{}"}
     monkeypatch.setattr(rollout, "Kubectl", lambda path: SimpleNamespace(get=lambda *args: {"data": data}))
-    monkeypatch.setattr(rollout, "build_platform", lambda *args, **kwargs: {})
-    monkeypatch.setattr(rollout, "write_platform", lambda *args, **kwargs: None)
     monkeypatch.setattr(rollout, "candidate_schema_head", lambda sha: "original_head")
+    monkeypatch.setattr(rollout, "render_candidate", lambda *args: None)
     args = SimpleNamespace(kubeconfig=tmp_path / "unused", namespace=config["namespace"],
                            publication_dir=tmp_path, candidate="a" * 40, evidence_dir=tmp_path, github=github)
     if record is not None:

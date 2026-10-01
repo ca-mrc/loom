@@ -29,6 +29,7 @@ from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
+from loom.hosted_harness import HostedHarnessSpec, hosted_harness, workspace_controller_phases
 from loom.models.capabilities import Capabilities
 from loom.models.networking import hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
@@ -160,6 +161,17 @@ async def _execution_identity(gateway: str) -> tuple[UUID, UUID]:
     return UUID(envelope["trial_id"]), UUID(envelope["team_id"])
 
 
+# Workspace harness phases this controller implements (see `run_agent`).
+CONTROLLER_PHASES = frozenset({"terminus-2", "oracle"})
+
+
+def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
+    spec = hosted_harness(trial.agent_name)
+    if spec is None or not spec.workspace or spec.controller_phase not in CONTROLLER_PHASES:
+        raise ServiceExecutionTaskError("selected agent has no workspace controller phase")
+    return spec
+
+
 class AgentTimeoutFinalizedError(TimeoutError):
     """Agent deadline reached; quiescence and verifier handoff completed safely."""
 
@@ -180,7 +192,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     services_retained = False
     driver_started = False
     lifecycle = task.environment.service_lifecycle
-    oracle = trial.agent_name == "oracle"
+    spec = _workspace_spec(trial)
     solution_staged = False
     timed_out = False
     finalizing = False
@@ -207,11 +219,11 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                 await driver.start()
                 driver_started = True
                 # Only Oracle's own sandbox receives the reference solution.
-                solution_staged = oracle
+                solution_staged = spec.stages_solution
                 await materialize_workspace(
                     driver=driver, task_dir=workspace, dst=task.environment.workdir, policy=_POLICY,
                     excluded_paths=_agent_input_exclusions(task),
-                    trusted_private_paths=ORACLE_SOLUTION_PATHS if oracle else (),
+                    trusted_private_paths=ORACLE_SOLUTION_PATHS if spec.stages_solution else (),
                 )
                 if task.environment.preserve_acls:
                     from loom.trial.workspace_acls import require_acl_support
@@ -237,17 +249,20 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     workspace, str(task.steps[0].instruction_file),
                 ).read_text()
                 agent_entered = True
-                if oracle:
+                # Explicit dispatch per harness phase; unknown phases fail closed.
+                if spec.controller_phase == "oracle":
                     await run_oracle(
                         driver=driver, task_dir=workspace, workspace=output, task_config=task,
                         trial_config=trial, trial_id=trial_id, deadline=deadline,
                     )
-                else:
+                elif spec.controller_phase == "terminus-2":
                     await run_terminus2(
                         driver=driver, workspace=output, task_config=task, trial_config=trial,
                         trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
                         deadline=deadline,
                     )
+                else:
+                    raise ServiceExecutionTaskError("no controller implements this harness phase")
                 handoff_allowed = True
         except (TimeoutError, asyncio.CancelledError):
             if deadline is None or not deadline.reached or not agent_entered:
@@ -267,7 +282,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                     if agent_entered:
                         try:
                             trace = output / "trajectory.jsonl"
-                            if oracle:
+                            if spec.trace_format == "oracle":
                                 _write_json_atomic(output / "usage.json", oracle_usage())
                             elif trace.exists() and trial_id is not None:
                                 events = parse_terminus_events(
@@ -540,7 +555,7 @@ async def _run_verifier(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("terminus-2", "oracle", "verify-sandbox"))
+    parser.add_argument("phase", choices=(*workspace_controller_phases(), "verify-sandbox"))
     parser.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args()
     workspace = args.workspace
@@ -552,7 +567,7 @@ def main() -> None:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
     agent_phase = args.phase != "verify-sandbox"
-    if agent_phase and args.phase != trial.agent_name:
+    if agent_phase and args.phase != _workspace_spec(trial).controller_phase:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
     phase = run_agent if agent_phase else run_verifier
     try:

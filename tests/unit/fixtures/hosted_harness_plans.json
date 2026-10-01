@@ -1,0 +1,1537 @@
+{
+  "direct-completion": {
+    "agent_image_ref": null,
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:4602ab35ab6d86cacaa270fd2b22a545365e1dc5116beaf55147cdf723200cc7",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-m",
+        "loom.service_execution_task",
+        "direct-completion"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_INSTRUCTION_FILE": "instruction.md",
+        "LOOM_TASK_MODEL": "openai/gpt-5",
+        "LOOM_TASK_REQUEST_PARAMS_JSON": "{\"temperature\":0.2}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/workspace"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": true,
+        "source_path": "answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": true,
+        "source_path": ".loom/verifier/output.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "/bin/sh",
+        "verifier/check.sh"
+      ],
+      "environment": {
+        "LOOM_AGENT_OUTPUT": "/workspace/answer.txt",
+        "LOOM_TASK_DIR": "/workspace",
+        "LOOM_VERIFIER_OUTPUT": "/workspace/.loom/verifier/output.json"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/workspace"
+    },
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "direct-completion-runner-image": {
+    "agent_image_ref": null,
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:4602ab35ab6d86cacaa270fd2b22a545365e1dc5116beaf55147cdf723200cc7",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-m",
+        "loom.service_execution_task",
+        "direct-completion"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_INSTRUCTION_FILE": "instruction.md",
+        "LOOM_TASK_MODEL": "openai/gpt-5",
+        "LOOM_TASK_REQUEST_PARAMS_JSON": "{\"temperature\":0.2}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/workspace"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": true,
+        "source_path": "answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": true,
+        "source_path": ".loom/verifier/output.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "/bin/sh",
+        "verifier/check.sh"
+      ],
+      "environment": {
+        "LOOM_AGENT_OUTPUT": "/workspace/answer.txt",
+        "LOOM_TASK_DIR": "/workspace",
+        "LOOM_VERIFIER_OUTPUT": "/workspace/.loom/verifier/output.json"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/workspace"
+    },
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "litellm": {
+    "agent_image_ref": null,
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:5b6dfd9198ec3c9f8e2db293e3c89ab91e3c4b7161a46a7c6c5a61ae6b526da2",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-m",
+        "loom.service_execution_task",
+        "direct-completion"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_INSTRUCTION_FILE": "instruction.md",
+        "LOOM_TASK_MODEL": "openai/gpt-5",
+        "LOOM_TASK_REQUEST_PARAMS_JSON": "{\"temperature\":0.2}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/workspace"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": true,
+        "source_path": "answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": true,
+        "source_path": ".loom/verifier/output.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "/bin/sh",
+        "verifier/check.sh"
+      ],
+      "environment": {
+        "LOOM_AGENT_OUTPUT": "/workspace/answer.txt",
+        "LOOM_TASK_DIR": "/workspace",
+        "LOOM_VERIFIER_OUTPUT": "/workspace/.loom/verifier/output.json"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/workspace"
+    },
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "oracle-guest": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:ff1467b4dd1df0686967faf60bebc571046d931c754f8ae1a526b423a6523139",
+    "composition": "init_payload",
+    "controller_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 3072,
+      "memory_mib": 1024
+    },
+    "execution_class_id": "linux-amd64-cpu-guest-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "oracle",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"agent_name\":\"oracle\",\"agent_model\":null}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": false,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 1024,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "guest_execution": {
+          "capabilities": [
+            "nested_docker"
+          ],
+          "runtime": "qemu-tcg-v1",
+          "schema_version": "loom.guest-execution.v1"
+        },
+        "identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 75,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      },
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/verifier-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "guest_execution": {
+          "capabilities": [
+            "nested_docker"
+          ],
+          "runtime": "qemu-tcg-v1",
+          "schema_version": "loom.guest-execution.v1"
+        },
+        "identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/verifier-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "verifier-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/verifier-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 75,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "verify-sandbox",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"agent_name\":\"oracle\",\"agent_model\":null}"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/app"
+    },
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "oracle-separate": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:516b9d2efcd930d61a834541ee97a2bc433b95bb37773b51941ff92d8c8edc34",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "oracle",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"agent_name\":\"oracle\",\"agent_model\":null}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": false,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "identity": null,
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": null,
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "separate_execution",
+    "workspace_mib": 2048
+  },
+  "oracle-shared": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:516b9d2efcd930d61a834541ee97a2bc433b95bb37773b51941ff92d8c8edc34",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": true,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "oracle",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"verifier_env_mode\":\"shared\",\"agent_name\":\"oracle\",\"agent_model\":null}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": true,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "identity": null,
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "verify-sandbox",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"verifier_env_mode\":\"shared\",\"agent_name\":\"oracle\",\"agent_model\":null}"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/app"
+    },
+    "verifier_after_agent_timeout": true,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "terminus-2-guest": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:b68f063cf6138d7a994c7da915f8892f7c8a24165ecceed37fc2bd6d358210cf",
+    "composition": "init_payload",
+    "controller_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 3072,
+      "memory_mib": 1024
+    },
+    "execution_class_id": "linux-amd64-cpu-guest-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "terminus-2",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"request_params\":{\"temperature\":0.2},\"agent_name\":\"terminus-2\",\"agent_model\":{\"provider\":\"openai\",\"name\":\"gpt-5\"}}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/trajectory.json",
+        "required": true,
+        "source_path": ".loom/agent/harbor/trajectory.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/recording.cast",
+        "required": false,
+        "source_path": ".loom/agent/harbor/recording.cast"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": false,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 1024,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "guest_execution": {
+          "capabilities": [
+            "nested_docker"
+          ],
+          "runtime": "qemu-tcg-v1",
+          "schema_version": "loom.guest-execution.v1"
+        },
+        "identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 75,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      },
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/verifier-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "guest_execution": {
+          "capabilities": [
+            "nested_docker"
+          ],
+          "runtime": "qemu-tcg-v1",
+          "schema_version": "loom.guest-execution.v1"
+        },
+        "identity": {
+          "home": "/root",
+          "run_as_group": 0,
+          "run_as_user": 0
+        },
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/verifier-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "verifier-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/verifier-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 75,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "verify-sandbox",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"request_params\":{\"temperature\":0.2},\"agent_name\":\"terminus-2\",\"agent_model\":{\"provider\":\"openai\",\"name\":\"gpt-5\"}}"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/app"
+    },
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  },
+  "terminus-2-separate": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:d40367c0d21255d22d50def454eacf1ea4d5c4aaee4e31d8f6f8ceb3951128c3",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": false,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "terminus-2",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"request_params\":{\"temperature\":0.2},\"agent_name\":\"terminus-2\",\"agent_model\":{\"provider\":\"openai\",\"name\":\"gpt-5\"}}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/trajectory.json",
+        "required": true,
+        "source_path": ".loom/agent/harbor/trajectory.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/recording.cast",
+        "required": false,
+        "source_path": ".loom/agent/harbor/recording.cast"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": false,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "identity": null,
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": null,
+    "verifier_after_agent_timeout": false,
+    "verifier_execution": "separate_execution",
+    "workspace_mib": 2048
+  },
+  "terminus-2-shared": {
+    "agent_image_ref": "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "candidate_sha": "1111111111111111111111111111111111111111",
+    "command_identity_sha256": "sha256:d40367c0d21255d22d50def454eacf1ea4d5c4aaee4e31d8f6f8ceb3951128c3",
+    "composition": "init_payload",
+    "controller_resources": null,
+    "execution_class_id": "linux-amd64-cpu-pod-v1",
+    "execution_role": "attempt",
+    "fs_group": 65532,
+    "image_admission": [
+      "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry.example/worker@sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "in_place_verifier": true,
+    "main": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "terminus-2",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"verifier_env_mode\":\"shared\",\"request_params\":{\"temperature\":0.2},\"agent_name\":\"terminus-2\",\"agent_model\":{\"provider\":\"openai\",\"name\":\"gpt-5\"}}"
+      },
+      "role": "agent",
+      "timeout_seconds": 1800,
+      "working_directory": "/app"
+    },
+    "max_artifact_bytes": 1073741824,
+    "max_log_bytes_per_stream": 10485760,
+    "node_resource_allocation": null,
+    "output_declarations": [
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/answer.txt",
+        "required": false,
+        "source_path": ".loom/collected/answer.txt"
+      },
+      {
+        "kind": "trajectory",
+        "relative_path": "trajectory/events.jsonl",
+        "required": true,
+        "source_path": ".loom/agent/trajectory.jsonl"
+      },
+      {
+        "kind": "usage",
+        "relative_path": "accounting/usage.json",
+        "required": true,
+        "source_path": ".loom/agent/usage.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "diagnostics/agent-exception.json",
+        "required": false,
+        "source_path": ".loom/agent/exception.json"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "diagnostics/verifier-exception.json",
+        "required": false,
+        "source_path": ".loom/verifier/exception.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/trajectory.json",
+        "required": true,
+        "source_path": ".loom/agent/harbor/trajectory.json"
+      },
+      {
+        "kind": "agent_native",
+        "relative_path": "artifacts/harbor/recording.cast",
+        "required": false,
+        "source_path": ".loom/agent/harbor/recording.cast"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/workspace.tar",
+        "required": true,
+        "source_path": ".loom/workspace.tar"
+      },
+      {
+        "kind": "verifier",
+        "relative_path": "verifier/output.json",
+        "required": true,
+        "source_path": ".loom/verifier/output.json"
+      },
+      {
+        "kind": "task_artifact",
+        "relative_path": "artifacts/verifier/ctrf.json",
+        "required": false,
+        "source_path": ".loom/verifier/ctrf.json"
+      }
+    ],
+    "resource_requests": null,
+    "run_as_group": 65532,
+    "run_as_user": 65532,
+    "runtime_binary_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtime_volume_mib": 32,
+    "schema_version": "loom.execution-runtime-plan.v1",
+    "setup": [],
+    "sidecars": [
+      {
+        "argv": [
+          "/loom/bin/loom-sandbox-runtime",
+          "--socket",
+          "/loom/sandboxes/task-sandbox/sandbox.sock",
+          "--exec-timeout-seconds",
+          "1800"
+        ],
+        "depends_on": [],
+        "environment": {},
+        "identity": null,
+        "image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "private_sandbox": true,
+        "readiness_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        },
+        "resources": {
+          "cpu_millis": 1000,
+          "ephemeral_storage_mib": 2048,
+          "memory_mib": 1024
+        },
+        "role_name": "task-sandbox",
+        "startup_probe": {
+          "argv": [
+            "/loom/bin/loom-sandbox-runtime",
+            "--check-socket",
+            "/loom/sandboxes/task-sandbox/sandbox.sock"
+          ],
+          "failure_threshold": 30,
+          "kind": "exec",
+          "path": null,
+          "period_seconds": 2,
+          "port": null,
+          "timeout_seconds": 2
+        }
+      }
+    ],
+    "task_egress": null,
+    "task_image_materialization_id": null,
+    "task_image_ref": "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_input": {
+      "file_count": 3,
+      "manifest_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "schema_version": "loom.runtime-task-input.v1",
+      "total_bytes": 4096
+    },
+    "task_resources": {
+      "cpu_millis": 1000,
+      "ephemeral_storage_mib": 2048,
+      "memory_mib": 1024
+    },
+    "task_revision_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "termination_grace_seconds": 30,
+    "verifier": {
+      "argv": [
+        "python",
+        "-I",
+        "-m",
+        "loom.service_execution_sandbox_task",
+        "verify-sandbox",
+        "--workspace",
+        "/workspace"
+      ],
+      "environment": {
+        "LOOM_TASK_ARTIFACTS_JSON": "[\"answer.txt\"]",
+        "LOOM_TASK_TRIAL_JSON": "{\"verifier_env_mode\":\"shared\",\"request_params\":{\"temperature\":0.2},\"agent_name\":\"terminus-2\",\"agent_model\":{\"provider\":\"openai\",\"name\":\"gpt-5\"}}"
+      },
+      "role": "verifier",
+      "timeout_seconds": 300,
+      "working_directory": "/app"
+    },
+    "verifier_after_agent_timeout": true,
+    "verifier_execution": "in_attempt",
+    "workspace_mib": 2048
+  }
+}

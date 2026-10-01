@@ -71,7 +71,7 @@ def test_oracle_with_model_fields_is_rejected() -> None:
 
     for trial in (with_model, with_params):
         reasons = automatic_service_execution_rejections(task, trial, source_provenance=_provenance())
-        assert "oracle_model_forbidden" in reasons
+        assert "harness_model_forbidden" in reasons
         assert "api_model_required" not in reasons
 
 
