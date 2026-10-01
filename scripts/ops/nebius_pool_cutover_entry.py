@@ -1,0 +1,219 @@
+"""Private cutover inputs and bound readers; no operational command or activation.
+
+The protected installer must still supply installed inventory/publication/backend
+qualification, activation, rollback and successor-refresh completion. This module
+connects completed history to the existing database readers without importing an
+ambient kubeconfig or replaying an old installation. No live writes occur here.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import re
+import ssl
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Annotated, Any, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
+from scripts.ops.nebius_management_prerequisites import HTTPSManagementPrerequisites
+from scripts.ops.nebius_management_refresh_predecessor import (
+    CompletedRefresh,
+    CompletedUpgrade,
+    RefreshPredecessorV1,
+    UpgradePredecessorV1,
+    load_completed_refresh,
+    load_completed_upgrade,
+)
+from scripts.ops.nebius_pool_cutover import PoolCutoverRequest, cutover_documents
+from scripts.ops.nebius_pool_material import machine_documents
+from scripts.ops.nebius_pool_migration import PoolGuardTarget, PoolMigrationRequest
+from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_origin_history import (
+    KubectlPoolHistoryAPI,
+    derive_management_history_target,
+)
+from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
+from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
+from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
+
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
+from loom_service.environment_management.candidates import ProtectedPublication, _json
+from loom_service.pool_management.installation import PoolInstallation
+
+
+class PoolCutoverPrivateInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    schema_version: Literal["loom.nebius-pool-cutover-private-inputs.v1"]
+    original_upgrade: UpgradePredecessorV1
+    predecessor: Annotated[UpgradePredecessorV1 | RefreshPredecessorV1, Field(discriminator="kind")]
+    installation: PoolInstallation
+    publication: ProtectedPublication
+    candidate: dict[str, Any]
+    profile: dict[str, Any]
+    guards: tuple[PoolGuardTarget, ...]
+    actuators: tuple[dict[str, Any], ...]
+    collectors: tuple[dict[str, Any], ...]
+    roles: tuple[dict[str, Any], ...]
+    services: tuple[dict[str, Any], ...]
+    collector_config: dict[str, Any]
+    profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
+    machine_token_files: dict[UUID, Path]
+    foundation_candidate: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
+@dataclass(frozen=True, repr=False)
+class PoolCutoverContext:
+    operation: dict[str, Any]
+    inputs: PoolCutoverPrivateInputs
+    original: CompletedUpgrade
+    predecessor: CompletedUpgrade | CompletedRefresh
+    request: PoolCutoverRequest
+    tokens: dict[UUID, str]
+
+
+def _operation(value: dict[str, Any]) -> tuple[UUID, Path]:
+    fields = {"schema", "operation_id", "source_sha", "candidate", "installation_id", "namespace",
+        "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
+    if (set(value) != fields or value["schema"] != "loom.nebius-pool-cutover-operation.v1"
+            or any(not isinstance(row, str) or not 0 < len(row) <= 1024 for row in value.values())
+            or value["source_sha"] != value["candidate"]
+            or re.fullmatch(r"[0-9a-f]{40}", value["candidate"]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", value["inputs_sha256"]) is None):
+        raise ValueError
+    for key in ("operation_id", "installation_id"):
+        if not UUID(value[key]).int or str(UUID(value[key])) != value[key]:
+            raise ValueError
+    for key in ("inputs_path", "state_dir", "anchor_dir"):
+        path = Path(value[key])
+        if not path.is_absolute() or path != path.resolve():
+            raise ValueError
+    operation = UUID(value["operation_id"])
+    directory = Path(value["inputs_path"]).parent
+    if (directory.name != str(operation) or directory.parent.name != "pool-cutover"
+            or directory.parent.parent.name != "nebius-management"
+            or Path(value["inputs_path"]) != directory / "inputs.json"
+            or Path(value["state_dir"]) != directory / "state"
+            or Path(value["anchor_dir"]) != directory / "anchor"):
+        raise ValueError
+    return operation, directory.parent.parent
+
+
+def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
+    """Qualify exact private data before any credential exchange or downtime.
+
+    Completed predecessor receipts derive the manager; it is not a supplied
+    manifest. Participant/backend and publication values remain claims requiring
+    live qualification by the connected protected parent, not approval by parsing.
+    """
+    try:
+        operation_id, root = _operation(operation)
+        raw = _private(Path(operation["inputs_path"]), 4 * 1024**2)
+        if hashlib.sha256(raw).hexdigest() != operation["inputs_sha256"]:
+            raise ValueError
+        inputs = PoolCutoverPrivateInputs.model_validate(_json(raw))
+        original = load_completed_upgrade(inputs.original_upgrade)
+        if Path(original.selector.operation["inputs_path"]).parent.parent != root:
+            raise ValueError
+        predecessor: CompletedUpgrade | CompletedRefresh
+        if isinstance(inputs.predecessor, UpgradePredecessorV1):
+            if inputs.predecessor != inputs.original_upgrade:
+                raise ValueError
+            predecessor = original
+        else:
+            predecessor = load_completed_refresh(inputs.predecessor, original=original)
+        binding = original.upgrade.setup.binding
+        config = original.deployment.installation.foundation.platform_config
+        spec = inputs.installation
+        if ((str(spec.operation_id), str(spec.installation_id), binding.namespace) !=
+                (str(operation_id), operation["installation_id"], operation["namespace"])
+                or str(spec.installation_id) != binding.installation_id
+                or (spec.cluster_id, spec.node_group_id) != (config["cluster_id"], config["execution_node_group_id"])
+                or inputs.candidate.get("candidate_sha") != operation["candidate"]
+                or inputs.profile.get("candidate_sha") != operation["candidate"]
+                or inputs.publication.source_sha != operation["candidate"]
+                or any(target.database is None for target in inputs.guards)):
+            raise ValueError
+        migration = PoolMigrationRequest(PoolRegistrationRequest(spec, binding, inputs.candidate), inputs.guards)
+        request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
+            inputs.actuators, inputs.collectors), inputs.roles), predecessor.active, inputs.services,
+            inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
+            "https://kubernetes.default.svc")
+        cutover_documents(request)
+        names = {row.machine_id for row in spec.machines}
+        paths = set(inputs.machine_token_files.values())
+        connection = original.original_inputs.operator_connection
+        protected = {*original.history, *predecessor.history, connection.ca_file, connection.credentials_file,
+            original.original_inputs.operator_cloud_credentials, original.original_inputs.ingress_config,
+            Path(operation["inputs_path"])}
+        if set(inputs.machine_token_files) != names or len(paths) != len(names) or paths & protected:
+            raise ValueError
+        tokens = {identity: _private(path, 65536).decode() for identity, path in inputs.machine_token_files.items()}
+        machine_documents(migration, tokens)
+        return PoolCutoverContext(dict(operation), inputs, original, predecessor, request, tokens)
+    except Exception:
+        raise EntryError("pool cutover private inputs unqualified") from None
+
+
+@dataclass(frozen=True, repr=False)
+class ConnectedPoolReaders:
+    base: HTTPSManagementPrerequisites
+    ssl_context: ssl.SSLContext
+    token: str
+    guards: KubectlPoolGuardAPI
+    history: KubectlPoolHistoryAPI
+
+
+@contextmanager
+def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoolReaders]:
+    """One qualified native authority for HTTPS and fixed SQL transports.
+
+    Copy only its current bounded bearer and pinned CA into a fresh private
+    kubeconfig. No exec plugin, client certificate, ambient context, proxy, CA
+    fallback or credential from the ingress kubeconfig is inherited. The existing
+    readers hash that exact file before operations. It is erased on exit, including
+    failures; recovery obtains a fresh token instead of journaling a credential.
+    """
+    if load_pool_cutover_inputs(context.operation) != context:
+        raise EntryError("pool cutover context changed before connection")
+    original = context.original
+    connection = original.original_inputs.operator_connection
+    authority = _private(connection.ca_file, 1024**2)
+    with connected_checks(original.original_inputs, original.ingress,
+            foundation_candidate=context.inputs.foundation_candidate) as (base, trust, token):
+        directory = Path(context.operation["inputs_path"]).parent
+        private_state._private_directory(directory)
+        with TemporaryDirectory(prefix=".pool-transport-", dir=directory) as temporary:
+            try:
+                if (not isinstance(token, str) or not 0 < len(token) <= 65536
+                        or any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in token)
+                        or _private(connection.ca_file, 1024**2) != authority):
+                    raise ValueError
+                credential = base._request("GET", "/api/v1/namespaces/" + original.upgrade.setup.binding.namespace + "/secrets/loom-platform-db")
+                if credential is None:
+                    raise ValueError
+                target = derive_management_history_target(original=original, predecessor=context.predecessor, credential=credential)
+                kubeconfig = Path(temporary) / "kubeconfig.json"
+                private_state._atomic_json(kubeconfig, {"apiVersion": "v1", "kind": "Config",
+                    "clusters": [{"name": "loom-pool", "cluster": {"server": connection.endpoint,
+                        "certificate-authority-data": base64.b64encode(authority).decode()}}],
+                    "users": [{"name": "loom-pool-operator", "user": {"token": token}}],
+                    "contexts": [{"name": "loom-pool", "context": {"cluster": "loom-pool", "user": "loom-pool-operator"}}],
+                    "current-context": "loom-pool"})
+                migration = context.request.fencing.retirement.migration
+                executable = Path(original.ingress["kubectl"])
+                guards = KubectlPoolGuardAPI(request=migration, kubeconfig=kubeconfig, executable=executable)
+                history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
+                history.qualify_binding(migration, context.request.manager)
+            except Exception:
+                raise EntryError("pool cutover operator readers unqualified") from None
+            # Do not replace the parent's stage-qualified recovery error with a
+            # connection diagnostic. The temporary authority is erased either way.
+            yield ConnectedPoolReaders(base, trust, token, guards, history)

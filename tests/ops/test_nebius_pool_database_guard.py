@@ -38,7 +38,8 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
         'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
             'uid': database['metadata']['uid'], 'controller': True}]},
         'spec': copy.deepcopy(database['spec']['template']['spec']),
-        'status': {'phase': 'Running', 'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
+        'status': {'phase': 'Running', 'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
+            'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
     pod['spec']['volumes'].append({'name': 'data', 'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
     secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'namespace': target.namespace,
         'name': 'loom-platform-db', 'uid': str(uuid4()), 'resourceVersion': '7'}, 'data': {
@@ -53,6 +54,17 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
     api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
     state = SimpleNamespace(request=request, target=target, database=database, service=service, pod=pod, secret=secret,
         calls=[], status='held', continuation=False, second_pod=False, executed=False, after_drift=False, exec_hook=None)
+    state.endpoints = {'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList',
+        'metadata': {'resourceVersion': '3'}, 'items': [{
+            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSlice', 'metadata': {
+                'name': 'loom-postgres-abcde', 'namespace': target.namespace, 'uid': str(uuid4()),
+                'labels': {'kubernetes.io/service-name': 'loom-postgres'},
+                'ownerReferences': [{'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
+                    'uid': service['metadata']['uid'], 'controller': True}]},
+            'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0].get('name'), 'port': 5432, 'protocol': 'TCP'}],
+            'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True, 'serving': True, 'terminating': False},
+                'targetRef': {'kind': 'Pod', 'namespace': target.namespace, 'name': 'loom-postgres-0',
+                    'uid': pod['metadata']['uid']}}]}]}
 
     def run(args):
         state.calls.append(args)
@@ -69,6 +81,11 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
             uid = request.registration.binding.kube_system_uid if name == 'kube-system' else str(target.namespace_uid)
             return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
         if kind == '--raw':
+            if args == ['get', '--raw', f'/apis/discovery.k8s.io/v1/namespaces/{target.namespace}/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Dloom-postgres&limit=100']:
+                endpoints = copy.deepcopy(state.endpoints)
+                if state.executed and getattr(state, 'endpoint_after_drift', False):
+                    endpoints['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+                return endpoints
             assert args == ['get', '--raw', f'/api/v1/namespaces/{target.namespace}/pods?labelSelector=app%3Dloom-postgres&limit=100']
             rows = [state.pod] * (2 if state.second_pod else 1)
             if state.executed and state.after_drift:
@@ -83,6 +100,65 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
 
     monkeypatch.setattr(api, '_run', run)
     return api, state
+
+
+@pytest.mark.parametrize('damage', ['wrong_pod', 'wrong_address', 'wrong_service', 'wrong_port', 'not_ready',
+    'terminating', 'extra_backend', 'missing_backend', 'pagination', 'after_drift'])
+def test_database_read_requires_actual_service_to_postgres_backend_correspondence(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    row = state.endpoints['items'][0]
+    endpoint = row['endpoints'][0]
+    if damage == 'wrong_pod':
+        endpoint['targetRef']['uid'] = str(uuid4())
+    elif damage == 'wrong_address':
+        endpoint['addresses'] = ['10.20.0.3']
+    elif damage == 'wrong_service':
+        row['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'wrong_port':
+        row['ports'][0]['port'] = 5433
+    elif damage == 'not_ready':
+        endpoint['conditions']['ready'] = False
+    elif damage == 'terminating':
+        endpoint['conditions']['terminating'] = True
+    elif damage == 'extra_backend':
+        extra = copy.deepcopy(endpoint)
+        extra['targetRef']['uid'] = str(uuid4())
+        row['endpoints'].append(extra)
+    elif damage == 'missing_backend':
+        state.endpoints['items'] = []
+    elif damage == 'pagination':
+        state.endpoints['metadata']['continue'] = 'next'
+    else:
+        state.endpoint_after_drift = True
+    with pytest.raises(PoolMigrationError):
+        api.guard(state.target, 'observe')
+    assert sum(args[0] == 'exec' for args in state.calls) == (1 if damage == 'after_drift' else 0)
+
+
+@pytest.mark.parametrize('families', [('IPv4',), ('IPv6',), ('IPv4', 'IPv6')])
+def test_database_backend_qualifies_every_service_address_family(database_guard, monkeypatch, families):
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    original, state = database_guard
+    addresses = {'IPv4': '10.20.0.2', 'IPv6': 'fd00::2'}
+    state.service['spec']['ipFamilies'] = list(families)
+    state.pod['status']['podIP'] = addresses[families[0]]
+    state.pod['status']['podIPs'] = [{'ip': addresses[family]} for family in families]
+    row = state.endpoints['items'][0]
+    state.endpoints['items'] = []
+    for family in families:
+        endpoint = copy.deepcopy(row)
+        endpoint['metadata'].update(uid=str(uuid4()), name='loom-postgres-' + family.lower())
+        endpoint['addressType'] = family
+        endpoint['endpoints'][0]['addresses'] = [addresses[family]]
+        state.endpoints['items'].append(endpoint)
+    target = replace(state.target, database=replace(state.target.database, service=copy.deepcopy(state.service)))
+    request = replace(state.request, guards=(target, *state.request.guards[1:]))
+    api = KubectlPoolGuardAPI(request=request, kubeconfig=original.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', original._run)
+    assert api.guard(target, 'observe') == {'status': 'held'}
 
 
 @pytest.mark.parametrize('status', ['open', 'held', 'skipped_locked'])

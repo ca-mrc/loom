@@ -97,7 +97,8 @@ def test_actual_database_observer_works_without_control_plane(runtime_inputs, pl
         def transport(args):
             value = json.loads(_run(cluster, "kubectl", *args))
             if args[:2] == ["get", "--raw"]:
-                assert value.get("kind") == "PodList" and value.get("metadata", {}).get("resourceVersion"), {
+                expected = "EndpointSliceList" if args[2].startswith("/apis/discovery.k8s.io/v1/") else "PodList"
+                assert value.get("kind") == expected and value.get("metadata", {}).get("resourceVersion"), {
                     "kind": value.get("kind"), "metadata": value.get("metadata"), "count": len(value.get("items", []))}
             return value
         monkeypatch.setattr(api, "_run", transport)
@@ -112,6 +113,24 @@ def test_actual_database_observer_works_without_control_plane(runtime_inputs, pl
         with pytest.raises(PoolMigrationError):
             api.guard(target, "release")
         assert sql("SELECT owner FROM public.nebius_rollout_guard").strip() == "other"
+        # Equal DB URLs, a retained Service and a ready matching Pod do not
+        # establish routing. A second live backend must deny even readback SQL.
+        discovery = client.DiscoveryV1Api(core.api_client)
+        service = document(core.read_namespaced_service("loom-postgres", namespace))
+        port = service["spec"]["ports"][0]
+        discovery.create_namespaced_endpoint_slice(namespace, {
+            "apiVersion": "discovery.k8s.io/v1", "kind": "EndpointSlice", "metadata": {
+                "name": "loom-postgres-foreign-backend", "labels": {"kubernetes.io/service-name": "loom-postgres"},
+                "ownerReferences": [{"apiVersion": "v1", "kind": "Service", "name": "loom-postgres",
+                    "uid": service["metadata"]["uid"], "controller": True}]},
+            "addressType": "IPv4", "ports": [{"name": port.get("name"), "port": 5432, "protocol": "TCP"}],
+            "endpoints": [{"addresses": ["10.20.253.2"], "conditions": {"ready": True},
+                "targetRef": {"kind": "Pod", "namespace": namespace, "name": "foreign-postgres", "uid": str(uuid4())}}]})
+        with pytest.raises(PoolMigrationError):
+            api.guard(target, "observe")
+        assert sql("SELECT owner FROM public.nebius_rollout_guard").strip() == "other"
+        discovery.delete_namespaced_endpoint_slice("loom-postgres-foreign-backend", namespace)
+        assert api.guard(target, "observe") == {"status": "skipped_locked"}
     finally:
         cluster.stop()
         subprocess.run(["docker", "image", "rm", tag], capture_output=True, check=False)

@@ -9,27 +9,49 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    application_material as application_material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    checks as checks,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    cloud as cloud,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    completed_upgrade as completed_upgrade,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    entry_inputs as entry_inputs,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    history_credential,
+    load,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    installation as installation,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    material as material,
+)
+from tests.ops.test_nebius_management_refresh_predecessor import (
+    private_upgrade as private_upgrade,
+)
 from tests.ops.test_nebius_pool_cutover import (
     collector_inputs as collector_inputs,
+)
+from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
+from tests.ops.test_nebius_pool_cutover import (
     fencing_inputs as fencing_inputs,
+)
+from tests.ops.test_nebius_pool_cutover import (
     retirement_inputs as retirement_inputs,
 )
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
-from tests.ops.test_nebius_management_refresh_predecessor import (
-    application_management_inputs as application_management_inputs,
-    application_material as application_material,
-    checks as checks,
-    cloud as cloud,
-    completed_upgrade as completed_upgrade,
-    entry_inputs as entry_inputs,
-    history_credential,
-    installation as installation,
-    load,
-    material as material,
-    private_upgrade as private_upgrade,
-)
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -106,7 +128,7 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     context = load_pool_cutover_inputs(metadata)
     assert context.request.manager == root.active
     assert context.request.management_origin == "https://" + root.deployment.public_host
-    assert context.request.kubernetes_endpoint == root.original_inputs.operator_connection.endpoint
+    assert context.request.kubernetes_endpoint == "https://kubernetes.default.svc"
     assert context.request.fencing.retirement.migration.registration.binding == root.upgrade.setup.binding
     assert len(context.tokens) == len(payload["machine_token_files"])
     assert {path: path.read_bytes() for path in root.history} == before
@@ -207,3 +229,24 @@ def test_reader_connection_rechecks_inputs_before_obtaining_operator_credentials
     with pytest.raises(EntryError):
         with entry.connected_pool_readers(context):
             pytest.fail("changed inputs were accepted")
+
+
+def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_failure(private_cutover, monkeypatch):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    metadata, _, root = private_cutover
+    context = entry.load_pool_cutover_inputs(metadata)
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield SimpleNamespace(_request=lambda *args: history_credential(root)), object(), "private-operator-token"
+    monkeypatch.setattr(entry, "connected_checks", connect)
+    with pytest.raises(PoolMigrationError) as error:
+        with entry.connected_pool_readers(context) as connected:
+            path = connected.guards.kubeconfig
+            raise PoolMigrationError("management_origin_history")
+    assert error.value.stage == "management_origin_history"
+    assert not path.exists()

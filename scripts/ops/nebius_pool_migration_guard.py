@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import ipaddress
 import os
 import re
 import subprocess
@@ -379,7 +380,8 @@ class KubectlPoolGuardAPI:
         # The guard command uses db_engine_url: a pooled URL overrides the
         # direct URL. This binding only qualifies the namespace-local direct
         # database; a pool needs separate backend correspondence evidence.
-        if any(row["name"] == "LOOM_CP_DB_URL_POOL" and row != {"name": "LOOM_CP_DB_URL_POOL", "value": ""}
+        pool_variable = url_variable + "_POOL"
+        if any(row["name"] == pool_variable and row != {"name": pool_variable, "value": ""}
                 for row in environment):
             raise ValueError
         entry, = (row for row in environment if row["name"] == url_variable)
@@ -462,8 +464,73 @@ class KubectlPoolGuardAPI:
         states = pod["status"].get("containerStatuses", [])
         if len(states) != 1 or states[0].get("name") != "loom-postgres" or states[0].get("ready") is not True:
             raise ValueError
+        self._database_backend(target, service=service, pod=pod)
         self._namespaces(target)
         return pod
+
+    def _database_backend(self, target: PoolDatabaseReadTarget, *, service: dict[str, Any], pod: dict[str, Any]) -> None:
+        """Qualify actual Service routing, not equal URLs or matching selectors."""
+        listing = self._run(["get", "--raw", f"/apis/discovery.k8s.io/v1/namespaces/{target.namespace}/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Dloom-postgres&limit=100"])
+        if (listing.get("apiVersion") != "discovery.k8s.io/v1" or listing.get("kind") != "EndpointSliceList"
+                or listing.get("metadata", {}).get("continue")
+                or not isinstance(listing.get("metadata", {}).get("resourceVersion"), str)
+                or not 0 < len(listing["metadata"]["resourceVersion"]) <= 128
+                or not isinstance(listing.get("items"), list) or not 0 < len(listing["items"]) <= 2
+                or service["spec"].get("publishNotReadyAddresses", False) is not False):
+            raise ValueError
+        status = pod["status"]
+        primary = ipaddress.ip_address(status["podIP"])
+        addresses = status["podIPs"]
+        if not isinstance(addresses, list) or not 0 < len(addresses) <= 2:
+            raise ValueError
+        pod_ips = {str(ipaddress.ip_address(row["ip"])) for row in addresses if set(row) == {"ip"}}
+        families = service["spec"].get("ipFamilies", ["IPv" + str(primary.version)])
+        if (len(pod_ips) != len(addresses) or str(primary) not in pod_ips or not isinstance(families, list)
+                or not 0 < len(families) <= 2 or len(set(families)) != len(families)
+                or not set(families) <= {"IPv4", "IPv6"}):
+            raise ValueError
+        expected = {address for address in pod_ips if "IPv" + str(ipaddress.ip_address(address).version) in families}
+        if len(expected) != len(families):
+            raise ValueError
+        seen: set[str] = set()
+        slices: set[str] = set()
+        service_port, = service["spec"]["ports"]
+        for row in listing["items"]:
+            metadata = row["metadata"]
+            if (row.get("apiVersion", "discovery.k8s.io/v1") != "discovery.k8s.io/v1"
+                    or row.get("kind", "EndpointSlice") != "EndpointSlice" or metadata.get("namespace") != target.namespace
+                    or metadata.get("deletionTimestamp") or metadata.get("labels", {}).get("kubernetes.io/service-name") != "loom-postgres"
+                    or _uid(row) in slices or row["addressType"] not in families):
+                raise ValueError
+            slices.add(_uid(row))
+            owner, = metadata["ownerReferences"]
+            owner = dict(owner)
+            blocking = owner.pop("blockOwnerDeletion", False)
+            if (type(blocking) is not bool or owner != {"apiVersion": "v1", "kind": "Service", "name": "loom-postgres",
+                    "uid": _uid(service), "controller": True}):
+                raise ValueError
+            port, = row["ports"]
+            if (port.keys() - {"name", "port", "protocol", "appProtocol"}
+                    or type(port.get("port")) is not int or port["port"] != 5432
+                    or port.get("protocol", "TCP") != "TCP" or port.get("name") != service_port.get("name")
+                    or port.get("appProtocol") != service_port.get("appProtocol")):
+                raise ValueError
+            endpoint, = row["endpoints"]
+            conditions, reference = endpoint["conditions"], endpoint["targetRef"]
+            if (conditions.get("ready") is not True or conditions.get("serving", True) is not True
+                    or conditions.get("terminating", False) is not False
+                    or reference.keys() - {"kind", "namespace", "name", "uid", "apiVersion", "resourceVersion"}
+                    or reference.get("apiVersion", "v1") != "v1"
+                    or any(reference.get(key) != value for key, value in {"kind": "Pod", "namespace": target.namespace,
+                        "name": pod["metadata"]["name"], "uid": _uid(pod)}.items())):
+                raise ValueError
+            address, = endpoint["addresses"]
+            parsed = ipaddress.ip_address(address)
+            if str(parsed) != address or row["addressType"] != "IPv" + str(parsed.version) or address not in expected or address in seen:
+                raise ValueError
+            seen.add(address)
+        if seen != expected:
+            raise ValueError
 
     def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
         try:

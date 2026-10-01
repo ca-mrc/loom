@@ -2248,7 +2248,11 @@ schema-readiness and queued-origin qualification. It cannot manufacture provenan
 for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
 work state and personal-access quiescence through each retained database Pod,
 qualifying its StatefulSet, Service, Secret version and Pod identity before and
-after every read-only page. The personal-access readiness routine must retain
+after every read-only page. Complete EndpointSlice readback also binds the Service
+UID, port, address family and ready/nonterminating backend to that exact PostgreSQL
+Pod UID/IP. Missing, additional, foreign or changed backends reject even read-only
+SQL. A direct database binding rejects an unresolved effective pooled URL for
+either the control plane or management service. The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
 same-named replacement is not evidence of retired access. The queue includes
 delayed trials/build consumers and unfanned native batches; quota, retry and target backoff do not hide future
@@ -2270,9 +2274,18 @@ upgrade/refresh evidence and the hash-bound original database/material journals,
 then checks the live database credential against its original immutable material.
 It preserves the latest completed manager template and never replays the original
 installation. The history reader must match the cutover's exact manager and
-migration inputs before transport creation. The protected entry still must
-connect this derivation and qualify actual backend correspondence; a supplied
-projection alone is not registration proof.
+migration inputs before transport creation. The private cutover input loader now
+derives the manager from reloaded completed receipts and validates operation/path,
+physical pool, participant database and machine-material bindings before operator
+connection. Its reader context connects the history derivation and both fixed SQL
+readers to the same explicit native API endpoint, CA and short-lived bearer. A
+fresh private kubeconfig embeds only that authority, never ingress credentials,
+ambient contexts, exec plugins or client certificates; it is removed on exit,
+including parent failures. The gateway runtime separately uses its projected
+service-account authority at the fixed in-cluster endpoint. These private inputs
+still require actual protected publication and complete installed writer/inventory
+qualification; parsing a supplied publication is not approval. No operational
+cutover command or admission activation is exposed by this reader context.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 

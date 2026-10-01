@@ -46,6 +46,10 @@ def management_history(database_guard, monkeypatch):
         'rows': [{'ordinal': 1, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
     state = SimpleNamespace(request=request, target=target, participant=previous.target, origin=origin, report=report,
         database=database, service=service, pod=pod, secret=secret, calls=[], executed=False, after_drift=False)
+    endpoints = copy.deepcopy(previous.endpoints)
+    for row in endpoints['items']:
+        row['metadata']['namespace'] = namespace
+        row['endpoints'][0]['targetRef']['namespace'] = namespace
 
     def run(args):
         state.calls.append(args)
@@ -60,6 +64,8 @@ def management_history(database_guard, monkeypatch):
             uid = binding.kube_system_uid if name == 'kube-system' else binding.namespace_uid
             return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
         if kind == '--raw':
+            if name == f'/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Dloom-postgres&limit=100':
+                return copy.deepcopy(endpoints)
             assert name == f'/api/v1/namespaces/{namespace}/pods?labelSelector=app%3Dloom-postgres&limit=100'
             result = copy.deepcopy(state.pod)
             if state.executed and state.after_drift:
@@ -80,6 +86,19 @@ def test_history_observer_binds_management_namespace_and_replays_only_reads(mana
     assert sum(row[0] == 'exec' for row in state.calls) == 2
     assert all(row[0] in {'get', 'exec'} for row in state.calls)
     assert all(state.request.guards[0].namespace not in row for row in state.calls)
+
+
+@pytest.mark.parametrize('override', [
+    {'value': 'postgresql+psycopg://foreign:private-marker@foreign.svc/loom'},
+    {'valueFrom': {'secretKeyRef': {'name': 'foreign-db', 'key': 'url'}}},
+])
+def test_management_database_binding_rejects_an_unqualified_effective_pool_url(management_history, override):
+    api, state = management_history
+    state.target.controller['spec']['template']['spec']['containers'][0]['env'].append(
+        {'name': 'LOOM_SVC_DB_URL_POOL', **override})
+    with pytest.raises(ValueError):
+        api._database(state.target, url_variable='LOOM_SVC_DB_URL')
+    assert not any(row[0] == 'exec' for row in state.calls)
 
 
 def test_history_scope_rejects_another_manager_or_migration_before_any_command(management_history):
