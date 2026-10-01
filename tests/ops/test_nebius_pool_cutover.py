@@ -659,7 +659,7 @@ def writer_descendant(parent, kind, *, name=None):
 
 
 def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified_hook=None, journal=None,
-                      workloads=None, workload_page_mode=None):
+                      workloads=None, workload_page_mode=None, database_read=None, history_read=None):
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 
     migration = request.fencing.retirement.migration
@@ -717,19 +717,50 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
             "kind": (kinds | workload_kinds)[resource] + "List", "metadata": metadata, "items": entries})
 
     external = CutoverAPI(request)
+    def empty_page(target, *, after):
+        assert target in migration.guards and after is None
+        return {"status": "observed", "schema_revision": "0172", "rows": []}
+    def empty_history(target, origins):
+        assert target in migration.guards and origins == ()
+    external.qualify_pending_origins = history_read or empty_history
     if qualified_hook is not None:
         def checked_preflight(actual):
             assert actual == request
             qualified_hook()
         external.preflight = checked_preflight
     with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
-            guards=SimpleNamespace(request=migration), checks=external, history=external,
+            guards=SimpleNamespace(request=migration, cutover_readiness_page=database_read or empty_page), checks=external, history=external,
             api_server="https://cluster.example", ssl_context=ssl.create_default_context(),
             state_dir=journal[0] if journal else None, anchor_dir=journal[1] if journal else None) as api:
         api.client.close()
         api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
         api.preflight(request)
     return calls
+
+
+@pytest.mark.parametrize("damage", [None, "schema", "active_access", "unknown_origin", "history"])
+def test_preflight_qualifies_every_database_before_producer_downtime(cutover_inputs, cutover_binding_inventory, damage):
+    request, tokens = cutover_inputs
+    migration = request.fencing.retirement.migration
+    seen = []
+    def page(target, *, after):
+        assert target in migration.guards and after is None
+        seen.append(("database", target.participant_id))
+        if damage == "active_access":
+            raise ValueError("pool cutover application access active")
+        rows = [{"key": "batch:" + str(uuid4()), "source_matches": True, "origin": None}] if damage == "unknown_origin" else []
+        return {"status": "observed", "schema_revision": "0171" if damage == "schema" else "0172", "rows": rows}
+    def history(target, origins):
+        assert target in migration.guards and origins == ()
+        seen.append(("history", target.participant_id))
+        if damage == "history":
+            raise ValueError("pool management history schema unqualified")
+    if damage:
+        with pytest.raises(ValueError):
+            binding_preflight(request, tokens, cutover_binding_inventory, database_read=page, history_read=history)
+    else:
+        binding_preflight(request, tokens, cutover_binding_inventory, database_read=page, history_read=history)
+        assert seen == [(kind, row.participant_id) for row in migration.guards for kind in ("database", "history")]
 
 
 @pytest.mark.parametrize("damage", ["foreign_subject", "extra_named_grant", "cluster_group",
