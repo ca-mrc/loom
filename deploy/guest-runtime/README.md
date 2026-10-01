@@ -27,6 +27,13 @@ without executing package installation hooks. An unavailable pinned archive
 fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
+`archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
+a newer version, so a pinned URL there can start returning 404. Launchpad keeps
+every published build at
+`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`. Pointing a
+lock entry at that URL keeps the same version, size and hash, so the extracted
+payload files are unchanged; only the retained `sources.lock.json` differs.
+
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`
 retains the inputs and `versions.json` records executable versions. Files are

@@ -26,6 +26,8 @@ class Cluster:
             "status": {"allocatable": {"cpu": "7900m", "memory": "30000Mi", "ephemeral-storage": "100Gi", "pods": "110"},
                        "conditions": [{"type": "Ready", "status": "True"}]}}
         self.lists = {
+            "deployments": [], "cronjobs": [], "roles": [], "rolebindings": [],
+            "clusterroles": [], "clusterrolebindings": [],
             "nodes": [node],
             "namespaces": [{"metadata": {"name": "loom-nebius-platform", "uid": "ns-uid"}}],
             "pods": [{"metadata": {"name": "service-1", "namespace": "loom-nebius-platform", "uid": "pod-uid",
@@ -75,6 +77,9 @@ def test_inventory_projects_capacity_and_routes_without_claiming_installation_re
     assert "private-" not in json.dumps(result)
     assert all(command[0] in {"get", "config"} for command in cluster.calls)
     assert result["ingress_preflight"] == {"status": "not_configured"}
+    assert result["controller_inventory"]["controllers"] == []
+    assert result["controller_inventory"]["job_write_bindings"] == []
+    assert "effective_writer_fencing" in result["controller_inventory"]["unverified"]
 
 
 @pytest.mark.parametrize("case,changes", [
