@@ -233,7 +233,8 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
 
 
 @pytest.mark.parametrize("damage", ["hash", "extra_manager", "source", "installation", "cluster", "pool",
-    "missing_database", "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication"])
+    "missing_database", "missing_actuator_credential", "partial_actuator_credential",
+    "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication"])
 def test_private_cutover_rejects_unbound_inputs_before_transport_or_downtime(private_cutover, damage):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
@@ -254,6 +255,11 @@ def test_private_cutover_rejects_unbound_inputs_before_transport_or_downtime(pri
         payload["installation"]["node_selector"]["nebius.com/node-group-id"] = "foreign-group"
     elif damage == "missing_database":
         payload["guards"][0]["database"] = None
+    elif damage == "missing_actuator_credential":
+        payload["guards"][0]["database"].pop("actuator_credential_uid", None)
+        payload["guards"][0]["database"].pop("actuator_credential_resource_version", None)
+    elif damage == "partial_actuator_credential":
+        payload["guards"][0]["database"].pop("actuator_credential_resource_version", None)
     elif damage == "token_hash":
         Path(next(iter(payload["machine_token_files"].values()))).write_text("private-marker")
     elif damage == "token_alias":
@@ -347,6 +353,62 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
             raise PoolMigrationError("management_origin_history")
     assert error.value.stage == "management_origin_history"
     assert not path.exists()
+
+
+@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop"])
+def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    metadata, _, root = private_cutover
+    context = entry.load_pool_cutover_inputs(metadata)
+    migration = context.request.fencing.retirement.migration
+    originals = [*(row.controller for row in migration.guards), *context.request.services,
+        *context.request.fencing.retirement.actuators]
+    by_name = {(row['metadata']['namespace'], row['metadata']['name']): row for row in originals}
+    checked, kubeconfigs = [], []
+    @contextmanager
+    def connect(*args, **kwargs):
+        yield SimpleNamespace(_request=lambda *args: history_credential(root)), object(), 'operator-fixture-token'
+
+    def get(self, kind, name, namespace=None):
+        assert kind == 'deployment'
+        document = copy.deepcopy(by_name[namespace, name])
+        if damage == 'unrecorded_stop' and name == 'loom-service':
+            document['spec']['replicas'] = 0
+        return document
+
+    def probe(self, target, *, original, credential_uid, credential_resource_version):
+        # Remote runtime/SQL I/O is covered separately. This boundary proves
+        # every original is selected with the correct independently pinned Secret.
+        assert target in migration.guards and original in originals
+        actuator = original['metadata']['namespace'] != target.namespace
+        expected = (target.database.actuator_credential_uid, target.database.actuator_credential_resource_version) if actuator else (
+            target.database.credential_uid, target.database.credential_resource_version)
+        assert (credential_uid, credential_resource_version) == expected
+        checked.append((original['metadata']['namespace'], original['metadata']['name']))
+        kubeconfigs.append(self.kubeconfig)
+        component = 'actuator' if actuator else 'controller' if original['metadata']['name'] == 'loom-control-plane' else 'service'
+        if damage == component:
+            raise PoolMigrationError('runtime_database')
+
+    monkeypatch.setattr(entry, 'connected_checks', connect)
+    monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
+    monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_database', probe)
+    if damage:
+        with pytest.raises(EntryError):
+            with entry.connected_pool_readers(context):
+                pytest.fail('unqualified runtime received operator access')
+    else:
+        with entry.connected_pool_readers(context):
+            assert set(checked) == set(by_name)
+        assert len(checked) == len(by_name)
+    assert all(not path.exists() for path in kubeconfigs)
+    assert not Path(metadata['state_dir']).exists()
 
 
 @pytest.mark.parametrize("damage", ["failed_run", "unmerged", "failed_gate", "forged_app", "expired",
