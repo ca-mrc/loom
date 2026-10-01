@@ -137,13 +137,16 @@ than being treated as an empty cluster.
 selected execution target/pool/group identifiers and database Secret references.
 Referenced `envFrom` ConfigMaps are projected through the same field allowlist;
 Only the explicit control-plane/actuator database Secret references are fetched,
-once per Secret per inspection; no Secret list or generic `envFrom` Secret read is
+once per Secret within `controller_inventory`; no Secret list or generic `envFrom` Secret read is
 performed. `declared_database_endpoints` reports each controller/container/setting,
 the referenced Secret UID/version/key, and allowlisted host/port/database fields.
 It never exports the URL, username, password, connection options or other Secret
 values. Inline/config-map database URLs and unsupported, unreadable or ambiguous
 references are explicitly `unavailable`; routing overrides in a URL query do not
-produce a misleading endpoint. The report
+produce a misleading endpoint. The control plane's direct `LOOM_CP_DB_URL` and
+optional `LOOM_CP_DB_URL_POOL` are reported separately: a configured pooled URL
+takes precedence for engine connections. No claim that the two routes reach the
+same backend is made. The report
 also lists RoleBinding/ClusterRoleBinding grants for Job-write verbs, including
 wildcards and group subjects, and explicitly identifies unresolved role references.
 This discovers guest controllers and target aliases without assuming one controller

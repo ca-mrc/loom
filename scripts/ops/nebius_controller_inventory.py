@@ -5,14 +5,14 @@ import base64
 import re
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, urlsplit
 from uuid import UUID
 
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl
 
 _ACTUATOR = "LOOM_EXECUTION_ACTUATOR_"
 _COLLECTOR = "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
-_DATABASES = {"LOOM_CP_DB_URL", _ACTUATOR + "DB_URL"}
+_DATABASES = {"LOOM_CP_DB_URL", "LOOM_CP_DB_URL_POOL", _ACTUATOR + "DB_URL"}
 _VALUES = {"LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT", "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID",
     *(_ACTUATOR + suffix for suffix in ("TARGET_ID", "NAMESPACE", "SERVICE_ACCOUNT_NAME", "RUNTIME_CLASS_NAME")),
     *(_COLLECTOR + suffix for suffix in ("TARGET_ID", "POOL_ID", "NAMESPACE", "NEBIUS_NODE_GROUP_ID",
@@ -102,9 +102,14 @@ def _database_endpoints(kube: Kubectl, controllers: list[dict[str, Any]]) -> lis
                         raise ValueError
                     url = urlsplit(raw)
                     query = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True)
-                    host, database = url.hostname, unquote(url.path.removeprefix('/'))
+                    # Only the canonical subset shared with SQLAlchemy is safe
+                    # to project. In particular it does not decode DB paths and
+                    # does not treat a raw @ in the password like urllib does.
+                    host, database = url.hostname, url.path.removeprefix('/')
                     port = 5432 if url.port is None else url.port
                     if (url.scheme not in {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
+                            or not raw.startswith(url.scheme + '://')
+                            or url.netloc.count('@') != 1 or url.netloc.endswith(':')
                             or not url.username or not url.password or url.fragment
                             or host is None or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host)
                             or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$-]{0,62}", database) or not 1 <= port <= 65535
