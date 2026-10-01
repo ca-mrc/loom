@@ -206,6 +206,19 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
 
 
+@pytest.mark.parametrize('field,value', [('uid', 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'),
+    ('resource_version', '28'), ('sha256', 'e' * 64)])
+def test_cutover_recovery_cannot_replace_the_qualified_collector_credential(cutover_inputs, tmp_path, field, value):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    run(request, tokens, api, tmp_path)
+    before = (len(api.patches), len(api.resources.creates))
+    altered = replace(request, collector_credential=request.collector_credential.model_copy(update={field: value}))
+    with pytest.raises(ValueError):
+        run(altered, tokens, api, tmp_path)
+    assert (len(api.patches), len(api.resources.creates)) == before
+
+
 @pytest.mark.parametrize("boundary", ["initial", "producer", "retirement", "runtime", "complete"])
 def test_runtime_preflight_derives_only_original_or_journal_qualified_workloads(cutover_inputs, tmp_path, boundary):
     from scripts.ops.nebius_management_switch import _matches

@@ -118,3 +118,33 @@ def test_collector_rejects_unqualified_source_or_legacy_binding(collector_inputs
         configmap["data"]["LOOM_EXECUTION_CAPACITY_COLLECTOR_COLLECTION_MODE"] = "pool"
     with pytest.raises(ValueError):
         wire_collector(request=request, original=cronjob, config_map=configmap, management_origin=origin)
+
+
+@pytest.mark.parametrize('damage', ['initializer_mount', 'reader_mount', 'extra_volume', 'initializer_env',
+    'initializer_args', 'reader_args', 'initializer_lifecycle', 'reader_lifecycle', 'projected_mode', 'subpath'])
+def test_collector_rejects_a_credential_path_that_does_not_use_the_qualified_secret(collector_inputs, damage):
+    from scripts.ops.nebius_pool_runtime import wire_collector
+
+    request, cronjob, configmap = collector_inputs
+    pod = cronjob['spec']['jobTemplate']['spec']['template']['spec']
+    initializer, = pod['initContainers']
+    reader, = pod['containers']
+    if damage == 'initializer_mount':
+        initializer['volumeMounts'][0]['name'] = 'foreign'
+    elif damage == 'reader_mount':
+        reader['volumeMounts'][0]['name'] = 'foreign'
+    elif damage == 'extra_volume':
+        pod['volumes'].append({'name': 'foreign', 'emptyDir': {}})
+    elif damage == 'initializer_env':
+        initializer['env'] = [{'name': 'PYTHONPATH', 'value': '/foreign'}]
+    elif damage in {'initializer_args', 'reader_args'}:
+        (initializer if damage == 'initializer_args' else reader)['args'] = ['--source', '/foreign']
+    elif damage in {'initializer_lifecycle', 'reader_lifecycle'}:
+        (initializer if damage == 'initializer_lifecycle' else reader)['lifecycle'] = {
+            'postStart': {'exec': {'command': ['sh', '-c', 'replace-credentials']}}}
+    elif damage == 'projected_mode':
+        pod['volumes'][0]['projected']['defaultMode'] = 0o666
+    else:
+        reader['volumeMounts'][0]['subPath'] = 'foreign'
+    with pytest.raises(ValueError, match='pool_collector_runtime_unqualified'):
+        wire_collector(request=request, original=cronjob, config_map=configmap, management_origin='https://manage.example.com')

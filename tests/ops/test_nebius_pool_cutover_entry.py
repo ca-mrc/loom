@@ -1,6 +1,7 @@
 """Protected cutover inputs derive history, never trust a supplied manager."""
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import io
@@ -430,6 +431,18 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     assert not Path(metadata["state_dir"]).exists()
 
 
+def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+
+    metadata, payload, _ = private_cutover
+    payload.pop('collector_credential', None)
+    save_private(metadata, payload)
+    with pytest.raises(EntryError):
+        load_pool_cutover_inputs(metadata)
+    assert not Path(metadata['state_dir']).exists()
+
+
 @pytest.mark.parametrize("damage", ["hash", "extra_manager", "source", "installation", "cluster", "pool",
     "missing_database", "missing_actuator_credential", "partial_actuator_credential",
     "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication",
@@ -745,7 +758,9 @@ def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(p
 
 
 @pytest.mark.parametrize('damage', [None, 'ambient', 'cluster', 'group', 'project', 'quota', 'quota_binding',
-    'missing_setting', 'unavailable', 'config', 'late_config', 'credentials'])
+    'missing_setting', 'unavailable', 'config', 'late_config', 'credentials', 'secret_missing',
+    'secret_uid', 'secret_version', 'secret_digest', 'secret_name', 'secret_namespace',
+    'secret_deleted', 'secret_encoding', 'secret_empty', 'secret_extra_key', 'late_secret', 'sdk_denied'])
 def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collector_inputs, platform_inputs, tmp_path, monkeypatch, damage):
     """Only SDK and Kubernetes transports are doubled; native quota parsing runs."""
     from types import SimpleNamespace
@@ -763,14 +778,24 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         _quota,
     )
 
-    migration, _, configmap = copy.deepcopy(collector_inputs)
+    migration, collector, configmap = copy.deepcopy(collector_inputs)
     spec = migration.registration.spec
     config = copy.deepcopy(platform_inputs[0])
     config.update(cluster_id=spec.cluster_id, execution_node_group_id=spec.node_group_id)
     credential = tmp_path / 'operator.json'
     credential.write_text('{"private":"marker"}')
     credential.chmod(0o600)
-    context = SimpleNamespace(request=SimpleNamespace(collector_config=configmap), inputs=SimpleNamespace(installation=spec),
+    collector_bytes = b'{"private":"collector-marker"}'
+    secret = {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+        'metadata': {'name': 'loom-execution-capacity-collector-nebius',
+            'namespace': configmap['metadata']['namespace'], 'uid': str(uuid4()), 'resourceVersion': '27'},
+        'data': {'credentials.json': base64.b64encode(collector_bytes).decode()}}
+    binding = SimpleNamespace(uid=secret['metadata']['uid'], resource_version='27',
+        sha256=hashlib.sha256(collector_bytes).hexdigest())
+    context = SimpleNamespace(operation={'inputs_path': str(tmp_path / 'inputs.json')},
+        request=SimpleNamespace(collector_config=configmap, collector_credential=binding,
+            fencing=SimpleNamespace(retirement=SimpleNamespace(collectors=(collector,)))),
+        inputs=SimpleNamespace(installation=spec),
         original=SimpleNamespace(deployment=SimpleNamespace(installation=SimpleNamespace(foundation=SimpleNamespace(platform_config=config))),
             original_inputs=SimpleNamespace(operator_cloud_credentials=credential)))
     group = SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, parent_id=spec.cluster_id, resource_version=9),
@@ -796,7 +821,7 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
     elif damage == 'ambient':
         for key in ('NEBIUS_PROJECT_ID', 'NEBIUS_NODE_GROUP_ID', 'QUOTA_MEMORY_NAME', 'KUBERNETES_ENDPOINT'):
             monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_' + key, 'foreign')
-    calls, closed = [], []
+    calls, closed, files = [], [], []
 
     async def quota_read(_self, request, **kwargs):
         calls.append('quotas')
@@ -807,7 +832,7 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         calls.append('group')
         assert request.id == spec.node_group_id
         if damage == 'credentials':
-            credential.write_text('changed-private-marker')
+            files[-1].write_text('changed-private-marker')
         return group
 
     async def platform_read(_self, request, **kwargs):
@@ -818,14 +843,48 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         closed.append(True)
 
     def get(method, path):
-        assert method == 'GET' and path == '/api/v1/namespaces/' + configmap['metadata']['namespace'] + '/configmaps/' + configmap['metadata']['name']
+        assert method == 'GET'
+        if path == '/api/v1/namespaces/' + secret['metadata']['namespace'] + '/secrets/loom-execution-capacity-collector-nebius':
+            result = copy.deepcopy(secret)
+            if damage == 'secret_missing':
+                return None
+            if damage in {'secret_uid', 'late_secret'} and (damage != 'late_secret' or calls):
+                result['metadata']['uid'] = str(uuid4())
+            elif damage == 'secret_version':
+                result['metadata']['resourceVersion'] = '28'
+            elif damage == 'secret_digest':
+                result['data']['credentials.json'] = base64.b64encode(b'foreign-private-marker').decode()
+            elif damage == 'secret_name':
+                result['metadata']['name'] = 'foreign'
+            elif damage == 'secret_namespace':
+                result['metadata']['namespace'] = 'foreign'
+            elif damage == 'secret_deleted':
+                result['metadata']['deletionTimestamp'] = '2026-10-01T00:00:00Z'
+            elif damage == 'secret_encoding':
+                result['data']['credentials.json'] = '@invalid'
+            elif damage == 'secret_empty':
+                result['data']['credentials.json'] = ''
+            elif damage == 'secret_extra_key':
+                result['data']['other'] = 'c2VjcmV0'
+            return result
+        assert path == '/api/v1/namespaces/' + configmap['metadata']['namespace'] + '/configmaps/' + configmap['metadata']['name']
         result = copy.deepcopy(configmap)
         if damage == 'config' or (damage == 'late_config' and calls):
             result['metadata']['uid'] = str(uuid4())
         return result
 
+    def sdk_init(_self, *, credentials_file_name, user_agent_prefix):
+        actual = Path(credentials_file_name)
+        files.append(actual)
+        assert actual != credential, 'preflight used operator authority instead of the mounted collector credential'
+        assert actual.read_bytes() == collector_bytes
+        assert actual.stat().st_mode & 0o777 == 0o600
+        assert actual.parent.stat().st_mode & 0o777 == 0o700
+        if damage == 'sdk_denied':
+            raise ValueError('private-sdk-marker')
+
     # SDK methods themselves are the network boundary, not the capacity parser.
-    monkeypatch.setattr(SDK, '__init__', lambda *args, **kwargs: None)
+    monkeypatch.setattr(SDK, '__init__', sdk_init)
     monkeypatch.setattr(SDK, 'close', close)
     monkeypatch.setattr(QuotaAllowanceServiceClient, '__init__', lambda *args, **kwargs: None)
     monkeypatch.setattr(NodeGroupServiceClient, '__init__', lambda *args, **kwargs: None)
@@ -842,6 +901,8 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         assert calls == ['quotas', 'group'] and closed == [True]
     if calls:
         assert closed == [True]
+    assert all(not path.exists() for path in files)
+    assert credential.read_bytes() == b'{"private":"marker"}'
 
 
 @pytest.mark.parametrize("damage", ["failed_run", "unmerged", "failed_gate", "forged_app", "expired",
