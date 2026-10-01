@@ -35,13 +35,14 @@ def _scope():
         "environments": [
             {"environment_id": UUID(int=n), "incarnation": UUID(int=n + 10),
              "execution_namespace": f"run-{n}", "build_namespace": f"run-{n}-build",
-             "target_id": f"target-{n}"}
+             "target_ids": [f"target-{n}"]}
             for n in (1, 2)
         ],
         "jobs": [
             {"reservation_id": UUID(int=n + 20), "environment_id": UUID(int=n),
              "incarnation": UUID(int=n + 10), "namespace": f"run-{n}",
              "job_name": f"job-{n}", "job_uid": f"job-uid-{n}",
+             "target_id": f"target-{n}",
              "workload_kind": "trial", "lease_id": "same-local-claim", "generation": 1}
             for n in (1, 2)
         ],
@@ -288,15 +289,19 @@ async def test_pool_scope_fingerprint_is_order_independent_and_binds_gateway_rec
 
 @pytest.mark.parametrize("change", [
     "environment", "incarnation", "namespace", "target", "job_uid", "job_name", "reservation",
-    "wrong_incarnation", "wrong_namespace", "nil", "empty_selector", "selector_injection",
+    "wrong_incarnation", "wrong_namespace", "nil", "empty_selector", "selector_injection", "unknown_target",
 ])
 def test_ambiguous_or_unbound_management_scope_is_rejected(change):
     from loom_execution_capacity_collector.pool import PoolObservationScope
 
     data = _scope().model_dump()
-    if change in {"environment", "incarnation", "namespace", "target"}:
+    if change == "target":
+        data["environments"][0]["target_ids"] = ["target-1", "target-1"]
+    elif change == "unknown_target":
+        data["jobs"][0]["target_id"] = "not-registered"
+    elif change in {"environment", "incarnation", "namespace"}:
         key = {"environment": "environment_id", "incarnation": "incarnation",
-               "namespace": "execution_namespace", "target": "target_id"}[change]
+               "namespace": "execution_namespace"}[change]
         data["environments"][1][key] = data["environments"][0][key]
     elif change in {"job_uid", "job_name", "reservation"}:
         key = "reservation_id" if change == "reservation" else change
@@ -317,6 +322,47 @@ def test_ambiguous_or_unbound_management_scope_is_rejected(change):
         data["node_selector"] = {"pool": "x,other=true"}
     with pytest.raises(ValidationError):
         PoolObservationScope.model_validate(data)
+
+
+@pytest.mark.asyncio
+async def test_local_target_aliases_share_one_inventory_and_remain_job_bound():
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    data = _scope().model_dump()
+    for environment in data["environments"]:
+        environment["target_ids"] = ["native", "native-alias"]
+    for job in data["jobs"]:
+        job["target_id"] = "native-alias"
+    pods = [_pod(1), _pod(2)]
+    for pod in pods:
+        pod.metadata.annotations["loom.openai.com/target-id"] = "native-alias"
+    scope = PoolObservationScope.model_validate(data)
+    result = await _capture([_node()], pods, scope)
+    assert result.active_nodes == 1
+    assert result.requested.cpu_millis == 2000
+    assert len(result.nodes[0].managed_pods) == 2
+    # Another registered alias is not evidence for this particular receipt.
+    pods[0].metadata.annotations["loom.openai.com/target-id"] = "native"
+    changed = await _capture([_node()], pods, scope)
+    assert changed.requested.cpu_millis == 2000
+    assert [pod.lease_id for pod in changed.nodes[0].managed_pods] == [
+        "reservation:00000000-0000-0000-0000-000000000016",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pool_fingerprint_sorts_local_aliases_but_binds_receipt_target():
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    data = _scope().model_dump()
+    data["environments"][0]["target_ids"] = ["target-1", "native-alias"]
+    first = await _capture([], [], PoolObservationScope.model_validate(data))
+    data["environments"][0]["target_ids"].reverse()
+    reordered = await _capture([], [], PoolObservationScope.model_validate(data))
+    assert first.source_versions["pool_scope"] == reordered.source_versions["pool_scope"]
+    data["jobs"][0]["target_id"] = "native-alias"
+    changed = await _capture([], [], PoolObservationScope.model_validate(data))
+    assert first.source_versions["pool_scope"] != changed.source_versions["pool_scope"]
 
 
 @pytest.mark.asyncio

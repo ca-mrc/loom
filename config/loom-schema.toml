@@ -68,6 +68,11 @@ python_type = "bool"
 default     = false
 description = "Enable normal queued-Trial reservation for tasks carrying an immutable service_execution binding. Disabled environments retain the legacy worker-only claim path."
 
+[service_config.service_execution_global_pool_json]
+used_by     = ["control-plane"]
+python_type = "str"
+description = "Protected global pool participant runtime JSON: registration, data environment, logical pool, HTTPS management origin and owner-only machine token file. When configured, queued execution uses global selection and direct admin reservations are rejected; activation still requires the protected writer migration."
+
 [service_config.service_execution_materializer_enabled]
 used_by     = ["control-plane"]
 python_type = "bool"
@@ -163,6 +168,11 @@ description = "application serves workload APIs and owns background workers; api
 used_by     = ["loom-service"]
 python_type = "Path"
 description = "Protected management-installation JSON: foundation, pinned publications, public image trust and child platform allowance. Management mode only; absent leaves provisioning unconfigured. Never mount in personal applications."
+
+[service_config.pool_profiles_file]
+used_by     = ["loom-service"]
+python_type = "Path"
+description = "Protected global pool renderer catalog JSON. Management mode only; absent leaves pool prepare/activation unavailable. Contains fixed execution/build profiles and public image trust, not Kubernetes credentials or registration authority."
 
 [service_config.management_http_max_body_bytes]
 used_by     = ["loom-service"]
@@ -559,6 +569,11 @@ used_by     = ["loom-service"]
 python_type = "bool"
 default     = false
 description = "Explicit HTTP-only local-development compatibility. Uses the legacy cookie name without Secure; cannot downgrade production or a canonical HTTPS public_base_url. Never enable for hosted development."
+
+[service_config.pool_submission_source_json]
+used_by     = ["loom-service"]
+python_type = "str"
+description = "Protected loom.pool-submission-source.v1 process identity for durable global-capacity provenance. Environment sources bind the data environment; personal sources additionally bind exact application/incarnation/deployment/release/source. Never accepted from public requests. Missing preserves unknown legacy provenance, not shared-dev priority. Does not enable global admission."
 
 [service_config.auth_csrf_header_name]
 used_by     = ["loom-service"]

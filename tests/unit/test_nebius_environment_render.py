@@ -31,6 +31,21 @@ def documents(result):
     return [doc for docs in result.files.values() for doc in docs]
 
 
+@pytest.mark.parametrize('strategy,cpu,memory,scratch', [
+    ({'type': 'Recreate'}, 1000, 1024, 512),
+    ({'type': 'RollingUpdate', 'rollingUpdate': {'maxSurge': 1}}, 1500, 1536, 768),
+])
+def test_platform_envelope_counts_recreate_without_rolling_surge(strategy, cpu, memory, scratch):
+    from loom.nebius_environment_render import _envelope
+
+    deployment = {'kind': 'Deployment', 'spec': {'replicas': 2, 'strategy': strategy,
+        'template': {'spec': {'containers': [{'resources': {'requests': {
+            'cpu': '500m', 'memory': '512Mi', 'ephemeral-storage': '256Mi'}}}]}}}}
+    result = _envelope({'services': [deployment]})
+    assert (result.cpu_millis, result.memory_mib, result.ephemeral_storage_mib) == (cpu, memory, scratch)
+    assert result.storage_mib == 0
+
+
 def named(result, kind, name):
     return next(doc for doc in documents(result)
                 if doc["kind"] == kind and doc["metadata"]["name"] == name)

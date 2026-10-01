@@ -3,7 +3,7 @@
 The service layer doesn't reimplement trial submit / cancel — it
 authenticates the caller, runs the local scope/team checks, then
 proxies the request to the Control Plane with the caller's bearer
-token intact. Cancellation also forwards the browser session and CSRF token;
+token intact. Submission and cancellation also forward the browser session and CSRF token;
 the CP independently authenticates the caller and enforces its team scope.
 
 `propagate` returns a `JSONResponse` so we can carry through the
@@ -15,6 +15,7 @@ batch submits need Retry-After for client backoff to work.
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import httpx
 from fastapi import HTTPException, Request
@@ -41,17 +42,24 @@ async def forward(
     authorization: str | None,
     json_body: Any | None = None,
     cancellation_request: Request | None = None,
+    submission_request: Request | None = None,
+    submission_id: UUID | None = None,
 ) -> httpx.Response:
     headers: dict[str, str] = {}
+    caller_request = submission_request if submission_request is not None else cancellation_request
+    if submission_id is not None:
+        # Produced by the service's DB write, never copied from HTTP input.
+        headers["X-Loom-Submission-ID"] = str(submission_id)
     if authorization:
         headers["Authorization"] = authorization
-    elif cancellation_request is not None:
-        # Only cancellation forwards browser credentials. Normalize configurable
+    elif caller_request is not None:
+        # Explicit submission/cancellation hops forward browser credentials.
+        # Normalize configurable
         # public names to the existing cookie/CSRF contract on the internal hop;
         # the CP independently verifies both and applies the caller's team scope.
-        settings = cancellation_request.app.state.settings
-        cookie = cancellation_request.cookies.get(settings.session_cookie_name)
-        csrf = cancellation_request.headers.get(settings.auth_csrf_header_name)
+        settings = caller_request.app.state.settings
+        cookie = caller_request.cookies.get(settings.session_cookie_name)
+        csrf = caller_request.headers.get(settings.auth_csrf_header_name)
         if cookie:
             headers["Cookie"] = f"loom_session={cookie}"
         if csrf:

@@ -7,6 +7,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
+from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import (
     ROOT,
     render,
@@ -230,3 +231,83 @@ def test_refresh_config_survives_canonical_private_input_roundtrip(refresh_reque
     after = ManagementDeployment.model_validate_json(json.dumps(
         refresh_request.after.model_dump(mode='json'), sort_keys=True))
     assert build(replace(refresh_request, after=after)) == build(refresh_request)
+
+
+@pytest.fixture
+def pool_refresh_request(refresh_request, runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_manager
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+    from loom_service.pool_management.installation import PoolInstallation
+
+    migration, _, _, _ = runtime_inputs
+    registration = migration.registration
+    identity = refresh_request.before.installation_id
+    spec = registration.spec.model_dump(mode='json')
+    spec['installation_id'] = str(identity)
+    for participant in spec['participants']:
+        participant['installation_id'] = str(identity)
+    migration = replace(migration, registration=replace(registration,
+        binding=replace(registration.binding, installation_id=str(identity)),
+        spec=PoolInstallation.model_validate(spec)))
+    active = wire_manager(request=migration, original=refresh_request.active)
+    # Simulate only the later activation. The actual wiring supplies the Pod;
+    # no test-only normalization may hide a stale image or incompatible mount.
+    active['spec']['replicas'] = 1
+    raw = refresh_request.before.model_dump(mode='json')
+    raw['pool_catalog_operation_id'] = str(migration.registration.spec.operation_id)
+    deployment = ManagementDeployment.model_validate(raw)
+    return replace(refresh_request, before=deployment, after=deployment, active=active)
+
+
+def test_refresh_preserves_installed_pool_catalog_across_successors(pool_refresh_request):
+    request = pool_refresh_request
+    first = build(request)
+    active = copy.deepcopy(first.deployment)
+    active['metadata'].update(uid=request.active['metadata']['uid'], resourceVersion='28', generation=4)
+    candidate = copy.deepcopy(request.candidate)
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '8' * 64
+    profile = copy.deepcopy(request.profile)
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    second = build(replace(request, active=active, candidate=candidate, profile=profile))
+    for result in (first, second):
+        pod = result.deployment['spec']['template']['spec']
+        setting, = [row for row in pod['containers'][0]['env'] if row['name'] == 'LOOM_SVC_POOL_PROFILES_FILE']
+        assert setting == {'name': 'LOOM_SVC_POOL_PROFILES_FILE', 'value': '/var/run/loom-pool-profiles/profiles.json'}
+        volume, = [row for row in pod['volumes'] if row['name'] == 'pool-profiles']
+        assert volume['configMap'] == {'name': 'loom-pool-profiles-' + request.before.pool_catalog_operation_id.hex,
+            'items': [{'key': 'profiles.json', 'path': 'profiles.json'}]}
+        mount, = [row for row in pod['containers'][0]['volumeMounts'] if row['name'] == 'pool-profiles']
+        assert mount == {'name': 'pool-profiles', 'mountPath': '/var/run/loom-pool-profiles', 'readOnly': True}
+        assert all(row['image'] == pod['containers'][0]['image'] for row in pod['initContainers'])
+        assert result.deployment['spec']['strategy'] == {'type': 'Recreate'}
+
+
+@pytest.mark.parametrize('change', ['remove', 'replace', 'add'])
+def test_refresh_cannot_change_pool_catalog_binding(pool_refresh_request, change):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = pool_refresh_request.after.model_dump(mode='json')
+    raw['pool_catalog_operation_id'] = str(uuid4()) if change == 'replace' else None
+    changed = ManagementDeployment.model_validate(raw)
+    request = (replace(pool_refresh_request, before=changed) if change == 'add'
+        else replace(pool_refresh_request, after=changed))
+    with pytest.raises(ValueError, match='refresh'):
+        build(request)
+
+
+@pytest.mark.parametrize('damage', ['catalog', 'setting', 'writable', 'extra_mount'])
+def test_refresh_rejects_changed_pool_catalog_runtime(pool_refresh_request, damage):
+    active = copy.deepcopy(pool_refresh_request.active)
+    pod = active['spec']['template']['spec']
+    container = pod['containers'][0]
+    if damage == 'catalog':
+        next(row for row in pod['volumes'] if row['name'] == 'pool-profiles')['configMap']['name'] = 'loom-pool-profiles-' + uuid4().hex
+    elif damage == 'setting':
+        next(row for row in container['env'] if row['name'] == 'LOOM_SVC_POOL_PROFILES_FILE')['value'] = '/tmp/foreign.json'
+    elif damage == 'writable':
+        next(row for row in container['volumeMounts'] if row['name'] == 'pool-profiles')['readOnly'] = False
+    else:
+        container['volumeMounts'].append({'name': 'pool-profiles', 'mountPath': '/tmp/foreign', 'readOnly': True})
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(pool_refresh_request, active=active))

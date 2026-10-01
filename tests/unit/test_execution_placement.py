@@ -16,6 +16,84 @@ def _resources(cpu: int = 2_000, memory: int = 1_024, storage: int = 1_024):
     return ResourceTotals(cpu_millis=cpu, memory_mib=memory, storage_mib=storage)
 
 
+@pytest.mark.parametrize("dimension,limit", [("nodes", 4), ("vcpu", 12000), ("memory", 6144), ("storage", 12288)])
+def test_provider_quota_projection_charges_distinct_pool_shapes_and_native_floor(dimension, limit):
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", parent_id="account", used_nodes=0,
+                                node_cpu=2000, node_memory=1024, node_storage=2048)
+    other = placement_fixture(target_id="second", parent_id="account", used_nodes=0,
+                              node_cpu=4000, node_memory=2048, node_storage=4096)
+    current["quota_resources"][dimension]["limit"] = limit
+    other["quota_resources"][dimension]["limit"] = limit
+    require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1,
+                                   peers=[(CapacityPlacement.model_validate(other), 1)])
+    other["quota_resources"][dimension]["limit"] = limit - 1
+    with pytest.raises(PlacementUnavailableError, match=f"provider_quota_{dimension}_exceeded"):
+        require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1,
+                                       peers=[(CapacityPlacement.model_validate(other), 1)])
+
+
+def test_provider_quota_projection_preserves_highest_external_usage_and_lowest_limit():
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", parent_id="account", quota_nodes=20, used_nodes=1)
+    other = placement_fixture(target_id="second", parent_id="account", quota_nodes=8, used_nodes=6)
+    require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1,
+                                   peers=[(CapacityPlacement.model_validate(other), 1)])
+    with pytest.raises(PlacementUnavailableError, match="provider_quota_nodes_exceeded"):
+        require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=2,
+                                       peers=[(CapacityPlacement.model_validate(other), 1)])
+
+
+@pytest.mark.parametrize("identity_field", ["parent_id", "region", "service", "name", "unit"])
+def test_provider_quota_projection_does_not_combine_unrelated_quota_identities(identity_field):
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", parent_id="account", quota_nodes=2)
+    other = placement_fixture(target_id="second", parent_id="account", quota_nodes=1)
+    for quota in other["quota_resources"].values():
+        quota[identity_field] = "foreign"
+    require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1,
+                                   peers=[(CapacityPlacement.model_validate(other), 10)])
+
+
+@pytest.mark.parametrize("overlap", ["group", "node_uid", "provider_id", "repeated_peer"])
+def test_provider_quota_projection_rejects_duplicate_physical_inventory(overlap):
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", parent_id="account")
+    other = placement_fixture(target_id="second", parent_id="account")
+    if overlap == "group":
+        other["node_group"]["id"] = "first"
+    elif overlap == "node_uid":
+        other["nodes"][0]["uid"] = "first-node-0"
+    elif overlap == "provider_id":
+        other["nodes"][0]["provider_id"] = "test://first/0"
+    peer = (CapacityPlacement.model_validate(other), 0)
+    with pytest.raises(PlacementUnavailableError, match="overlapping_targets"):
+        require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=0,
+                                       peers=[peer, peer] if overlap == "repeated_peer" else [peer])
+
+
+@pytest.mark.parametrize("count", [-1, True])
+def test_provider_quota_projection_rejects_invalid_unobserved_node_charges(count):
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = CapacityPlacement.model_validate(placement_fixture(target_id="first"))
+    with pytest.raises(ValueError, match="additional_nodes"):
+        require_provider_quota_headroom(current, additional_nodes=count, peers=[])
+
+
+def test_provider_quota_projection_keeps_stable_failure_order_independent_of_json_key_order():
+    from loom_control_plane.execution_placement import require_provider_quota_headroom
+
+    current = placement_fixture(target_id="first", quota_nodes=0, used_nodes=0)
+    current["quota_resources"] = dict(reversed(list(current["quota_resources"].items())))
+    with pytest.raises(PlacementUnavailableError, match="provider_quota_nodes_exceeded"):
+        require_provider_quota_headroom(CapacityPlacement.model_validate(current), additional_nodes=1, peers=[])
+
+
 def test_fragmented_nodes_cannot_combine_cpu_and_memory_holes():
     data = placement_fixture(target_id="a", nodes=2, node_cpu=4_000, node_memory=4_096)
     data["nodes"][0]["requested"].update(cpu_millis=3_500)

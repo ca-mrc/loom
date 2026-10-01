@@ -24,6 +24,7 @@ func main() {
 	planPath := flag.String("plan", "/etc/loom/execution-plan.json", "immutable execution plan")
 	workspace := flag.String("workspace", "/workspace", "bounded workspace volume")
 	outputRoot := flag.String("output-root", "/loom/output", "bounded evidence volume")
+	absoluteDeadline := flag.String("deadline-at", "", "original absolute workload deadline (RFC3339)")
 	terminationMessage := flag.String(
 		"termination-message",
 		"/loom/output/termination-message",
@@ -36,7 +37,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	signalContext, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stopSignals()
+	ctx, cancel, err := workloadContext(signalContext, *absoluteDeadline)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
 	defer cancel()
 	cleanOutput := filepath.Clean(*outputRoot)
 	cleanTerminationMessage := filepath.Clean(*terminationMessage)

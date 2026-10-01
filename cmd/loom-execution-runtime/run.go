@@ -388,7 +388,7 @@ func classifyFailure(ctx context.Context, evidence phaseEvidence) string {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return "cancelled"
 	}
-	if evidence.TimedOut {
+	if evidence.TimedOut || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return "timed_out"
 	}
 	switch evidence.Role {

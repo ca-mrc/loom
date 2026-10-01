@@ -56,6 +56,7 @@ from loom_service.failure_taxonomy import is_replaceable_by_successful_supplemen
 from loom_service.monitor_filters import apply_batch_monitor_filters
 from loom_service.multi_model import apply_plan_mode
 from loom_service.pagination import Cursor, decode_cursor, encode_cursor
+from loom_service.pool_submission import submission_origin
 from loom_service.provider_connection_lookup import validate_provider_connection
 from loom_service.public_links import public_url_for
 from loom_service.routes.object_downloads import stream_object_response
@@ -2435,6 +2436,7 @@ async def clone_run_library_batch_config(
     )
     clone = Batch(
         id=clone_id,
+        pool_origin=submission_origin(request.app.state.settings, clone_id),
         purpose=source.purpose,
         team_id=ctx.team_id,
         name=payload.name,
@@ -2652,6 +2654,7 @@ async def reuse_run_library_artifact(
     )
     derived = Batch(
         id=derived_id,
+        pool_origin=submission_origin(request.app.state.settings, derived_id),
         purpose="trajectory_generation",
         team_id=ctx.team_id,
         name=payload.name,

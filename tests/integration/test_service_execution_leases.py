@@ -7,6 +7,7 @@ import tarfile
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -548,6 +549,7 @@ async def _seed_ready_trial(
     now: datetime,
     task_id: str | None = None,
     execution_class: ExecutionClassV1 = NEBIUS_CPU_EXECUTION_CLASS_V1,
+    pool_origin: dict[str, Any] | None = None,
 ) -> tuple[UUID, ExecutionTargetV1]:
     suffix = uuid4().hex[:12]
     team_id = uuid4()
@@ -572,6 +574,7 @@ async def _seed_ready_trial(
                 requires_caps={"os": "linux", "cpu_arch": "x86_64"},
                 state="queued",
                 attempt_count=0,
+                pool_origin=pool_origin,
             ),
         )
     )

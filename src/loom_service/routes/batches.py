@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
+from loom_service.pool_submission import submission_origin
+
 if TYPE_CHECKING:
     from loom.family_run.spec import FamilyRunSpec
 from uuid import UUID, uuid4
@@ -1520,6 +1522,7 @@ async def _create_batch_record(
     )
     b = Batch(
         id=batch_id,
+        pool_origin=submission_origin(request.app.state.settings, batch_id),
         team_id=submission_team_id,
         name=batch_name,
         description=batch_description,
@@ -3034,6 +3037,7 @@ async def rerun_failed_batch(
     )
     rerun = Batch(
         id=rerun_id,
+        pool_origin=submission_origin(request.app.state.settings, rerun_id),
         team_id=b.team_id,
         name=f"{b.name} failed-case rerun",
         description=(f"Reruns {len(targets)} transient failed case(s) from batch {b.id}."),

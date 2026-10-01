@@ -46,6 +46,8 @@ COMMON_EXECUTION_TABLES = (
     "execution_budget_policies",
     "execution_price_snapshots",
     "execution_target_price_bindings",
+    # Lease guards run with invoker rights, including before global activation.
+    "nebius_pool_execution_outbox",
 )
 # Keep the Gateway's inventory independent: it may read task-image readiness,
 # but never acquires builder leases or writes publication evidence.
@@ -236,6 +238,7 @@ def _bootstrap_database(
                     cursor.execute(sql.SQL("GRANT SELECT ON {} TO {}").format(tables, identifier))
                     read_only = {
                         "nebius_rollout_guard",
+                        "nebius_pool_execution_outbox",
                         "trial_resource_usage",
                         "alembic_version",
                         "users",
