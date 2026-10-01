@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import ssl
 from typing import Any
 
@@ -10,7 +11,12 @@ from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI, _patch_result
-from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest, role_fence_documents
+from scripts.ops.nebius_pool_role_fencing import (
+    PoolRoleFenceRequest,
+    qualify_pool_reader_rules,
+    role_fence_documents,
+    role_fence_review_scope,
+)
 
 from loom.nebius_platform_render import digest
 
@@ -45,6 +51,36 @@ class HTTPSPoolRoleFenceAPI(HTTPSManagementStageAPI):
     def _role_path(self, key: str) -> str:
         original = self.roles[key]
         return "/apis/rbac.authorization.k8s.io/v1/namespaces/" + str(original["metadata"]["namespace"]) + "/roles/" + str(original["metadata"]["name"])
+
+    def verify_readonly(self) -> None:
+        """Nonpersisted reviews only; no issued tokens or arbitrary impersonation.
+
+The operator needs existing impersonation authority for these exact subjects.
+Impersonation headers are per-request, never applied to subsequent operator reads
+or Role updates. Unknown/unsupported authorization resolution fails closed.
+"""
+        try:
+            self._scope()
+            subjects, namespaces = role_fence_review_scope(self.request)
+            for account_namespace, account in subjects:
+                headers = [("Impersonate-User", f"system:serviceaccount:{account_namespace}:{account}"),
+                    *(('Impersonate-Group', group) for group in (
+                        "system:serviceaccounts", "system:serviceaccounts:" + account_namespace, "system:authenticated"))]
+                for namespace in namespaces:
+                    document = {"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview", "spec": {"namespace": namespace}}
+                    with self.client.stream("POST", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews",
+                            json=document, headers=headers) as response:
+                        if response.status_code != 201 or response.headers.get("content-encoding", "identity").lower() != "identity":
+                            raise ValueError
+                        content = bytearray()
+                        for chunk in response.iter_bytes(chunk_size=16384):
+                            if len(content) + len(chunk) > 4 * 1024**2:
+                                raise ValueError
+                            content.extend(chunk)
+                        qualify_pool_reader_rules(json.loads(content), namespace=namespace)
+            self._scope()
+        except Exception:
+            raise ValueError("pool_role_fence_effective_authority_unconfirmed") from None
 
     def read_role(self, key: str) -> dict[str, Any]:
         try:

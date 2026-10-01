@@ -1,12 +1,14 @@
 """Replace retained participant writer roles with readers after process retirement.
 
-No new bindings, gateway authority or activation. The parent must additionally
-qualify effective permissions and the complete writer inventory before cutover.
+No new bindings, gateway authority or activation. Effective permission reviews
+are repeated on recovery; the parent still owns the complete writer inventory
+and activation-time requalification.
 """
 from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -37,15 +39,88 @@ class PoolRoleFenceRequest:
 class PoolRoleFenceAPI(Protocol):
     retirement: PoolRetirementAPI
 
+    def verify_readonly(self) -> None: ...
     def read_role(self, key: str) -> dict[str, Any]: ...
     def restrict_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         """False only on a complete definite rejection; exceptions are unknown."""
         ...
 
 
+def role_fence_review_scope(request: PoolRoleFenceRequest) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
+    """Fixed retained subjects crossed with every qualified operation namespace."""
+    subjects = set()
+    for document in retirement_documents(request.retirement).values():
+        pod = (document["spec"]["jobTemplate"]["spec"]["template"]["spec"] if document["kind"] == "CronJob"
+            else document["spec"]["template"]["spec"])
+        account = pod.get("serviceAccountName", "default")
+        if (not isinstance(account, str) or len(account) > 253
+                or re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*", account) is None):
+            raise ValueError("pool_role_fence_subject_unqualified")
+        subjects.add((str(document["metadata"]["namespace"]), account))
+    migration = request.retirement.migration
+    namespaces = {migration.registration.binding.namespace, *(row.namespace for row in migration.guards),
+        *(ns.name for row in migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))}
+    return tuple(sorted(subjects)), tuple(sorted(namespaces))
+
+
+def qualify_pool_reader_rules(review: dict[str, Any], *, namespace: str) -> None:
+    """Reject incomplete resolution and all authority outside fixed readers.
+
+Named grants are checked too. Default Kubernetes self-inspection and discovery
+are harmless exceptions to reads; credential access and arbitrary subresources
+are not. A resolver that cannot enumerate effective rules cannot qualify cutover.
+"""
+    try:
+        status = review["status"]
+        if (review.get("apiVersion") != "authorization.k8s.io/v1" or review.get("kind") != "SelfSubjectRulesReview"
+                # Kubernetes returns an empty spec, not an echo. The fixed TLS
+                # request binds scope; reject a contradictory echo if supplied.
+                or review.get("spec") not in ({}, {"namespace": namespace}) or status.get("incomplete") is not False
+                or status.get("evaluationError", "") != ""):
+            raise ValueError
+
+        def strings(value: Any, *, empty: bool = False) -> set[str]:
+            if (not isinstance(value, list) or not 0 < len(value) <= 1000
+                    or any(not isinstance(item, str) or len(item) > 1024 or (not item and not empty) for item in value)):
+                raise ValueError
+            return set(value)
+
+        allowed = {
+            ("", "nodes"): {"get", "list", "watch"}, ("", "pods"): {"get", "list", "watch"},
+            ("", "pods/log"): {"get"}, ("", "namespaces"): {"get"}, ("batch", "jobs"): {"get", "list", "watch"},
+            ("authorization.k8s.io", "selfsubjectaccessreviews"): {"create"},
+            ("authorization.k8s.io", "selfsubjectrulesreviews"): {"create"},
+            ("authentication.k8s.io", "selfsubjectreviews"): {"create"},
+        }
+        discovery = {"/api", "/api/*", "/apis", "/apis/*", "/openapi", "/openapi/*", "/healthz", "/livez", "/readyz",
+            "/version", "/version/", "/.well-known/openid-configuration", "/.well-known/openid-configuration/",
+            "/openid/v1/jwks", "/openid/v1/jwks/"}
+        for field in ("resourceRules", "nonResourceRules"):
+            rules = status[field]
+            if not isinstance(rules, list) or len(rules) > 1000:
+                raise ValueError
+            for rule in rules:
+                verbs = strings(rule["verbs"])
+                if field == "nonResourceRules":
+                    if set(rule) != {"verbs", "nonResourceURLs"} or verbs != {"get"}:
+                        raise ValueError
+                    if not strings(rule["nonResourceURLs"]) <= discovery:
+                        raise ValueError
+                    continue
+                if set(rule) - {"verbs", "apiGroups", "resources", "resourceNames"}:
+                    raise ValueError
+                groups, resources = strings(rule["apiGroups"], empty=True), strings(rule["resources"])
+                if "resourceNames" in rule and rule["resourceNames"] != []:
+                    strings(rule["resourceNames"])
+                if any(not verbs <= allowed.get((group, resource), set()) for group in groups for resource in resources):
+                    raise ValueError
+    except Exception:
+        raise ValueError("pool_role_fence_effective_authority_unqualified") from None
+
+
 def role_fence_documents(request: PoolRoleFenceRequest) -> dict[str, dict[str, Any]]:
     try:
-        retirement_documents(request.retirement)
+        role_fence_review_scope(request)  # Qualify subjects before any downtime.
         targets = {_key(row): row for row in participant_readonly_roles(request=request.retirement.migration) if row["kind"] == "Role"}
         originals = {_key(row): row for row in request.originals}
         if (set(originals) != set(targets) or len(request.originals) != len(targets)
@@ -134,6 +209,11 @@ def fence_pool_roles(*, request: PoolRoleFenceRequest, api: PoolRoleFenceAPI,
         # The two phases share an anchor lock, so requalification stays outside
         # that lock. A changed or reactivated old workload cannot qualify fencing.
         retirement = retire_pool_workloads(request=request.retirement, api=api.retirement, state_dir=state, anchor_dir=anchor)
-        return result("participant_roles_restricted") if retirement["status"] == "old_pool_workloads_retired" else retirement
+        if retirement["status"] != "old_pool_workloads_retired":
+            return retirement
+        # Never persist this as permanent proof: extra bindings can change while
+        # the six retained Role documents and their journal remain unchanged.
+        api.verify_readonly()
+        return result("participant_roles_restricted")
     except Exception:
         raise ValueError("pool_role_fencing_unconfirmed_preserve_evidence") from None

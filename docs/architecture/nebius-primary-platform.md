@@ -2196,9 +2196,21 @@ task-image-builder roles in its namespaces. It preserves Role UIDs, bindings and
 unrelated metadata, changing only the recorded rules to the fixed reader rules
 and adding its operation marker. Exact preconditions, retained update intent and
 bounded readback handle lost replies without uncertain retries. It rechecks the
-stopped workloads and restricted roles on replay. The phase does not create
-bindings or gateway permissions, and its receipt still marks writer migration
-incomplete: extra grants and unrecorded writers require separate qualification.
+stopped workloads and restricted roles on replay. It also obtains complete
+effective rules for each retained controller/collector ServiceAccount across all
+qualified management, data, execution and build namespaces. Fixed per-request
+impersonation includes the actual ServiceAccount groups; no runtime token or
+persisted probe is created. Named grants are included, so an extra binding cannot
+hide behind an unnamed access probe. Only explicit reader resources, discovery
+and standard self-inspection qualify; credential access, indirect writes,
+wildcards, incomplete rule resolution and evaluation errors reject the phase.
+Recovery repeats these nonpersisted authorization reviews without repeating
+confirmed Role writes. The operator must already have the required impersonation
+authority; unsupported resolution has no permissive fallback. The phase does not
+create bindings or gateway permissions, and its receipt still marks writer
+migration incomplete: the protected parent owns complete external-writer
+inventory and fresh qualification before activation. It never removes an
+unexpected grant automatically.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
