@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 
@@ -27,6 +28,22 @@ from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.environment_management.deployment import mount_pool_profiles
 from loom_service.pool_management.installation_render import mount_machine_token
+
+
+class PoolCollectorCredential(BaseModel):
+    """Pin the development collector's existing Secret without storing its bytes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    uid: UUID
+    resource_version: str = Field(min_length=1, max_length=160)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def non_nil_identity(self) -> PoolCollectorCredential:
+        if not self.uid.int:
+            raise ValueError("nil collector credential identity")
+        return self
 
 
 def _image(request: PoolMigrationRequest, component: str) -> str:
@@ -278,6 +295,17 @@ retained for the existing two-file initializer, but now holds observer authority
                 or initializer.get("command") != ["python", "-m", "loom_execution_capacity_collector.secret_init",
                     "--source", "/var/run/loom-projected", "--destination", "/var/run/loom-owned/credentials"]):
             raise ValueError
+        # Bind the actual file route, not just Secret names or environment
+        # strings. No alternate mount, argv, Python environment or lifecycle
+        # hook may replace the credential qualified by the protected parent.
+        if (initializer.get("env") or initializer.get("envFrom")
+                or any(row.get(key) for row in (initializer, container) for key in ("args", "lifecycle"))
+                or initializer.get("volumeMounts") != [
+                    {"name": "projected-credentials", "mountPath": "/var/run/loom-projected", "readOnly": True},
+                    {"name": "credentials", "mountPath": "/var/run/loom-owned"}]
+                or container.get("volumeMounts") != [
+                    {"name": "credentials", "mountPath": "/var/run/loom-owned", "readOnly": True}]):
+            raise ValueError
         prefix = "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
         env = _environment(container)
         paths = {prefix + "NEBIUS_CREDENTIALS_FILE": "/var/run/loom-owned/credentials/nebius-credentials.json",
@@ -308,7 +336,9 @@ retained for the existing two-file initializer, but now holds observer authority
         expected_sources = [
             {"secret": {"name": name + "-nebius", "items": [{"key": "credentials.json", "path": "nebius-credentials.json"}]}},
             {"secret": {"name": name + "-control-plane", "items": [{"key": "token", "path": "control-plane-token"}]}}]
-        if projected["projected"]["sources"] != expected_sources:
+        if pod["volumes"] != [
+                {"name": "projected-credentials", "projected": {"defaultMode": 0o440, "sources": expected_sources}},
+                {"name": "credentials", "emptyDir": {}}]:
             raise ValueError
         projected["projected"]["sources"][1]["secret"]["name"] = "loom-pool-machine-" + observer.machine_id.hex
         config_name = "loom-pool-collector-" + spec.operation_id.hex

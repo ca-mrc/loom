@@ -62,6 +62,7 @@ from scripts.ops.nebius_pool_registration import (
 )
 from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
+from scripts.ops.nebius_pool_runtime import PoolCollectorCredential
 
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
@@ -92,6 +93,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     roles: tuple[dict[str, Any], ...]
     services: tuple[dict[str, Any], ...]
     collector_config: dict[str, Any]
+    collector_credential: PoolCollectorCredential
     platform_authority: PoolPlatformAuthority
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     machine_token_files: dict[UUID, Path]
@@ -176,7 +178,7 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
             inputs.actuators, inputs.collectors), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
-            "https://kubernetes.default.svc", inputs.platform_authority)
+            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority)
         cutover_documents(request)
         names = {row.machine_id for row in spec.machines}
         paths = set(inputs.machine_token_files.values())
@@ -361,12 +363,36 @@ def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlP
         raise EntryError("pool cutover management database unqualified") from None
 
 
+def _collector_cloud_credential(context: PoolCutoverContext, base: HTTPSManagementPrerequisites) -> bytes:
+    """Read only the existing, hash-bound collector Secret; never an operator key."""
+    namespace = context.request.collector_config["metadata"]["namespace"]
+    name = "loom-execution-capacity-collector-nebius"
+    secret = base._request("GET", "/api/v1/namespaces/" + namespace + "/secrets/" + name)
+    pin = context.request.collector_credential
+    if (secret is None or secret.get("apiVersion") != "v1" or secret.get("kind") != "Secret"
+            or secret.get("type") != "Opaque" or secret.get("stringData")
+            or secret["metadata"].get("deletionTimestamp") is not None
+            or (secret["metadata"].get("namespace"), secret["metadata"].get("name"),
+                secret["metadata"].get("uid"), secret["metadata"].get("resourceVersion")) !=
+                (namespace, name, str(pin.uid), pin.resource_version)
+            or set(secret["data"]) != {"credentials.json"}):
+        raise ValueError
+    encoded = secret["data"]["credentials.json"]
+    if not isinstance(encoded, str) or not 0 < len(encoded) <= 4 * ((1024**2 + 2) // 3):
+        raise ValueError
+    value = base64.b64decode(encoded, validate=True)
+    if not 0 < len(value) <= 1024**2 or hashlib.sha256(value).hexdigest() != pin.sha256:
+        raise ValueError
+    return value
+
+
 def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrerequisites) -> None:
-    """Resolve the retained collector's physical group and native quota scope.
+    """Qualify the actual collector principal, physical group and quota scope.
 
     This read neither requests nodes nor reserves a share of provider headroom.
     A scale-zero group is valid; actual workload fit/telemetry belongs to startup.
-    The operator credential stays local and is never copied into the collector.
+    A private temporary file carries only the existing pinned collector key; it
+    is erased on success or failure. Operator credentials cannot prove this gate.
     """
     try:
         original = context.request.collector_config
@@ -377,13 +403,11 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
             raise ValueError
         raw, spec = original["data"], context.inputs.installation
         foundation = context.original.deployment.installation.foundation.platform_config
-        credential = context.original.original_inputs.operator_cloud_credentials
-        before = _private(credential, 1024**2)
         values: dict[str, Any] = {}
         for field, definition in NebiusCapacitySourceSettings.model_fields.items():
             key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_" + field.upper()
             if field == "nebius_credentials_file":
-                values[field] = credential
+                continue  # Supplied explicitly from the pinned Secret below.
             elif field.startswith("kubernetes_"):
                 if raw.get(key):
                     raise ValueError
@@ -396,7 +420,9 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 raise ValueError
         # Every field is explicit: ambient collector variables cannot override
         # this protected read or supply a missing ConfigMap setting.
-        settings = NebiusCapacitySourceSettings(_env_file=None, **values)
+        # Validate configuration before any credential is read or exchanged.
+        settings = NebiusCapacitySourceSettings(_env_file=None,
+            nebius_credentials_file=Path("/var/run/loom-owned/credentials/nebius-credentials.json"), **values)
         if ((settings.nebius_project_id, settings.nebius_quota_parent_id, settings.nebius_region,
                 settings.nebius_node_group_id, spec.cluster_id) != (
                     foundation["project_id"], foundation["quota_parent_id"], foundation["region"],
@@ -404,7 +430,7 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 or spec.node_group_id != settings.nebius_node_group_id):
             raise ValueError
 
-        async def observe() -> None:
+        async def observe(settings: NebiusCapacitySourceSettings) -> None:
             async with asyncio.timeout(120):
                 reader = NebiusCapacityReader(settings)
                 try:
@@ -417,9 +443,18 @@ def qualify_pool_provider(context: PoolCutoverContext, base: HTTPSManagementPrer
                 finally:
                     await reader.close()
 
-        asyncio.run(observe())
+        before = _collector_cloud_credential(context, base)
+        directory = Path(context.operation["inputs_path"]).parent
+        private_state._private_directory(directory)
+        with TemporaryDirectory(prefix=".pool-collector-", dir=directory) as temporary:
+            credential = Path(temporary) / "nebius-credentials.json"
+            private_state._write_private(credential, before)
+            settings = settings.model_copy(update={"nebius_credentials_file": credential})
+            asyncio.run(observe(settings))
+            if _private(credential, 1024**2) != before:
+                raise ValueError
         current = base._request("GET", path)
-        if (_private(credential, 1024**2) != before
+        if (_collector_cloud_credential(context, base) != before
                 or current is None or not _matches(current, original, _uid(original))):
             raise ValueError
     except Exception:

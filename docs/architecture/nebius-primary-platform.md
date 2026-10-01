@@ -2333,14 +2333,24 @@ in retired Pods; drain and successor startup remain separate mandatory barriers.
 The predecessor manager is independently bound to its management database by the
 same real-settings probe and phase-aware recovery checks, never by a participant
 credential. Before returning operator access, the entry also rereads the retained
-collector ConfigMap and uses the production Nebius reader to qualify its actual
+collector ConfigMap and uses the production Nebius reader with the **collector's
+existing cloud credential**, not the operator's credential, to qualify its actual
 node group, parent cluster and native quota identities against the protected
-foundation. Ambient collector settings cannot supply or override these inputs;
-changed ConfigMap identity/content or operator credential fails qualification.
+foundation. The private input and immutable cutover journal bind the source Secret's
+UID, resource version and content digest. The read requires that exact, undeleted
+Secret and fixed key before and after the provider request. An owner-only temporary
+file carries the credential to the SDK and is removed on success or failure; neither
+raw credentials nor SDK errors enter public reports. Ambient collector settings
+cannot supply or override these inputs. Changed configuration, credential, provider
+scope or quota identity rejects qualification before producer downtime.
+The collector renderer also binds the fixed projection, initializer and read-only
+consumer mounts; alternate volumes, command arguments, initialization environment
+or lifecycle hooks cannot substitute another credential. This qualifies the retained
+credential route and its cloud access, not a successful successor collector process.
 The read accepts a scale-zero pool and does not reserve headroom, request nodes or
-introduce a per-environment budget. Workload fit and direct-kubelet telemetry still
-require startup qualification. These checks do not prove the complete external-
-writer inventory or an installed global activation.
+introduce a per-environment budget. Workload fit, direct-kubelet telemetry and actual
+collector startup still require qualification. These checks do not prove the complete
+external-writer inventory or an installed global activation.
 The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
 same-named replacement is not evidence of retired access. The queue includes

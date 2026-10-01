@@ -7,7 +7,7 @@ import json
 import ssl
 from dataclasses import replace
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -57,6 +57,7 @@ def platform_writer_authority(kube_system_uid):
 @pytest.fixture
 def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_inputs):
     from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
+    from scripts.ops.nebius_pool_runtime import PoolCollectorCredential
 
     from loom_service.pool_management.installation import PoolInstallation
 
@@ -74,6 +75,8 @@ def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_
     request = PoolCutoverRequest(fencing=fencing, manager=manager, services=tuple(services.values()),
         collector_config=configmap, profiles={key: desired_profile(migration, doc) for key, doc in services.items()},
         management_origin="https://manage.example.com", kubernetes_endpoint="https://kubernetes.default.svc",
+        collector_credential=PoolCollectorCredential(uid=uuid4(), resource_version='27',
+            sha256=hashlib.sha256(b'{"private":"collector-marker"}').hexdigest()),
         platform_authority=platform_writer_authority(migration.registration.binding.kube_system_uid))
     return request, tokens
 
@@ -206,7 +209,7 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
 
 
-@pytest.mark.parametrize('field,value', [('uid', 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'),
+@pytest.mark.parametrize('field,value', [('uid', UUID('aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa')),
     ('resource_version', '28'), ('sha256', 'e' * 64)])
 def test_cutover_recovery_cannot_replace_the_qualified_collector_credential(cutover_inputs, tmp_path, field, value):
     request, tokens = cutover_inputs
@@ -214,6 +217,7 @@ def test_cutover_recovery_cannot_replace_the_qualified_collector_credential(cuto
     run(request, tokens, api, tmp_path)
     before = (len(api.patches), len(api.resources.creates))
     altered = replace(request, collector_credential=request.collector_credential.model_copy(update={field: value}))
+    api.request = altered  # The anchored parent, not the transport double, must reject replay drift.
     with pytest.raises(ValueError):
         run(altered, tokens, api, tmp_path)
     assert (len(api.patches), len(api.resources.creates)) == before

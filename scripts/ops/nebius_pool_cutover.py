@@ -41,6 +41,7 @@ from scripts.ops.nebius_pool_role_fencing import (
     role_fence_documents,
 )
 from scripts.ops.nebius_pool_runtime import (
+    PoolCollectorCredential,
     participant_readonly_roles,
     wire_collector,
     wire_manager,
@@ -63,6 +64,7 @@ class PoolCutoverRequest:
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     management_origin: str
     kubernetes_endpoint: str
+    collector_credential: PoolCollectorCredential
     platform_authority: PoolPlatformAuthority | None = None
 
 
@@ -97,6 +99,7 @@ class PoolCutoverAPI(Protocol):
 def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     """Generate targets from retained originals, never accept arbitrary manifests."""
     migration = request.fencing.retirement.migration
+    PoolCollectorCredential.model_validate(request.collector_credential.model_dump())
     spec, binding = migration.registration.spec, migration.registration.binding
     originals = retirement_documents(request.fencing.retirement)
     role_fence_documents(request.fencing)
@@ -153,6 +156,7 @@ def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[st
         "writers": {key: {"uid": _uid(row), "document": _stable(row)} for key, row in retirement_documents(request.fencing.retirement).items()},
         "producers": {key: {"uid": _uid(row), "document": _stable(row)} for key, row in documents["producers"].items()},
         "collector_config": {"uid": _uid(request.collector_config), "document": _stable(request.collector_config)},
+        "collector_credential": request.collector_credential.model_dump(mode="json"),
         "documents": {key: value for key, value in documents.items() if key != "producers"}}
 
 

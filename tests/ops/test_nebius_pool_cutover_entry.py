@@ -152,6 +152,7 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
         "guards": guards, "actuators": request.fencing.retirement.actuators,
         "collectors": request.fencing.retirement.collectors, "roles": request.fencing.originals,
         "services": request.services, "collector_config": collector_config,
+        "collector_credential": request.collector_credential.model_dump(mode="json"),
         "platform_authority": platform_writer_authority(root.upgrade.setup.binding.kube_system_uid).model_dump(mode="json"),
         "profiles": profiles,
         "machine_token_files": token_paths, "foundation_candidate": "5" * 40}
@@ -426,6 +427,7 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     assert context.request.kubernetes_endpoint == "https://kubernetes.default.svc"
     assert context.request.fencing.retirement.migration.registration.binding == root.upgrade.setup.binding
     assert context.request.platform_authority.model_dump(mode="json") == payload["platform_authority"]
+    assert context.request.collector_credential.model_dump(mode="json") == payload["collector_credential"]
     assert len(context.tokens) == len(payload["machine_token_files"])
     assert {path: path.read_bytes() for path in root.history} == before
     assert not Path(metadata["state_dir"]).exists()
@@ -901,6 +903,8 @@ def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collec
         assert calls == ['quotas', 'group'] and closed == [True]
     if calls:
         assert closed == [True]
+    if damage is not None and damage.startswith('secret_'):
+        assert files == [] and calls == []  # Reject before handing any bytes to the SDK.
     assert all(not path.exists() for path in files)
     assert credential.read_bytes() == b'{"private":"marker"}'
 
