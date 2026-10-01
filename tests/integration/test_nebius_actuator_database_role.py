@@ -109,6 +109,14 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                         db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
                     db.rollback()
                 db.execute("REVOKE UPDATE(mode) ON nebius_pool_bindings FROM loom_actuator")
+            if kind == "registered-build":
+                db.execute("REVOKE INSERT ON task_bundle_source_references FROM loom_actuator")
+                db.execute("GRANT INSERT(source_id) ON task_bundle_source_references TO loom_actuator")
+                with pytest.raises(psycopg.errors.RaiseException, match="source journal authority unqualified"):
+                    db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="observe"), prepare=False)
+                db.rollback()
+                db.execute("REVOKE INSERT(source_id) ON task_bundle_source_references FROM loom_actuator")
+                db.execute("GRANT INSERT ON task_bundle_source_references TO loom_actuator")
         async with owners.begin() as session:
             await release(session, owner=owner, candidate=candidate)
         if kind == "execution":
@@ -132,7 +140,13 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 from loom.db.schema import Task, TrialTaskImageMaterialization
                 from loom.task_image_materialization import ensure_task_image_materializations
                 from tests.integration.test_nebius_pool_build_selection import selector
-                from tests.integration.test_task_bundle_source_journal import _module, _publish, _receipts, _spec, _upload
+                from tests.integration.test_task_bundle_source_journal import (
+                    _module,
+                    _publish,
+                    _receipts,
+                    _spec,
+                    _upload,
+                )
 
                 spec = _spec(tmp_path)
                 ticket = await _upload(owners, spec)
