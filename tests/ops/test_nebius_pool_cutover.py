@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import ssl
 from dataclasses import replace
+from types import SimpleNamespace
+from uuid import uuid4
 
+import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_collector_runtime import collector_inputs as collector_inputs
@@ -64,6 +69,9 @@ class CutoverAPI:
         self.failure = None
         self.fail_key = None
         self.unqualified_preflight = False
+        self.acl_staged = set()
+        self.acl_failure = None
+        self.acl_fail_participant = None
 
     def preflight(self, request):
         assert request == self.request
@@ -75,12 +83,24 @@ class CutoverAPI:
         if self.unqualified_queue or self.active_application_access:
             raise ValueError("private-marker")
 
-    def qualify_runtime_access(self, action):
+    def qualify_runtime_access(self, participant_id, action):
         assert action in {"stage", "observe"}
-        self.events.append("acl-" + action)
+        self.events.append("acl-" + action + ":" + str(participant_id))
+        if action == "stage":
+            if self.acl_failure == "before" and participant_id == self.acl_fail_participant:
+                raise OSError("private-marker")
+            self.acl_staged.add(participant_id)
+            if self.acl_failure == "after" and participant_id == self.acl_fail_participant:
+                raise OSError("private-marker")
+        else:
+            assert participant_id in self.acl_staged
 
     def read_workload(self, key):
         return copy.deepcopy(self.documents[key])
+
+    def preview_workload(self, key, before, desired):
+        assert before == self.documents[key]
+        return copy.deepcopy(desired)
 
     def patch_workload(self, key, before, desired):
         assert before == self.documents[key]
@@ -98,7 +118,9 @@ class CutoverAPI:
         return True
 
     def drained_workload(self, key, desired):
-        assert self.documents[key]["spec"] == desired["spec"]
+        from scripts.ops.nebius_management_switch import _matches
+
+        assert _matches(self.documents[key], desired, self.documents[key]["metadata"]["uid"])
         return key not in self.busy
 
 
@@ -122,7 +144,7 @@ def test_connected_parent_freezes_producers_retires_fences_and_stages_only_close
     assert api.events.index("quiescence") > api.events.index("patch:" + producer_keys[-1])
     assert len(api.retirement.patches) == 9
     assert len(api.fencing.patches) == 6
-    assert api.events.count("acl-stage") == 1
+    assert len([row for row in api.events if row.startswith("acl-stage:")]) == 3
     assert len(api.migration.guards) == 3
     for document in api.documents.values():
         if document["kind"] == "Deployment":
@@ -147,8 +169,40 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     before = (len(api.patches), len(api.retirement.patches), len(api.fencing.patches), len(api.resources.creates))
     assert run(request, tokens, api, tmp_path) == first
     assert (len(api.patches), len(api.retirement.patches), len(api.fencing.patches), len(api.resources.creates)) == before
-    assert api.events.count("acl-stage") == 1
-    assert api.events.count("acl-observe") >= 2
+    assert len([row for row in api.events if row.startswith("acl-stage:")]) == 3
+    assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
+
+
+@pytest.mark.parametrize("failure", ["before", "after"])
+def test_each_participant_acl_intent_is_recovered_independently_without_repeating_sql(cutover_inputs, tmp_path, failure):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    participant = request.fencing.retirement.migration.guards[1].participant_id
+    api.acl_fail_participant, api.acl_failure = participant, failure
+    if failure == "before":
+        for _ in range(2):
+            with pytest.raises(ValueError):
+                run(request, tokens, api, tmp_path)
+        assert not api.resources.creates
+    else:
+        assert run(request, tokens, api, tmp_path)["status"] == "pool_runtime_staged_closed"
+        assert run(request, tokens, api, tmp_path)["status"] == "pool_runtime_staged_closed"
+        assert len(api.acl_staged) == 3
+    assert api.events.count("acl-stage:" + str(participant)) == 1
+
+
+def test_partial_runtime_recovery_rechecks_every_frozen_producer_before_another_patch(cutover_inputs, tmp_path):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    api.fail_key = _key(request.fencing.retirement.migration.guards[0].controller)
+    api.failure = "conflict"
+    assert run(request, tokens, api, tmp_path)["status"] == "pending_runtime_update"
+    api.failure = None
+    api.documents[_key(request.services[-1])]["spec"]["replicas"] = 1
+    before = len(api.patches)
+    with pytest.raises(ValueError):
+        run(request, tokens, api, tmp_path)
+    assert len(api.patches) == before
 
 
 @pytest.mark.parametrize("boundary", ["producer_drain", "queue_origin", "application_access", "publication"])
@@ -226,3 +280,106 @@ def test_runtime_renderer_rejects_an_incomplete_shared_service_roster_before_any
     with pytest.raises(ValueError):
         run(request, tokens, api, tmp_path)
     assert not api.patches and not api.retirement.patches and not api.resources.creates
+
+
+@pytest.mark.parametrize("damage", [None, "namespace", "uid", "running", "foreign_template", "redirect"])
+def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutover_inputs, damage):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+    from scripts.ops.nebius_pool_retirement import stopped_document
+
+    request, tokens = cutover_inputs
+    migration = request.fencing.retirement.migration
+    guard = migration.guards[0]
+    key = _key(guard.controller)
+    before = stopped_document(request.fencing.retirement, key)
+    before["metadata"].update(uid=guard.controller["metadata"]["uid"], resourceVersion="2")
+    desired = cutover_documents(request)["runtime"][key]
+    namespaces = {migration.registration.binding.namespace: migration.registration.binding.namespace_uid,
+        "kube-system": migration.registration.binding.kube_system_uid,
+        **{row.namespace: str(row.namespace_uid) for row in migration.guards},
+        **{ns.name: str(ns.uid) for row in migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace)}}
+    calls = []
+
+    def respond(message):
+        calls.append(message)
+        if message.method == "GET" and message.url.path.startswith("/api/v1/namespaces/"):
+            name = message.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": name, "uid": str(uuid4()) if damage == "namespace" and name == guard.namespace else namespaces[name],
+                "labels": {"loom.nebius/management-installation": migration.registration.binding.installation_id,
+                    "pod-security.kubernetes.io/enforce": "restricted"}}})
+        assert message.method == "PATCH"
+        assert message.url.path == "/apis/apps/v1/namespaces/" + guard.namespace + "/deployments/loom-control-plane"
+        if damage == "redirect":
+            return httpx.Response(307, headers={"Location": "https://foreign.example/"})
+        patch = json.loads(message.content)
+        assert patch[:3] == [{"op": "test", "path": "/metadata/uid", "value": guard.controller["metadata"]["uid"]},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": "2"},
+            {"op": "test", "path": "/spec", "value": before["spec"]}]
+        value = copy.deepcopy(desired)
+        value["metadata"].update(uid=guard.controller["metadata"]["uid"], resourceVersion="3")
+        return httpx.Response(200, json=value)
+
+    external = CutoverAPI(request)
+    external.migration.guards = {row.participant_id: str(migration.registration.spec.operation_id) for row in migration.guards}
+    with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
+            guards=SimpleNamespace(request=migration, guard=external.migration.guard), checks=external, api_server="https://cluster.example",
+            ssl_context=ssl.create_default_context()) as api:
+        api.fencing.verify_readonly = external.fencing.verify_readonly
+        api.client.close()
+        api.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond), follow_redirects=False)
+        if damage == "uid":
+            before["metadata"]["uid"] = str(uuid4())
+        elif damage == "running":
+            desired["spec"]["replicas"] = 1
+        elif damage == "foreign_template":
+            desired["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign.example/unreviewed:latest"
+        if damage:
+            with pytest.raises(ValueError):
+                api.patch_workload(key, before, desired)
+        else:
+            assert api.patch_workload(key, before, desired) is True
+        patches = [row for row in calls if row.method == "PATCH"]
+        assert len(patches) == (1 if damage in {None, "redirect"} else 0)
+
+
+def test_https_resource_stage_routes_only_fixed_catalog_secrets_and_gateway_authority(cutover_inputs, tmp_path):
+    from scripts.ops.nebius_management_stage import _MARKER
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+
+    request, tokens = cutover_inputs
+    migration = request.fencing.retirement.migration
+    binding = migration.registration.binding
+    namespaces = {binding.namespace: binding.namespace_uid, "kube-system": binding.kube_system_uid,
+        **{row.namespace: str(row.namespace_uid) for row in migration.guards},
+        **{ns.name: str(ns.uid) for row in migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace)}}
+    calls = []
+
+    def respond(message):
+        calls.append(message)
+        name = message.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
+            "name": name, "uid": namespaces[name], "labels": {"loom.nebius/management-installation": binding.installation_id,
+                "pod-security.kubernetes.io/enforce": "restricted"}}})
+
+    external = CutoverAPI(request)
+    with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
+            guards=SimpleNamespace(request=migration), checks=external, api_server="https://cluster.example",
+            ssl_context=ssl.create_default_context()) as api:
+        api.client.close()
+        api.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond))
+        documents = cutover_documents(request)
+        cluster_role = next(row for row in documents["authority"] if row["kind"] == "ClusterRole")
+        collector = next(row for row in documents["configuration"] if row["metadata"]["namespace"] != binding.namespace)
+        for doc, want in ((cluster_role, "/apis/rbac.authorization.k8s.io/v1/clusterroles"),
+                (collector, "/api/v1/namespaces/" + collector["metadata"]["namespace"] + "/configmaps")):
+            assert api._approved(doc) == want
+            marked = copy.deepcopy(doc)
+            marked["metadata"].setdefault("annotations", {})[_MARKER] = str(uuid4())
+            assert api._approved(marked, writing=True) == want
+            marked["metadata"]["name"] = "foreign-resource"
+            with pytest.raises(ValueError):
+                api.create_resource(marked)
+        assert not calls  # Rejected before even an operator request.

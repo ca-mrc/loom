@@ -2238,6 +2238,30 @@ migration incomplete: the protected parent owns complete external-writer
 inventory and fresh qualification before activation. It never removes an
 unexpected grant automatically.
 
+The connected cutover parent now sequences producer shutdown, closed
+registration, workload retirement, effective-role fencing, dedicated material,
+runtime ACL qualification, gateway configuration/authority and disabled runtime
+replacement. Targets are generated from the retained manager, complete shared
+API/actuator roster and one development collector; arbitrary manifests are not
+inputs. Producer Pod drain is followed by independent application-access,
+schema-readiness and queued-origin qualification. It cannot manufacture provenance
+for a legacy queue. Runtime ACL intent is retained separately per participant;
+unknown SQL outcomes permit qualification only, not repeated grant commands.
+
+Once runtime replacement starts, recovery must not replay the original retirement
+or fencing installer against the changed templates. The parent instead qualifies
+the anchored child hashes, held guards, restricted roles, current effective rules
+and each exact stopped old or journaled new workload. It rechecks every frozen
+producer before further mutations, including partial replacement recovery.
+Kubernetes previews qualify defaults before UID/resource-version/spec-fenced
+updates; uncertain updates are observed, never retried. Immutable material and
+gateway resource creation retain the existing single-create journals. The
+`pool_runtime_staged_closed` result still marks writer migration incomplete: all
+replacement Deployments remain at zero and the single collector remains suspended.
+Protected entry qualification, runtime activation, rollback and completed
+successor-refresh authority remain required; this internal parent is not a
+standalone operational command or evidence of an installed usable pool.
+
 Actuator telemetry uses the qualified Node's private `InternalIP` and fixed
 kubelet HTTPS `/stats/summary` endpoint. The cluster CA verifies the serving
 certificate and the renewable runtime bearer authorizes GET `nodes/stats`;
