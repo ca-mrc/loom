@@ -351,7 +351,7 @@ def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutov
     external = CutoverAPI(request)
     external.migration.guards = {row.participant_id: str(migration.registration.spec.operation_id) for row in migration.guards}
     with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
-            guards=SimpleNamespace(request=migration, guard=external.migration.guard), checks=external, api_server="https://cluster.example",
+            guards=SimpleNamespace(request=migration, guard=external.migration.guard), checks=external, history=external, api_server="https://cluster.example",
             ssl_context=ssl.create_default_context()) as api:
         api.fencing.verify_readonly = external.fencing.verify_readonly
         api.client.close()
@@ -393,7 +393,7 @@ def test_https_resource_stage_routes_only_fixed_catalog_secrets_and_gateway_auth
 
     external = CutoverAPI(request)
     with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
-            guards=SimpleNamespace(request=migration), checks=external, api_server="https://cluster.example",
+            guards=SimpleNamespace(request=migration), checks=external, history=external, api_server="https://cluster.example",
             ssl_context=ssl.create_default_context()) as api:
         api.client.close()
         api.client = httpx.Client(base_url="https://cluster.example", transport=httpx.MockTransport(respond))
@@ -444,7 +444,7 @@ def test_https_quiescence_requires_bound_database_pages_and_registered_origin_hi
     external.qualify_pending_origins = registered_origins
     guards = SimpleNamespace(request=migration, cutover_readiness_page=database_page)
     with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
-            guards=guards, checks=external, api_server='https://cluster.example',
+            guards=guards, checks=external, history=external, api_server='https://cluster.example',
             ssl_context=ssl.create_default_context()) as api:
         monkeypatch.setattr(api, '_scope', lambda: None)
         if damage:

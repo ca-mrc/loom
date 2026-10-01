@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import replace
 from uuid import uuid4
 
+import psycopg
 import pytest
 from sqlalchemy import text, update
 
@@ -101,6 +102,64 @@ async def test_cutover_origin_history_denies_unregistered_source_and_wrong_bindi
     async with factory() as session:
         with pytest.raises(PoolOriginError):
             await qualify_retained_pool_origin(session, origin, participant=binding, cluster_id=cluster, workload_kind='trial')
+
+
+async def read_management_history(factory, origins):
+    from scripts.ops.nebius_pool_origin_history import pool_management_history_sql
+
+    url = factory.kw['bind'].url.set(drivername='postgresql').render_as_string(hide_password=False)
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as connection:
+        async with connection.cursor() as cursor:
+            await cursor.execute(pool_management_history_sql(origins), prepare=False)
+            rows = []
+            while True:
+                if cursor.description:
+                    rows.extend(await cursor.fetchall())
+                if not await cursor.nextset():
+                    break
+            assert len(rows) == 1
+            return rows[0][0]
+
+
+async def test_fixed_management_sql_qualifies_original_source_after_retirement_without_writes(applications):
+    from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
+
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='history-stop',
+        action='suspend', expected_generation=1)
+    before = await registry.get_operation(operation.operation_id, principal=alice)
+    report = await read_management_history(factory, (origin,))
+    assert report['read_only'] is True
+    assert qualify_management_history_page(report, origins=(origin,), participant=binding,
+        cluster_id=plan['prepared'].registration.cluster_id) == (3,)
+    assert await registry.get_operation(operation.operation_id, principal=alice) == before
+
+
+@pytest.mark.parametrize('damage', ['source', 'incarnation', 'generation', 'missing_app', 'cluster', 'environment', 'missing_row', 'extra_row'])
+async def test_fixed_history_readback_denies_unknown_or_misbound_original_work(applications, damage):
+    from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
+
+    factory, _, binding, origin, _, _, _, plan = await setup_origin(applications)
+    cluster = plan['prepared'].registration.cluster_id
+    changes = {
+        'source': {'source_digest': 'sha256:' + 'f' * 64},
+        'incarnation': {'incarnation': uuid4()},
+        'generation': {'deployment_generation': 99},
+        'missing_app': {'application_id': uuid4()},
+    }
+    if damage in changes:
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update=changes[damage])})
+    report = await read_management_history(factory, (origin,))
+    if damage == 'cluster':
+        cluster = 'mk8scluster-foreign'
+    elif damage == 'environment':
+        binding = binding.model_copy(update={'environment_id': uuid4()})
+    elif damage == 'missing_row':
+        report['rows'].clear()
+    elif damage == 'extra_row':
+        report['rows'].append(report['rows'][0])
+    with pytest.raises(ValueError):
+        qualify_management_history_page(report, origins=(origin,), participant=binding, cluster_id=cluster)
 
 
 @pytest.mark.parametrize("field,value", [
