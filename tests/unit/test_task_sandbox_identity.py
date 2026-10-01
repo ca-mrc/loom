@@ -1,5 +1,7 @@
 """Task identity is confined to private sandboxes and deployment opt-in."""
 
+import json
+
 import pytest
 
 from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, ExecutionRuntimePlanV1
@@ -132,7 +134,13 @@ def test_explicit_template_cannot_bypass_automatic_capability_readiness(declarat
     elif declaration == "mutable_paths":
         payload["environment"]["mutable_paths"] = ["/data"]
     else:
-        template["task_egress"] = {"kind": "web-allowlist", "destinations": [{"host": "example.org", "protocol": "https"}]}
+        policy = {"kind": "web-allowlist", "destinations": [{"host": "example.org", "protocol": "https"}]}
+        template["task_egress"] = policy
+        template["effective_network_policy"] = policy
+        frozen = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+        for phase in (template["main"], template.get("verifier")):
+            if phase is not None:
+                phase["environment"]["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"] = frozen
         template["output_declarations"].append(TASK_EGRESS_OUTPUT.model_dump(mode="json"))
     with pytest.raises(ValueError, match="automatic native execution"):
         TaskConfig.model_validate(payload)

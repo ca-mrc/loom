@@ -1,9 +1,12 @@
 import { Input } from "../components/Input";
-import { RETRY_REASONS, clampFloat, clampInt, type AdvancedState } from "./newBatch/advancedConfig";
+import type { AdvancedState } from "./newBatch/advancedConfig";
+import { RETRY_REASONS, clampFloat, clampInt } from "./newBatch/advancedInputs";
 import { FieldLabel, Help } from "./NewBatchFields";
 
 import type { NewBatchViewState } from "./useNewBatch";
-export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose, toggleRetryReason }: NewBatchViewState): JSX.Element {
+export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose, toggleRetryReason, networkPolicyPreview }: NewBatchViewState): JSX.Element {
+  const policyChoice = (kind: AdvancedState["networkPolicy"]) =>
+    networkPolicyPreview?.data?.choices?.find((choice) => choice.kind === kind);
   return (
     <div className="space-y-6 px-6 pb-6">
       <fieldset className="space-y-3">
@@ -67,6 +70,52 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             <option value="separate">separate</option>
           </select>
         </label>
+        <label className="block max-w-sm">
+          <FieldLabel hint="default: task setting">Task network access</FieldLabel>
+          <select
+            className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+            value={advanced.networkPolicy}
+            onChange={(e) =>
+              setAdv("networkPolicy", e.target.value as AdvancedState["networkPolicy"])
+            }
+          >
+            <option value="">Use task default</option>
+            <option value="gateway-only" disabled={policyChoice("gateway-only")?.available === false}>Gateway only</option>
+            <option value="web-allowlist" disabled={policyChoice("web-allowlist")?.available === false}>Approved websites</option>
+            <option value="public-web" disabled={policyChoice("public-web")?.available === false}>Public HTTP/HTTPS</option>
+          </select>
+        </label>
+        {advanced.networkPolicy === "web-allowlist" ? (
+          <label className="block max-w-lg">
+            <FieldLabel hint="one per line">Approved websites</FieldLabel>
+            <textarea
+              className="block min-h-24 w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-slate-800"
+              value={advanced.allowedWebsites}
+              onChange={(e) => setAdv("allowedWebsites", e.target.value)}
+              placeholder={"https://registry.npmjs.org\nhttps://pypi.org"}
+            />
+            <Help>Exact public HTTP or HTTPS hostnames. Paths, ports, credentials, and wildcards are rejected.</Help>
+          </label>
+        ) : null}
+        {networkPolicyPreview?.data?.authored_defaults?.length ? (
+          <div className="text-xs text-slate-600">
+            Task defaults: {networkPolicyPreview.data.authored_defaults.map((group) =>
+              `${String(group.policy.kind)} (${group.task_ids.length})`,
+            ).join(", ")}
+          </div>
+        ) : null}
+        {networkPolicyPreview?.data?.widens_task_ids?.length ? (
+          <p className="text-xs font-medium text-amber-700">
+            This selection widens network access for {networkPolicyPreview.data.widens_task_ids.length} task(s).
+          </p>
+        ) : null}
+        {networkPolicyPreview?.data?.selected_incompatible_task_ids?.length ? (
+          <div className="text-xs text-red-700" role="alert">
+            Incompatible tasks ({networkPolicyPreview.data.selected_incompatible_task_ids.length}):{" "}
+            {networkPolicyPreview.data.selected_incompatible_task_ids.slice(0, 8).join(", ")}
+            {networkPolicyPreview.data.selected_incompatible_task_ids.length > 8 ? "…" : ""}
+          </div>
+        ) : null}
       </fieldset>
 
       <fieldset className="space-y-3">

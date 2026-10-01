@@ -54,7 +54,12 @@ from loom.hosted_harness import (
     hosted_harness,
     is_workspace_harness,
 )
-from loom.models.networking import hosted_http_egress
+from loom.models.networking import (
+    NetworkPolicy,
+    UnsupportedNetworkPolicyOverrideError,
+    hosted_http_egress,
+    resolve_effective_network_policy,
+)
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
@@ -406,6 +411,17 @@ def automatic_service_execution_rejections(
     spec = hosted_harness(trial.agent_name)
     controller = spec is not None and spec.workspace
     reasons: list[str] = list(declared_rejections)
+    try:
+        effective_network_policy = resolve_effective_network_policy(
+            baseline=env.baseline_network_policy,
+            supported=env.network_policies_supported,
+            override=trial.baseline_network_policy_override,
+        )
+        network_override_supported = True
+    except UnsupportedNetworkPolicyOverrideError:
+        reasons.append("network_policy_override_not_supported")
+        effective_network_policy = env.baseline_network_policy
+        network_override_supported = False
     if task.agent.continue_until_timeout and not (spec and spec.supports("agent_continuation")):
         reasons.append("agent_continuation_unsupported")
     reasons.extend(item.code for item in execution_requirement_diagnostics(
@@ -423,7 +439,10 @@ def automatic_service_execution_rejections(
                 identity = None
             if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
                 reasons.append("guest_root_identity_required")
-        admission = evaluate_execution_admission(workload_requirements_from_task(task), nebius_guest_execution_class())
+        admission = evaluate_execution_admission(
+            workload_requirements_from_task(task, trial if network_override_supported else None),
+            nebius_guest_execution_class(),
+        )
         reasons.extend(reason.code for reason in admission.reasons if reason.code.startswith("guest_"))
     if service_execution_input_binding(source_provenance) is None:
         reasons.append("immutable_task_input_unavailable")
@@ -464,8 +483,13 @@ def automatic_service_execution_rejections(
                 resolve_sandbox_identity(task.verifier.user, env.environment.get("HOME"))
         except ValueError:
             reasons.append("unsupported_task_identity")
-    if env.baseline_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
+    if effective_network_policy.kind not in {"gateway-only", "web-allowlist", "public-web"}:
         reasons.append("gateway_only_network_required")
+    if (
+        hosted_http_egress(effective_network_policy) is not None
+        and not controller
+    ):
+        reasons.append("task_network_consumer_unavailable")
     if (
         (set(env.environment) - ({"HOME"} if controller else set()))
         or (env.sidecars and (not controller or not all(sidecar.fixture for sidecar in env.sidecars)))
@@ -520,8 +544,6 @@ def automatic_service_execution_rejections(
             reasons.append("private_verifier_directory_required")
         if trial.workspace_staging_policy_name == "none":
             reasons.append("private_workspace_isolation_required")
-        if trial.baseline_network_policy_override is not None:
-            reasons.append("network_override_unsupported")
     if task.steps:
         step = task.steps[0]
         if (
@@ -594,7 +616,12 @@ def compile_service_execution_plan(
         raise ValueError("automatic service execution is incompatible: " + ",".join(reasons))
     spec = hosted_harness(trial.agent_name)
     assert spec is not None  # admission rejected unknown harnesses above
-    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
+    effective_network_policy = resolve_effective_network_policy(
+        baseline=task.environment.baseline_network_policy,
+        supported=task.environment.network_policies_supported,
+        override=trial.baseline_network_policy_override,
+    )
+    if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         raise ValueError("task_egress_runtime_unavailable")
     profile_reasons = runtime_profile_rejections(task, trial, profile)
     selected_agent_image = controller_image_for_trial(profile, trial)
@@ -623,6 +650,7 @@ def compile_service_execution_plan(
                if trial.agent_version is not None else {}),
             "model": trial.agent_model.model_dump(mode="json") if trial.agent_model else None,
             "request_params": trial.request_params,
+            "effective_network_policy": effective_network_policy.model_dump(mode="json"),
             "instruction_file": str(step.instruction_file),
             "artifacts": step.artifacts,
             "required_artifacts": step.required_artifacts,
@@ -634,6 +662,7 @@ def compile_service_execution_plan(
             spec=spec, task=task, trial=trial, task_revision_sha256=task_revision_sha256,
             profile=profile, binding=binding, command_identity=command_identity,
             output_paths=output_paths,
+            effective_network_policy=effective_network_policy,
             resource_requests=resource_requests,
             task_image_materialization_id=(
                 task_image_grant.materialization_id if task_image_grant else None
@@ -644,6 +673,11 @@ def compile_service_execution_plan(
     # the service-execution lease and supports both a JWT-bound provider
     # connection and the platform route, whose model identity is provider/name.
     model = trial.agent_model.to_gateway_model_string()
+    effective_network_policy_json = json.dumps(
+        effective_network_policy.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     main_environment = {
         "LOOM_TASK_MODEL": model,
         "LOOM_TASK_INSTRUCTION_FILE": str(step.instruction_file),
@@ -651,6 +685,7 @@ def compile_service_execution_plan(
         "LOOM_TASK_REQUEST_PARAMS_JSON": json.dumps(
             trial.request_params, sort_keys=True, separators=(",", ":")
         ),
+        "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": effective_network_policy_json,
     }
     verifier_path = str(task.verifier.args.get("script_path", ""))
     verifier = ProcessPhaseV1(
@@ -664,6 +699,7 @@ def compile_service_execution_plan(
         environment={
             "LOOM_TASK_DIR": "/workspace",
             "LOOM_VERIFIER_OUTPUT": "/workspace/.loom/verifier/output.json",
+            "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": effective_network_policy_json,
             **(
                 {"LOOM_AGENT_OUTPUT": f"/workspace/{step.artifacts[0]}"}
                 if len(step.artifacts) == 1
@@ -700,10 +736,11 @@ def compile_service_execution_plan(
             required=True,
         ),
     )
-    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
+    if hosted_http_egress(effective_network_policy) is not None:
         output_declarations = (TASK_EGRESS_OUTPUT, *output_declarations)
     return ExecutionRuntimePlanV1(
-        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
+        effective_network_policy=effective_network_policy,
+        task_egress=hosted_http_egress(effective_network_policy),
         candidate_sha=profile.candidate_sha,
         task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity,
@@ -831,6 +868,14 @@ def runtime_profile_rejections(
     *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
     """Submission and scheduling share the profile's image/agent compatibility."""
+    try:
+        effective_network_policy = resolve_effective_network_policy(
+            baseline=task.environment.baseline_network_policy,
+            supported=task.environment.network_policies_supported,
+            override=trial.baseline_network_policy_override,
+        )
+    except UnsupportedNetworkPolicyOverrideError:
+        return ("network_policy_override_not_supported",)
     if _guest_capabilities(task):
         if profile.guest_runtime is None:
             return ("guest_runtime_unavailable",)
@@ -838,7 +883,7 @@ def runtime_profile_rejections(
             return ("guest_runtime_volume_too_small",)
         if not profile.supports_task_identity:
             return ("task_identity_runtime_unavailable",)
-    if hosted_http_egress(task.environment.baseline_network_policy) is not None and not profile.supports_task_web_egress:
+    if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
         return ("task_egress_runtime_unavailable",)
     spec = hosted_harness(trial.agent_name)
     if trial.agent_version is not None and (
@@ -878,7 +923,7 @@ def _plan_admissions(
 def _compile_terminus_plan(
     *, spec: HostedHarnessSpec, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
     profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
-    command_identity: str, output_paths: list[str],
+    command_identity: str, output_paths: list[str], effective_network_policy: NetworkPolicy,
     task_image_materialization_id: UUID | None = None,
     resource_requests: ExecutionResourceRequestsV1 | None = None,
 ) -> ExecutionRuntimePlanV1:
@@ -938,6 +983,11 @@ def _compile_terminus_plan(
     phase_env = {
         "LOOM_TASK_TRIAL_JSON": trial.model_dump_json(exclude_defaults=True),
         "LOOM_TASK_ARTIFACTS_JSON": json.dumps(output_paths),
+        "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": json.dumps(
+            effective_network_policy.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
     }
     def phase(role: Literal["agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
         return ProcessPhaseV1(
@@ -986,7 +1036,7 @@ def _compile_terminus_plan(
             ))
     if task_image_materialization_id is None:
         published_refs.add(env.docker_image)
-    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
+    if hosted_http_egress(effective_network_policy) is not None:
         outputs.insert(0, TASK_EGRESS_OUTPUT)
     controller_resources = (ContainerResourcesV1(
         cpu_millis=profile.controller_resources.cpu_millis,
@@ -1009,7 +1059,8 @@ def _compile_terminus_plan(
                 }),
             })
     return ExecutionRuntimePlanV1(
-        task_egress=hosted_http_egress(task.environment.baseline_network_policy),
+        effective_network_policy=effective_network_policy,
+        task_egress=hosted_http_egress(effective_network_policy),
         candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
         command_identity_sha256=command_identity, execution_class_id=(nebius_guest_execution_class(
             supports_task_web_egress=profile.supports_task_web_egress,

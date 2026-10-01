@@ -1224,6 +1224,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/network-policy-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview Batch Network Policy
+         * @description Preview the network dimension without creating a Batch or Trial.
+         */
+        post: operations["preview_batch_network_policy_api_v1_network_policy_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/overview": {
         parameters: {
             query?: never;
@@ -2829,6 +2849,21 @@ export interface components {
             /** Task Name */
             task_name: string;
         };
+        /** Allowlist */
+        Allowlist: {
+            /**
+             * Cidrs
+             * @default []
+             */
+            cidrs: string[];
+            /** Domains */
+            domains: string[];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "allowlist";
+        };
         /** ArtifactInventory */
         ArtifactInventory: {
             /** Logs Diagnostics */
@@ -3102,6 +3137,7 @@ export interface components {
             model_backed_terminal_trial_count?: number;
             /** Name */
             name: string;
+            network_policy?: components["schemas"]["BatchDetailNetworkPolicyEvidence"];
             /** No Call Trial Count */
             no_call_trial_count?: number;
             owner_team?: components["schemas"]["BatchOwnerTeam"];
@@ -3181,6 +3217,32 @@ export interface components {
             usage_reporting_status?: string;
             /** Visibility */
             visibility?: "team" | "org" | "private";
+        } & {
+            [key: string]: unknown;
+        };
+        /** BatchDetailNetworkPolicyEvidence */
+        BatchDetailNetworkPolicyEvidence: {
+            /** Authored Defaults */
+            authored_defaults: components["schemas"]["BatchDetailNetworkPolicyGroup"][];
+            /** Requested Override */
+            requested_override: {
+                [key: string]: unknown;
+            } | null;
+            /** Resolved Effective */
+            resolved_effective: components["schemas"]["BatchDetailNetworkPolicyGroup"][];
+            /** Unavailable Task Ids */
+            unavailable_task_ids?: string[];
+        } & {
+            [key: string]: unknown;
+        };
+        /** BatchDetailNetworkPolicyGroup */
+        BatchDetailNetworkPolicyGroup: {
+            /** Policy */
+            policy: {
+                [key: string]: unknown;
+            };
+            /** Task Ids */
+            task_ids: string[];
         } & {
             [key: string]: unknown;
         };
@@ -4084,6 +4146,14 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** GatewayOnly */
+        GatewayOnly: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "gateway-only";
+        };
         /** GetBackendsResponse */
         GetBackendsResponse: {
             /** Items */
@@ -4812,6 +4882,14 @@ export interface components {
             sha256: string;
             /** Size Bytes */
             size_bytes: number;
+        };
+        /** NoNetwork */
+        NoNetwork: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "no-network";
         };
         /** OverviewAction */
         OverviewAction: {
@@ -6176,6 +6254,29 @@ export interface components {
             /** Refreshed */
             refreshed: number;
         };
+        /** Public */
+        Public: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "public";
+        };
+        /**
+         * PublicWeb
+         * @description Public HTTP and HTTPS through the gateway dialer.
+         *
+         *     This is not Docker ``Public``. The execution pod still has no route to
+         *     the public internet; the gateway dials port 80 or 443 after the public
+         *     address checks.
+         */
+        PublicWeb: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "public-web";
+        };
         /** RecipeProviderBindingApplyV1 */
         RecipeProviderBindingApplyV1: {
             /** Allowed Team Ids */
@@ -7509,6 +7610,7 @@ export interface components {
             execution_state: string;
             /** Lifecycle Stage */
             lifecycle_stage: "queued" | "admission_blocked" | "provisioning" | "running" | "verifying" | "materializing" | "succeeded" | "failed" | "cancelled" | "output_unavailable";
+            network_policy?: components["schemas"]["TrialDetailNetworkPolicyEvidence"];
             /** Next Attempt At */
             next_attempt_at: string | null;
             /** Output Commit State */
@@ -7589,6 +7691,23 @@ export interface components {
             required_size_bytes: number;
             /** State */
             state: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialDetailNetworkPolicyEvidence */
+        TrialDetailNetworkPolicyEvidence: {
+            /** Effective */
+            effective: {
+                [key: string]: unknown;
+            } | null;
+            /** Requested Override */
+            requested_override: {
+                [key: string]: unknown;
+            } | null;
+            /** Task Default */
+            task_default: {
+                [key: string]: unknown;
+            } | null;
         } & {
             [key: string]: unknown;
         };
@@ -7842,6 +7961,29 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WebAllowlist */
+        WebAllowlist: {
+            /** Destinations */
+            destinations: components["schemas"]["WebDestination"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "web-allowlist";
+        };
+        /**
+         * WebDestination
+         * @description Exact public DNS destination; HTTPS uses CONNECT, HTTP uses forwarding.
+         */
+        WebDestination: {
+            /** Host */
+            host: string;
+            /**
+             * Protocol
+             * @enum {string}
+             */
+            protocol: "http" | "https";
         };
         /** _AcceptInviteReq */
         _AcceptInviteReq: {
@@ -8110,6 +8252,59 @@ export interface components {
         _LoginStartReq: {
             /** Email */
             email: string;
+        };
+        /** _NetworkPolicyDefaultGroup */
+        _NetworkPolicyDefaultGroup: {
+            /** Policy */
+            policy: {
+                [key: string]: unknown;
+            };
+            /** Task Ids */
+            task_ids: string[];
+        };
+        /** _NetworkPolicyPreviewChoice */
+        _NetworkPolicyPreviewChoice: {
+            /** Available */
+            available: boolean;
+            /** Incompatible Task Ids */
+            incompatible_task_ids: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "gateway-only" | "web-allowlist" | "public-web";
+            /** Reasons */
+            reasons: string[];
+        };
+        /** _NetworkPolicyPreviewRequest */
+        _NetworkPolicyPreviewRequest: {
+            /** Agent Names */
+            agent_names?: string[];
+            /** Baseline Network Policy Override */
+            baseline_network_policy_override?: (components["schemas"]["Public"] | components["schemas"]["NoNetwork"] | components["schemas"]["GatewayOnly"] | components["schemas"]["Allowlist"] | components["schemas"]["WebAllowlist"] | components["schemas"]["PublicWeb"]) | null;
+            /** Task Filter */
+            task_filter: {
+                [key: string]: unknown;
+            };
+            /** Team Id */
+            team_id?: string | null;
+        };
+        /** _NetworkPolicyPreviewResponse */
+        _NetworkPolicyPreviewResponse: {
+            /** Authored Defaults */
+            authored_defaults: components["schemas"]["_NetworkPolicyDefaultGroup"][];
+            /** Choices */
+            choices: components["schemas"]["_NetworkPolicyPreviewChoice"][];
+            /** Selected Incompatible Task Ids */
+            selected_incompatible_task_ids: string[];
+            /** Selected Rejection Reasons */
+            selected_rejection_reasons: {
+                [key: string]: string[];
+            };
+            /** Task Count */
+            task_count: number;
+            /** Widens Task Ids */
+            widens_task_ids: string[];
         };
         /** _PasswordResetRequestReq */
         _PasswordResetRequestReq: {
@@ -10980,6 +11175,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MonitorSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_batch_network_policy_api_v1_network_policy_preview_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_NetworkPolicyPreviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["_NetworkPolicyPreviewResponse"];
                 };
             };
             /** @description Validation Error */

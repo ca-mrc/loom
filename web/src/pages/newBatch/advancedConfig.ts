@@ -1,37 +1,15 @@
-/** Advanced form defaults, numeric inputs, and trial-config validation. */
+/** Advanced form defaults and trial-config validation. */
 
-export const RETRY_REASONS = [
-  { value: "worker_crash", label: "Worker crash" },
-  { value: "env_start_failure", label: "Env start failure" },
-  { value: "agent_timeout", label: "Agent timeout" },
-  { value: "verifier_timeout", label: "Verifier timeout" },
-  { value: "trajectory_flush_failed", label: "Trajectory flush failed" },
-] as const;
+import type { RetryReason } from "./advancedInputs";
 
-export type RetryReason = (typeof RETRY_REASONS)[number]["value"];
-
-export function clampInt(raw: string, min: number, max: number): string {
-  if (raw === "") return raw;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n)) return String(min);
-  if (n < min) return String(min);
-  if (n > max) return String(max);
-  return String(n);
-}
-
-export function clampFloat(raw: string, min: number, max?: number): string {
-  if (raw === "") return raw;
-  const n = Number.parseFloat(raw);
-  if (!Number.isFinite(n)) return String(min);
-  if (n < min) return String(min);
-  if (max !== undefined && n > max) return String(max);
-  return raw;
-}
+export { RETRY_REASONS, clampFloat, clampInt, type RetryReason } from "./advancedInputs";
 
 export interface AdvancedState {
   forceBuild: boolean;
   deleteEnv: boolean;
   verifierEnvMode: "" | "shared" | "separate";
+  networkPolicy: "" | "gateway-only" | "web-allowlist" | "public-web";
+  allowedWebsites: string;
   skipVerifier: boolean;
   overrideAgentTimeoutSec: string;
   agentTimeoutMultiplier: string;
@@ -60,6 +38,8 @@ export const INITIAL_ADVANCED: AdvancedState = {
   forceBuild: false,
   deleteEnv: true,
   verifierEnvMode: "",
+  networkPolicy: "",
+  allowedWebsites: "",
   skipVerifier: false,
   overrideAgentTimeoutSec: "",
   agentTimeoutMultiplier: "1",
@@ -84,6 +64,42 @@ export const INITIAL_ADVANCED: AdvancedState = {
   multiModelStepEnd: "9",
 };
 
+export function buildNetworkPolicyOverride(
+  s: Pick<AdvancedState, "networkPolicy" | "allowedWebsites">,
+): { ok: true; value: Record<string, unknown> | null } | { ok: false; error: string } {
+  const allowWeb = s.allowedWebsites.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  if (!s.networkPolicy && allowWeb.length > 0) {
+    return { ok: false, error: "Approved websites require the Approved websites network policy." };
+  }
+  if (s.networkPolicy && s.networkPolicy !== "web-allowlist" && allowWeb.length > 0) {
+    return { ok: false, error: "Approved websites can only be set for the Approved websites policy." };
+  }
+  if (s.networkPolicy === "web-allowlist") {
+    if (allowWeb.length === 0) return { ok: false, error: "Add at least one approved website." };
+    const destinations: Array<{ host: string; protocol: "http" | "https" }> = [];
+    for (const raw of allowWeb) {
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        return { ok: false, error: `${raw} is not a valid website URL.` };
+      }
+      if (
+        !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.port ||
+        (url.pathname !== "" && url.pathname !== "/") || url.search || url.hash
+      ) {
+        return { ok: false, error: `${raw} must be an exact http(s)://hostname without a port or path.` };
+      }
+      destinations.push({ host: url.hostname, protocol: url.protocol.slice(0, -1) as "http" | "https" });
+    }
+    const unique = Array.from(
+      new Map(destinations.map((item) => [`${item.host}\0${item.protocol}`, item])).values(),
+    ).sort((a, b) => a.host.localeCompare(b.host) || a.protocol.localeCompare(b.protocol));
+    return { ok: true, value: { kind: "web-allowlist", destinations: unique } };
+  }
+  return { ok: true, value: s.networkPolicy ? { kind: s.networkPolicy } : null };
+}
+
 export function buildAdvancedConfig(
   s: AdvancedState,
 ): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
@@ -92,6 +108,9 @@ export function buildAdvancedConfig(
   if (!s.deleteEnv) out.delete_env = false;
   if (s.skipVerifier) out.skip_verifier = true;
   if (s.verifierEnvMode) out.verifier_env_mode = s.verifierEnvMode;
+  const networkPolicy = buildNetworkPolicyOverride(s);
+  if (!networkPolicy.ok) return networkPolicy;
+  if (networkPolicy.value !== null) out.baseline_network_policy_override = networkPolicy.value;
   const numOrErr = (
     raw: string,
     name: string,

@@ -227,6 +227,58 @@ func TestPublicWebAllowsValidatedHostsAndAllowlistDoesNotWiden(t *testing.T) {
 	}
 }
 
+func TestEffectiveNetworkPolicyMustAgreeWithEgressAndPhases(t *testing.T) {
+	decode := func(policy string, egress taskEgressPolicy, phaseEnv *string) error {
+		main := phase{Role: "agent", Argv: []string{"true"}, WorkingDirectory: "/workspace", TimeoutSeconds: 2, Environment: map[string]string{}}
+		if phaseEnv != nil {
+			main.Environment[effectiveNetworkPolicyEnv] = *phaseEnv
+		}
+		p := testPlan("/workspace", main)
+		if policy != "" {
+			p.EffectiveNetworkPolicy = json.RawMessage(policy)
+		}
+		if egress != nil {
+			p.OutputDeclarations = []outputDeclaration{taskEgressOutput}
+			p.TaskEgress = &storedTaskEgress{taskEgressPolicy: egress}
+		}
+		raw, err := json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = decodePlan(raw)
+		return err
+	}
+	str := func(value string) *string { return &value }
+	gateway := `{"kind":"gateway-only"}`
+	allow := `{"destinations":[{"host":"pypi.org","protocol":"https"}],"kind":"web-allowlist"}`
+	allowPolicy := &webAllowlist{Kind: "web-allowlist", Destinations: []webDestination{{Host: "pypi.org", Protocol: "https"}}}
+	if err := decode("", nil, nil); err != nil {
+		t.Fatalf("legacy plan rejected: %v", err)
+	}
+	if err := decode(gateway, nil, str(gateway)); err != nil {
+		t.Fatalf("gateway-only plan rejected: %v", err)
+	}
+	if err := decode(allow, allowPolicy, str(allow)); err != nil {
+		t.Fatalf("web-allowlist plan rejected: %v", err)
+	}
+	if err := decode(`{"kind":"public-web"}`, &publicWeb{Kind: "public-web"}, str(`{"kind":"public-web"}`)); err != nil {
+		t.Fatalf("public-web plan rejected: %v", err)
+	}
+	for name, err := range map[string]error{
+		"phase without plan authority": decode("", nil, str(gateway)),
+		"phase missing policy":         decode(gateway, nil, nil),
+		"phase differs":                decode(gateway, nil, str(`{"kind":"public-web"}`)),
+		"unknown kind":                 decode(`{"kind":"everything"}`, nil, str(`{"kind":"everything"}`)),
+		"web policy without egress":    decode(allow, nil, str(allow)),
+		"egress without web policy":    decode(gateway, allowPolicy, str(gateway)),
+		"egress widens policy":         decode(allow, &publicWeb{Kind: "public-web"}, str(allow)),
+	} {
+		if err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
 func TestTaskProxyRejectsUnsupportedPortsAndAmbiguousAuthorities(t *testing.T) {
 	for _, item := range []struct{ method, target, host string }{
 		{"CONNECT", "packages.example.org:23", "packages.example.org:23"},

@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from sqlalchemy import and_, func, or_, select, update
 
 from loom.auth import AuthContext
@@ -50,6 +50,13 @@ from loom.db.schema import (
 from loom.execution_diagnosis_store import execution_failure_groups
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
+from loom.models.networking import (
+    NetworkPolicy,
+    UnsupportedNetworkPolicyOverrideError,
+    hosted_http_egress,
+    resolve_effective_network_policy,
+)
+from loom.models.task import TaskConfig
 from loom.models.types import ModelSpec
 from loom.pipeline.keys import canonical_digest
 from loom.request_params import sanitize_request_extras
@@ -61,6 +68,7 @@ from loom.service_execution_backend import (
 )
 from loom.service_execution_materialization import (
     TaskExecutionResourceRequestsV1,
+    load_service_execution_runtime_profile,
 )
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
@@ -296,6 +304,103 @@ class _AdminCreateBatchOnBehalf(_CreateBatch):
     # POST /batches must not admit this field — coverage trials belong
     # on a separate admin on-behalf batch identity.
     required_worker_pools: list[str] = Field(default_factory=list, max_length=20)
+
+
+class _NetworkPolicyPreviewRequest(BaseModel):
+    task_filter: dict[str, Any]
+    baseline_network_policy_override: NetworkPolicy | None = None
+    agent_names: list[str] = Field(default_factory=list, max_length=50)
+    team_id: UUID | None = None
+
+
+class _NetworkPolicyPreviewChoice(BaseModel):
+    kind: Literal["gateway-only", "web-allowlist", "public-web"]
+    available: bool
+    incompatible_task_ids: list[str]
+    reasons: list[str]
+
+
+class _NetworkPolicyDefaultGroup(BaseModel):
+    policy: dict[str, Any]
+    task_ids: list[str]
+
+
+class _NetworkPolicyPreviewResponse(BaseModel):
+    task_count: int
+    authored_defaults: list[_NetworkPolicyDefaultGroup]
+    choices: list[_NetworkPolicyPreviewChoice]
+    selected_incompatible_task_ids: list[str]
+    selected_rejection_reasons: dict[str, list[str]]
+    widens_task_ids: list[str]
+
+
+_NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
+
+
+def _network_policy_groups(
+    policies: Sequence[tuple[str, NetworkPolicy]],
+) -> list[dict[str, Any]]:
+    groups: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    for task_id, policy in policies:
+        payload = policy.model_dump(mode="json")
+        key = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        groups.setdefault(key, (payload, []))[1].append(task_id)
+    return [
+        {"policy": payload, "task_ids": sorted(task_ids)}
+        for _, (payload, task_ids) in sorted(groups.items())
+    ]
+
+
+async def _batch_network_policy_evidence(
+    session: Any,
+    *,
+    task_ids: Sequence[str],
+    trial_config: dict[str, Any],
+) -> dict[str, Any]:
+    """Aggregate authored and resolved policy without per-Trial UI requests."""
+    task_ids = sorted(set(task_ids))
+    rows = (
+        await session.execute(select(Task.id, Task.config).where(Task.id.in_(task_ids)))
+    ).all()
+    requested_raw = trial_config.get("baseline_network_policy_override")
+    try:
+        requested = (
+            _NETWORK_POLICY_ADAPTER.validate_python(requested_raw)
+            if requested_raw is not None
+            else None
+        )
+    except ValidationError:
+        requested = None
+    authored: list[tuple[str, NetworkPolicy]] = []
+    resolved: list[tuple[str, NetworkPolicy]] = []
+    unavailable: list[str] = []
+    # Batch detail must stay readable for historical or partial task configs;
+    # those tasks are reported rather than failing the whole response.
+    for task_id, raw_config in rows:
+        try:
+            task = TaskConfig.model_validate(raw_config)
+        except ValidationError:
+            unavailable.append(str(task_id))
+            continue
+        authored.append((str(task_id), task.environment.baseline_network_policy))
+        try:
+            effective = resolve_effective_network_policy(
+                baseline=task.environment.baseline_network_policy,
+                supported=task.environment.network_policies_supported,
+                override=requested,
+            )
+        except UnsupportedNetworkPolicyOverrideError:
+            unavailable.append(str(task_id))
+            continue
+        resolved.append((str(task_id), effective))
+    return {
+        "authored_defaults": _network_policy_groups(authored),
+        "requested_override": (
+            requested.model_dump(mode="json") if requested is not None else None
+        ),
+        "resolved_effective": _network_policy_groups(resolved),
+        "unavailable_task_ids": sorted(unavailable),
+    }
 
 
 class _RerunFailedBatch(BaseModel):
@@ -1548,6 +1653,120 @@ def _reject_required_worker_pools_on_user_batch(raw_body: object) -> None:
     )
 
 
+@router.post(
+    "/network-policy-preview",
+    response_model=_NetworkPolicyPreviewResponse,
+)
+async def preview_batch_network_policy(
+    request: Request,
+    sc: SessionAndCtx,
+    payload: _NetworkPolicyPreviewRequest,
+) -> _NetworkPolicyPreviewResponse:
+    """Preview the network dimension without creating a Batch or Trial."""
+    s, ctx = sc
+    require_scope(ctx, "submit")
+    require_submitting_user(ctx)
+    team_id = await _resolve_submission_team_id(s, ctx, payload.team_id)
+    task_result = await resolve_task_filter_with_diagnostics(
+        s, payload.task_filter, team_id=team_id,
+    )
+    rows = (
+        await s.execute(select(Task.id, Task.config).where(Task.id.in_(task_result.task_ids)))
+    ).all()
+    tasks: dict[str, TaskConfig] = {}
+    for task_id, raw_config in rows:
+        try:
+            tasks[str(task_id)] = TaskConfig.model_validate(raw_config)
+        except ValueError:
+            continue
+
+    profile = load_service_execution_runtime_profile(
+        request.app.state.settings.service_execution_runtime_profile_json,
+    )
+    task_ids = [task_id for task_id in task_result.task_ids if task_id in tasks]
+    agents_have_consumer = bool(payload.agent_names) and all(
+        (spec := hosted_harness(agent_name)) is not None and spec.workspace
+        for agent_name in payload.agent_names
+    )
+
+    defaults: dict[str, tuple[dict[str, Any], list[str]]] = {}
+    for task_id in task_ids:
+        policy = tasks[task_id].environment.baseline_network_policy.model_dump(mode="json")
+        key = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+        defaults.setdefault(key, (policy, []))[1].append(task_id)
+
+    choices: list[_NetworkPolicyPreviewChoice] = []
+    for kind in ("gateway-only", "web-allowlist", "public-web"):
+        incompatible = [
+            task_id for task_id in task_ids
+            if kind not in tasks[task_id].environment.network_policies_supported
+        ]
+        reasons: list[str] = []
+        if incompatible:
+            reasons.append("network_policy_override_not_supported")
+        if kind in {"web-allowlist", "public-web"}:
+            if profile is None or not profile.supports_task_web_egress:
+                reasons.append("task_egress_runtime_unavailable")
+                incompatible = list(task_ids)
+            if not agents_have_consumer:
+                reasons.append("task_network_consumer_unavailable")
+                incompatible = list(task_ids)
+        choices.append(_NetworkPolicyPreviewChoice(
+            kind=kind,
+            available=not incompatible and not reasons and bool(task_ids),
+            incompatible_task_ids=list(dict.fromkeys(incompatible)),
+            reasons=list(dict.fromkeys(reasons)),
+        ))
+
+    selected_reasons: dict[str, list[str]] = {}
+    widens: list[str] = []
+    rank = {"gateway-only": 0, "web-allowlist": 1, "public-web": 2}
+    for task_id in task_ids:
+        task = tasks[task_id]
+        try:
+            effective = resolve_effective_network_policy(
+                baseline=task.environment.baseline_network_policy,
+                supported=task.environment.network_policies_supported,
+                override=payload.baseline_network_policy_override,
+            )
+        except ValueError:
+            selected_reasons.setdefault(task_id, []).append(
+                "network_policy_override_not_supported",
+            )
+            continue
+        if effective.kind not in rank:
+            selected_reasons.setdefault(task_id, []).append(
+                "hosted_network_policy_unsupported",
+            )
+        if hosted_http_egress(effective) is not None:
+            if profile is None or not profile.supports_task_web_egress:
+                selected_reasons.setdefault(task_id, []).append(
+                    "task_egress_runtime_unavailable",
+                )
+            if not agents_have_consumer:
+                selected_reasons.setdefault(task_id, []).append(
+                    "task_network_consumer_unavailable",
+                )
+        if (
+            payload.baseline_network_policy_override is not None
+            and rank.get(effective.kind, -1)
+            > rank.get(task.environment.baseline_network_policy.kind, -1)
+        ):
+            widens.append(task_id)
+
+    return _NetworkPolicyPreviewResponse(
+        task_count=len(task_ids),
+        authored_defaults=[
+            _NetworkPolicyDefaultGroup(policy=policy, task_ids=ids)
+            for policy, ids in defaults.values()
+        ],
+        choices=choices,
+        selected_incompatible_task_ids=list(selected_reasons),
+        selected_rejection_reasons=selected_reasons,
+        widens_task_ids=widens,
+    )
+
+
 @router.post("/batches", status_code=201, response_model=wire.PostBatchesResponse, response_model_exclude_unset=True)
 async def create_batch(
     request: Request,
@@ -2294,9 +2513,18 @@ async def get_batch(
         if b.backend == NEBIUS_BACKEND
         else None
     )
+    network_policy = await _batch_network_policy_evidence(
+        s,
+        task_ids=(
+            b.resolved_task_ids
+            or [trial.task_id for trial in original_trials]
+        ),
+        trial_config=b.trial_config,
+    )
     rerunnable_failed_count = sum(1 for trial in original_trials if _is_rerunnable_failure(trial))
     extra = {
         "service_execution_summary": service_execution_summary,
+        "network_policy": network_policy,
         "progress": await progress_summary(s, select(Trial.id).where(Trial.batch_id == b.id)),
         "rerun_batches": [
             {

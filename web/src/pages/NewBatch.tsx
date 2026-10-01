@@ -8,7 +8,7 @@ import ErrorState from "../components/ErrorState";
 import { Input } from "../components/Input";
 import { agentLabel } from "../lib/agentLabel";
 import type { BatchExportResult } from "./newBatch/BatchExportDialog";
-import { clampInt } from "./newBatch/advancedConfig";
+import { clampInt } from "./newBatch/advancedInputs";
 import { DEFAULT_AGENT_NAME } from "./newBatch/formState";
 import { FieldLabel } from "./NewBatchFields";
 import { MAX_COMBINATIONS } from "./newBatchState";

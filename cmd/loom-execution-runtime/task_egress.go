@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -119,6 +120,75 @@ func (s storedTaskEgress) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(s.taskEgressPolicy)
+}
+
+const effectiveNetworkPolicyEnv = "LOOM_EFFECTIVE_NETWORK_POLICY_JSON"
+
+var networkPolicyKinds = map[string]bool{
+	"public": true, "no-network": true, "gateway-only": true,
+	"allowlist": true, "web-allowlist": true, "public-web": true,
+}
+
+func decodeNetworkPolicy(data []byte) (map[string]any, error) {
+	var policy map[string]any
+	if err := json.Unmarshal(data, &policy); err != nil || policy == nil {
+		return nil, fmt.Errorf("effective network policy is invalid")
+	}
+	return policy, nil
+}
+
+// The control plane freezes one effective policy into the plan, the task
+// egress dialer and every phase environment; all three must agree.
+func (p plan) validateEffectiveNetworkPolicy() error {
+	phases := []phase{p.Main}
+	if p.Verifier != nil {
+		phases = append(phases, *p.Verifier)
+	}
+	if len(p.EffectiveNetworkPolicy) == 0 {
+		for _, item := range phases {
+			if _, ok := item.Environment[effectiveNetworkPolicyEnv]; ok {
+				return fmt.Errorf("phase network policy has no immutable plan authority")
+			}
+		}
+		return nil
+	}
+	policy, err := decodeNetworkPolicy(p.EffectiveNetworkPolicy)
+	if err != nil {
+		return err
+	}
+	kind, _ := policy["kind"].(string)
+	if !networkPolicyKinds[kind] {
+		return fmt.Errorf("effective network policy is invalid")
+	}
+	if kind == "web-allowlist" || kind == "public-web" {
+		if p.TaskEgress == nil || p.TaskEgress.taskEgressPolicy == nil {
+			return fmt.Errorf("task egress does not match the effective network policy")
+		}
+		encoded, err := json.Marshal(p.TaskEgress)
+		if err != nil {
+			return err
+		}
+		egress, err := decodeNetworkPolicy(encoded)
+		if err != nil || !reflect.DeepEqual(policy, egress) {
+			return fmt.Errorf("task egress does not match the effective network policy")
+		}
+	} else if p.TaskEgress != nil {
+		return fmt.Errorf("task egress does not match the effective network policy")
+	}
+	for _, item := range phases {
+		raw, ok := item.Environment[effectiveNetworkPolicyEnv]
+		if !ok {
+			return fmt.Errorf("phase is missing the effective network policy")
+		}
+		phasePolicy, err := decodeNetworkPolicy([]byte(raw))
+		if err != nil {
+			return fmt.Errorf("phase effective network policy is invalid")
+		}
+		if !reflect.DeepEqual(policy, phasePolicy) {
+			return fmt.Errorf("phase effective network policy differs from the plan")
+		}
+	}
+	return nil
 }
 func requestDestination(r *http.Request) (webDestination, error) {
 	if r.Method == http.MethodConnect {

@@ -34,9 +34,11 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlsplit
 
 import httpx
 
+from loom.models.networking import WebDestination
 from loom.security.redaction import redact_mapping
 from loom_cli.backend_flag import add_legacy_backend_flag, warn_legacy_backend_flag
 from loom_cli.minio_storage_preflight import validate_minio_storage_preflight_artifact
@@ -68,6 +70,44 @@ _TYPE_TO_AGENT_PROVIDER: dict[str, str] = {
 }
 
 _TERMINAL_TRIAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+
+
+def _network_policy_override(
+    kind: str | None, destinations: list[str] | None,
+) -> dict[str, Any] | None:
+    values = destinations or []
+    if kind is None:
+        if values:
+            raise ValueError("--allow-web requires --network-policy web-allowlist")
+        return None
+    if kind != "web-allowlist":
+        if values:
+            raise ValueError("--allow-web is only valid with --network-policy web-allowlist")
+        return {"kind": kind}
+    if not values:
+        raise ValueError("--network-policy web-allowlist requires at least one --allow-web URL")
+    parsed: list[WebDestination] = []
+    for raw in values:
+        url = urlsplit(raw)
+        if (
+            url.scheme not in {"http", "https"}
+            or url.hostname is None
+            or url.username is not None
+            or url.password is not None
+            or url.port is not None
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                f"--allow-web {raw!r} must be an exact http(s)://hostname URL without a port or path",
+            )
+        parsed.append(WebDestination(host=url.hostname, protocol=url.scheme))
+    destinations_json = [
+        item.model_dump(mode="json")
+        for item in sorted(set(parsed), key=lambda item: (item.host, item.protocol))
+    ]
+    return {"kind": "web-allowlist", "destinations": destinations_json}
 
 
 def _build_agent_model(
@@ -793,6 +833,16 @@ def _batch_create(args: argparse.Namespace) -> int:
                     )
                     return 2
                 trial_config["verifier_env_mode"] = args.verifier_env_mode
+            try:
+                network_policy_override = _network_policy_override(
+                    getattr(args, "network_policy", None),
+                    getattr(args, "allow_web", None),
+                )
+            except ValueError as exc:
+                sys.stderr.write(f"error: {exc}\n")
+                return 2
+            if network_policy_override is not None:
+                trial_config["baseline_network_policy_override"] = network_policy_override
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -1754,6 +1804,25 @@ def dispatch(argv: list[str]) -> int:
             "Grade in the agent sandbox (shared) or the second verifier "
             "sandbox (separate). Omit to use the task file, which defaults "
             "to separate. Cannot be combined with --skip-verifier."
+        ),
+    )
+    p_bc.add_argument(
+        "--network-policy",
+        choices=("gateway-only", "web-allowlist", "public-web"),
+        default=None,
+        help=(
+            "Override task network access for every selected task. Omit to use each "
+            "task default; the server rejects tasks that do not declare support."
+        ),
+    )
+    p_bc.add_argument(
+        "--allow-web",
+        action="append",
+        default=None,
+        metavar="URL",
+        help=(
+            "Allow one exact http(s)://hostname destination. Repeat as needed; "
+            "requires --network-policy web-allowlist."
         ),
     )
     p_bc.add_argument(

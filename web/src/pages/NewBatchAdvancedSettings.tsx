@@ -10,7 +10,11 @@ export function NewBatchAdvancedSettings(props: NewBatchViewState): JSX.Element 
   const [visited, setVisited] = useState(false);
   return (
     <Card>
-      <details className="group" onToggle={event => { if (event.currentTarget.open) setVisited(true); }}>
+      <details className="group" onToggle={event => {
+        if (!event.currentTarget.open) return;
+        setVisited(true);
+        props.requestNetworkPolicyPreview();
+      }}>
         <summary className="flex cursor-pointer items-start gap-2 px-6 py-4 text-sm font-semibold text-slate-900">
           <span className="flex-1">
             Advanced trial settings

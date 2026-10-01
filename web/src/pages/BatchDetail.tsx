@@ -29,6 +29,7 @@ import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeTaskFilter } from "../lib/humanizeTaskFilter";
 import { humanizeTrialConfig } from "../lib/humanizeTrialConfig";
 import { modelLabel } from "../lib/modelLabel";
+import { networkPolicyGroupsLabel, networkPolicyLabel } from "../lib/networkPolicy";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { batchInspectionCommands } from "../lib/quickstartSnippets";
@@ -295,6 +296,39 @@ export default function BatchDetail(): JSX.Element {
                 );
               })}
             </div>
+          ) : null}
+
+          {c.network_policy ? (
+            <section aria-label="Task network policy" className="border-y border-slate-200 py-3">
+              <h2 className="text-sm font-semibold text-slate-900">Task network access</h2>
+              <dl className="mt-2 grid gap-3 text-sm md:grid-cols-3">
+                <div>
+                  <dt className="text-slate-500">Authored defaults</dt>
+                  <dd className="break-words text-slate-800">
+                    {networkPolicyGroupsLabel(c.network_policy.authored_defaults)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Batch override</dt>
+                  <dd className="break-words text-slate-800">
+                    {networkPolicyLabel(c.network_policy.requested_override)}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-slate-500">Resolved effective</dt>
+                  <dd className="break-words text-slate-800">
+                    {networkPolicyGroupsLabel(c.network_policy.resolved_effective)}
+                  </dd>
+                </div>
+              </dl>
+              {c.network_policy.unavailable_task_ids?.length ? (
+                <p className="mt-2 text-xs text-amber-700">
+                  Policy unavailable for {c.network_policy.unavailable_task_ids.length} task(s):{" "}
+                  {c.network_policy.unavailable_task_ids.slice(0, 8).join(", ")}
+                  {c.network_policy.unavailable_task_ids.length > 8 ? "…" : ""}
+                </p>
+              ) : null}
+            </section>
           ) : null}
 
           {c.failure_reason ? (

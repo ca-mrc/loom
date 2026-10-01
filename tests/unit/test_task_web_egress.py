@@ -8,8 +8,12 @@ from pydantic import ValidationError
 
 from loom.execution_contract import workload_requirements_from_task
 from loom.execution_runtime_contract import TASK_EGRESS_OUTPUT, validate_runtime_plan_requirements
-from loom.models.networking import WebAllowlist, WebDestination
-from loom.service_execution_materialization import compile_service_execution_plan
+from loom.models.networking import PublicWeb, WebAllowlist, WebDestination
+from loom.service_execution_materialization import (
+    automatic_service_execution_rejections,
+    compile_deferred_verifier_plan,
+    compile_service_execution_plan,
+)
 from loom_llm_gateway.task_egress import EgressDeniedError, resolve_destination
 from tests.unit.test_service_execution_materialization import _REVISION, _provenance
 from tests.unit.test_service_execution_terminus_plan import _inputs
@@ -42,6 +46,65 @@ def test_egress_policy_bound_to_plan_and_runtime_capability() -> None:
     validate_runtime_plan_requirements(plan, requirements)
     with pytest.raises(ValueError, match="network"):
         validate_runtime_plan_requirements(plan.model_copy(update={"task_egress": None}), requirements)
+
+
+def test_trial_override_is_frozen_across_agent_and_deferred_verifier_plans() -> None:
+    task, trial, profile = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "network_policies_supported": frozenset({"gateway-only", "public-web"}),
+    })})
+    trial = trial.model_copy(update={"baseline_network_policy_override": PublicWeb()})
+    profile = profile.model_copy(update={
+        "supports_task_web_egress": True,
+        "execution_class_id": "linux-amd64-cpu-web-pod-v1",
+    })
+
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert task.environment.baseline_network_policy.kind == "gateway-only"
+    assert plan.effective_network_policy == PublicWeb()
+    assert plan.task_egress == PublicWeb()
+    assert plan.main.environment["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"] == '{"kind":"public-web"}'
+    assert workload_requirements_from_task(task, trial).effective_network_policy == PublicWeb()
+
+    drifted = plan.model_dump(mode="json")
+    drifted["main"]["environment"]["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"] = (
+        '{"kind":"gateway-only"}'
+    )
+    with pytest.raises(ValidationError, match="differs from the plan"):
+        type(plan).model_validate(drifted)
+
+    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=120)
+    assert verifier.effective_network_policy == plan.effective_network_policy
+    assert verifier.main.environment == plan.main.environment
+
+    shared_trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    shared = compile_service_execution_plan(
+        task=task, trial=shared_trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+    assert shared.verifier is not None
+    assert shared.verifier.environment == shared.main.environment
+    assert shared.effective_network_policy == PublicWeb()
+
+
+def test_unsupported_override_and_response_only_web_topology_are_rejected() -> None:
+    task, trial, _ = _inputs()
+    override = PublicWeb()
+    unsupported = trial.model_copy(update={"baseline_network_policy_override": override})
+    assert "network_policy_override_not_supported" in automatic_service_execution_rejections(
+        task, unsupported, source_provenance=_provenance(),
+    )
+
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "network_policies_supported": frozenset({"gateway-only", "public-web"}),
+    })})
+    response_only = unsupported.model_copy(update={"agent_name": "direct-completion"})
+    assert "task_network_consumer_unavailable" in automatic_service_execution_rejections(
+        task, response_only, source_provenance=_provenance(),
+    )
 
 
 @pytest.mark.parametrize("host", ["*.example.org", "localhost", "127.0.0.1", "[::1]", "EXAMPLE.org", "example.org.",
@@ -78,6 +141,7 @@ async def test_command_receives_proxy_environment_without_changing_model_gateway
         "baseline_network_policy": policy(),
     })})
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:12345")
+    monkeypatch.setenv("LOOM_EFFECTIVE_NETWORK_POLICY_JSON", policy().model_dump_json())
     driver = sandbox_driver("task-sandbox", task)
     response = Mock()
     response.json.return_value = {"return_code": 0, "stdout": "", "stderr": "", "duration_sec": 0}

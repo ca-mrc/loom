@@ -83,8 +83,17 @@ export function humanizeTrialConfig(
 
   addCount(items, "Extra MCP servers", c.extra_mcp_servers);
   addCount(items, "Extra skills", c.extra_skills);
-  if (c.baseline_network_policy_override) {
-    items.push("Network policy: overridden");
+  if (c.baseline_network_policy_override && typeof c.baseline_network_policy_override === "object") {
+    const policy = c.baseline_network_policy_override as Record<string, unknown>;
+    const kind = typeof policy.kind === "string" ? policy.kind : "overridden";
+    const destinations = Array.isArray(policy.destinations)
+      ? policy.destinations
+          .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+          .map((item) => `${String(item.protocol)}://${String(item.host)}`)
+      : [];
+    items.push(
+      `Network policy: ${kind}` + (destinations.length > 0 ? ` (${destinations.join(", ")})` : ""),
+    );
   }
   if (
     typeof c.workspace_staging_policy_name === "string" &&

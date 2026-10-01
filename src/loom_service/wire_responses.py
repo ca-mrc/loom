@@ -380,8 +380,16 @@ class ExecutionResourceAllocation(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class TrialDetailNetworkPolicyEvidence(TypedDict):
+    task_default: dict[str, Any] | None
+    requested_override: dict[str, Any] | None
+    effective: dict[str, Any] | None
+
+
+@with_config(ConfigDict(extra="allow"))
 class TrialDetailMaterializationVariant0(TypedDict):
     resource_allocation: NotRequired[ExecutionResourceAllocation | None]
+    network_policy: NotRequired[TrialDetailNetworkPolicyEvidence]
     state: str
     lifecycle_stage: (
         Literal["queued"]
@@ -650,6 +658,20 @@ class BatchDetailRerunBatchesItem(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class BatchDetailNetworkPolicyGroup(TypedDict):
+    policy: dict[str, Any]
+    task_ids: list[str]
+
+
+@with_config(ConfigDict(extra="allow"))
+class BatchDetailNetworkPolicyEvidence(TypedDict):
+    authored_defaults: list[BatchDetailNetworkPolicyGroup]
+    requested_override: dict[str, Any] | None
+    resolved_effective: list[BatchDetailNetworkPolicyGroup]
+    unavailable_task_ids: NotRequired[list[str]]
+
+
+@with_config(ConfigDict(extra="allow"))
 class Batch(TypedDict):
     purpose: NotRequired[Literal["evaluation", "trajectory_generation"]]
     id: str
@@ -708,6 +730,7 @@ class Batch(TypedDict):
 
 @with_config(ConfigDict(extra="allow"))
 class BatchDetail(Batch):
+    network_policy: NotRequired[BatchDetailNetworkPolicyEvidence]
     task_resource_requests: NotRequired[dict[str, TaskResourceRequests]]
     trial_summary: dict[str, int | float]
     progress: NotRequired[ProgressSummary]

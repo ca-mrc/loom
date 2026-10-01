@@ -22,6 +22,7 @@ import { parseTaskIds } from "../lib/parseTaskIds";
 import {
   INITIAL_ADVANCED,
   buildAdvancedConfig,
+  buildNetworkPolicyOverride,
   type AdvancedState,
   type RetryReason,
 } from "./newBatch/advancedConfig";
@@ -271,6 +272,50 @@ export function useNewBatch() {
     staleTime: 30 * 1000,
   });
 
+  const [networkPolicyPreviewWanted, setNetworkPolicyPreviewWanted] = useState(false);
+  const previewTaskFilter = useMemo(() => {
+    if (subsetKind === "explicit") {
+      return parsed.ids.length > 0 && !parsed.error
+        ? { subset_kind: "explicit" as const, task_ids: parsed.ids }
+        : null;
+    }
+    return countTaskFilter;
+  }, [subsetKind, parsed.ids, parsed.error, countTaskFilter]);
+  const previewNetworkPolicy = useMemo(
+    () => buildNetworkPolicyOverride({
+      networkPolicy: advanced.networkPolicy,
+      allowedWebsites: advanced.allowedWebsites,
+    }),
+    [advanced.networkPolicy, advanced.allowedWebsites],
+  );
+  const previewAgentNames = useMemo(
+    () => rows
+      .map((row) => findAgent(agents.data?.items, row.picker.agentName)?.name)
+      .filter((name): name is string => Boolean(name)),
+    [rows, agents.data?.items],
+  );
+  const networkPolicyPreview = useQuery({
+    queryKey: queryKeys["network-policy-preview"](
+      currentTeamId,
+      JSON.stringify(previewTaskFilter),
+      previewNetworkPolicy.ok ? JSON.stringify(previewNetworkPolicy.value) : "invalid",
+      previewAgentNames.join(","),
+    ),
+    queryFn: () => api.previewBatchNetworkPolicy({
+      task_filter: previewTaskFilter ?? {},
+      baseline_network_policy_override: previewNetworkPolicy.ok
+        ? previewNetworkPolicy.value
+        : null,
+      agent_names: previewAgentNames,
+      ...(currentTeamId ? { team_id: currentTeamId } : {}),
+    }),
+    // The preview is shown only in Advanced settings; a selected policy also
+    // needs it for submit validation.
+    enabled: (networkPolicyPreviewWanted || advanced.networkPolicy !== "")
+      && currentTeamId !== null && previewTaskFilter !== null && previewNetworkPolicy.ok,
+    staleTime: 30 * 1000,
+  });
+
   const matchedTaskCount: number | undefined = (() => {
     if (subsetKind === "explicit") return parsed.ids.length;
     // When a tag filter is active and we have a real count, use it.
@@ -440,6 +485,15 @@ export function useNewBatch() {
     }
     if (!currentTeamId) {
       return { ok: false, error: "Select an active team before submitting a batch." };
+    }
+    if (advanced.networkPolicy && networkPolicyPreview.isPending) {
+      return { ok: false, error: "Wait for task network compatibility to finish loading." };
+    }
+    if (advanced.networkPolicy && networkPolicyPreview.data?.selected_incompatible_task_ids.length) {
+      return {
+        ok: false,
+        error: `Task network access is incompatible with ${networkPolicyPreview.data.selected_incompatible_task_ids.length} selected task(s).`,
+      };
     }
     if (subsetKind === "explicit") {
       if (parsed.error || parsed.ids.length === 0) {
@@ -731,6 +785,8 @@ export function useNewBatch() {
     matchedTaskCount,
     countSummary,
     advanced,
+    networkPolicyPreview,
+    requestNetworkPolicyPreview: () => setNetworkPolicyPreviewWanted(true),
     setAdv,
     toggleRetryReason,
     addRow,

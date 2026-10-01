@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.eval_cmd import _network_policy_override
 
 _CONN_ID = "00000000-0000-0000-0000-0000000000aa"
 _BATCH_ID = "00000000-0000-0000-0000-0000000000bb"
@@ -1570,6 +1571,59 @@ def test_batch_create_verifier_env_mode_shared_is_sent(
     body = json.loads(mock_server[1].content)
     assert body["trial_config"]["verifier_env_mode"] == "shared"
     capsys.readouterr()
+
+
+def test_batch_create_web_allowlist_override_is_structured(
+    mock_server: MockServer,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(
+        201,
+        json={
+            "batch_id": _BATCH_ID,
+            "expected_trial_count": 1,
+            "n_per_task": 1,
+            "backend": "nebius",
+            "combinations": [],
+            "state": "submitted",
+            "created_at": "2026-06-16T00:00:00Z",
+        },
+    )
+    rc = main([
+        "eval", "batch", "create", "--purpose", "evaluation",
+        "--provider", "openai-prod", "--model", "gpt-4o",
+        "--agent", "terminus-2", "--benchmark", "terminal-bench",
+        "--network-policy", "web-allowlist",
+        "--allow-web", "https://pypi.org",
+        "--allow-web", "https://registry.npmjs.org",
+    ])
+    assert rc == 0
+    body = json.loads(mock_server[1].content)
+    assert body["trial_config"]["baseline_network_policy_override"] == {
+        "kind": "web-allowlist",
+        "destinations": [
+            {"host": "pypi.org", "protocol": "https"},
+            {"host": "registry.npmjs.org", "protocol": "https"},
+        ],
+    }
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("kind", "destinations", "message"),
+    [
+        (None, ["https://pypi.org"], "requires --network-policy"),
+        ("public-web", ["https://pypi.org"], "only valid"),
+        ("web-allowlist", [], "requires at least one"),
+        ("web-allowlist", ["https://pypi.org/simple"], "without a port or path"),
+    ],
+)
+def test_network_policy_override_rejects_invalid_cli_shapes(
+    kind: str | None, destinations: list[str], message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _network_policy_override(kind, destinations)
 
 
 def test_batch_create_rejects_verifier_env_mode_with_skip_verifier(

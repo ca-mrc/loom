@@ -193,9 +193,12 @@ class Trial:
             except Exception:
                 logger.exception("state PATCH (running) failed; continuing")
 
-        baseline: NetworkPolicy = (
-            self.ctx.trial_config.baseline_network_policy_override
-            or self.ctx.task_config.environment.baseline_network_policy
+        from loom.models.networking import resolve_effective_network_policy
+
+        baseline: NetworkPolicy = resolve_effective_network_policy(
+            baseline=self.ctx.task_config.environment.baseline_network_policy,
+            supported=self.ctx.task_config.environment.network_policies_supported,
+            override=self.ctx.trial_config.baseline_network_policy_override,
         )
 
         writer = TrajectoryWriter(
