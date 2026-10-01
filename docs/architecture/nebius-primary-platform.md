@@ -33,12 +33,15 @@ API-only process closes only its own database engine and HTTP/storage clients;
 stopping it does not cancel work owned by a different process.
 
 In `api_only` mode, authenticated `/api/v1/health/ready` checks PostgreSQL with
-`SELECT 1` and HEADs each distinct configured artifact/trajectory bucket using
-that API's own credentials. It returns 200 for healthy dependencies and 503 for
+`SELECT 1` and lists at most one object in each distinct configured
+artifact/trajectory bucket using that API's own credentials. The
+`ListObjectsV2(MaxKeys=1)` response must report HTTP 200; listing contents are
+discarded, and bucket metadata permissions are not required. It returns 200 for healthy dependencies and 503 for
 unavailable dependencies or invalid bucket configuration, without provider error
 details. It does not query the legacy staging mutation/capacity tables or claim
-execution capacity, task readiness, or lifecycle cleanup. The staging application
-mode retains its separate capacity-evidence readiness contract. Database errors
+execution capacity, task readiness, or lifecycle cleanup. Application mode reports
+its configured environment and namespace with dependency status; lifecycle
+capacity admission remains separate. Database errors
 while authenticating a readiness caller return a secret-free 503; they never
 authorize the caller or bypass ordinary authentication/authorization failures.
 
