@@ -44,7 +44,11 @@ from loom.service_execution_materialization import (
     verifier_handoff_path,
 )
 from loom.trajectory.storage import ObjectStore
-from loom_control_plane.service_execution import record_committed_runtime_result
+from loom_control_plane.service_execution import (
+    VerifierHandoffUnavailableError,
+    committed_handoff_files,
+    record_committed_runtime_result,
+)
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -200,37 +204,6 @@ class ResolvedServiceExecutionHandoff:
     source_keys: tuple[str, ...]
 
 
-async def committed_handoff_files(
-    session: AsyncSession, *, parent: ServiceExecutionLease,
-) -> tuple[list[tuple[str, int, str]], list[str]]:
-    """The parent attempt's verified committed outputs and their spool keys."""
-    if parent.output_commit_state != "committed" or parent.output_upload_session_id is None:
-        raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
-    upload = await session.get(ArtifactUploadSession, parent.output_upload_session_id)
-    artifact = await session.scalar(select(Artifact).where(
-        Artifact.control_producer_kind == "service_execution",
-        Artifact.control_producer_id == parent.id,
-    ))
-    if (
-        upload is None or artifact is None or upload.state != "committed"
-        or upload.manifest_sha256 != parent.output_manifest_sha256
-    ):
-        raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
-    rows = (await session.scalars(
-        select(ArtifactUploadFile)
-        .where(ArtifactUploadFile.session_id == upload.id)
-        .order_by(ArtifactUploadFile.file_index)
-    )).all()
-    files: list[tuple[str, int, str]] = []
-    keys: list[str] = []
-    for row in rows:
-        if row.state != "verified" or row.actual_size is None or row.computed_sha256 is None:
-            raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
-        files.append((row.relative_path, row.actual_size, row.computed_sha256))
-        keys.append(f"{upload.prefix}artifacts/{artifact.id}/{row.relative_path}")
-    return files, keys
-
-
 async def resolve_service_execution_handoff(
     session: AsyncSession, *, lease: ServiceExecutionLease,
 ) -> ResolvedServiceExecutionHandoff:
@@ -240,7 +213,10 @@ async def resolve_service_execution_handoff(
     parent = await session.get(ServiceExecutionLease, lease.parent_lease_id)
     if parent is None or parent.trial_id != lease.trial_id or parent.attempt != lease.attempt:
         raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
-    files, keys = await committed_handoff_files(session, parent=parent)
+    try:
+        files, keys = await committed_handoff_files(session, parent=parent)
+    except VerifierHandoffUnavailableError as exc:
+        raise ServiceExecutionBrokerError("verifier_handoff_unavailable") from exc
     try:
         manifest = build_verifier_handoff_manifest(
             task_revision_sha256=plan.task_revision_sha256, committed_files=files,

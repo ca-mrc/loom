@@ -14,6 +14,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
+    Artifact,
+    ArtifactUploadFile,
+    ArtifactUploadSession,
     ExecutionAdmissionReservation,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
@@ -2213,6 +2216,41 @@ def defers_verification(lease: ServiceExecutionLease) -> bool:
         and contract.get("execution_role") == "attempt"
         and contract.get("verifier_execution") == "separate_execution"
     )
+
+
+class VerifierHandoffUnavailableError(ValueError):
+    pass
+
+
+async def committed_handoff_files(
+    session: AsyncSession, *, parent: ServiceExecutionLease,
+) -> tuple[list[tuple[str, int, str]], list[str]]:
+    """The parent attempt's verified committed outputs and their spool keys."""
+    if parent.output_commit_state != "committed" or parent.output_upload_session_id is None:
+        raise VerifierHandoffUnavailableError("verifier_handoff_unavailable")
+    upload = await session.get(ArtifactUploadSession, parent.output_upload_session_id)
+    artifact = await session.scalar(select(Artifact).where(
+        Artifact.control_producer_kind == "service_execution",
+        Artifact.control_producer_id == parent.id,
+    ))
+    if (
+        upload is None or artifact is None or upload.state != "committed"
+        or upload.manifest_sha256 != parent.output_manifest_sha256
+    ):
+        raise VerifierHandoffUnavailableError("verifier_handoff_unavailable")
+    rows = (await session.scalars(
+        select(ArtifactUploadFile)
+        .where(ArtifactUploadFile.session_id == upload.id)
+        .order_by(ArtifactUploadFile.file_index)
+    )).all()
+    files: list[tuple[str, int, str]] = []
+    keys: list[str] = []
+    for row in rows:
+        if row.state != "verified" or row.actual_size is None or row.computed_sha256 is None:
+            raise VerifierHandoffUnavailableError("verifier_handoff_unavailable")
+        files.append((row.relative_path, row.actual_size, row.computed_sha256))
+        keys.append(f"{upload.prefix}artifacts/{artifact.id}/{row.relative_path}")
+    return files, keys
 
 
 def mark_verifier_unavailable(trial: Trial, lease: ServiceExecutionLease | None, *, reason: str) -> None:

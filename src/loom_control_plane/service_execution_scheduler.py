@@ -48,12 +48,9 @@ from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedEr
 from loom_control_plane.execution_resource_allocation import allocate_target_resources
 from loom_control_plane.service_execution import (
     ServiceExecutionConflict,
+    committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
-)
-from loom_control_plane.service_execution_output import (
-    ServiceExecutionBrokerError,
-    committed_handoff_files,
 )
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
@@ -510,7 +507,7 @@ async def reserve_next_verifier_executions(
                 _LOG.info("service_execution_verifier_wait", extra={
                     "trial_id": str(trial.id), "reason": getattr(exc, "reason", None) or str(exc),
                 })
-        except (ServiceExecutionBrokerError, ServiceExecutionTaskSnapshotError, ServiceExecutionConfigurationError,
+        except (ServiceExecutionTaskSnapshotError, ServiceExecutionConfigurationError,
                 ValueError) as exc:
             _fail_verifier_handoff(trial, reason=str(exc), now=current_time)
     return reserved
