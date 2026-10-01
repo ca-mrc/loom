@@ -151,6 +151,12 @@ class KubectlPoolGuardAPI:
         environment = containers[0]["env"]
         if len({row["name"] for row in environment}) != len(environment):
             raise ValueError
+        # The guard command uses db_engine_url: a pooled URL overrides the
+        # direct URL. This binding only qualifies the namespace-local direct
+        # database; a pool needs separate backend correspondence evidence.
+        if any(row["name"] == "LOOM_CP_DB_URL_POOL" and row != {"name": "LOOM_CP_DB_URL_POOL", "value": ""}
+                for row in environment):
+            raise ValueError
         entry, = (row for row in environment if row["name"] == "LOOM_CP_DB_URL")
         if set(entry) != {"name", "valueFrom"} or set(entry["valueFrom"]) != {"secretKeyRef"}:
             raise ValueError

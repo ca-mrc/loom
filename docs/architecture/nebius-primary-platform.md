@@ -2148,6 +2148,8 @@ after the fixed read-only ownership query. Changed credentials, alternate databa
 destinations or unqualified Pods fail closed. Acquisition still uses the original
 qualified controller; the database path never acquires or releases a guard. The
 protected parent must supply the binding before retiring that controller.
+This direct-database binding rejects an unresolved pooled-engine override; the
+parent must qualify pooled-to-backend correspondence before using that topology.
 An independent anchor and parent journal bind closure to registration; missing or
 changed recovery evidence cannot start another registration. Successful closure
 and registration explicitly leave writer migration incomplete. Controller
