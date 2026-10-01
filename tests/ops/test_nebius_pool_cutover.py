@@ -178,6 +178,7 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
 
 @pytest.mark.parametrize("boundary", ["initial", "producer", "retirement", "runtime", "complete"])
 def test_runtime_preflight_derives_only_original_or_journal_qualified_workloads(cutover_inputs, tmp_path, boundary):
+    from scripts.ops.nebius_management_switch import _matches
     from scripts.ops.nebius_pool_cutover import retained_cutover_workloads
 
     request, tokens = cutover_inputs
@@ -185,7 +186,7 @@ def test_runtime_preflight_derives_only_original_or_journal_qualified_workloads(
     if boundary == "producer":
         api.busy.add(_key(request.services[0]))
     elif boundary == "retirement":
-        api.retirement.busy = _key(request.fencing.retirement.actuators[0])
+        api.retirement.busy.add(_key(request.fencing.retirement.actuators[0]))
     elif boundary == "runtime":
         api.fail_key = _key(request.fencing.retirement.migration.guards[0].controller)
         api.failure = "conflict"
@@ -194,7 +195,7 @@ def test_runtime_preflight_derives_only_original_or_journal_qualified_workloads(
     qualified = retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
     assert set(qualified) == set(api.documents)
     for key, document in qualified.items():
-        assert document["spec"] == api.documents[key]["spec"]
+        assert _matches(api.documents[key], document, api.documents[key]["metadata"]["uid"])
     assert (tmp_path / "cutover/cutover.json").exists() is (boundary != "initial")
 
 
@@ -224,7 +225,7 @@ def test_runtime_preflight_never_treats_a_state_file_as_recovery_authority(cutov
         if damage == "unrecorded_runtime":
             saved['fenced'] = None
         else:
-            next(iter(saved['runtime'].values()))['expected']['spec']['replicas'] = 1
+            saved['runtime'][_key(request.manager)]['expected']['spec']['replicas'] = 1
         parent.write_text(json.dumps(saved))
     with pytest.raises(ValueError):
         retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
