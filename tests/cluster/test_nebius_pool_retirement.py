@@ -163,6 +163,14 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
             with HTTPSPoolRoleFenceAPI(request=fencing, retirement=api, api_server=configuration.host, ssl_context=tls) as roles_api:
                 methods.clear()
                 roles_api.client.event_hooks["request"].append(lambda message: methods.append(message.method))
+                reviews = []
+
+                def retain_review(response):
+                    if response.request.url.path == "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews":
+                        response.read()
+                        reviews.append({"code": response.status_code, "review": response.json()})
+
+                roles_api.client.event_hooks["response"].append(retain_review)
                 # An unexpected group binding grants a named write that unnamed
                 # access-review probes would miss. Role replacement alone must
                 # not declare this identity fenced.
@@ -181,8 +189,12 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 assert methods.count("PATCH") == 6
                 await asyncio.to_thread(rbac.delete_namespaced_role_binding, "extra-writer", extra_namespace)
                 methods.clear()
-                result = await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
-                    state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+                reviews.clear()
+                try:
+                    result = await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
+                        state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+                except ValueError:
+                    pytest.fail("effective permission qualification failed: " + repr(reviews[-1:]))
                 assert result["status"] == "participant_roles_restricted" and result["writer_migration_complete"] is False
                 assert set(methods) == {"GET", "POST"}
                 methods.clear()

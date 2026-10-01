@@ -7,8 +7,8 @@ import ssl
 from dataclasses import replace
 from uuid import uuid4
 
-import pytest
 import httpx
+import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_runtime import participant_readonly_roles
 from tests.ops.test_nebius_pool_retirement import initialize
@@ -121,10 +121,14 @@ def rules_review(namespace="loom-nebius-exec-0"):
             "nonResourceRules": [{"verbs": ["get"], "nonResourceURLs": ["/api", "/apis/*", "/version"]}]}}
 
 
-def test_complete_reader_rules_include_named_reads_and_standard_self_inspection():
+@pytest.mark.parametrize("echo_spec", [False, True])
+def test_complete_reader_rules_include_named_reads_and_standard_self_inspection(echo_spec):
     from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
 
-    qualify_pool_reader_rules(rules_review(), namespace="loom-nebius-exec-0")
+    review = rules_review()
+    if not echo_spec:
+        review["spec"] = {}  # Actual Kubernetes response does not echo the request.
+    qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
 
 
 @pytest.mark.parametrize("damage", ["write", "named_write", "pod_create", "deployment", "exec", "secret",
@@ -194,7 +198,8 @@ def test_https_reviews_only_retained_identities_with_real_groups_and_never_retri
             uid = binding.kube_system_uid if name == "kube-system" else namespaces[name]
             return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
                 "name": name, "uid": str(uuid4()) if failure == "namespace" else uid,
-                "resourceVersion": "1", "labels": {"loom.nebius/management-installation": binding.installation_id}}})
+                "resourceVersion": "1", "labels": {"loom.nebius/management-installation": binding.installation_id,
+                    "pod-security.kubernetes.io/enforce": "restricted"}}})
         assert message.method == "POST" and message.url.path == "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews"
         subject = message.headers["Impersonate-User"]
         assert subject in identities
@@ -207,6 +212,7 @@ def test_https_reviews_only_retained_identities_with_real_groups_and_never_retri
             "kind": "SelfSubjectRulesReview", "spec": {"namespace": namespace}}
         observed.append((subject, namespace))
         review = rules_review(namespace)
+        review["spec"] = {}
         if failure == "grant":
             review["status"]["resourceRules"].append({"apiGroups": ["batch"], "resources": ["jobs"],
                 "verbs": ["patch"], "resourceNames": ["old-job"]})
