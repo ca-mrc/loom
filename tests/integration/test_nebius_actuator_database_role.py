@@ -1,6 +1,7 @@
 """Exercise the real actuator command/trigger path with its bootstrap DB role."""
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -30,6 +31,109 @@ from tests.integration.test_service_execution_leases import (
     _reserve,
     _seed_ready_trial,
 )
+
+
+@pytest.fixture
+def global_role_database(platform_database):
+    from tests.integration.conftest import _isolated_migration_database
+
+    yield from _isolated_migration_database(platform_database, template_name="template0", prepare_template=False)
+
+
+@pytest.mark.parametrize("kind", ["execution", "build"])
+async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_stage(
+    global_role_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+) -> None:
+    from scripts.ops import nebius_pool_migration_guard as migration
+
+    from loom.nebius_rollout_guard import acquire, release
+    from tests.integration.test_nebius_pool_build_outbox import grant as build_grant
+    from tests.integration.test_nebius_pool_build_outbox import local_setup, outbox
+    from tests.integration.test_nebius_pool_execution_outbox import grant as execution_grant
+    from tests.integration.test_nebius_pool_execution_outbox import setup
+    from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
+
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: global_role_database)
+    monkeypatch.setenv("LOOM_DB_URL", global_role_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", "restricted-role-password-" + "a" * 32)
+    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    url = make_url(global_role_database).set(drivername="postgresql+psycopg")
+    admin = create_async_engine(url)
+    worker = create_async_engine(url.set(username="loom_actuator", password="restricted-role-password-" + "a" * 32))
+    scheduler = create_async_engine(url.set(username="loom_control_plane", password="restricted-role-password-" + "a" * 32))
+    owners = async_sessionmaker(admin, expire_on_commit=False)
+    actuators = async_sessionmaker(worker, expire_on_commit=False)
+    schedulers = async_sessionmaker(scheduler, expire_on_commit=False)
+    owner, candidate = str(uuid4()), "a" * 40
+    try:
+        async with owners.begin() as session:
+            assert (await acquire(session, owner=owner, candidate=candidate))["status"] == "acquired"
+        with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
+            with db.cursor() as cursor:
+                cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
+                reports = []
+                while True:
+                    if cursor.description:
+                        reports.extend(cursor.fetchall())
+                    if not cursor.nextset():
+                        break
+            assert reports == [({"status": "staged"},)]
+        async with owners.begin() as session:
+            await release(session, owner=owner, candidate=candidate)
+        if kind == "execution":
+            journal, trial_id, target = await setup(owners)
+            journal.sessions = schedulers
+            proposal = await journal.propose(trial_id=trial_id, target_id=target.target_id)
+            receipt = execution_grant(proposal)
+            attached = await journal.accept_grant(proposal.request.key, receipt)
+            assert attached.phase == "attached"
+            from loom_execution_actuator.pool_execution_outbox import PoolExecutionOutbox
+
+            journal = PoolExecutionOutbox(sessions=actuators, participant=journal.participant,
+                environment="staging", logical_pool_id="nebius-cpu", image_admission_keyring=IMAGE_ADMISSION_KEYRING)
+            key = proposal.request.key
+        else:
+            participant, request, _ = await local_setup(owners)
+            journal = outbox(actuators, participant)
+            assert (await journal.remember(request)).phase == "selected"
+            receipt = build_grant(request)
+            attached = await journal.accept_grant(request.key, receipt)
+            assert attached.phase == "attached"
+            key = request.key
+        pending = await journal.begin_activation(key)
+        assert pending.phase == "activation_pending" and pending.activation is not None
+        active = await journal.confirm_activation(key, receipt.model_copy(update={
+            "phase": "create_intent", "plan_sha256": "d" * 64}))
+        assert active.phase == "active"
+        assert await journal.get(key) == active
+        # The runtime can lock its source but cannot alter task content, batch
+        # identity/origin, credentials, global authority, or erase either journal.
+        with psycopg.connect(url.set(drivername="postgresql", username="loom_actuator",
+                password="restricted-role-password-" + "a" * 32).render_as_string(hide_password=False)) as db:
+            assert db.execute("SELECT current_user").fetchone() == ("loom_actuator",)
+            db.commit()
+            for statement in (
+                "UPDATE tasks SET config='{}'::jsonb",
+                "UPDATE batches SET service_execution_runtime_profile='{}'::jsonb",
+                "DELETE FROM nebius_pool_execution_outbox",
+                "DELETE FROM nebius_pool_build_outbox",
+                "UPDATE nebius_pool_bindings SET mode='global'",
+                "SELECT * FROM nebius_pool_machine_credentials",
+                "DELETE FROM tokens",
+                "CREATE ROLE global_actuator_escape",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(statement)
+                db.rollback()
+    finally:
+        await worker.dispose()
+        await scheduler.dispose()
+        await admin.dispose()
 
 
 @pytest.mark.parametrize("infra_retry", [False, True])

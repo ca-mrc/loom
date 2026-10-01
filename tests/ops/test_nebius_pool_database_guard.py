@@ -160,6 +160,39 @@ def test_acquire_checks_database_identity_before_writing(database_guard):
     assert not any(args[0] == 'exec' for args in state.calls)
 
 
+@pytest.mark.parametrize('action,status', [('stage', 'staged'), ('observe', 'qualified')])
+def test_runtime_role_stage_binds_original_database_without_the_retired_controller(database_guard, action, status):
+    api, state = database_guard
+    state.status = status
+    assert api.runtime_role(state.target, action) == {'status': status}
+    command, = [args for args in state.calls if args[0] == 'exec']
+    assert command[:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
+
+
+@pytest.mark.parametrize('damage', ['database_uid', 'after_drift', 'wrong_report', 'release', 'extra_report', 'config'])
+def test_runtime_role_stage_denies_drift_unknown_receipts_and_arbitrary_actions(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    state.status, action = 'staged', 'stage'
+    if damage == 'database_uid':
+        state.database['metadata']['uid'] = str(uuid4())
+    elif damage == 'after_drift':
+        state.after_drift = True
+    elif damage == 'wrong_report':
+        state.status = 'released'
+    elif damage == 'release':
+        action = 'release'
+    elif damage == 'extra_report':
+        state.calls.clear()
+        state.exec_hook = lambda query: {'status': 'staged', 'unqualified': 'private-marker'}
+    else:
+        api.kubeconfig.write_text('changed-private-config')
+    with pytest.raises(PoolMigrationError):
+        api.runtime_role(state.target, action)
+    assert sum(args[0] == 'exec' for args in state.calls) == (0 if damage in {'database_uid', 'release', 'config'} else 1)
+
+
 def test_database_observer_never_exposes_unqualified_query_output(database_guard):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
