@@ -206,3 +206,42 @@ def test_operator_observation_reads_real_persisted_guard_without_service(isolate
         assert rollout_guard(kube, "test-platform", "observe", "another-owner", "a" * 40) == {"status": "skipped_locked"}
         database.execute("DELETE FROM nebius_rollout_guard")
         assert rollout_guard(kube, "test-platform", "observe", "test-persisted-owner", "a" * 40) == {"status": "open"}
+
+
+def test_periodic_read_only_probe_tracks_busy_idle_and_held_guard(isolated_migration_postgres_url):
+    """The exact operator SQL sees reservations and never creates/releases a guard."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_idle_rollout import idle_snapshot
+
+    async def scenario():
+        engine = create_async_engine(isolated_migration_postgres_url)
+        try:
+            async with AsyncSession(engine) as session:
+                trial_id, target = await execution._seed_ready_trial(session, now=datetime.now(UTC))
+                await execution._reserve(session, trial_id=trial_id, target=target, now=datetime.now(UTC))
+                # Capture the exact query emitted by the operator transport.
+                queries = []
+                idle_snapshot(SimpleNamespace(run=lambda *args: queries.append(args[-1]) or json.dumps({
+                    'locked': False, 'active': {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0},
+                })), 'platform')
+                sql = queries[0].split('; ')[2]
+                busy = await session.scalar(text(sql))
+                assert busy['active']['executions'] == 1
+                assert busy['locked'] is False
+                assert (await acquire(session, owner='periodic-check', candidate='a' * 40))['status'] == 'skipped_busy'
+                await session.rollback()
+                idle = await session.scalar(text(sql))
+                assert not any(idle['active'].values()) and idle['locked'] is False
+                assert (await acquire(session, owner='periodic-check', candidate='a' * 40))['status'] == 'acquired'
+                held = await session.scalar(text(sql))
+                assert held['locked'] is True
+                assert not await admission_open(session)
+                await release(session, owner='periodic-check', candidate='a' * 40)
+                assert (await session.scalar(text(sql)))['locked'] is False
+                await session.rollback()
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
