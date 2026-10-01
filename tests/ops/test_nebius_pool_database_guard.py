@@ -537,3 +537,36 @@ def test_service_probe_checks_effective_settings_including_pooled_and_image_loca
         qualify_workload(api, state)
     assert len(state.commands) == 1
     assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
+
+
+@pytest.mark.parametrize('workload_database', ['actuator'], indirect=True)
+@pytest.mark.parametrize('damage', [None, 'audience', 'ca', 'writable_mount', 'foreign_mount'])
+def test_runtime_recognizes_only_standard_kubernetes_automounted_authority(workload_database, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    assert state.original['spec']['template']['spec']['automountServiceAccountToken'] is True
+    pod = state.runtime_pod['spec']
+    token = {'name': 'kube-api-access-abcde', 'projected': {'defaultMode': 420, 'sources': [
+        {'serviceAccountToken': {'expirationSeconds': 3607, 'path': 'token'}},
+        {'configMap': {'name': 'kube-root-ca.crt', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}},
+        {'downwardAPI': {'items': [{'path': 'namespace', 'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}]}},
+    ]}}
+    mount = {'name': token['name'], 'readOnly': True, 'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount'}
+    pod.setdefault('volumes', []).append(token)
+    pod['containers'][0].setdefault('volumeMounts', []).append(mount)
+    if damage == 'audience':
+        token['projected']['sources'][0]['serviceAccountToken']['audience'] = 'foreign'
+    elif damage == 'ca':
+        token['projected']['sources'][1]['configMap']['name'] = 'foreign'
+    elif damage == 'writable_mount':
+        mount['readOnly'] = False
+    elif damage == 'foreign_mount':
+        mount['mountPath'] = '/var/run/other'
+    if damage:
+        with pytest.raises(PoolMigrationError):
+            qualify_workload(api, state)
+        assert not state.commands
+    else:
+        assert qualify_workload(api, state) is None
+        assert len(state.commands) == 1

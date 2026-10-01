@@ -29,6 +29,62 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(240)
+def test_actual_running_consumers_qualify_kubernetes_default_token_projection(runtime_inputs, tmp_path, monkeypatch):
+    from kubernetes import client
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, _, _, _ = runtime_inputs
+    target = request.guards[0]
+    execution = request.registration.spec.participants[0].execution_namespace.name
+    tag = 'cr.eu-north1.nebius.cloud/test/postgres:runtime-projection-' + uuid4().hex
+    _docker('pull', POSTGRES)
+    _docker('tag', POSTGRES, tag)
+    cluster = _start_k3s(ephemeral_storage_floor='1Gi')
+    try:
+        _, core, _ = _load_client(cluster)
+        apps = client.AppsV1Api(core.api_client)
+        namespaces = {name: core.create_namespace({'metadata': {'name': name,
+            'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}}).metadata.uid
+            for name in (target.namespace, execution)}
+        imported = _import_image(cluster, tag=tag, root=tmp_path, ordinal=1)
+        deployments = []
+        for namespace, name, container, label in ((target.namespace, 'loom-control-plane', 'loom-control-plane', 'app'),
+                (target.namespace, 'loom-service', 'loom-service', 'app'),
+                (execution, 'loom-execution-actuator', 'actuator', 'app.kubernetes.io/name')):
+            document = {'apiVersion': 'apps/v1', 'kind': 'Deployment', 'metadata': {'name': name, 'namespace': namespace},
+                'spec': {'replicas': 1, 'selector': {'matchLabels': {label: name}}, 'template': {
+                    'metadata': {'labels': {label: name}}, 'spec': {'automountServiceAccountToken': True,
+                        'securityContext': {'runAsNonRoot': True, 'runAsUser': 1000, 'seccompProfile': {'type': 'RuntimeDefault'}},
+                        'containers': [{'name': container, 'image': imported, 'command': ['sleep', '600'],
+                            'securityContext': {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}}}]}}}}
+            apps.create_namespaced_deployment(namespace, document)
+            _run(cluster, 'kubectl', 'rollout', 'status', 'deployment/' + name, '-n', namespace, '--timeout=60s')
+            deployments.append(core.api_client.sanitize_for_serialization(apps.read_namespaced_deployment(name, namespace)))
+        spec = request.registration.spec.model_dump(mode='json')
+        spec['participants'][0]['execution_namespace']['uid'] = namespaces[execution]
+        target = replace(target, namespace_uid=UUID(namespaces[target.namespace]), controller=deployments[0])
+        request = replace(request, guards=(target, *request.guards[1:]), registration=replace(request.registration,
+            spec=PoolInstallation.model_validate(spec),
+            binding=replace(request.registration.binding, kube_system_uid=core.read_namespace('kube-system').metadata.uid)))
+        kubeconfig = tmp_path / 'runtime-kubeconfig'
+        kubeconfig.write_text('disposable-transport')
+        kubeconfig.chmod(0o600)
+        api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+        monkeypatch.setattr(api, '_run', lambda args: json.loads(_run(cluster, 'kubectl', *args)))
+        for original in deployments:
+            pod = api._runtime(target, original=original)
+            assert pod['status']['phase'] == 'Running'
+            assert any(volume['name'].startswith('kube-api-access-') for volume in pod['spec']['volumes'])
+        # This test exercises real Deployment/ReplicaSet/Pod admission defaults,
+        # not the settings probe, SQL, protected publication or installed Nebius.
+    finally:
+        cluster.stop()
+        subprocess.run(['docker', 'image', 'rm', tag], capture_output=True, check=False)
+
+
+@pytest.mark.timeout(240)
 def test_actual_database_observer_works_without_control_plane(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
     from kubernetes import client
     from scripts.ops.nebius_pool_migration import PoolGuardDatabase, PoolMigrationError
