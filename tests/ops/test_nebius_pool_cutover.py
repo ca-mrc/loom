@@ -994,3 +994,16 @@ def test_writer_workload_inventory_preserves_foreign_identities_even_with_equal_
     extra["metadata"].update(namespace="unrelated-physical-pool", uid=str(uuid4()))
     rows["deployments"].append(extra)
     binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("template", [{}, {"template": None}])
+def test_foreign_replication_controller_without_a_pod_template_is_not_a_writer_consumer(
+        cutover_inputs, cutover_binding_inventory, template):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    # A legal adopt-only ReplicationController has no Pod-creation identity.
+    # Any Pods it adopts are still covered by the complete Pod collection.
+    rows["replicationcontrollers"].append({"apiVersion": "v1", "kind": "ReplicationController",
+        "metadata": {"namespace": "foreign", "name": "adopt-only", "uid": str(uuid4()), "resourceVersion": "1"},
+        "spec": {"selector": {"legacy": "retained"}, "replicas": 0, **template}})
+    binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
