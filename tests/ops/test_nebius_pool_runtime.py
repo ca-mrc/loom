@@ -289,6 +289,36 @@ def test_manager_rejects_an_unqualified_initializer_image(runtime_inputs):
         wire_manager(request=request, original=original)
 
 
+def test_participant_initializers_follow_their_own_candidate_images(runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _ = runtime_inputs
+    guard = request.guards[0]
+    originals = {'control_plane': guard.controller, 'service': services[guard.participant_id]}
+    result = wire_participant(request=request, participant_id=guard.participant_id,
+        management_origin='https://manage.example.com', actuator=actuators[guard.participant_id],
+        service=services[guard.participant_id], runtime_profile=desired_profile(request, services[guard.participant_id]))
+    for name, original in originals.items():
+        names = {row['name'] for row in original['spec']['template']['spec']['initContainers']}
+        assert names
+        pod = result[name]['spec']['template']['spec']
+        assert all(row['image'] == pod['containers'][0]['image'] for row in pod['initContainers'] if row['name'] in names)
+
+
+@pytest.mark.parametrize('component', ['control_plane', 'service'])
+def test_participant_rejects_foreign_original_initializer(runtime_inputs, component):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _ = runtime_inputs
+    guard = request.guards[0]
+    originals = {'control_plane': guard.controller, 'service': services[guard.participant_id]}
+    originals[component]['spec']['template']['spec']['initContainers'][0]['image'] = 'registry.example/foreign@sha256:' + 'f' * 64
+    with pytest.raises(ValueError):
+        wire_participant(request=request, participant_id=guard.participant_id,
+            management_origin='https://manage.example.com', actuator=actuators[guard.participant_id],
+            service=services[guard.participant_id], runtime_profile=desired_profile(request, services[guard.participant_id]))
+
+
 def test_all_participant_processes_consume_same_binding_and_preserve_data(runtime_inputs, monkeypatch):
     from scripts.ops.nebius_pool_runtime import wire_participant
 
