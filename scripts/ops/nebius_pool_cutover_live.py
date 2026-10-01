@@ -44,6 +44,9 @@ from loom.nebius_pool_priority import PoolWorkOriginV1
 class PoolCutoverChecks(Protocol):
     def preflight(self, request: PoolCutoverRequest) -> None: ...
     def qualify_quiescence(self) -> None: ...
+
+
+class PoolCutoverHistory(Protocol):
     def qualify_pending_origins(self, target: PoolGuardTarget, origins: tuple[PoolWorkOriginV1, ...]) -> None:
         """Qualify retained management registration/history, not just JSON shape."""
         ...
@@ -58,12 +61,13 @@ class PoolCutoverGuards(Protocol):
 
 class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
     def __init__(self, *, request: PoolCutoverRequest, tokens: dict[UUID, str], migration: PoolMigrationAPI,
-                 guards: PoolCutoverGuards, checks: PoolCutoverChecks, api_server: str,
+                 guards: PoolCutoverGuards, checks: PoolCutoverChecks, history: PoolCutoverHistory, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
+        self.history = history
         self.binding = registration.binding
         self.catalog = cutover_documents(request)
         self.contract_sha256 = digest(_contract(request, self.catalog))
@@ -142,7 +146,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             while True:
                 report = self.guards.cutover_readiness_page(target, after=after)
                 origins = qualify_cutover_readiness_page(report, participant=participant, after=after)
-                self.checks.qualify_pending_origins(target, origins)
+                self.history.qualify_pending_origins(target, origins)
                 if len(report["rows"]) < 128:
                     break
                 after = report["rows"][-1]["key"]

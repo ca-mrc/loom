@@ -7,6 +7,10 @@ No capacity is granted here, and no network call, flush or commit is performed.
 """
 from __future__ import annotations
 
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +27,73 @@ from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_mach
 class PoolOriginError(ValueError):
     def __init__(self) -> None:
         super().__init__("pool_origin_unavailable")
+
+
+class PoolApplicationHistoryV1(BaseModel):
+    """Only the retained identity fields needed to qualify original work."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    application_id: UUID
+    incarnation: UUID
+    data_environment_id: UUID
+    cluster_id: str
+    owner_user_id: UUID
+    owner_team_id: UUID
+    deployment_generation: int = Field(gt=0, strict=True)
+
+
+class PoolOperationHistoryV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    application_id: UUID
+    owner_user_id: UUID
+    deployment_generation: int = Field(gt=0, strict=True)
+    action: Literal["create", "update", "resume"]
+    plan_schema: Literal["loom.nebius-application-plan.v1"]
+    registration: ApplicationRegistrationV1
+    release: ApplicationReleaseV1
+
+
+def qualify_pool_history(origin: PoolWorkOriginV1, *, participant: PoolParticipantV1, cluster_id: str,
+                         workload_kind: PoolWorkloadKind, application: PoolApplicationHistoryV1 | None,
+                         operation: PoolOperationHistoryV1 | None) -> int:
+    """One validator for locked admission and protected READ ONLY SQL readback.
+
+    These projections must come from the bound management database. Parsing an
+    owner-provided projection is not proof of registration or dispatch authority.
+    """
+    try:
+        binding = PoolParticipantV1.model_validate(participant.model_dump())
+        origin = PoolWorkOriginV1.model_validate(origin.model_dump())
+        priority = pool_request_priority(binding, origin, workload_kind=workload_kind)
+        if origin.kind == "personal_build":
+            raise ValueError
+        if origin.application is None:
+            if application is not None or operation is not None:
+                raise ValueError
+            return priority
+        if application is None or operation is None:
+            raise ValueError
+        app = PoolApplicationHistoryV1.model_validate(application.model_dump())
+        op = PoolOperationHistoryV1.model_validate(operation.model_dump())
+        recorded = origin.application
+        if (app.application_id != recorded.application_id or app.incarnation != recorded.incarnation
+                or app.data_environment_id != binding.environment_id or app.cluster_id != cluster_id
+                or app.deployment_generation < recorded.deployment_generation
+                or op.application_id != app.application_id or op.owner_user_id != app.owner_user_id
+                or op.deployment_generation != recorded.deployment_generation):
+            raise ValueError
+        registration, release = op.registration, op.release
+        if (registration.application_id, registration.incarnation, registration.data_environment_id,
+                registration.cluster_id, registration.owner_user_id, registration.owner_team_id,
+                registration.deployment_generation, registration.release_id, registration.desired_state) != (
+                app.application_id, app.incarnation, app.data_environment_id, app.cluster_id,
+                app.owner_user_id, app.owner_team_id, recorded.deployment_generation, recorded.release_id, "active"):
+            raise ValueError
+        if release.release_id != recorded.release_id or release.source_digest != recorded.source_digest:
+            raise ValueError
+        return priority
+    except (ValueError, KeyError, TypeError):
+        raise PoolOriginError from None
 
 
 async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, origin: PoolWorkOriginV1, *,
@@ -93,23 +164,12 @@ async def qualify_retained_pool_origin(session: AsyncSession, origin: PoolWorkOr
                 app_query, operation_query = app_query.with_for_update(read=True), operation_query.with_for_update(read=True)
             app = (await session.scalars(app_query)).one_or_none()
             operation = (await session.scalars(operation_query)).one_or_none()
-            if (app is None or operation is None or app.incarnation != recorded.incarnation
-                    or app.data_environment_id != binding.environment_id or app.cluster_id != cluster_id
-                    or app.deployment_generation < recorded.deployment_generation
-                    or operation.owner_user_id != app.owner_user_id
-                    or operation.action not in {"create", "update", "resume"}
-                    or operation.plan_json.get("schema_version") != "loom.nebius-application-plan.v1"):
-                raise ValueError
-            registration = ApplicationRegistrationV1.model_validate(operation.plan_json["registration"])
-            release = ApplicationReleaseV1.model_validate(operation.plan_json["release"])
-            if (registration.application_id, registration.incarnation, registration.data_environment_id,
-                    registration.cluster_id, registration.owner_user_id, registration.owner_team_id,
-                    registration.deployment_generation, registration.release_id, registration.desired_state) != (
-                    app.application_id, app.incarnation, app.data_environment_id, app.cluster_id,
-                    app.owner_user_id, app.owner_team_id, recorded.deployment_generation, recorded.release_id, "active"):
-                raise ValueError
-            if release.release_id != recorded.release_id or release.source_digest != recorded.source_digest:
-                raise ValueError
-            return priority
+            return qualify_pool_history(origin, participant=binding, cluster_id=cluster_id, workload_kind=workload_kind,
+                application=PoolApplicationHistoryV1.model_validate(app, from_attributes=True) if app is not None else None,
+                operation=PoolOperationHistoryV1.model_validate({"application_id": operation.application_id,
+                    "owner_user_id": operation.owner_user_id, "deployment_generation": operation.deployment_generation,
+                    "action": operation.action, "plan_schema": operation.plan_json.get("schema_version"),
+                    "registration": operation.plan_json.get("registration"), "release": operation.plan_json.get("release")})
+                    if operation is not None else None)
     except (ValueError, KeyError, TypeError):
         raise PoolOriginError from None

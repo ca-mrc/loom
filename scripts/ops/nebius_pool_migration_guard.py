@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
@@ -21,6 +21,7 @@ from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_pool_migration import (
+    PoolGuardDatabase,
     PoolGuardTarget,
     PoolMigrationError,
     PoolMigrationRequest,
@@ -34,6 +35,19 @@ from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+
+class PoolDatabaseReadTarget(Protocol):
+    """Retained namespace-local database scope; not authority to acquire a guard."""
+
+    @property
+    def namespace(self) -> str: ...
+    @property
+    def namespace_uid(self) -> UUID: ...
+    @property
+    def controller(self) -> dict[str, Any]: ...
+    @property
+    def database(self) -> PoolGuardDatabase | None: ...
 
 
 def _backlog_cursor(value: str | None) -> str:
@@ -275,7 +289,7 @@ class KubectlPoolGuardAPI:
         # Read the fixed API collection so completeness remains verifiable.
         return self._run(["get", "--raw", f"/api/v1/namespaces/{namespace}/pods?labelSelector=app%3D{app}&limit=100"])
 
-    def _namespaces(self, target: PoolGuardTarget) -> None:
+    def _namespaces(self, target: PoolDatabaseReadTarget) -> None:
         for name, uid in (("kube-system", self.request.registration.binding.kube_system_uid),
                 (target.namespace, str(target.namespace_uid))):
             namespace = self._get("namespace", name)
@@ -349,7 +363,8 @@ class KubectlPoolGuardAPI:
         self._namespaces(target)
         return pod
 
-    def _database(self, target: PoolGuardTarget) -> dict[str, Any]:
+    def _database(self, target: PoolDatabaseReadTarget, *,
+                  url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> dict[str, Any]:
         """Bind a read to the original controller's namespace-local database."""
         self._namespaces(target)
         binding = target.database
@@ -367,7 +382,7 @@ class KubectlPoolGuardAPI:
         if any(row["name"] == "LOOM_CP_DB_URL_POOL" and row != {"name": "LOOM_CP_DB_URL_POOL", "value": ""}
                 for row in environment):
             raise ValueError
-        entry, = (row for row in environment if row["name"] == "LOOM_CP_DB_URL")
+        entry, = (row for row in environment if row["name"] == url_variable)
         if set(entry) != {"name", "valueFrom"} or set(entry["valueFrom"]) != {"secretKeyRef"}:
             raise ValueError
         reference = entry["valueFrom"]["secretKeyRef"]

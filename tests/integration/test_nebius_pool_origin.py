@@ -115,7 +115,7 @@ async def read_management_history(factory, origins):
             while True:
                 if cursor.description:
                     rows.extend(await cursor.fetchall())
-                if not await cursor.nextset():
+                if not cursor.nextset():
                     break
             assert len(rows) == 1
             return rows[0][0]

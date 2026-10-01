@@ -130,7 +130,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
         tls = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
         tls.load_cert_chain(configuration.cert_file, configuration.key_file)
         methods = []
-        with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=guards, guards=guards, checks=Checks(),
+        with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=guards, guards=guards, checks=Checks(), history=Checks(),
                 api_server=configuration.host, ssl_context=tls) as api:
             for http in (api.client, api.retirement.client, api.fencing.client):
                 http.event_hooks["request"].append(lambda message: methods.append((message.method, message.url.path, str(message.url.query))))

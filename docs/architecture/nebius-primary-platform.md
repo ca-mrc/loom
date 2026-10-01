@@ -2256,6 +2256,18 @@ work. Unknown origins, inconsistent inherited batch origins and ambiguous legacy
 batches cannot be backfilled or silently assigned shared-development priority.
 Every observed origin still requires independent management-registration/history
 qualification before the parent advances; JSON parsing is not that authority.
+The HTTPS adapter requires a separate history reader for every pending page.
+Its fixed `REPEATABLE READ READ ONLY` query projects original application identity,
+owner, deployment generation, registration and source release from the retained
+management database, not the participant database. The manager's original database
+Secret UID/version, Service, StatefulSet and current Pod are checked before and
+after the read. The same history validator serves locked ordinary admission and
+protected readback: suspended or destroyed applications may retain legitimate
+older queued work, but missing history, changed source, wrong incarnation,
+environment or cluster fail closed. No probe Job, new grant, source rewrite or
+admission opening is performed. The protected entry still must derive this
+separate database binding from the completed manager predecessor; a supplied
+projection alone is not registration proof.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 
