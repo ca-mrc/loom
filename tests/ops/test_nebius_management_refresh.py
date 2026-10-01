@@ -264,10 +264,12 @@ def test_refresh_preserves_installed_pool_catalog_across_successors(pool_refresh
     request = pool_refresh_request
     first = build(request)
     active = copy.deepcopy(first.deployment)
-    active['metadata']['resourceVersion'] = '28'
+    active['metadata'].update(uid=request.active['metadata']['uid'], resourceVersion='28', generation=4)
     candidate = copy.deepcopy(request.candidate)
     candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '8' * 64
-    second = build(replace(request, active=active, candidate=candidate))
+    profile = copy.deepcopy(request.profile)
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    second = build(replace(request, active=active, candidate=candidate, profile=profile))
     for result in (first, second):
         pod = result.deployment['spec']['template']['spec']
         setting, = [row for row in pod['containers'][0]['env'] if row['name'] == 'LOOM_SVC_POOL_PROFILES_FILE']

@@ -140,7 +140,7 @@ def _envelope(files: dict[str, list[dict[str, Any]]]) -> PlatformEnvelope:
             count = 1
             if kind in {"Deployment", "StatefulSet"}:
                 count = spec["replicas"]
-                if kind == "Deployment":
+                if kind == "Deployment" and spec["strategy"]["type"] != "Recreate":
                     count += spec["strategy"]["rollingUpdate"]["maxSurge"]
                 for claim in spec.get("volumeClaimTemplates", []):
                     storage += spec["replicas"] * _requested_quantity(claim["spec"]["resources"]["requests"]["storage"], "storage")

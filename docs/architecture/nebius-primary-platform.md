@@ -2054,6 +2054,17 @@ no owner API can replace the catalog. The file grants neither registration nor
 Kubernetes authority. Without it, prepare and activation remain unavailable;
 retained status and cleanup do not depend on current rendering profiles.
 
+Protected management deployment inputs retain `pool_catalog_operation_id` after
+pool migration. The renderer mounts that exact operation's immutable catalog and
+preserves the pool manager's `Recreate` strategy. Ordinary image/config refreshes
+must retain the reference and its read-only mount; they cannot introduce, remove
+or rebind a pool catalog. An absent reference leaves historical serialization and
+rendering unchanged. Pool wiring advances each retained workload's same-image
+initialization containers with its main image and rejects foreign initializer images. These
+rendering checks do not establish a completed migration predecessor, catalog
+ownership or live writer fencing; the connected protected operation must prove
+those before applying the configuration.
+
 The fixed gateway has a separate `python -m loom_service.pool_management` process.
 `LOOM_POOL_GATEWAY_` settings bind its management database, pool/installation/
 machine UUIDs, admission epoch, private machine-token file and explicit projected

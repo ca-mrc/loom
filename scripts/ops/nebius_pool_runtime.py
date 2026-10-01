@@ -25,6 +25,7 @@ from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
+from loom_service.environment_management.deployment import mount_pool_profiles
 from loom_service.pool_management.installation_render import mount_machine_token
 
 
@@ -48,6 +49,10 @@ def _disabled(original: dict[str, Any], *, namespace: str, name: str,
     container, = pod["containers"]
     if container.get("name") != container_name or container.get("envFrom"):
         raise ValueError("unqualified pool process container")
+    for initializer in pod.get("initContainers", []):
+        if initializer["image"] != container["image"]:
+            raise ValueError("unqualified original pool initializer image")
+        initializer["image"] = image
     container["image"] = image
     result["spec"]["replicas"] = 0
     result["spec"]["strategy"] = {"type": "Recreate"}
@@ -140,10 +145,7 @@ def wire_manager(*, request: PoolMigrationRequest, original: dict[str, Any]) -> 
                 or any(row["name"] == "pool-profiles" for row in pod.get("volumes", []))
                 or any(row["mountPath"].startswith("/var/run/loom-pool-profiles") for row in container.get("volumeMounts", []))):
             raise ValueError
-        pod.setdefault("volumes", []).append({"name": "pool-profiles", "configMap": {
-            "name": "loom-pool-profiles-" + spec.operation_id.hex, "items": [{"key": "profiles.json", "path": "profiles.json"}]}})
-        container.setdefault("volumeMounts", []).append({"name": "pool-profiles", "mountPath": "/var/run/loom-pool-profiles", "readOnly": True})
-        container["env"].append({"name": "LOOM_SVC_POOL_PROFILES_FILE", "value": "/var/run/loom-pool-profiles/profiles.json"})
+        mount_pool_profiles(pod, operation_id=spec.operation_id)
         return result
     except Exception:
         raise ValueError("pool_manager_runtime_unqualified") from None
