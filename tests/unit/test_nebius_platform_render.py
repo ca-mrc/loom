@@ -726,7 +726,7 @@ def test_execution_quota_uses_native_envelope_and_namespace_control_requests(
     ]
     assert all(set(rule["verbs"]) <= {"get", "list"} for rule in role["rules"])
     usage = next(doc for doc in docs if doc["kind"] == "ClusterRole" and doc["metadata"]["name"].endswith("-actuator-usage"))
-    assert usage["rules"] == [{"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}]
+    assert usage["rules"] == [{"apiGroups": [""], "resources": ["nodes", "nodes/stats"], "verbs": ["get"]}]
     assert len({(doc["kind"], doc["metadata"]["name"]) for doc in docs}) == len(docs)
 
 

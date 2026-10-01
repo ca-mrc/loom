@@ -204,7 +204,7 @@ async def test_cancelled_pool_read_finishes_before_its_client_closes(operation, 
 
     api = InClusterKubernetesJobApi.__new__(InClusterKubernetesJobApi)
     api._api_client, api._credentials = resource, None
-    api._core = SimpleNamespace(read_namespace=bounded_read, connect_get_node_proxy_with_path=bounded_read)
+    api._core = SimpleNamespace(read_namespace=bounded_read, read_node=bounded_read)
     api._batch = SimpleNamespace(read_namespaced_job=missing_job)
 
     async def owning_loop():

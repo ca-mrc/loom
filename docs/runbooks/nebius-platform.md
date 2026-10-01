@@ -1296,18 +1296,23 @@ minimal-harness and real trajectory acceptance in #1550/#1538/#1766.
 
 ### Native Trial resource observations
 
-The execution actuator samples kubelet `/stats/summary` through the Kubernetes
-API server during ordinary reconciliation (normally 30 seconds; a 15-second
+The execution actuator samples kubelet `/stats/summary` directly over verified
+HTTPS during ordinary reconciliation (normally 30 seconds; a 15-second
 per-node cache coalesces watch/reconcile reads). Only the lease's namespace and
-exact Pod UID are persisted. The actuator needs GET `nodes/proxy`; execution
-Pods retain no Kubernetes API privilege. This node-proxy permission belongs only
-to the trusted actuator, not a user task.
+exact Pod UID are persisted. The actuator needs GET `nodes` to qualify the node's
+private `InternalIP` and GET `nodes/stats` for kubelet webhook authorization.
+It uses the cluster CA and renewable runtime bearer, never an administrator
+certificate, disabled TLS verification, redirect, ambient proxy or API-server
+`nodes/proxy` fallback. Execution Pods retain no Kubernetes API privilege.
+The protected cutover must qualify direct node reachability, serving-certificate
+trust and actual summary access before retiring writer authority; a source test
+does not establish that installed Nebius prerequisite.
 
-The Kubernetes Python client's generated proxy method declares a string response
-even when kubelet returns JSON. Read the raw HTTP response and decode its JSON
-once; decoding the SDK's stringified Python dictionary fails despite a successful
-request. Regression coverage must exercise the real SDK response conversion,
-not only a stub that returns a JSON string.
+Decode the HTTP JSON directly, preserving cumulative CPU, sampled memory and
+filesystem/container statistics. Reject a summary for another node or a body
+larger than 16 MiB. Disposable real-kubelet coverage proves summary access while
+node proxy, kubelet Pod/exec, Secret and execution access remain denied. Existing
+resource-ledger coverage retains exact Pod UID selection and counter accounting.
 
 Trial/Batch `resource-usage` APIs and delivery exports retain the same durable
 ledger after native nodes are removed. Native rows carry execution lease,

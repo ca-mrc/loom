@@ -335,7 +335,9 @@ def participant_readonly_roles(*, request: PoolMigrationRequest) -> tuple[dict[s
 
 Not sufficient alone to fence a writer: the parent must also qualify the full
 binding inventory and stop all old processes before granting gateway authority.
-The existing node-usage reader is unchanged; CPs need no Kubernetes permission.
+The qualified node-usage reader retains only nodes/stats; CPs need no Kubernetes
+permission. The parent must replace a historical nodes/proxy grant and qualify
+direct kubelet reachability/TLS before effective reader fencing can pass.
 """
     migration_contract(request)
     documents: list[dict[str, Any]] = []

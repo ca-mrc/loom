@@ -2238,6 +2238,17 @@ migration incomplete: the protected parent owns complete external-writer
 inventory and fresh qualification before activation. It never removes an
 unexpected grant automatically.
 
+Actuator telemetry uses the qualified Node's private `InternalIP` and fixed
+kubelet HTTPS `/stats/summary` endpoint. The cluster CA verifies the serving
+certificate and the renewable runtime bearer authorizes GET `nodes/stats`;
+GET `nodes` supplies endpoint identity. The reader preserves cumulative CPU,
+sampled memory and filesystem counters without retaining foreign Pod data.
+It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
+summaries, with no broad `nodes/proxy` fallback. The effective reader review
+accepts only GET on `nodes/stats`, not node proxy or execution authority.
+The connected protected preflight must prove installed kubelet reachability,
+certificate trust and summary authorization before controller retirement.
+
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
 absence/output-drain and settled-create evidence before recording cleanup.
