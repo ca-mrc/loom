@@ -138,6 +138,7 @@ export {
   type DeliveryExport,
   type DiagnosisReport,
   type MonitorSummary,
+  type NetworkPolicyPreview,
   type RerunPlan,
   type TaskFilter,
   type TrialDetail,

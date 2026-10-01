@@ -34,7 +34,12 @@ from loom.execution_requirements import (
     execution_requirement_diagnostics,
 )
 from loom.hosted_harness import is_workspace_harness
-from loom.models.networking import TaskHttpEgress, hosted_http_egress
+from loom.models.networking import (
+    NetworkPolicy,
+    TaskHttpEgress,
+    hosted_http_egress,
+    resolve_effective_network_policy,
+)
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.verifier_runtime import resolve_verifier_env_mode
@@ -334,6 +339,7 @@ class WorkloadRequirementsV1(_StrictContract):
     ephemeral_storage_mib: int | None = Field(gt=0)
     isolation_level: IsolationLevel
     network_access: NetworkAccess
+    effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
     image_materialization: ImageMaterialization
     image_ref: str | None
@@ -355,6 +361,8 @@ class WorkloadRequirementsV1(_StrictContract):
     @model_serializer(mode="wrap")
     def _omit_unused_egress(self, handler: Any) -> dict[str, Any]:
         payload: dict[str, Any] = handler(self)
+        if self.effective_network_policy is None:
+            payload.pop("effective_network_policy", None)
         if self.task_egress is None:
             payload.pop("task_egress", None)
         return payload
@@ -553,7 +561,12 @@ def workload_requirements_from_task(
         materialization = ImageMaterialization.MUTABLE_OCI
         image_ref = env.docker_image
 
-    policy_kind = env.baseline_network_policy.kind
+    effective_policy = resolve_effective_network_policy(
+        baseline=env.baseline_network_policy,
+        supported=env.network_policies_supported,
+        override=trial.baseline_network_policy_override if trial is not None else None,
+    )
+    policy_kind = effective_policy.kind
     network_access = {
         "no-network": NetworkAccess.NONE,
         "gateway-only": NetworkAccess.GATEWAY_ONLY,
@@ -594,7 +607,8 @@ def workload_requirements_from_task(
             else IsolationLevel.SHARED_KERNEL
         ),
         network_access=network_access,
-        task_egress=hosted_http_egress(env.baseline_network_policy),
+        effective_network_policy=effective_policy,
+        task_egress=hosted_http_egress(effective_policy),
         image_materialization=materialization,
         image_ref=image_ref,
         sidecar_count=len(env.sidecars),

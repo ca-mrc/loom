@@ -29,6 +29,7 @@ import { agentLabel } from "../lib/agentLabel";
 import { formatLocalDateTime } from "../lib/dateTime";
 import { humanizeFailureReason } from "../lib/humanizeFailureReason";
 import { modelLabel } from "../lib/modelLabel";
+import { networkPolicyLabel } from "../lib/networkPolicy";
 import { ownershipLabel } from "../lib/ownership";
 import { provenanceLabel } from "../lib/provenanceLabel";
 import { trialDownloadCommands } from "../lib/quickstartSnippets";
@@ -182,6 +183,16 @@ function MaterializationCard({
         }
       />
       <Card.Body className="space-y-4">
+        {materialization.network_policy ? (
+          <section aria-label="Task network policy" className="space-y-2">
+            <h3 className="font-semibold">Task network access</h3>
+            <dl className="grid gap-2 text-sm md:grid-cols-3">
+              <div><dt className="text-slate-500">Task default</dt><dd>{networkPolicyLabel(materialization.network_policy.task_default)}</dd></div>
+              <div><dt className="text-slate-500">Batch override</dt><dd>{networkPolicyLabel(materialization.network_policy.requested_override)}</dd></div>
+              <div><dt className="text-slate-500">Effective</dt><dd>{networkPolicyLabel(materialization.network_policy.effective)}</dd></div>
+            </dl>
+          </section>
+        ) : null}
         {materialization.resource_allocation ? (
           <section aria-label="Execution resource allocation" className="space-y-2">
             <h3 className="font-semibold">Reserved execution resources</h3>

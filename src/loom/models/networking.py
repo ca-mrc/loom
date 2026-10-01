@@ -10,6 +10,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from loom.models.types import NetworkPolicyKind
+
 
 class _BasePolicy(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -85,6 +87,28 @@ NetworkPolicy = Annotated[
 ]
 
 TaskHttpEgress = Annotated[WebAllowlist | PublicWeb, Field(discriminator="kind")]
+
+
+class UnsupportedNetworkPolicyOverrideError(ValueError):
+    """A trial requested a policy the task does not declare it can run with."""
+
+
+def resolve_effective_network_policy(
+    *,
+    baseline: NetworkPolicy,
+    supported: frozenset[NetworkPolicyKind],
+    override: NetworkPolicy | None,
+) -> NetworkPolicy:
+    """Resolve and validate the policy that an execution must freeze.
+
+    The task owns the set of policies its environment supports. A trial may
+    select one of those policies, but it cannot silently expand that contract.
+    """
+    if override is not None and override.kind not in supported:
+        raise UnsupportedNetworkPolicyOverrideError(
+            f"network policy override {override.kind!r} is not supported by the task",
+        )
+    return override or baseline
 
 
 def hosted_http_egress(policy: NetworkPolicy) -> WebAllowlist | PublicWeb | None:

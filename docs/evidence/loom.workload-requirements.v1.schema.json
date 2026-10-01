@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "Allowlist": {
+      "additionalProperties": false,
+      "properties": {
+        "cidrs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Cidrs",
+          "type": "array"
+        },
+        "domains": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "kind": {
+          "const": "allowlist",
+          "default": "allowlist",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domains"
+      ],
+      "title": "Allowlist",
+      "type": "object"
+    },
     "ExecutionPrerequisiteV1": {
       "additionalProperties": false,
       "description": "An unresolved dependency, with an optional opaque inventory reference.",
@@ -41,6 +73,19 @@
       "title": "ExecutionPrerequisiteV1",
       "type": "object"
     },
+    "GatewayOnly": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "gateway-only",
+          "default": "gateway-only",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "GatewayOnly",
+      "type": "object"
+    },
     "ImageMaterialization": {
       "enum": [
         "immutable_oci",
@@ -71,6 +116,32 @@
       ],
       "title": "NetworkAccess",
       "type": "string"
+    },
+    "NoNetwork": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "no-network",
+          "default": "no-network",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "NoNetwork",
+      "type": "object"
+    },
+    "Public": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "public",
+          "default": "public",
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "title": "Public",
+      "type": "object"
     },
     "PublicWeb": {
       "additionalProperties": false,
@@ -220,6 +291,48 @@
       ],
       "default": null,
       "title": "Data Residency"
+    },
+    "effective_network_policy": {
+      "anyOf": [
+        {
+          "discriminator": {
+            "mapping": {
+              "allowlist": "#/$defs/Allowlist",
+              "gateway-only": "#/$defs/GatewayOnly",
+              "no-network": "#/$defs/NoNetwork",
+              "public": "#/$defs/Public",
+              "public-web": "#/$defs/PublicWeb",
+              "web-allowlist": "#/$defs/WebAllowlist"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Public"
+            },
+            {
+              "$ref": "#/$defs/NoNetwork"
+            },
+            {
+              "$ref": "#/$defs/GatewayOnly"
+            },
+            {
+              "$ref": "#/$defs/Allowlist"
+            },
+            {
+              "$ref": "#/$defs/WebAllowlist"
+            },
+            {
+              "$ref": "#/$defs/PublicWeb"
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Effective Network Policy"
     },
     "ephemeral_storage_mib": {
       "anyOf": [

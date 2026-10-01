@@ -73,6 +73,40 @@ destinations = [
 ]
 ```
 
+Batch submissions may select another task-declared policy with
+`TrialConfig.baseline_network_policy_override`. The override is valid only when
+its `kind` appears in `environment.network_policies_supported`; it cannot add a
+capability that the task author did not declare. The hosted-native choices are
+`gateway-only`, `web-allowlist`, and `public-web`. Legacy local-driver policies
+are not translated.
+
+Loom resolves the task default and optional trial override before choosing an
+execution compiler. The complete effective policy is frozen into workload
+requirements, command identity, the immutable runtime plan, and the trusted
+phase environment. Private sandbox controllers consume that frozen value; they
+do not re-read the task default. Shared verification therefore uses the same
+policy as the agent, and a deferred verifier plan inherits its parent policy
+without resolving it again. Batch admission checks every selected task and
+reports all incompatible task IDs before creating trials.
+
+CLI example:
+
+```bash
+loom eval batch create ... \
+  --network-policy web-allowlist \
+  --allow-web https://registry.npmjs.org \
+  --allow-web https://pypi.org
+```
+
+The advanced Batch form exposes the same selection and a read-only compatibility
+preview. Model calls remain on Loom's internal model Gateway; task web egress
+does not grant provider credentials, direct provider access, or an implicit
+browser. Response-only execution has no task command sandbox, so hosted web
+egress is rejected for that topology instead of being accepted and ignored.
+That applicability check consumes the selected `HostedHarnessSpec` execution
+kind from `loom.hosted_harness`; network policy never branches on a harness
+name or grants a harness a different policy.
+
 `https` permits CONNECT to TCP/443; `http` permits ordinary forwarding to TCP/80.
 No wildcard, literal IP, alternate port, arbitrary CIDR or raw TCP policy is
 accepted. Existing `Allowlist` retains its local-driver semantics and is not

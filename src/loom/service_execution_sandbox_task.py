@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 import httpx
+from pydantic import TypeAdapter, ValidationError
 
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
@@ -31,7 +32,7 @@ from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.hosted_harness import HostedHarnessSpec, hosted_harness, workspace_controller_phases
 from loom.models.capabilities import Capabilities
-from loom.models.networking import hosted_http_egress
+from loom.models.networking import NetworkPolicy, hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.models.verifier import VerifierResult
@@ -104,7 +105,21 @@ def _agent_input_exclusions(task: TaskConfig) -> tuple[str, ...]:
     return tuple(excluded)
 
 
+_NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
+
+
+def _frozen_network_policy() -> NetworkPolicy:
+    raw = os.environ.get("LOOM_EFFECTIVE_NETWORK_POLICY_JSON")
+    if raw is None:
+        raise ServiceExecutionTaskError("effective_network_policy_unavailable")
+    try:
+        return _NETWORK_POLICY_ADAPTER.validate_json(raw)
+    except ValidationError:
+        raise ServiceExecutionTaskError("effective_network_policy_invalid") from None
+
+
 def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
+    network_policy = _frozen_network_policy()
     command_environment = {}
     guest = (task.environment.execution_requirements is not None
              and bool(GUEST_EXECUTION_CAPABILITIES.intersection(task.environment.execution_requirements.capabilities)))
@@ -116,7 +131,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid") from None
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
-    if hosted_http_egress(task.environment.baseline_network_policy) is not None:
+    if hosted_http_egress(network_policy) is not None:
         from urllib.parse import urlsplit
 
         proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
@@ -134,7 +149,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
             network_policies=frozenset({"gateway-only", "web-allowlist", "public-web"}), dynamic_network_policy=False,
             mounted_fs=False, resource_modes=frozenset({"limit"}),
         ),
-        network_policy=task.environment.baseline_network_policy,
+        network_policy=network_policy,
         command_environment=command_environment,
         max_transfer_bytes=max_transfer,
     )

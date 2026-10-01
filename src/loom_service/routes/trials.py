@@ -722,6 +722,26 @@ async def get_trial(
             .limit(1)
         )
     ).scalar_one_or_none()
+    runtime_plan = (
+        ExecutionRuntimePlanV1.model_validate(materialization.runtime_contract_json)
+        if materialization is not None and materialization.runtime_contract_json
+        else None
+    )
+    task_environment = (
+        task.config.get("environment", {})
+        if task is not None and isinstance(task.config, dict)
+        else {}
+    )
+    task_default_network_policy = (
+        task_environment.get("baseline_network_policy")
+        if isinstance(task_environment, dict)
+        else None
+    )
+    requested_network_policy = (
+        trial.config.get("baseline_network_policy_override")
+        if isinstance(trial.config, dict)
+        else None
+    )
     trial_result = trial.result if isinstance(trial.result, dict) else {}
     raw_runtime_result = trial_result.get("runtime_result")
     runtime_result = raw_runtime_result if isinstance(raw_runtime_result, dict) else {}
@@ -781,9 +801,19 @@ async def get_trial(
             }
     base["materialization"] = (
         {
-            "resource_allocation": (resource_allocation_summary(ExecutionRuntimePlanV1.model_validate(
-                materialization.runtime_contract_json,
-            )) if materialization.runtime_contract_json else None),
+            "resource_allocation": (
+                resource_allocation_summary(runtime_plan) if runtime_plan is not None else None
+            ),
+            "network_policy": {
+                "task_default": task_default_network_policy,
+                "requested_override": requested_network_policy,
+                "effective": (
+                    runtime_plan.effective_network_policy.model_dump(mode="json")
+                    if runtime_plan is not None
+                    and runtime_plan.effective_network_policy is not None
+                    else None
+                ),
+            },
             "state": materialization.materialization_state,
             "lifecycle_stage": service_execution_lifecycle_stage(
                 trial_state=trial.state,

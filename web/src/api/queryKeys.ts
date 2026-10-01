@@ -28,6 +28,7 @@ export const queryKeys = {
   models: key("models"),
   "monitor-placement": key("monitor-placement"),
   "monitor-summary": key("monitor-summary"),
+  "network-policy-preview": key("network-policy-preview"),
   overview: key("overview"),
   "password-action": key("password-action"),
   "pipeline-artifact": key("pipeline-artifact"),

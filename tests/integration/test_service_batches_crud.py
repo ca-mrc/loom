@@ -430,6 +430,17 @@ async def test_post_batch_materializes_count(
     }
     assert detail_body["submitted_by_user"]["username"].startswith("BatchOwner-")
     assert detail_body["submitted_by_user"]["team_id"] == str(team_id)
+    assert detail_body["network_policy"] == {
+        "authored_defaults": [{
+            "policy": {"kind": "public"},
+            "task_ids": ["local/mit-0", "local/mit-1", "local/mit-2"],
+        }],
+        "requested_override": None,
+        "resolved_effective": [{
+            "policy": {"kind": "public"},
+            "task_ids": ["local/mit-0", "local/mit-1", "local/mit-2"],
+        }],
+    }
     async with app.state.session_factory() as session:
         batch, authority = (
             await session.execute(
@@ -2884,6 +2895,36 @@ async def test_post_nebius_rejects_task_without_nebius_binding(
                 "runtime_profile_unavailable",
             ]
         },
+    }
+
+
+async def test_network_policy_preview_reports_every_incompatible_task(
+    camp_setup: tuple[FastAPI, str, UUID],
+) -> None:
+    app, raw, team_id = camp_setup
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://svc") as ac:
+        response = await ac.post(
+            "/api/v1/network-policy-preview",
+            headers={"Authorization": f"Bearer {raw}"},
+            json={
+                "team_id": str(team_id),
+                "task_filter": {
+                    "subset_kind": "explicit",
+                    "task_ids": ["local/mit-0", "local/mit-1"],
+                },
+                "baseline_network_policy_override": {"kind": "gateway-only"},
+                "agent_names": ["terminus-2"],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["task_count"] == 2
+    assert body["selected_incompatible_task_ids"] == ["local/mit-0", "local/mit-1"]
+    assert body["selected_rejection_reasons"] == {
+        "local/mit-0": ["network_policy_override_not_supported"],
+        "local/mit-1": ["network_policy_override_not_supported"],
     }
 
 

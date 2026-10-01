@@ -1,5 +1,6 @@
 """Guest launch authority comes from deployment readiness and frozen task requirements."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -15,6 +16,7 @@ from loom.execution_runtime_contract import (
     runtime_pod_resources,
     validate_runtime_plan_requirements,
 )
+from loom.models.networking import WebAllowlist, WebDestination
 from loom.models.task import TaskConfig
 from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
@@ -75,6 +77,30 @@ def test_guest_opt_in_preserves_primary_class_and_selects_separate_plan_class(we
         }
     validate_runtime_plan_requirements(plan, workload_requirements_from_task(task))
     assert ExecutionRuntimePlanV1.model_validate(plan.canonical_payload()) == plan
+
+
+def test_guest_plan_freezes_web_override_and_web_execution_class():
+    task, trial, profile = _guest_inputs()
+    policy = WebAllowlist(destinations=(
+        WebDestination(host="registry.npmjs.org", protocol="https"),
+    ))
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "network_policies_supported": frozenset({"gateway-only", "web-allowlist"}),
+    })})
+    trial = trial.model_copy(update={"baseline_network_policy_override": policy})
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **profile.model_dump(mode="json"),
+        "supports_task_web_egress": True,
+        "execution_class_id": "linux-amd64-cpu-web-pod-v1",
+    })
+
+    plan = _compile(task, trial, profile)
+    assert plan.execution_class_id == "linux-amd64-cpu-guest-web-v1"
+    assert plan.effective_network_policy == policy
+    assert json.loads(plan.main.environment["LOOM_EFFECTIVE_NETWORK_POLICY_JSON"]) == policy.model_dump(
+        mode="json"
+    )
+    validate_runtime_plan_requirements(plan, workload_requirements_from_task(task, trial))
 
 
 def test_ordinary_plan_and_profile_omit_guest_extensions_even_when_deployment_ready():

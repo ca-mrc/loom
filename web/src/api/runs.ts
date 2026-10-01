@@ -77,6 +77,20 @@ export interface CreateBatchBody {
   budget_confirmed?: boolean;
 }
 
+export interface NetworkPolicyPreview {
+  task_count: number;
+  authored_defaults: Array<{ policy: Record<string, unknown>; task_ids: string[] }>;
+  choices: Array<{
+    kind: "gateway-only" | "web-allowlist" | "public-web";
+    available: boolean;
+    incompatible_task_ids: string[];
+    reasons: string[];
+  }>;
+  selected_incompatible_task_ids: string[];
+  selected_rejection_reasons: Record<string, string[]>;
+  widens_task_ids: string[];
+}
+
 export const runsApi = {
   getMonitorPlacement: (q: Record<string, string | undefined>) =>
     apiFetch<components["schemas"]["MonitorPlacement"]>(`/api/v1/monitor/placement${qs(q)}`, {
@@ -125,6 +139,15 @@ export const runsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  previewBatchNetworkPolicy: (body: {
+    task_filter: TaskFilter;
+    baseline_network_policy_override: Record<string, unknown> | null;
+    agent_names: string[];
+    team_id?: string;
+  }) => apiFetch<NetworkPolicyPreview>("/api/v1/network-policy-preview", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }),
   cancelBatch: (id: string) =>
     apiFetch<{ batch_id: string; state: string }>(`/api/v1/batches/${id}/cancel`, { method: "POST" }),
   getBatchRerunPlan: (id: string, q: { task_id?: string[]; include_operator_approval?: boolean } = {}) => {

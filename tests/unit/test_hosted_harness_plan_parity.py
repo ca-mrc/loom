@@ -1,8 +1,9 @@
 """#2295: moving harness facts into typed specs must not change any plan.
 
-The fixture holds canonical plans compiled by the pre-migration code
-(`origin/dev` at the #2295 base). Regenerate it only for an intentional,
-documented plan change:
+The fixture started from canonical plans compiled by the pre-#2295 code.
+#2289 intentionally adds the effective policy to command identity, plan, and
+phase environment while preserving every existing topology field. Regenerate
+it only for an intentional, documented plan change:
 
     uv run python -m tests.unit.test_hosted_harness_plan_parity > \
         tests/unit/fixtures/hosted_harness_plans.json

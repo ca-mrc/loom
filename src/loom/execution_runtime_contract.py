@@ -14,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    TypeAdapter,
     field_validator,
     model_serializer,
     model_validator,
@@ -28,7 +29,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
-from loom.models.networking import TaskHttpEgress
+from loom.models.networking import NetworkPolicy, TaskHttpEgress, hosted_http_egress
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -37,6 +38,7 @@ _CANDIDATE = re.compile(r"^[0-9a-f]{40}$")
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
 _ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 _SECRET_ENV = re.compile(r"(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|KUBECONFIG)")
+_NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 
 def _confined_relative_path(value: str) -> str:
@@ -356,6 +358,7 @@ class ExecutionRuntimePlanV1(_Strict):
     run_as_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     fs_group: int = Field(default=65532, gt=0, le=2_147_483_647)
     task_resources: ContainerResourcesV1
+    effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
@@ -437,6 +440,26 @@ class ExecutionRuntimePlanV1(_Strict):
             raise ValueError("one prepared fixture requires an isolated attempt controller and both sandboxes")
         if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
             raise ValueError("task egress requires its immutable diagnostic output declaration")
+        if (
+            self.effective_network_policy is not None
+            and hosted_http_egress(self.effective_network_policy) != self.task_egress
+        ):
+            raise ValueError("task egress does not match the effective network policy")
+        phases = (self.main, *((self.verifier,) if self.verifier is not None else ()))
+        for phase in phases:
+            raw_policy = phase.environment.get("LOOM_EFFECTIVE_NETWORK_POLICY_JSON")
+            if self.effective_network_policy is None:
+                if raw_policy is not None:
+                    raise ValueError("phase network policy has no immutable plan authority")
+                continue
+            if raw_policy is None:
+                raise ValueError("phase is missing the effective network policy")
+            try:
+                phase_policy = _NETWORK_POLICY_ADAPTER.validate_json(raw_policy)
+            except ValueError:
+                raise ValueError("phase effective network policy is invalid") from None
+            if phase_policy != self.effective_network_policy:
+                raise ValueError("phase effective network policy differs from the plan")
         if self.task_image_materialization_id is not None and (
             self.task_image_materialization_id.int == 0
             or self.agent_image_ref is None
@@ -552,6 +575,8 @@ class ExecutionRuntimePlanV1(_Strict):
 
     def canonical_payload(self) -> dict[str, object]:
         payload = self.model_dump(mode="json")
+        if self.effective_network_policy is None:
+            payload.pop("effective_network_policy")
         if self.task_egress is None:
             payload.pop("task_egress")
         # Keep existing published plans byte-compatible when new fields are unused.
@@ -756,6 +781,14 @@ def validate_runtime_plan_requirements(
             raise ValueError("runtime guest plan does not match admitted workload requirements")
     if requirements.task_egress != plan.task_egress:
         raise ValueError("runtime plan network policy does not match workload requirements")
+    # Historical task-authored/static plans predate the frozen policy field.
+    # Their task_egress equality above remains authoritative. New automatic
+    # hosted plans always populate this field and must match it exactly.
+    if (
+        plan.effective_network_policy is not None
+        and requirements.effective_network_policy != plan.effective_network_policy
+    ):
+        raise ValueError("runtime plan effective network policy does not match workload requirements")
     if requirements.image_ref != plan.task_image_ref:
         raise ValueError("runtime plan task image does not match workload requirements")
     expected_resources = (
