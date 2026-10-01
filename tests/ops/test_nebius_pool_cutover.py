@@ -479,3 +479,115 @@ def test_https_cutover_refuses_a_history_reader_bound_to_another_manager(cutover
             api_server='https://cluster.example', ssl_context=ssl.create_default_context()):
             pass
     assert external.events == [] and external.patches == []
+
+
+@pytest.fixture
+def cutover_binding_inventory(cutover_inputs):
+    """Complete external RBAC collections, including unrelated native authority."""
+    from scripts.ops.nebius_pool_runtime import participant_readonly_roles
+
+    request, _ = cutover_inputs
+    migration = request.fencing.retirement.migration
+    inventories = {"roles": list(copy.deepcopy(request.fencing.originals)),
+        "clusterroles": [], "rolebindings": [], "clusterrolebindings": []}
+    for document in participant_readonly_roles(request=migration):
+        if document["kind"] != "RoleBinding":
+            continue
+        document["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+        inventories["rolebindings"].append(document)
+    for name, subjects in (("cluster-admin", [{"kind": "Group", "name": "system:masters",
+            "apiGroup": "rbac.authorization.k8s.io"}]),
+            ("system:controller:job-controller", [{"kind": "ServiceAccount", "name": "job-controller",
+                "namespace": "kube-system"}])):
+        inventories["clusterroles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+            "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1"},
+            "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "delete"]}]})
+        inventories["clusterrolebindings"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+            "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1"},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name},
+            "subjects": subjects})
+    return inventories
+
+
+def binding_preflight(request, tokens, inventories, *, partial=False):
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+
+    migration = request.fencing.retirement.migration
+    namespaces = {migration.registration.binding.namespace: migration.registration.binding.namespace_uid,
+        "kube-system": migration.registration.binding.kube_system_uid,
+        **{row.namespace: str(row.namespace_uid) for row in migration.guards},
+        **{ns.name: str(ns.uid) for row in migration.registration.spec.participants
+            for ns in (row.execution_namespace, row.build_namespace)}}
+    kinds = {"roles": "Role", "clusterroles": "ClusterRole", "rolebindings": "RoleBinding",
+        "clusterrolebindings": "ClusterRoleBinding"}
+    calls = []
+
+    def respond(message):
+        calls.append(message)
+        assert message.method == "GET", "inventory qualification must not persist any mutation"
+        if message.url.path.startswith("/api/v1/namespaces/"):
+            name = message.url.path.rsplit("/", 1)[-1]
+            return httpx.Response(200, json={"apiVersion": "v1", "kind": "Namespace", "metadata": {
+                "name": name, "uid": namespaces[name], "labels": {
+                    "loom.nebius/management-installation": migration.registration.binding.installation_id,
+                    "pod-security.kubernetes.io/enforce": "restricted"}}})
+        resource = message.url.path.rsplit("/", 1)[-1]
+        assert message.url.path == "/apis/rbac.authorization.k8s.io/v1/" + resource
+        assert dict(message.url.params) == {"limit": "100"}
+        metadata = {"resourceVersion": "7"}
+        if partial:
+            metadata["continue"] = "unresolved-next-page"
+        return httpx.Response(200, json={"apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": kinds[resource] + "List", "metadata": metadata, "items": inventories[resource]})
+
+    external = CutoverAPI(request)
+    with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
+            guards=SimpleNamespace(request=migration), checks=external, history=external,
+            api_server="https://cluster.example", ssl_context=ssl.create_default_context()) as api:
+        api.client.close()
+        api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
+        api.preflight(request)
+    return calls
+
+
+@pytest.mark.parametrize("damage", ["foreign_subject", "extra_named_grant", "cluster_group",
+    "cross_namespace_grant", "unresolved", "role_drift", "duplicate", "missing_role", "missing_binding"])
+def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_downtime(
+        cutover_inputs, cutover_binding_inventory, damage):
+    request, tokens = cutover_inputs
+    rows = cutover_binding_inventory
+    binding = rows["rolebindings"][0]
+    if damage == "foreign_subject":
+        binding["subjects"].append({"kind": "ServiceAccount", "name": "foreign-writer", "namespace": "foreign"})
+    elif damage in {"extra_named_grant", "cross_namespace_grant"}:
+        extra = copy.deepcopy(binding)
+        extra["metadata"].update(name="unexpected", uid=str(uuid4()))
+        if damage == "cross_namespace_grant":
+            extra["metadata"]["namespace"] = "foreign"
+        extra["roleRef"].update(kind="ClusterRole", name="cluster-admin")
+        rows["rolebindings"].append(extra)
+        rows["clusterroles"][0]["rules"][0]["resourceNames"] = ["one-named-job"]
+    elif damage == "cluster_group":
+        rows["clusterrolebindings"][0]["subjects"] = [{"kind": "Group", "name": "system:serviceaccounts",
+            "apiGroup": "rbac.authorization.k8s.io"}]
+    elif damage == "unresolved":
+        binding["roleRef"]["name"] = "missing"
+    elif damage == "role_drift":
+        rows["roles"][0]["rules"][0]["verbs"].append("patch")
+    elif damage == "duplicate":
+        rows["roles"].append(copy.deepcopy(rows["roles"][0]))
+    elif damage == "missing_role":
+        rows["roles"].pop(0)
+    else:
+        rows["rolebindings"].pop(0)
+    with pytest.raises(ValueError, match="pool.*binding"):
+        binding_preflight(request, tokens, rows)
+
+
+def test_connected_binding_preflight_preserves_unrelated_native_and_operator_authority(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+    calls = binding_preflight(request, tokens, cutover_binding_inventory)
+    assert {row.url.path.rsplit("/", 1)[-1] for row in calls
+        if row.url.path.startswith("/apis/rbac.authorization.k8s.io/v1/")} == {
+            "roles", "clusterroles", "rolebindings", "clusterrolebindings"}
