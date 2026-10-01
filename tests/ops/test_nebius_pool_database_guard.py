@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -382,3 +383,140 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
     assert min(credential_reads) < write < max(credential_reads)
     monkeypatch.setattr(api, '_run', database_run)
     assert api.guard(state.target, 'observe') == {'status': 'held'}
+
+
+@pytest.fixture(params=['controller', 'service', 'actuator', 'guest'])
+def workload_database(request, database_guard, guest_runtime_inputs, monkeypatch):
+    """Real rendered Pods/settings; only the remote Kubernetes transport is doubled."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    previous, state = database_guard
+    migration, actuators, services, _, guest = guest_runtime_inputs
+    target = state.target
+    migration = replace(migration, guards=(target, *migration.guards[1:]))
+    original = {'controller': target.controller, 'service': services[target.participant_id],
+        'actuator': actuators[target.participant_id], 'guest': guest}[request.param]
+    controller = copy.deepcopy(original)
+    controller['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
+        'updatedReplicas': 1, 'availableReplicas': 1}
+    namespace, name = original['metadata']['namespace'], original['metadata']['name']
+    container, = original['spec']['template']['spec']['containers']
+    variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL',
+        'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL', 'guest': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[request.param]
+    reference, = (row['valueFrom']['secretKeyRef'] for row in container['env'] if row['name'] == variable)
+    url = f'postgresql+psycopg://fixture:private-runtime-marker@loom-postgres.{target.namespace}.svc:5432/loom'
+    if namespace == target.namespace:
+        secret = state.secret
+    else:
+        secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': reference['name'],
+            'namespace': namespace, 'uid': str(uuid4()), 'resourceVersion': '11'}, 'data': {}}
+    secret['data'][reference['key']] = base64.b64encode(url.encode()).decode()
+    replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+        'name': name + '-abc', 'namespace': namespace, 'uid': str(uuid4()),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': name,
+            'uid': controller['metadata']['uid'], 'controller': True}]},
+        'spec': {'template': copy.deepcopy(controller['spec']['template'])}}
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': name + '-abc-def', 'namespace': namespace, 'uid': str(uuid4()),
+        'labels': copy.deepcopy(controller['spec']['selector']['matchLabels']),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+            'uid': replica['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(controller['spec']['template']['spec']),
+        'status': {'phase': 'Running', 'containerStatuses': [{'name': container['name'], 'ready': True}]}}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
+    environment.update({variable: url, 'LOOM_CP_MINIO_ACCESS_KEY': 'fixture', 'LOOM_CP_MINIO_SECRET_KEY': 'fixture',
+        'LOOM_CP_STEP_JWT_SIGNING_KEY': 'runtime-database-test-key-00000000',
+        'LOOM_SVC_MINIO_ACCESS_KEY': 'fixture', 'LOOM_SVC_MINIO_SECRET_KEY': 'fixture',
+        'LOOM_EXECUTION_ACTUATOR_NAMESPACE': namespace, 'LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID': pod['metadata']['name'],
+        'LOOM_EXECUTION_ACTUATOR_TARGET_ID': 'fixture-target'})
+    api = KubectlPoolGuardAPI(request=migration, kubeconfig=previous.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    state.original, state.controller, state.runtime_pod, state.replica = original, controller, pod, replica
+    state.runtime_secret, state.runtime_environment, state.variable = secret, environment, variable
+    state.credential = (UUID(secret['metadata']['uid']), secret['metadata']['resourceVersion'])
+    state.commands, state.processes, state.runtime_after_drift = [], [], False
+    database_run = previous._run
+
+    def run(args):
+        if args[:1] == ['exec']:
+            assert args[:7] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', container['name'], '--']
+            assert args[7:9] == ['python', '-c']
+            state.commands.append(args)
+            result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False,
+                timeout=30, cwd=previous.kubeconfig.parent, env=environment)
+            state.processes.append(result)
+            if result.returncode:
+                raise ValueError('private-transport-marker')
+            return json.loads(result.stdout)
+        if args[:2] == ['get', 'namespace'] and args[2] == namespace and namespace != target.namespace:
+            participant = next(row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+            return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace,
+                'uid': str(participant.execution_namespace.uid)}}
+        if args[:2] == ['get', 'secret'] and args[2] == reference['name'] and args[4] == namespace:
+            return copy.deepcopy(secret)
+        if args[:2] == ['get', 'deployment']:
+            assert args[2:5] == [name, '-n', namespace]
+            return copy.deepcopy(controller)
+        if args[:2] == ['get', 'replicaset']:
+            assert args[2:5] == [replica['metadata']['name'], '-n', namespace]
+            return copy.deepcopy(replica)
+        if args[:2] == ['get', '--raw'] and '/pods?' in args[2] and 'loom-postgres' not in args[2]:
+            current = copy.deepcopy(pod)
+            if state.commands and state.runtime_after_drift:
+                current['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [current]}
+        return database_run(args)
+
+    monkeypatch.setattr(api, '_run', run)
+    return api, state
+
+
+def qualify_workload(api, state):
+    return api.qualify_runtime_database(state.target, original=state.original,
+        credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+
+
+def test_each_running_database_consumer_is_qualified_without_sql_or_credential_output(workload_database):
+    api, state = workload_database
+    assert qualify_workload(api, state) is None
+    assert qualify_workload(api, state) is None
+    assert len(state.commands) == 2 and state.commands[0][-2:] != state.commands[1][-2:]
+    assert all('private-runtime-marker' not in arg for command in state.commands for arg in command)
+    assert all(result.returncode == 0 and result.stdout == b'{"status": "qualified"}\n' and not result.stderr
+        for result in state.processes)
+
+
+@pytest.mark.parametrize('damage', ['loaded_url', 'secret_identity', 'secret_version', 'foreign_database',
+    'pod_owner', 'pod_template', 'not_ready', 'after_drift'])
+def test_runtime_database_qualification_rejects_drift_in_every_consumer(workload_database, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    if damage == 'loaded_url':
+        state.runtime_environment[state.variable] += '?application_name=private-override'
+    elif damage == 'secret_identity':
+        state.runtime_secret['metadata']['uid'] = str(uuid4())
+    elif damage == 'secret_version':
+        state.runtime_secret['metadata']['resourceVersion'] = '12'
+    elif damage == 'foreign_database':
+        for key in state.runtime_secret['data']:
+            raw = base64.b64decode(state.runtime_secret['data'][key]).decode().replace('loom-postgres.', 'foreign.')
+            state.runtime_secret['data'][key] = base64.b64encode(raw.encode()).decode()
+        state.runtime_environment[state.variable] = state.runtime_environment[state.variable].replace('loom-postgres.', 'foreign.')
+    elif damage == 'pod_owner':
+        state.runtime_pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'pod_template':
+        state.runtime_pod['spec']['containers'][0]['image'] = 'foreign:latest'
+    elif damage == 'not_ready':
+        state.runtime_pod['status']['containerStatuses'][0]['ready'] = False
+    else:
+        state.runtime_after_drift = True
+    with pytest.raises(PoolMigrationError) as error:
+        qualify_workload(api, state)
+    assert 'private-' not in str(error.value)
+    assert len(state.commands) == (1 if damage in {'loaded_url', 'after_drift'} else 0)
+    assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
