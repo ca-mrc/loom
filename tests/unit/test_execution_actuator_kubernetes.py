@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from loom_execution_actuator.__main__ import ActuatorRuntimeHealth, _health_app
 from loom_execution_actuator.contracts import ExecutionTerminationSummaryV1, NormalizedJobState
-from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize
+from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi, _normalize, _scrub_log
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -170,6 +170,12 @@ def test_kubernetes_status_normalization_is_exhaustive(
     assert observation.normalized_state is expected
     assert observation.job_uid == "job-uid"
     assert observation.resource_version == "42"
+
+
+def test_scrubbed_log_excerpt_drops_credentials() -> None:
+    scrubbed = _scrub_log("api_key=super-secret\nboom")
+    assert "super-secret" not in scrubbed
+    assert "boom" in scrubbed
 
 
 @pytest.mark.parametrize(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,8 +11,10 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesCredentials,
     create_api_client,
 )
+from loom.security.redaction import redact_text
 from loom_execution_actuator.contracts import (
     ContainerDiagnostic,
+    ContainerLogExcerpt,
     ContainerTerminationDiagnostic,
     ExecutionTerminationSummaryV1,
     KubernetesApiError,
@@ -115,6 +118,25 @@ def _condition(conditions: list[Any] | None, condition_type: str) -> Any | None:
     )
 
 
+def _newest_pod(pods: list[Any]) -> Any:
+    return max(
+        pods,
+        key=lambda item: (
+            getattr(item.metadata, "creation_timestamp", None) or datetime.min.replace(tzinfo=UTC)
+        ),
+        default=None,
+    )
+
+
+def _scrub_log(value: str) -> str:
+    value = re.sub(
+        r"(?i)((?:password|secret(?:[_-]?key)?|(?:api|access)[_-]?key|token)\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\1[REDACTED]",
+        value,
+    )
+    return redact_text(value, limit=4096).strip()
+
+
 def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     metadata = job.metadata
     labels = dict(metadata.labels or {})
@@ -130,13 +152,7 @@ def _normalize(job: Any, pods: list[Any]) -> KubernetesJobObservation:
     except (TypeError, ValueError) as exc:
         raise KubernetesApiError("managed Job generation is invalid", status_code=409) from exc
 
-    pod = max(
-        pods,
-        key=lambda item: (
-            getattr(item.metadata, "creation_timestamp", None) or datetime.min.replace(tzinfo=UTC)
-        ),
-        default=None,
-    )
+    pod = _newest_pod(pods)
     state = NormalizedJobState.PENDING
     reason: str | None = None
     message: str | None = None
@@ -421,6 +437,52 @@ class InClusterKubernetesJobApi:
             if self._credentials is not None:
                 await self._credentials.close()
 
+    def _observe(self, namespace: str, job: Any) -> KubernetesJobObservation:
+        pods = self._pods_for_job(namespace, job.metadata.name)
+        observed = _normalize(job, pods)
+        if observed.normalized_state != NormalizedJobState.FAILED:
+            return observed
+        pod = _newest_pod(pods)
+        if pod is None:
+            return observed
+        return observed.model_copy(update={"container_logs": self._log_excerpts(namespace, pod)})
+
+    def _log_excerpts(self, namespace: str, pod: Any) -> tuple[ContainerLogExcerpt, ...]:
+        pod_name = getattr(getattr(pod, "metadata", None), "name", None)
+        if not isinstance(pod_name, str) or not pod_name:
+            return ()
+        statuses = list(getattr(pod.status, "container_statuses", None) or [])
+        statuses.extend(getattr(pod.status, "init_container_statuses", None) or [])
+        excerpts: list[ContainerLogExcerpt] = []
+        seen: set[str] = set()
+        for status in statuses:
+            name = getattr(status, "name", None)
+            if not isinstance(name, str) or name in seen:
+                continue
+            if name not in {
+                "execution",
+                "task-sandbox",
+                "verifier-sandbox",
+            } and not name.startswith("fixture-"):
+                continue
+            seen.add(name)
+            try:
+                text = self._core.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    container=name,
+                    tail_lines=100,
+                    limit_bytes=4096,
+                )
+            except Exception:
+                continue
+            scrubbed = _scrub_log(str(text))
+            if scrubbed:
+                excerpts.append(ContainerLogExcerpt(name=name, text=scrubbed))
+            if len(excerpts) == 4:
+                break
+        return tuple(excerpts)
+
     def _pods_for_job(self, namespace: str, job_name: str) -> list[Any]:
         return list(
             self._core.list_namespaced_pod(
@@ -444,7 +506,7 @@ class InClusterKubernetesJobApi:
     def _get_sync(self, namespace: str, job_name: str) -> KubernetesJobObservation | None:
         try:
             job = self._batch.read_namespaced_job(name=job_name, namespace=namespace)
-            return _normalize(job, self._pods_for_job(namespace, job_name))
+            return self._observe(namespace, job)
         except Exception as exc:
             if getattr(exc, "status", None) == 404:
                 return None
@@ -459,7 +521,7 @@ class InClusterKubernetesJobApi:
         def create() -> KubernetesJobObservation:
             try:
                 job = self._batch.create_namespaced_job(namespace=namespace, body=manifest)
-                return _normalize(job, self._pods_for_job(namespace, job.metadata.name))
+                return self._observe(namespace, job)
             except Exception as exc:
                 raise self._translate(exc, "create") from exc
 
@@ -502,9 +564,7 @@ class InClusterKubernetesJobApi:
             rejected_count = 0
             for job in jobs:
                 try:
-                    observations.append(
-                        _normalize(job, self._pods_for_job(namespace, job.metadata.name))
-                    )
+                    observations.append(self._observe(namespace, job))
                 except KubernetesApiError as exc:
                     if exc.status_code != 409:
                         raise
@@ -542,9 +602,7 @@ class InClusterKubernetesJobApi:
                     timeout_seconds=timeout_seconds,
                 ):
                     job = event["object"]
-                    observations.append(
-                        _normalize(job, self._pods_for_job(namespace, job.metadata.name))
-                    )
+                    observations.append(self._observe(namespace, job))
                 return tuple(observations)
             except Exception as exc:
                 if getattr(exc, "status", None) == 410:

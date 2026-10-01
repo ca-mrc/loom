@@ -36,7 +36,69 @@ var (
 	errCleanupPIDNamespace = errors.New("sandbox runtime must be Linux PID 1")
 	errCleanupProcessOwner = errors.New("unexpected sandbox process owner")
 	errCleanupProcRead     = errors.New("cannot inspect sandbox processes")
+	errCleanupSignalDenied = errors.New("sandbox cannot signal descendant")
+	errCleanupSignalFailed = errors.New("sandbox signal failed")
 )
+
+// Kernel identity for one descendant that cleanup could not reap. Command
+// lines, environments and file paths stay out of this value.
+type processSnapshot struct {
+	PID           int
+	ParentPID     uint64
+	State         string
+	UID           uint64
+	WaitChannel   string
+	KillErrno     int
+	SignalPending bool
+}
+
+type cleanupDiagnosticError struct {
+	cause     error
+	snapshots []processSnapshot
+}
+
+func (e *cleanupDiagnosticError) Error() string { return e.cause.Error() }
+func (e *cleanupDiagnosticError) Unwrap() error { return e.cause }
+
+var waitChannelPattern = regexp.MustCompile(`^[A-Za-z0-9_.]{1,64}$`)
+
+func (snapshot processSnapshot) diagnostic() (string, bool) {
+	if snapshot.PID <= 1 || snapshot.PID > 1<<31-1 || snapshot.ParentPID > 1<<31-1 || snapshot.UID > 1<<32-1 {
+		return "", false
+	}
+	if len(snapshot.State) != 1 || !strings.Contains("RSDTtXZPIUW", snapshot.State) {
+		return "", false
+	}
+	if snapshot.KillErrno < 0 || snapshot.KillErrno > 255 {
+		return "", false
+	}
+	wait := snapshot.WaitChannel
+	if !waitChannelPattern.MatchString(wait) {
+		wait = "unavailable"
+	}
+	pending := 0
+	if snapshot.SignalPending {
+		pending = 1
+	}
+	return fmt.Sprintf(
+		"pid=%d;ppid=%d;state=%s;uid=%d;wchan=%s;kill_errno=%d;sigkill_pending=%d",
+		snapshot.PID, snapshot.ParentPID, snapshot.State, snapshot.UID, wait, snapshot.KillErrno, pending,
+	), true
+}
+
+func cleanupProcessHeader(snapshots []processSnapshot) string {
+	parts := make([]string, 0, 4)
+	for _, snapshot := range snapshots {
+		if len(parts) == 4 {
+			break
+		}
+		part, ok := snapshot.diagnostic()
+		if ok {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, ",")
+}
 
 // Only bounded kernel identity fields may cross the cleanup error boundary.
 // Command lines, environment and paths must never be attached to this error.
@@ -60,6 +122,10 @@ func cleanupErrorCode(err error) string {
 		return "process_owner_mismatch"
 	case errors.Is(err, errCleanupProcRead):
 		return "process_inspection_failed"
+	case errors.Is(err, errCleanupSignalDenied):
+		return "cleanup_signal_denied"
+	case errors.Is(err, errCleanupSignalFailed):
+		return "cleanup_signal_failed"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "cleanup_timeout"
 	case errors.Is(err, context.Canceled):
@@ -71,11 +137,22 @@ func cleanupErrorCode(err error) string {
 
 func writeCleanupFailure(w http.ResponseWriter, err error) {
 	w.Header().Set("X-Loom-Sandbox-Error", cleanupErrorCode(err))
+	header := ""
 	var owner *processOwnerError
 	if errors.As(err, &owner) && owner.PID > 1 && len(owner.State) == 1 && strings.Contains("RSDTtXZPIUW", owner.State) {
-		w.Header().Set("X-Loom-Sandbox-Process", fmt.Sprintf(
+		header = fmt.Sprintf(
 			"pid=%d;ppid=%d;state=%s;uid=%d;expected_uid=%d",
-			owner.PID, owner.ParentPID, owner.State, owner.ObservedUID, owner.ExpectedUID))
+			owner.PID, owner.ParentPID, owner.State, owner.ObservedUID, owner.ExpectedUID)
+	}
+	var diagnostic *cleanupDiagnosticError
+	if header == "" && errors.As(err, &diagnostic) {
+		header = cleanupProcessHeader(diagnostic.snapshots)
+	}
+	if header != "" {
+		w.Header().Set("X-Loom-Sandbox-Process", header)
+		// Same bounded fields as the response header, so the sandbox log still
+		// has them after the pod is deleted.
+		log.Printf("sandbox cleanup diagnostic %s", header)
 	}
 	http.Error(w, "sandbox process cleanup failed", http.StatusConflict)
 }

@@ -90,6 +90,15 @@ class ContainerDiagnostic(BaseModel):
     previous_termination: ContainerTerminationDiagnostic | None = None
 
 
+class ContainerLogExcerpt(BaseModel):
+    """Bounded, scrubbed container log retained after the Pod is deleted."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=63)
+    text: str = Field(min_length=1, max_length=4096)
+
+
 class KubernetesJobObservation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -107,6 +116,7 @@ class KubernetesJobObservation(BaseModel):
     resource_version: str | None = Field(default=None, min_length=1, max_length=128)
     pod_resource_version: str | None = Field(default=None, min_length=1, max_length=128)
     container_diagnostics: tuple[ContainerDiagnostic, ...] = Field(default=(), max_length=4)
+    container_logs: tuple[ContainerLogExcerpt, ...] = Field(default=(), max_length=4)
     node_name: str | None = Field(default=None, min_length=1, max_length=253)
     scheduled_at: datetime | None = None
     started_at: datetime | None = None

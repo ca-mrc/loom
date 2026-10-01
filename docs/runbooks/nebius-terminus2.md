@@ -794,12 +794,18 @@ still runs if local usage parsing fails.
 
 Native phase stderr reports a fixed sandbox operation, HTTP status and one of
 `pid_namespace_invalid`, `process_owner_mismatch`, `process_inspection_failed`,
-`cleanup_timeout`, `cleanup_cancelled` or `cleanup_failed` when that server
-boundary fails. Unknown response reasons become `http_error`; connection and
-timeout failures use fixed transport categories. Request bodies, commands,
-environments, response bodies and endpoint URLs are excluded. These codes
-identify the failed boundary; a completed model conversation alone does not
-prove workspace handoff or verifier success.
+`cleanup_timeout`, `cleanup_signal_denied`, `cleanup_signal_failed`,
+`cleanup_cancelled` or `cleanup_failed` when that server boundary fails. Unknown
+response reasons become `http_error`; connection and timeout failures use fixed
+transport categories. Request bodies, commands,
+environments, response bodies and endpoint URLs are excluded. A cleanup timeout
+or signal failure may also include a bounded snapshot of the remaining
+descendant: pid, ppid, state, uid, kernel wait channel, the last SIGKILL errno,
+and whether SIGKILL is pending. An already-exited process (`ESRCH`) is not a
+failure. A refused signal (`EPERM`) is `cleanup_signal_denied`, not a timeout.
+These codes identify the failed boundary; a completed model conversation alone
+does not prove workspace handoff or verifier success. The snapshot does not
+choose a longer cleanup deadline.
 
 Process cleanup checks the effective UID and state from the same `/proc/<pid>/status`
 read. It tolerates process disappearance (`ENOENT`/`ESRCH`), while foreign effective

@@ -613,6 +613,12 @@ def build_trial_diagnosis(evidence: Mapping[str, Any]) -> dict[str, Any]:
             f"Termination: {native.get('terminated_at') or 'unknown'}; exit code: {native.get('exit_code')}; memory limit: {native.get('memory_limit_mib')} MiB.",
             "Kernel termination evidence is independent of sampled peaks; missing peak data is not zero usage.",
         ])
+    elif native.get("message") and reason_code == "trial.native_execution_failed" and not active:
+        report["summary"] = str(native["message"])
+        report["evidence"].append(
+            f"Container: {native.get('container_role') or 'unattributed'}; "
+            f"exit code: {native.get('exit_code')}; signal: {native.get('signal')}."
+        )
     return cast(dict[str, Any], redact_mapping(report))
 
 
