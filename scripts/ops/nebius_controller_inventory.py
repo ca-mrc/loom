@@ -1,15 +1,18 @@
 """Read-only declared controller topology; never a writer-fencing attestation."""
 from __future__ import annotations
 
+import base64
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+from uuid import UUID
 
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl
 
 _ACTUATOR = "LOOM_EXECUTION_ACTUATOR_"
 _COLLECTOR = "LOOM_EXECUTION_CAPACITY_COLLECTOR_"
-_DATABASES = {"LOOM_CP_DB_URL", _ACTUATOR + "DB_URL"}
+_DATABASES = {"LOOM_CP_DB_URL", "LOOM_CP_DB_URL_POOL", _ACTUATOR + "DB_URL"}
 _VALUES = {"LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT", "LOOM_CP_SERVICE_EXECUTION_SCHEDULER_POOL_ID",
     *(_ACTUATOR + suffix for suffix in ("TARGET_ID", "NAMESPACE", "SERVICE_ACCOUNT_NAME", "RUNTIME_CLASS_NAME")),
     *(_COLLECTOR + suffix for suffix in ("TARGET_ID", "POOL_ID", "NAMESPACE", "NEBIUS_NODE_GROUP_ID",
@@ -61,11 +64,73 @@ def _container(row: dict[str, Any], namespace: str, maps: Callable[[str, str], d
         "unresolved_secret_env_from": unresolved}
 
 
+def _database_endpoints(kube: Kubectl, controllers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Observe explicit DB references only; never export a URL or authentication."""
+    secrets: dict[tuple[str, str], dict[str, Any] | None] = {}
+    reports = []
+    for controller in controllers:
+        for container in controller["containers"]:
+            for setting in sorted(_DATABASES & container["settings"].keys()):
+                report: dict[str, Any] = {"controller": {key: controller[key] for key in
+                    ("kind", "namespace", "name", "uid", "resource_version")},
+                    "container": container["name"], "setting": setting, "status": "unavailable"}
+                reports.append(report)
+                try:
+                    ref = container["settings"][setting]["secret_ref"]
+                    if (ref["namespace"] != controller["namespace"]
+                            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", ref["name"])
+                            or not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", ref["key"])):
+                        raise ValueError
+                    identity = ref["namespace"], ref["name"]
+                    if identity not in secrets:
+                        secrets[identity] = None  # A failed GET is not retried for a sibling.
+                        secrets[identity] = kube.get("secret", ref["name"], ref["namespace"])
+                    secret = secrets[identity]
+                    if secret is None:
+                        raise ValueError
+                    meta = secret["metadata"]
+                    if (secret.get("apiVersion") != "v1" or secret.get("kind") != "Secret"
+                            or (meta.get("namespace"), meta.get("name")) != identity
+                            or str(UUID(meta["uid"])) != meta["uid"] or not UUID(meta["uid"]).int
+                            or not meta.get("resourceVersion") or meta.get("deletionTimestamp")):
+                        raise ValueError
+                    encoded = secret["data"][ref["key"]]
+                    if not isinstance(encoded, str) or len(encoded) > 131072:
+                        raise ValueError
+                    raw = base64.b64decode(encoded, validate=True).decode()
+                    if not raw or any(ord(char) < 33 or ord(char) == 127 for char in raw):
+                        raise ValueError
+                    url = urlsplit(raw)
+                    query = parse_qsl(url.query, keep_blank_values=True, strict_parsing=True)
+                    # Only the canonical subset shared with SQLAlchemy is safe
+                    # to project. In particular it does not decode DB paths and
+                    # does not treat a raw @ in the password like urllib does.
+                    host, database = url.hostname, url.path.removeprefix('/')
+                    port = 5432 if url.port is None else url.port
+                    if (url.scheme not in {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
+                            or not raw.startswith(url.scheme + '://')
+                            or url.netloc.count('@') != 1 or url.netloc.endswith(':')
+                            or not url.username or not url.password or url.fragment
+                            or host is None or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", host)
+                            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$-]{0,62}", database) or not 1 <= port <= 65535
+                            or len({key for key, _ in query}) != len(query)
+                            or any(key not in {"sslmode", "sslrootcert", "sslcert", "sslkey", "connect_timeout", "application_name"}
+                                for key, _ in query)):
+                        raise ValueError
+                    report.update(status="observed", credential={**_identity(secret), "key": ref["key"]},
+                        endpoint={"host": host, "port": port, "database": database})
+                except Exception:
+                    # Endpoint diagnostics must not leak server errors or URL fragments.
+                    pass
+    return reports
+
+
 def controller_inventory(kube: Kubectl, read_list: Callable[[str, bool], list[dict[str, Any]]]) -> dict[str, Any]:
     """Discover guests/aliases by inventory, not a hard-coded environment count.
 
-    Only selected identifiers and Secret references leave this function. No
-    Secret GET, Pod exec, mutation, arbitrary env/args, database URL or token.
+    Only selected identifiers, DB endpoint fields and Secret identities leave
+    this function. Only explicit DB Secret references are fetched. No Pod exec,
+    mutation, arbitrary env/args, database URL, username, password or token.
     Observations are not atomic and do not establish effective authorization.
     """
     cache: dict[tuple[str, str], dict[str, Any]] = {}
@@ -120,6 +185,7 @@ def controller_inventory(kube: Kubectl, read_list: Callable[[str, bool], list[di
                     "role": {"kind": ref["kind"], "name": ref["name"], "uid": role["metadata"]["uid"]},
                     "subjects": [{key: item[key] for key in ("kind", "name", "namespace") if key in item}
                         for item in row.get("subjects") or []], "rules": rules})
-    return {"controllers": controllers, "job_write_bindings": writers, "unresolved_bindings": unresolved,
+    return {"controllers": controllers, "declared_database_endpoints": _database_endpoints(kube, controllers),
+        "job_write_bindings": writers, "unresolved_bindings": unresolved,
         "unverified": ["resolved_database_identity", "running_configuration_matches_templates",
             "effective_writer_fencing", "non_job_workload_and_external_writer_authority"]}
