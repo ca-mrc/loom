@@ -1,11 +1,14 @@
 """The real execution reader qualifies gateway-owned Job/Pod/namespace identity."""
 from __future__ import annotations
 
+import asyncio
 import copy
+import threading
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 import pytest
 
 from loom_execution_actuator.contracts import KubernetesApiError
@@ -128,3 +131,58 @@ async def test_missing_job_is_only_absence_not_a_deletion_observation_or_retry()
     api._core = SimpleNamespace(read_namespace=read_namespace)
     assert await api.observe_pool(runtime) is None
     assert calls == ["namespace", "job", "namespace"]
+
+
+@pytest.mark.parametrize("operation", ["probe", "observe", "usage"])
+@pytest.mark.parametrize("sdk_failure", [False, True])
+async def test_cancelled_pool_read_finishes_before_its_client_closes(operation, sdk_failure):
+    runtime, _, _, namespace = fixture()
+    started, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    resource = httpx.Client()
+
+    def bounded_read(*args, **kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "test did not release its SDK read"
+        assert not resource.is_closed, "client closed underneath an active SDK read"
+        if sdk_failure:
+            raise RuntimeError("SDK read failed during shutdown")
+        if operation == "usage":
+            return SimpleNamespace(data=b"{}", release_conn=lambda: None)
+        return namespace
+
+    def missing_job(*args, **kwargs):
+        error = RuntimeError("gone")
+        error.status = 404
+        raise error
+
+    api = InClusterKubernetesJobApi.__new__(InClusterKubernetesJobApi)
+    api._api_client, api._credentials = resource, None
+    api._core = SimpleNamespace(read_namespace=bounded_read, connect_get_node_proxy_with_path=bounded_read)
+    api._batch = SimpleNamespace(read_namespaced_job=missing_job)
+
+    async def owning_loop():
+        try:
+            if operation == "probe":
+                await api.probe_pool_namespace(runtime.namespace)
+            elif operation == "observe":
+                await api.observe_pool(runtime)
+            else:
+                await api.resource_summary(node_name="node-a")
+        finally:
+            await api.close()
+
+    task = asyncio.create_task(owning_loop())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.05)
+        closed_while_reading = resource.is_closed
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        resource.close()
+    assert not done and not closed_while_reading
