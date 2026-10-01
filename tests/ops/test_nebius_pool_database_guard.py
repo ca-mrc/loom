@@ -352,8 +352,10 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
             'phase': 'Running', 'containerStatuses': [{'name': 'loom-control-plane', 'ready': True}]}}
     database_run = api._run
     writes = []
+    operations = []
 
     def run(args):
+        operations.append(args)
         if args[:2] == ['get', 'deployment']:
             return controller
         if args[:2] == ['get', 'replicaset']:
@@ -362,8 +364,12 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
             return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [pod]}
         if args[:1] == ['exec'] and args[5] == 'loom-control-plane':
             assert args[3] == 'pod/loom-control-plane-abc-def'
-            assert args[7:] == ['python', '-m', 'loom.nebius_rollout_guard', 'acquire', '--owner',
-                str(state.request.registration.spec.operation_id), '--candidate', state.request.registration.candidate['candidate_sha']]
+            assert args[7:9] == ['python', '-c']
+            assert args[10:13] == ['acquire', str(state.request.registration.spec.operation_id),
+                state.request.registration.candidate['candidate_sha']]
+            assert len(args) == 15 and len(bytes.fromhex(args[13])) == 32
+            assert len(bytes.fromhex(args[14])) == 32
+            assert not any('private-marker' in argument for argument in args)
             writes.append(args)
             return {'status': 'acquired', 'active': {'trials': 0}}
         return database_run(args)
@@ -371,6 +377,8 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
     monkeypatch.setattr(api, '_run', run)
     assert api.guard(state.target, 'acquire') == {'status': 'acquired'}
     assert len(writes) == 1
-    assert sum(args[:2] == ['get', 'secret'] for args in state.calls) == 2
+    credential_reads = [index for index, args in enumerate(operations) if args[:2] == ['get', 'secret']]
+    write, = [index for index, args in enumerate(operations) if args[:1] == ['exec']]
+    assert min(credential_reads) < write < max(credential_reads)
     monkeypatch.setattr(api, '_run', database_run)
     assert api.guard(state.target, 'observe') == {'status': 'held'}

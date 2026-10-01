@@ -9,14 +9,17 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import hmac
 import ipaddress
 import os
 import re
+import secrets
 import subprocess
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from pydantic import PostgresDsn
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
@@ -36,6 +39,37 @@ from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+# The same settings instance is checked and used to open SQL. No new option or
+# probe module is required in retained old images: their existing typed settings
+# and idle-guard functions are sufficient. Never include a URL in exec arguments
+# or serialize the settings/exception, including on validation or driver failure.
+_BOUND_GUARD_COMMAND = """import asyncio, hmac, json, sys
+from loom_control_plane.config import ControlPlaneSettings
+from loom.nebius_rollout_guard import acquire, observe
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+async def run(settings):
+    engine = create_async_engine(settings.db_engine_url, connect_args=settings.db_engine_connect_args)
+    try:
+        async with AsyncSession(engine) as session, session.begin():
+            action = {"acquire": acquire, "observe": observe}[sys.argv[1]]
+            return await action(session, owner=sys.argv[2], candidate=sys.argv[3])
+    finally:
+        await engine.dispose()
+
+try:
+    if len(sys.argv) != 6 or sys.argv[1] not in {"acquire", "observe"}:
+        raise ValueError()
+    settings = ControlPlaneSettings()
+    actual = hmac.new(bytes.fromhex(sys.argv[4]), settings.db_engine_url.encode(), "sha256").hexdigest()
+    if not hmac.compare_digest(actual, sys.argv[5]):
+        raise ValueError()
+    print(json.dumps(asyncio.run(run(settings))))
+except Exception:
+    print("Pool guard database unqualified; preserve recovery evidence", file=sys.stderr)
+    raise SystemExit(1)
+"""
 
 
 class PoolDatabaseReadTarget(Protocol):
@@ -364,9 +398,9 @@ class KubectlPoolGuardAPI:
         self._namespaces(target)
         return pod
 
-    def _database(self, target: PoolDatabaseReadTarget, *,
-                  url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> dict[str, Any]:
-        """Bind a read to the original controller's namespace-local database."""
+    def _database_url(self, target: PoolDatabaseReadTarget, *,
+                      url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> str:
+        """Resolve only the pinned credential; backend qualification is separate."""
         self._namespaces(target)
         binding = target.database
         if binding is None:
@@ -399,7 +433,15 @@ class KubectlPoolGuardAPI:
                 or secret["metadata"].get("resourceVersion") != binding.credential_resource_version
                 or secret["metadata"].get("deletionTimestamp") or secret["metadata"].get("ownerReferences")):
             raise ValueError
-        url = make_url(base64.b64decode(secret["data"][reference["key"]], validate=True).decode())
+        return base64.b64decode(secret["data"][reference["key"]], validate=True).decode()
+
+    def _database(self, target: PoolDatabaseReadTarget, *,
+                  url_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> dict[str, Any]:
+        """Bind a read to the original controller's namespace-local database."""
+        url = make_url(self._database_url(target, url_variable=url_variable))
+        binding = target.database
+        if binding is None:
+            raise ValueError
         if (url.drivername not in {"postgresql", "postgresql+psycopg", "postgresql+asyncpg"}
                 or url.host != f"loom-postgres.{target.namespace}.svc" or url.port not in (None, 5432)
                 or url.database != "loom" or not url.username or not url.password
@@ -549,9 +591,18 @@ class KubectlPoolGuardAPI:
                     raise ValueError
                 return {"status": report["status"]}
             before = self._runtime(target)
+            if database is not None:
+                nonce = secrets.token_hex(32)
+                expected = hmac.new(bytes.fromhex(nonce), str(PostgresDsn(self._database_url(target))).encode(), "sha256").hexdigest()
+                command = ["python", "-c", _BOUND_GUARD_COMMAND, action,
+                    str(self.request.registration.spec.operation_id), self.request.registration.candidate["candidate_sha"], nonce, expected]
+            else:
+                # Historical unbound callers retain their old command. The
+                # protected cutover input loader requires every database bound.
+                command = ["python", "-m", "loom.nebius_rollout_guard", action, "--owner", str(self.request.registration.spec.operation_id),
+                    "--candidate", self.request.registration.candidate["candidate_sha"]]
             report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-control-plane", "--",
-                "python", "-m", "loom.nebius_rollout_guard", action, "--owner", str(self.request.registration.spec.operation_id),
-                "--candidate", self.request.registration.candidate["candidate_sha"]])
+                *command])
             if report.get("status") not in allowed[action] or _uid(self._runtime(target)) != _uid(before):
                 raise ValueError
             if database is not None and _uid(self._database(target)) != _uid(database):

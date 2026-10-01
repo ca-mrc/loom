@@ -102,11 +102,42 @@ async def test_bound_acquire_keeps_real_guard_ownership_and_admission_semantics(
             assert tuple(row) == (owner, candidate)
         assert api.guard(state.target, "acquire") == {"status": "skipped_locked"}
         assert len(state.commands) == 2
+        assert state.commands[0][-2:] != state.commands[1][-2:]
+        assert all(url not in argument for command in state.commands for argument in command)
         assert url.encode() not in state.process.stdout + state.process.stderr
     finally:
         async with engine.begin() as connection:
             await connection.execute(text("DELETE FROM nebius_rollout_guard"))
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_bound_acquire_cannot_pause_a_different_live_database(bound_pool_guard, migration_template_postgres_url):
+    from contextlib import contextmanager
+
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from sqlalchemy.engine import make_url
+
+    from tests.integration.conftest import _isolated_migration_database
+
+    api, state, url = bound_pool_guard
+    template = make_url(migration_template_postgres_url).database
+    assert template is not None
+    with contextmanager(_isolated_migration_database)(migration_template_postgres_url,
+            template_name=template, prepare_template=False) as other:
+        state.runtime_environment["LOOM_CP_DB_URL"] = other
+        with pytest.raises(PoolMigrationError):
+            api.guard(state.target, "acquire")
+        for database in (url, other):
+            engine = create_async_engine(database)
+            try:
+                async with engine.connect() as connection:
+                    assert await connection.scalar(text("SELECT count(*) FROM nebius_rollout_guard")) == 0
+            finally:
+                await engine.dispose()
+        assert len(state.commands) == 1
+        assert url.encode() not in state.process.stdout + state.process.stderr
+        assert other.encode() not in state.process.stdout + state.process.stderr
 
 
 @pytest.mark.asyncio

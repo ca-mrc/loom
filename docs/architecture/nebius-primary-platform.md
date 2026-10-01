@@ -2272,7 +2272,17 @@ after every read-only page. Complete EndpointSlice readback also binds the Servi
 UID, port, address family and ready/nonterminating backend to that exact PostgreSQL
 Pod UID/IP. Missing, additional, foreign or changed backends reject even read-only
 SQL. A direct database binding rejects an unresolved effective pooled URL for
-either the control plane or management service. The personal-access readiness routine must retain
+either the control plane or management service. Bound guard acquisition also
+checks the old control-plane container's loaded effective database URL against
+that pinned credential before opening SQL. A fixed in-container command loads
+the real typed settings once, checks a fresh HMAC challenge, then passes the same
+settings instance to the existing guard functions. Pooled or image-local `.env`
+overrides cannot silently close a different database. Only the challenge and
+response appear in arguments; no URL, password or configuration is emitted.
+Retained images need no new CLI option. Recovery still observes ownership through
+the qualified PostgreSQL Pod and never retries an uncertain acquisition. This
+check qualifies the acquisition backend, not every already-running API/actuator.
+The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
 same-named replacement is not evidence of retired access. The queue includes
 delayed trials/build consumers and unfanned native batches; quota, retry and target backoff do not hide future
