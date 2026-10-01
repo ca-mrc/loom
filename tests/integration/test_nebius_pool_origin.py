@@ -70,7 +70,7 @@ async def test_cutover_can_qualify_retained_application_history_without_opening_
     from loom.db.nebius_pool_schema import NebiusPoolBinding
     from loom_service.pool_management.origin import qualify_retained_pool_origin
 
-    factory, principal, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
     await registry.transition(operation.application_id, principal=alice, idempotency_key='origin-retirement',
         action='suspend', expected_generation=1)
     async with factory.begin() as session:

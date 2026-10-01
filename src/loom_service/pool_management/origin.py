@@ -52,6 +52,25 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
                     current.incarnation, current.participant_revision, current.participant_epoch):
                 raise ValueError
             binding.target(target_id, workload_kind)
+            return await qualify_retained_pool_origin(session, origin, participant=binding,
+                cluster_id=pool.cluster_id, workload_kind=workload_kind, lock_history=True)
+    except (ValueError, KeyError, TypeError):
+        raise PoolOriginError from None
+
+
+async def qualify_retained_pool_origin(session: AsyncSession, origin: PoolWorkOriginV1, *,
+                                      participant: PoolParticipantV1, cluster_id: str,
+                                      workload_kind: PoolWorkloadKind, lock_history: bool = False) -> int:
+    """Read source history without authenticating a machine or opening admission.
+
+    The protected cutover uses its explicitly bound management DB and a READ ONLY
+    transaction. Normal admission still requires current machine authority and
+    global/active mode above, and retains row locks on the source history. This
+    helper is not a route, grant, readiness check or permission to run work.
+    """
+    try:
+        with session.no_autoflush:
+            binding = PoolParticipantV1.model_validate(participant.model_dump())
             origin = PoolWorkOriginV1.model_validate(origin.model_dump())
             priority = pool_request_priority(binding, origin, workload_kind=workload_kind)
             if origin.kind == "personal_build":
@@ -63,15 +82,19 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
                     for value in session.new | session.dirty | session.deleted):
                 raise ValueError
             recorded = origin.application
-            app = (await session.scalars(select(NebiusApplication).where(
+            app_query = select(NebiusApplication).where(
                 NebiusApplication.application_id == recorded.application_id,
-            ).execution_options(populate_existing=True).with_for_update(read=True))).one_or_none()
-            operation = (await session.scalars(select(NebiusApplicationOperation).where(
+            ).execution_options(populate_existing=True)
+            operation_query = select(NebiusApplicationOperation).where(
                 NebiusApplicationOperation.application_id == recorded.application_id,
                 NebiusApplicationOperation.deployment_generation == recorded.deployment_generation,
-            ).execution_options(populate_existing=True).with_for_update(read=True))).one_or_none()
+            ).execution_options(populate_existing=True)
+            if lock_history:
+                app_query, operation_query = app_query.with_for_update(read=True), operation_query.with_for_update(read=True)
+            app = (await session.scalars(app_query)).one_or_none()
+            operation = (await session.scalars(operation_query)).one_or_none()
             if (app is None or operation is None or app.incarnation != recorded.incarnation
-                    or app.data_environment_id != binding.environment_id or app.cluster_id != pool.cluster_id
+                    or app.data_environment_id != binding.environment_id or app.cluster_id != cluster_id
                     or app.deployment_generation < recorded.deployment_generation
                     or operation.owner_user_id != app.owner_user_id
                     or operation.action not in {"create", "update", "resume"}
