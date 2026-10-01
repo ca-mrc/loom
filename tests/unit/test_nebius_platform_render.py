@@ -1208,3 +1208,30 @@ def test_node_share_profile_does_not_publish_retired_default_template(platform_i
     rendered = json.loads(cm["data"]["profile.json"])
     assert rendered["resource_allocation_policy"] == "node-share-v1"
     assert "default_task_resource_requests" not in rendered
+
+
+def test_operator_renders_pinned_candidate_in_separate_process(platform_inputs, tmp_path, monkeypatch):
+    """A later operator renderer cannot add flags unsupported by candidate images."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_idle_rollout
+
+    from loom import nebius_platform_render
+
+    sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    config, candidate, profile = platform_inputs
+    candidate['candidate_sha'] = sha
+    profile['candidate_sha'] = sha
+    (tmp_path / 'candidate.json').write_text(json.dumps(candidate))
+    (tmp_path / 'runtime-profile.json').write_text(json.dumps(profile))
+    monkeypatch.setattr(nebius_platform_render, 'build_platform',
+                        lambda *a, **kw: pytest.fail('must run the candidate renderer in its own process'))
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(candidate=sha, publication_dir=Path('.'), render_dir=Path('rendered'))
+    nebius_idle_rollout.render_candidate(args, config, '{}')
+    import yaml
+    docs = list(yaml.safe_load_all((args.render_dir / '10-config-network.yaml').read_text()))
+    cm = next(doc for doc in docs if doc['kind'] == 'ConfigMap' and doc['metadata']['name'] == 'loom-platform-config')
+    assert json.loads(cm['data']['profile.json'])['candidate_sha'] == sha
+    assert (args.render_dir / '40-services.yaml').is_file()

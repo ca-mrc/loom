@@ -1342,18 +1342,50 @@ absence of usage as zero consumption or evidence sufficient to reduce requests.
 ## Automatic rollout when idle
 
 After successful full `dev` publication, `nebius-rollout.yml` tries deployment
-once. Active task reservations, running trials, output processing, cleanup, or
-native image builds cause **skipped_busy**; no backup/apply, wait, timer, or retry
-follows. Queued tasks do not block deployment. A later successful publication
-tries again; manual dispatch of the same workflow selects the latest successful
-push publication. Harness-only publications do not roll out the platform.
+immediately. While `NEBIUS_AUTO_ROLLOUT_ENABLED=true`, a scheduled check also runs
+approximately every 10 minutes on the default branch. GitHub can delay scheduled
+runs; this interval is not a deployment deadline. Active task reservations,
+running trials, output processing, cleanup, or native image builds cause
+**waiting_idle** (decision `skipped_busy`): the check exits without backup or
+apply, and the next scheduled check tries again. Queued tasks do not block
+deployment.
+
+Publication-triggered, scheduled and manual checks select the latest eligible
+successful full `dev` publication (push or manual) with an available platform candidate artifact. Harness-only
+publications do not roll out the platform or hide an earlier eligible platform
+candidate. Pending versions coalesce: if A waits for work to finish and B is
+published, the next check selects B. A deployment already in progress completes
+without cancellation. Native concurrency queuing also preserves pending manual
+recovery requests when periodic checks arrive. Each queued check selects the
+latest eligible candidate when it starts. If a successful Deployment record and the live configured
+version both match the candidate, the check reports `skipped_already_deployed`
+and avoids another backup/deployment. A matching ConfigMap alone is insufficient:
+an interrupted deployment may have updated it before verification.
+
+The workflow separates **Check deployment conditions** from **Deploy selected candidate**.
+When the check does not admit deployment, the deploy job is skipped. The summary
+retains the underlying decision code and reports its outcome and automatic retry
+policy explicitly:
+
+| Outcome | Meaning | Automatic retry |
+| --- | --- | --- |
+| `deployed` | HTTPS and workload versions verified; dispatch resumed | No; complete |
+| `waiting_idle` | Active work or admission prevents reserving the environment | Yes; next scheduled check |
+| `skipped` | Already deployed, superseded, unavailable/cancelled publication, or automation disabled | No retry of this decision |
+| `blocked_recovery` | Held guard or unresolved earlier deployment requires investigation/recovery | No |
+| `failed` | Deployment failed; inspect the phase and persisted pause | No |
+
+The intermediate `ready` decision only admits an attempt; it is not deployment
+success. A green workflow or condition-check job can record a skip, and only
+verified deployment completion counts as `deployed`.
 
 Open the workflow's **Summary** to see the reason for a skipped rollout in plain
-language. For **skipped_busy**, the summary lists the active work and counts
+language. For **waiting_idle**, the summary lists the active work and counts
 (such as running trials, execution reservations, image builds, or pending image
 build cleanup). These counts are separate activity indicators, not a count of
 distinct tasks. A historical failed task-image build alone does not block rollout;
-its cleanup can still block while pending. Busy skips do not wait or retry.
+its cleanup can still block while pending. Busy checks exit promptly; they do not
+hold a runner or dispatch pause while waiting for the next scheduled check.
 
 If the upstream `nebius-candidate` publication failed, was cancelled, or otherwise
 did not succeed, a read-only **Explain why automatic rollout did not start** job
@@ -1369,8 +1401,14 @@ no Nebius runner, new gateway, public Kubernetes API exposure, or old environmen
 integration is needed. A pinned SSH host key is required; do not use live
 `ssh-keyscan` output as trust. Kubernetes credentials stay on the gateway.
 
-One database advisory lock coordinates new execution/build claims with the idle
-check. On success a single durable guard row pauses **new dispatch only** while
+Operator tooling stays on merged `dev` so older candidates retain current retry
+and recovery fixes. Rendering reads the selected commit's Kubernetes manifests,
+and migration readiness uses that commit's Alembic graph.
+
+The condition check is read-only. Deployment repeats the idle check while
+acquiring the existing database advisory lock that coordinates new execution/build
+claims; work arriving after the preliminary check can still prevent deployment.
+On success a single durable guard row pauses **new dispatch only** while
 submissions continue queuing. Ordinary rollouts preserve target health/desire
 flags and operator submission pauses. Explicit primary-target replacement uses
 the guarded procedure below. The guard covers all activity in this
@@ -1406,7 +1444,7 @@ Enable once, after installing the guard-aware release:
    deployment credentials, not ordinary user or CI test credentials.
 3. Set repository variable `NEBIUS_AUTO_ROLLOUT_ENABLED=true`. Use manual workflow
    dispatch for the first guarded rollout and inspect Actions plus Deployments.
-   Busy is a successful decision to skip, not a successful deployment. Only
+   Busy is reported as `waiting_idle`, not a successful deployment. Only
    verified rollouts get Deployment status `success`; skipped records are
    `inactive`. Publication retains environment secrets without creating a
    Deployment record. Actual Deployment records bind the selected candidate SHA.
@@ -1431,7 +1469,13 @@ identify the result and guard owner. No manifests or credentials are uploaded
 as Actions artifacts. Backup failures before manifest application release the
 pause. Once apply starts, failure or runner loss retains the pause; there is no
 expiry that could restart work on a partially updated platform. New automation
-then reports `skipped_locked`, leaving the failed deployment for recovery.
+then reports `blocked_recovery` (with `skipped_locked` retained for a held guard),
+leaving the failed deployment for recovery. An unresolved failed or interrupted
+Deployment record also blocks automatic attempts even when a pre-apply failure
+released its guard. Scheduled checks never clear guards, retry failed migrations,
+or repeat a failed backup automatically. Diagnose and fix the failure before an
+explicit operator attempt or the recovery operation below; a later successful
+deployment clears the automatic failure block.
 
 For recovery, inspect the recorded phase, migration and workload state first.
 Fix the diagnosed cause, confirm the original workflow is terminal, and use the

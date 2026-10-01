@@ -12,6 +12,8 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,7 +23,7 @@ if __package__ in {None, ""}:
 from scripts.ops.deploy_nebius_platform import DeploymentError, Kubectl, deploy  # noqa: E402
 from scripts.ops.nebius_rollout_reporting import emit_result, explanation  # noqa: E402
 
-from loom.nebius_platform_render import build_platform, write_platform  # noqa: E402
+from loom.nebius_rollout_guard import ACTIVITY_SQL  # noqa: E402
 
 REPOSITORY = "qianyi-sun/loom"
 
@@ -86,12 +88,92 @@ def persisted_recovery_intent(run_id: str, attempt: int) -> dict:
     return matches[0]
 
 
+def latest_publication() -> dict:
+    """Coalesce pending updates, including manually published full candidates."""
+    page = 1
+    while True:
+        rows = github(f"actions/workflows/nebius-candidate.yml/runs?branch=dev&status=success&per_page=100&page={page}")["workflow_runs"]
+        for row in rows:
+            selected = select_publication(str(row["id"]))
+            if selected["status"] == "ready":
+                return selected
+        if len(rows) < 100:
+            return {"status": "skipped_no_candidate"}
+        page += 1
+
+
+def deployment_decision(config: dict, current: str, candidate: str) -> dict:
+    """Use the latest non-skip attempt; partial config never proves completion."""
+    page = 1
+    while True:
+        rows = github(f"deployments?environment=nebius-integration&per_page=100&page={page}")
+        if not isinstance(rows, list):
+            raise DeploymentError("deployment history unavailable")
+        for row in rows:
+            payload = row.get("payload")
+            if (not isinstance(payload, dict) or payload.get("schema_version") != "loom.nebius-deployment.v1"
+                    or payload.get("mode") != "apply" or row.get("environment") != "nebius-integration"
+                    or row.get("sha") != payload.get("candidate_sha")
+                    or any(payload.get(key) != config[key] for key in ("cluster_id", "namespace", "execution_namespace"))):
+                continue
+            statuses = github(f"deployments/{row['id']}/statuses?per_page=1")
+            if not isinstance(statuses, list):
+                raise DeploymentError("deployment status unavailable")
+            state = statuses[0]["state"] if statuses else "pending"
+            if state == "inactive":
+                continue
+            if state != "success":
+                return {"status": "blocked_recovery"}
+            return {"status": "skipped_already_deployed" if row["sha"] == current == candidate else "ready"}
+        if len(rows) < 100:
+            return {"status": "ready"}
+        page += 1
+
+
+def idle_snapshot(kube: Kubectl, namespace: str) -> dict:
+    """Inspect idle conditions without pausing dispatch or needing a healthy service."""
+    query = ("BEGIN READ ONLY; SET LOCAL statement_timeout='10s'; SELECT json_build_object("
+             "'locked', EXISTS (SELECT 1 FROM nebius_rollout_guard), 'active', row_to_json(activity)) "
+             "FROM (" + ACTIVITY_SQL + ") activity; ROLLBACK;")
+    result = json.loads(kube.run("exec", "-n", namespace, "statefulset/loom-postgres", "--", "psql",
+                                "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query))
+    if (type(result.get("locked")) is not bool or not isinstance(result.get("active"), dict)
+            or set(result["active"]) != {"trials", "executions", "builds", "build_cleanup"}
+            or any(type(value) is not int or value < 0 for value in result["active"].values())):
+        raise DeploymentError("invalid idle snapshot")
+    return result
+
+
+def check_rollout(args: argparse.Namespace) -> dict:
+    kube = Kubectl(args.kubeconfig)
+    data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
+    config = json.loads(data["environment.json"])
+    if (config["namespace"] != args.namespace or config["cluster_id"] != args.expected_cluster_id
+            or config.get("regional_execution_targets")):
+        raise DeploymentError("rollout check platform binding differs")
+    current = json.loads(data["profile.json"])["candidate_sha"]
+    candidate = args.candidate
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate):
+        raise DeploymentError("invalid selected candidate")
+    result = {"status": "ready", "candidate_sha": candidate}
+    snapshot = idle_snapshot(kube, args.namespace)
+    if snapshot["locked"]:
+        return {**result, "status": "blocked_recovery"}
+    if args.github:
+        decision = deployment_decision(config, current, candidate)
+        if decision["status"] == "skipped_already_deployed" or (
+                getattr(args, "automatic", False) and decision["status"] == "blocked_recovery"):
+            return {**result, **decision}
+    if current != candidate and not candidate_follows(current, candidate):
+        return {**result, "status": "skipped_superseded"}
+    if any(snapshot["active"].values()):
+        return {**result, "status": "skipped_busy", "guard": {"active": snapshot["active"]}}
+    return result
+
+
 def select_publication(run_id: str | None) -> dict:
     if run_id is None:
-        runs = github("actions/workflows/nebius-candidate.yml/runs?branch=dev&event=push&status=success&per_page=1")
-        if not runs["workflow_runs"]:
-            return {"status": "skipped_no_candidate"}
-        run_id = str(runs["workflow_runs"][0]["id"])
+        return latest_publication()
     if not run_id.isdigit():
         raise DeploymentError("publication run ID must be numeric")
     run = github(f"actions/runs/{run_id}")
@@ -155,6 +237,37 @@ def select_recovery(run_id: str, directory: Path) -> dict:
     return selected
 
 
+@contextmanager
+def candidate_manifests(sha: str) -> Iterator[Path]:
+    """Keep current operator fixes while rendering the selected candidate's YAML."""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise DeploymentError("invalid candidate commit")
+    result = subprocess.run(["git", "archive", sha, "deploy/k8s", "src/loom", "scripts/ops/render_nebius_platform.py"], cwd=ROOT, capture_output=True, check=False)
+    if result.returncode:
+        raise DeploymentError("candidate manifest source unavailable")
+    with tempfile.TemporaryDirectory(prefix="loom-candidate-manifests-") as directory:
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            archive.extractall(directory, filter="data")
+        yield Path(directory)
+
+
+def render_candidate(args: argparse.Namespace, config: dict, keyring: str) -> None:
+    """Run the candidate's renderer/imports separately from current operator tooling."""
+    with candidate_manifests(args.candidate) as source:
+        environment = source / "environment.json"
+        environment.write_text(json.dumps(config))
+        trusted_keys = source / "keyring.json"
+        trusted_keys.write_text(keyring)
+        result = subprocess.run([
+            sys.executable, str(source / "scripts/ops/render_nebius_platform.py"),
+            "--environment-config", str(environment), "--candidate", str(args.publication_dir.resolve() / "candidate.json"),
+            "--runtime-profile", str(args.publication_dir.resolve() / "runtime-profile.json"),
+            "--trusted-keyring", str(trusted_keys), "--output", str(args.render_dir.resolve()),
+        ], cwd=source, capture_output=True, text=True, check=False)
+        if result.returncode:
+            raise DeploymentError("selected candidate rendering failed")
+
+
 def candidate_schema_head(sha: str) -> str:
     """Read the pinned candidate's migration graph when recovery uses newer tools."""
     from loom.db.schema_startup import service_schema_head
@@ -187,6 +300,10 @@ def candidate_follows(current: str, candidate: str) -> bool:
 
 
 def rollout(args: argparse.Namespace) -> dict:
+    if getattr(args, "automatic", False):
+        decision = check_rollout(args)
+        if decision["status"] != "ready":
+            return decision
     kube = Kubectl(args.kubeconfig)
     data = kube.get("configmap", "loom-platform-config", args.namespace)["data"]
     config = json.loads(data["environment.json"])
@@ -206,17 +323,14 @@ def rollout(args: argparse.Namespace) -> dict:
             raise DeploymentError("recovery binding differs from the failed candidate and live platform")
     elif current != sha and not candidate_follows(current, sha):
         return {"status": "skipped_superseded", "candidate_sha": sha}
-    profile = json.loads((args.publication_dir / "runtime-profile.json").read_text())
-    # Preserve all live settings: task requests, builder concurrency, resource IDs.
-    files = build_platform(config, candidate, profile, json.loads(data["keyring.json"]), repo_root=ROOT)
     args.render_dir = args.evidence_dir / "rendered"
-    write_platform(files, config, candidate, args.render_dir)
+    render_candidate(args, config, data["keyring.json"])
+    args.migration_schema_head = candidate_schema_head(sha)
     args.apply = True
     args.retry_failed_jobs = False
     args.expected_current_candidate = current
     args.guard_owner = "rollout-" + uuid.uuid4().hex
     if record is not None:
-        args.migration_schema_head = candidate_schema_head(sha)
         args.resume_guard_owner = record["guard_owner"]
         args.guard_owner = record["guard_owner"]
         args.retry_failed_jobs = True
@@ -234,7 +348,7 @@ def rollout(args: argparse.Namespace) -> dict:
         deployment_id = github("deployments", {
             "ref": sha, "environment": "nebius-integration", "auto_merge": False,
             "required_contexts": [], "transient_environment": False, "production_environment": False,
-            "description": "Checking whether Nebius is idle; no waiting or retry",
+            "description": "Check idle and deploy once; busy work is checked again by the scheduled workflow",
             "payload": intent,
         })["id"]
 
@@ -256,7 +370,7 @@ def rollout(args: argparse.Namespace) -> dict:
     if result["status"] == "complete":
         report("success", "Candidate deployed; HTTPS and workload versions verified; dispatch resumed")
     else:
-        report("inactive", ("Skipped: " + explanation(result))[:140])
+        report("inactive", ("Decision: " + explanation(result))[:140])
     return result
 
 
@@ -265,6 +379,7 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     select = sub.add_parser("select")
     select.add_argument("--run-id")
+    select.add_argument("--trigger-run-id")
     select.add_argument("--recovery-run-id")
     select.add_argument("--recovery-dir", type=Path)
     run = sub.add_parser("run")
@@ -275,26 +390,43 @@ def main() -> int:
     run.add_argument("--namespace", default="loom-nebius-platform")
     run.add_argument("--evidence-dir", type=Path, required=True)
     run.add_argument("--github", action="store_true")
+    run.add_argument("--automatic", action="store_true")
+    check = sub.add_parser("check")
+    check.add_argument("--candidate", required=True)
+    check.add_argument("--kubeconfig", type=Path, required=True)
+    check.add_argument("--expected-cluster-id", required=True)
+    check.add_argument("--namespace", default="loom-nebius-platform")
+    check.add_argument("--github", action="store_true")
+    check.add_argument("--automatic", action="store_true")
     run.add_argument("--recovery-evidence", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "select":
             if args.recovery_run_id:
-                if args.run_id or args.recovery_dir is None:
+                if args.run_id or args.trigger_run_id or args.recovery_dir is None:
                     raise DeploymentError("recovery requires its own evidence directory and no publication override")
                 result = select_recovery(args.recovery_run_id, args.recovery_dir)
+            elif args.trigger_run_id:
+                if args.run_id:
+                    raise DeploymentError("publication trigger cannot override selection")
+                result = select_publication(args.trigger_run_id)
+                if result["status"] == "ready":
+                    result = latest_publication()
             else:
                 result = select_publication(args.run_id)
+        elif args.command == "check":
+            result = check_rollout(args)
         else:
             result = rollout(args)
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a") as stream:
-                for key in ("status", "sha", "run_id", "artifact", "recovery_evidence"):
+                for key in ("status", "sha", "candidate_sha", "run_id", "artifact", "recovery_evidence"):
                     if key in result:
                         stream.write(f"{key}={result[key]}\n")
         emit_result(result)
         return 0
     except Exception as exc:
+        emit_result({"status": "failed", "candidate_sha": getattr(args, "candidate", "")})
         print(f"Idle rollout failed ({type(exc).__name__}); inspect sanitized deployment evidence", file=sys.stderr)
         return 1
 

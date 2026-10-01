@@ -28,11 +28,14 @@ fails the build. Updating dependencies requires updating the lock and running
 the full payload verification and guest capability tests.
 
 `archive.ubuntu.com` removes a package file from `pool/` once Ubuntu publishes
-a newer version, so a pinned URL there can start returning 404. Launchpad keeps
-every published build at
-`https://launchpad.net/ubuntu/+archive/primary/+files/<file>.deb`. Pointing a
-lock entry at that URL keeps the same version, size and hash, so the extracted
-payload files are unchanged; only the retained `sources.lock.json` differs.
+a newer version, so a pinned URL there can start returning 404. The `libssl3t64`
+entry uses the [Ubuntu snapshot service](https://snapshot.ubuntu.com/) at
+`20260928T000000Z`, before the pinned version was superseded. Launchpad's
+`+files` redirect timed out or returned 502 during image and Docker CI builds.
+The snapshot serves the same version, size and hash, so the extracted payload
+files are unchanged; only the retained `sources.lock.json` differs. Ubuntu
+currently guarantees snapshot availability for at least two years; refresh the
+snapshot together with the dependency lock before that retention boundary.
 
 The output is relocatable and contains regular files rather than absolute
 distro symlinks. `SHA256SUMS` covers all other payload files; `sources.lock.json`
