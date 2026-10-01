@@ -88,6 +88,7 @@ are not. A resolver that cannot enumerate effective rules cannot qualify cutover
         allowed = {
             ("", "nodes"): {"get", "list", "watch"}, ("", "pods"): {"get", "list", "watch"},
             ("", "pods/log"): {"get"}, ("", "namespaces"): {"get"}, ("batch", "jobs"): {"get", "list", "watch"},
+            ("apps", "daemonsets"): {"get", "list"},
             ("authorization.k8s.io", "selfsubjectaccessreviews"): {"create"},
             ("authorization.k8s.io", "selfsubjectrulesreviews"): {"create"},
             ("authentication.k8s.io", "selfsubjectreviews"): {"create"},

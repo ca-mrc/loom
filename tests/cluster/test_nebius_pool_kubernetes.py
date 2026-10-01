@@ -20,6 +20,7 @@ from loom_service.pool_management.gateway_journal import PoolGatewayJournal
 from loom_service.pool_management.kubernetes import (
     KubernetesPoolGateway,
     PoolKubernetesError,
+    PoolKubernetesRejectedError,
     PoolKubernetesWaitingError,
 )
 from tests.integration.conftest import (
@@ -141,6 +142,20 @@ async def test_fixed_gateway_real_defaulting_and_restricted_namespace_authority(
                     raise
                 assert observed.phase == "observed"
                 assert await gateway.create(principal, receipt.reservation_id, kind="Job") == observed
+                # Qualify the adapter against actual scoped Status responses,
+                # not only the HTTP double. These test-only POSTs never retry
+                # a journal dispatch and cannot create a runnable workload.
+                collection = "/apis/batch/v1/namespaces/" + observed.document["metadata"]["namespace"] + "/jobs"
+                with pytest.raises(PoolKubernetesRejectedError) as duplicate:
+                    await gateway._request("POST", collection, observed.document)
+                assert duplicate.value.status_code == 409
+                invalid = copy.deepcopy(observed.document)
+                invalid["metadata"]["name"] += "-invalid"
+                invalid["spec"]["template"]["spec"]["containers"][0]["image"] = ""
+                with pytest.raises(PoolKubernetesRejectedError) as rejected:
+                    await gateway._request("POST", collection, invalid)
+                assert rejected.value.status_code == 422
+                assert await gateway._request("GET", collection + "/" + invalid["metadata"]["name"]) is None
                 deadline = time.monotonic() + 20
                 while True:
                     try:

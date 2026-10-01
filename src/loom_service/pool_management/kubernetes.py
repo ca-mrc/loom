@@ -68,13 +68,11 @@ class KubernetesPoolGateway:
         try:
             async with asyncio.timeout(_TIMEOUT):
                 async with self.http.stream(method, path, json=body, params=params, follow_redirects=False, timeout=_TIMEOUT) as response:
-                    if response.status_code == 404 and method in {"GET", "DELETE"}:
-                        return None
-                    if method != "GET" and response.status_code in {409, 422}:
-                        raise PoolKubernetesRejectedError(response.status_code)
-                    if response.status_code in {409, 422, 429} or response.status_code >= 500:
+                    absence = response.status_code == 404 and method in {"GET", "DELETE"}
+                    rejection = method != "GET" and response.status_code in {409, 422}
+                    if (response.status_code in {409, 422} and not rejection) or response.status_code == 429 or response.status_code >= 500:
                         raise PoolKubernetesWaitingError
-                    if response.status_code not in {200, 201, 202}:
+                    if not (absence or rejection) and response.status_code not in {200, 201, 202}:
                         raise PoolKubernetesError("pool_kubernetes_request_rejected")
                     data = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -84,12 +82,43 @@ class KubernetesPoolGateway:
                     value = json.loads(data)
                     if not isinstance(value, dict):
                         raise ValueError
+                    if absence or rejection:
+                        self._failure(value, method=method, path=path, body=body, code=response.status_code)
+                        if absence:
+                            return None
+                        raise PoolKubernetesRejectedError(response.status_code)
                     return value
         except (httpx.TransportError, TimeoutError):
             raise PoolKubernetesWaitingError from None
         except PoolKubernetesError:
             raise
         except (ValueError, UnicodeError):
+            raise PoolKubernetesError("pool_kubernetes_invalid_response") from None
+
+    @staticmethod
+    def _failure(value: dict[str, Any], *, method: str, path: str, body: dict[str, Any] | None, code: int) -> None:
+        """Only a scoped Kubernetes Status can settle a write or prove absence.
+
+An ingress/proxy's bare HTTP status is not evidence the API server rejected a
+dispatched write. Keep its intent uncertain and capacity charged in that case.
+"""
+        try:
+            parts = path.split("/")
+            group = "batch" if path.startswith("/apis/batch/v1/") else ""
+            if method == "POST":
+                assert body is not None
+                resource, name = parts[-1], body["metadata"]["name"]
+            else:
+                resource, name = parts[-2:]
+            kinds = {"jobs": "Job", "pods": "Pod", "configmaps": "ConfigMap", "namespaces": "Namespace"}
+            details = value["details"]
+            if (value.get("apiVersion") != "v1" or value.get("kind") != "Status" or value.get("status") != "Failure"
+                    or type(value.get("code")) is not int or value["code"] != code
+                    or value.get("reason") not in {404: {"NotFound"}, 409: {"AlreadyExists", "Conflict"}, 422: {"Invalid"}}[code]
+                    or details.get("name") != name or details.get("group", "") != group
+                    or details.get("kind") not in {resource, kinds[resource]}):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, AttributeError, AssertionError):
             raise PoolKubernetesError("pool_kubernetes_invalid_response") from None
 
     @staticmethod

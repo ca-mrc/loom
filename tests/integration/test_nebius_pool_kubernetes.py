@@ -212,7 +212,10 @@ async def test_unqualified_rejection_retains_uncertain_create_without_retry(sess
 @pytest.mark.parametrize("status", [404, 409, 422])
 @pytest.mark.parametrize("damage", ["code", "reason", "status", "details", "name", "group", "resource"])
 async def test_error_response_must_be_kubernetes_failure_for_the_exact_resource(sessions, status, damage):
-    from loom_service.pool_management.kubernetes import PoolKubernetesError, PoolKubernetesRejectedError
+    from loom_service.pool_management.kubernetes import (
+        PoolKubernetesError,
+        PoolKubernetesRejectedError,
+    )
 
     gateway, _api, _principal, _receipt, original = await provider(sessions)
     await original.aclose()

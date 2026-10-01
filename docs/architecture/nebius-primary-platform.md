@@ -1825,6 +1825,10 @@ qualified API defaults. Native Job creation also rechecks the live, observed
 ConfigMap UID and contents. A lost response followed by 404 never authorizes another
 create. UID-bound deletion derives its target from the retained create observation;
 neither a successful deletion nor an absent Job frees capacity.
+Absence and definite rejection require a bounded Kubernetes `Status` response
+matching the requested resource name, group, kind, status code and failure reason.
+Bare proxy errors or mismatched responses preserve uncertain effects and charged
+capacity; they cannot settle a dispatched create or authorize another write.
 
 Residual-Pod inventory scans the complete bound namespace with bounded pagination
 and one consistent list resource version. It qualifies original Job UID, name,
@@ -2039,8 +2043,11 @@ origin and private machine-token file. Configuration rejects mismatched schedule
 target or namespace identities. Global mode fences direct admin reservations,
 omits the legacy namespace watch and uses the native build outbox controller.
 Build lease maintenance runs independently of admission HTTP and participates in
-readiness. Shutdown drains every controller loop before closing the management,
-Kubernetes or database clients, including when another loop fails. These settings
+readiness. Shutdown cancels and awaits every controller loop before closing the
+management, Kubernetes or database clients, including when another loop fails.
+The actuator's bounded synchronous SDK reads can outlive coroutine cancellation;
+draining those threads before client closure remains a runtime qualification gap.
+These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
 
