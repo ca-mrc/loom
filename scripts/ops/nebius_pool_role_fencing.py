@@ -29,6 +29,13 @@ from loom.nebius_platform_render import digest
 
 MARKER = "loom.nebius/pool-role-fencing-operation"
 
+POOL_WRITER_WORKLOAD_COLLECTIONS = (
+    ("apps/v1", "deployments", "Deployment"), ("apps/v1", "statefulsets", "StatefulSet"),
+    ("apps/v1", "daemonsets", "DaemonSet"), ("apps/v1", "replicasets", "ReplicaSet"),
+    ("v1", "replicationcontrollers", "ReplicationController"),
+    ("batch/v1", "cronjobs", "CronJob"), ("batch/v1", "jobs", "Job"), ("v1", "pods", "Pod"),
+)
+
 
 @dataclass(frozen=True, repr=False)
 class PoolRoleFenceRequest:
@@ -255,6 +262,94 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
             raise ValueError
     except Exception:
         raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
+
+
+def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
+                                      inventory: dict[str, list[dict[str, Any]]], *,
+                                      originals: dict[str, dict[str, Any]],
+                                      expected: dict[str, dict[str, Any]]) -> None:
+    """Account for built-in workloads declaring retiring ServiceAccounts.
+
+    Exact retained roots and typed UID ancestry qualify ownership, not process
+    shutdown or workload contents. Inert historical descendants still count;
+    the retirement phase independently proves their drain. Unrelated accounts
+    remain untouched. This does not attest external tokens or custom controllers.
+    """
+    try:
+        retired = retirement_documents(request.retirement)
+        subjects, _ = role_fence_review_scope(request)
+        if (set(inventory) != {resource for _api, resource, _kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+                or set(expected) != set(originals)
+                or any(originals.get(key) != row for key, row in retired.items())):
+            raise ValueError
+        documents: dict[str, dict[str, Any]] = {}
+        identities: dict[str, tuple[str, str]] = {}
+        keys: dict[str, str] = {}
+
+        def name(value: Any) -> str:
+            if (not isinstance(value, str) or len(value) > 253
+                    or re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*", value) is None):
+                raise ValueError
+            return value
+
+        for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS:
+            for row in inventory[resource]:
+                metadata = row["metadata"]
+                uid, key = _uid(row), _key(row)
+                namespace = name(metadata["namespace"])
+                name(metadata["name"])
+                version = metadata["resourceVersion"]
+                if (row.get("apiVersion") != api or row.get("kind") != kind
+                        or not isinstance(version, str) or not 0 < len(version) <= 1024
+                        or uid in documents or key in keys):
+                    raise ValueError
+                documents[uid], keys[key] = row, uid
+                # Kubernetes permits adopt-only replication controllers with
+                # no template. They cannot choose a Pod identity; any adopted
+                # Pods still pass the independent complete Pod inventory below.
+                if kind == "ReplicationController" and row["spec"].get("template") is None:
+                    continue
+                pod = (row["spec"] if kind == "Pod" else row["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+                    if kind == "CronJob" else row["spec"]["template"]["spec"])
+                account = name(pod.get("serviceAccountName", "default"))
+                if pod.get("serviceAccount", account) != account:
+                    raise ValueError
+                identities[uid] = (namespace, account)
+        roots: set[str] = set()
+        for key, original in originals.items():
+            uid = _uid(original)
+            if keys.get(key) != uid or not _matches(documents[uid], expected[key], uid):
+                raise ValueError
+            roots.add(uid)
+
+        for uid, identity in identities.items():
+            if identity not in subjects:
+                continue
+            # The supported ancestry has at most two edges. No replica/phase
+            # shortcut, label adoption, dangling parent or arbitrary owner kind.
+            visited: set[str] = set()
+            while uid not in roots:
+                if uid in visited or len(visited) >= 2:
+                    raise ValueError
+                visited.add(uid)
+                row = documents[uid]
+                owners = row["metadata"].get("ownerReferences", [])
+                if not isinstance(owners, list) or len(owners) != 1:
+                    raise ValueError
+                owner = dict(owners[0])
+                blocking = owner.pop("blockOwnerDeletion", False)
+                parent_uid = owner["uid"]
+                parent = documents[parent_uid]
+                if (type(blocking) is not bool or owner.get("controller") is not True
+                        or owner != {"apiVersion": parent["apiVersion"], "kind": parent["kind"],
+                            "name": parent["metadata"]["name"], "uid": parent_uid, "controller": True}
+                        or (row["kind"], parent["kind"]) not in {
+                            ("Pod", "ReplicaSet"), ("Pod", "Job"), ("ReplicaSet", "Deployment"), ("Job", "CronJob")}
+                        or identities[parent_uid] != identity):
+                    raise ValueError
+                uid = parent_uid
+    except Exception:
+        raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None
 
 
 def fence_pool_roles(*, request: PoolRoleFenceRequest, api: PoolRoleFenceAPI,

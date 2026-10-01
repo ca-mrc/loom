@@ -38,9 +38,11 @@ class ManagementPrerequisiteError(RuntimeError):
 
 
 def inventory_resources(request: Callable[[str, str], dict[str, Any] | None],
-                        api: str, resource: str, kind: str) -> list[dict[str, Any]]:
+                        api: str, resource: str, kind: str, *,
+                        include_terminal_pods: bool = False) -> list[dict[str, Any]]:
     """Fixed read-only collections; incomplete or unstable pages never qualify."""
     collections = {("v1", "nodes", "Node"), ("v1", "pods", "Pod"),
+        ("v1", "replicationcontrollers", "ReplicationController"),
         ("v1", "persistentvolumeclaims", "PersistentVolumeClaim"),
         ("networking.k8s.io/v1", "ingresses", "Ingress"),
         ("autoscaling/v2", "horizontalpodautoscalers", "HorizontalPodAutoscaler"),
@@ -60,7 +62,7 @@ def inventory_resources(request: Callable[[str, str], dict[str, Any] | None],
         result: list[dict[str, Any]] = []
         for _ in range(30):
             query = {"limit": "100", **({"continue": token} if token else {})}
-            if kind == "Pod":
+            if kind == "Pod" and not include_terminal_pods:
                 query["fieldSelector"] = "status.phase!=Succeeded,status.phase!=Failed"
             page = request("GET", prefix + resource + "?" + urlencode(query))
             if (page is None or page.get("apiVersion") != api or page.get("kind") != kind + "List"

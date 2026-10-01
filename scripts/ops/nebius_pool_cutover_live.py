@@ -28,7 +28,12 @@ from scripts.ops.nebius_management_stage import (
 )
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
-from scripts.ops.nebius_pool_cutover import PoolCutoverRequest, _contract, cutover_documents
+from scripts.ops.nebius_pool_cutover import (
+    PoolCutoverRequest,
+    _contract,
+    cutover_documents,
+    retained_cutover_workloads,
+)
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
@@ -44,7 +49,11 @@ from scripts.ops.nebius_pool_retirement import (
     stopped_document,
 )
 from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
-from scripts.ops.nebius_pool_role_fencing import qualify_retained_writer_bindings
+from scripts.ops.nebius_pool_role_fencing import (
+    POOL_WRITER_WORKLOAD_COLLECTIONS,
+    qualify_retained_writer_bindings,
+    qualify_retained_writer_workloads,
+)
 from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 
 from loom.nebius_platform_render import digest
@@ -231,13 +240,13 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         return approved
 
     def qualify_writer_bindings(self) -> None:
-        """Complete live discovery, not a supplied writer list or replica count."""
+        """Discover retained grants and consumers at one API-server revision."""
         try:
             revision: str | None = None
 
             def read(method: str, path: str) -> dict[str, Any] | None:
                 nonlocal revision
-                # One API-server snapshot for all four RBAC collections. A
+                # One API-server snapshot for RBAC and workload collections. A
                 # continuation already pins its initial revision and cannot be
                 # combined with an explicit resourceVersion query.
                 if revision is not None and "continue=" not in path:
@@ -256,6 +265,17 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                 staged_authority=self._recorded_writer_authority(inventory))
         except Exception:
             raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
+        try:
+            expected = (self.originals if self.state_dir is None or self.anchor_dir is None else
+                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir))
+            workloads = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
+                for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+            qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected)
+            if (self.state_dir is not None and self.anchor_dir is not None
+                    and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir) != expected):
+                raise ValueError
+        except Exception:
+            raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None
 
     def qualify_quiescence(self) -> None:
         self._scope()
@@ -340,11 +360,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         except Exception:
             raise ValueError("pool cutover workload update unconfirmed") from None
 
-    def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]:
-        value = self._patch(key, before, desired, preview=True)
-        if value is None:
-            raise ValueError("pool cutover workload preview rejected")
-        return value
+    def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return self._patch(key, before, desired, preview=True)
 
     def patch_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         return self._patch(key, before, desired, preview=False) is not None

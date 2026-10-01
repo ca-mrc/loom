@@ -2252,11 +2252,31 @@ declared fenced by name. This is retained binding correspondence, not full exter
 writer/backend acceptance; effective reviews after reduction and the parent's
 installed qualification remain required.
 
+The same snapshot also inventories Deployments, ReplicaSets, StatefulSets,
+DaemonSets, ReplicationControllers, CronJobs, Jobs and Pods. Terminal Pods are
+included; zero replicas, suspension and completion do not exempt an unregistered
+consumer of a retiring ServiceAccount. Every retained root must match its original
+UID and exact original or journal-qualified recovery template. A descendant must
+resolve through an exact same-namespace, same-ServiceAccount controller chain:
+Deployment → ReplicaSet → Pod or CronJob → Job → Pod. Dangling, replaced, cyclic
+or contradictory ownership rejects preflight. Historical descendants can remain
+without deletion; this check establishes identity consumers, not execution health
+or shutdown. The existing drain and effective-permission barriers still apply.
+Unrelated identities remain untouched. External credentials and custom-controller
+authority still require the parent's separate installed qualification.
+
 On recovery, successor gateway grants qualify only through the bound parent
 anchor, retained closed/fenced receipts and fixed authority-stage journal. Exact
 recorded UIDs/snapshots or unresolved CREATE intents are observed without writes;
 matching names/labels do not authorize adoption, and aggregation cannot widen a
 partial stage's authority.
+
+An exact workload preview that receives a complete definite Kubernetes rejection
+leaves that workload prepared and returns a pending update. It records no mutation
+intent and sends no persistent update. The next invocation reads the current object
+again; malformed responses and uncertain outcomes remain failures, not retry
+permission. This covers controller-status resource-version races without weakening
+the actual write's UID, version and template preconditions.
 
 The connected cutover parent now sequences producer shutdown, closed
 registration, workload retirement, effective-role fencing, dedicated material,

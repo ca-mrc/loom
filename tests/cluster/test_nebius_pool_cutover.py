@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import ssl
 import sys
@@ -154,6 +155,50 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             await asyncio.to_thread(rbac.delete_namespaced_role_binding, "foreign-shares-retained-role", role_namespace)
             methods.clear()
 
+            # A second consumer still has the retained identity even when its
+            # desired replicas are zero. Detect it before stopping any producer.
+            foreign = copy.deepcopy(request.fencing.retirement.actuators[0])
+            foreign["metadata"] = {"name": "unregistered-writer-consumer",
+                "namespace": foreign["metadata"]["namespace"]}
+            foreign["spec"]["replicas"] = 0
+            labels = {"app.kubernetes.io/name": "unregistered-writer-consumer"}
+            foreign["spec"]["selector"] = {"matchLabels": labels}
+            foreign["spec"]["template"]["metadata"]["labels"] = labels
+            foreign_namespace = foreign["metadata"]["namespace"]
+            await asyncio.to_thread(apps.create_namespaced_deployment, foreign_namespace, foreign)
+            with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+                await asyncio.to_thread(api.preflight, request)
+            assert not (tmp_path / "cutover").exists()
+            assert methods and all(method == "GET" for method, _path, _query in methods)
+            await asyncio.to_thread(apps.delete_namespaced_deployment, "unregistered-writer-consumer", foreign_namespace,
+                propagation_policy="Foreground")
+            deadline = time.monotonic() + 30
+            while True:
+                try:
+                    await asyncio.to_thread(apps.read_namespaced_deployment, "unregistered-writer-consumer", foreign_namespace)
+                except client.ApiException as error:
+                    assert error.status == 404
+                    break
+                assert time.monotonic() < deadline, "test-only foreign controller did not drain"
+                await asyncio.sleep(0.1)
+            methods.clear()
+
+            # Reproduce the resource-version race seen with a real controller
+            # status update between read and dry-run. No template changes.
+            preview = api.preview_workload
+            raced = []
+
+            def preview_after_status_update(key, before, desired):
+                if not raced:
+                    updated = apps.patch_namespaced_deployment_status(before["metadata"]["name"],
+                        before["metadata"]["namespace"], {"status": {"conditions": [{
+                            "type": "DisposablePreviewRace", "status": "False"}]}})
+                    assert updated.metadata.resource_version != before["metadata"]["resourceVersion"]
+                    raced.append(key)
+                return preview(key, before, desired)
+
+            api.preview_workload = preview_after_status_update
+
             def observed_stage():
                 # Only disposable-fixture source locations; never exception
                 # values, credentials, manifests or production diagnostics.
@@ -166,6 +211,12 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                         key = frame.f_locals.get("key")
                         if value[0] is KeyError and isinstance(key, str) and key.startswith(("Role:", "ClusterRole:")):
                             failures.append(("unresolved RBAC reference", key))
+                    if event == "return" and frame.f_code.co_name == "_patch" and value is None:
+                        response = frame.f_locals.get("response")
+                        status = frame.f_locals.get("value", {})
+                        if response is not None and isinstance(status, dict):
+                            failures.append(("workload definite rejection", response.status_code, status.get("reason"),
+                                [(row.get("reason"), row.get("field")) for row in status.get("details", {}).get("causes", [])]))
                     return trace
                 prior = sys.gettrace()
                 sys.settrace(trace)
@@ -179,8 +230,15 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                     sys.settrace(prior)
 
             deadline = time.monotonic() + 120
+            first = True
             while True:
                 result = await asyncio.to_thread(observed_stage)
+                if first:
+                    assert result["status"] == "pending_producer_update"
+                    assert raced == [_key(request.manager)]
+                    record = json.loads((tmp_path / "cutover/cutover.json").read_text())
+                    assert record["producers"][raced[0]] == {"phase": "prepared", "expected": None}
+                    first = False
                 if result["status"] == "pool_runtime_staged_closed":
                     break
                 assert result["status"] in {"pending_producer_update", "pending_producer_drain", "pending_drain",

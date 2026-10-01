@@ -82,7 +82,9 @@ class PoolCutoverAPI(Protocol):
         ...
 
     def read_workload(self, key: str) -> dict[str, Any]: ...
-    def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any]: ...
+    def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        """None only for a definite dry-run rejection; no persistent write."""
+        ...
     def patch_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         """False only for definite rejection; unknown outcomes are never retried."""
         ...
@@ -253,7 +255,10 @@ def _updates(*, api: PoolCutoverAPI, originals: dict[str, Any], targets: dict[st
         if item["phase"] == "prepared":
             if not _matches(actual, original, _uid(original)):
                 raise ValueError
-            item["expected"] = _qualified_defaulted(targets[key], api.preview_workload(key, actual, targets[key]))
+            preview = api.preview_workload(key, actual, targets[key])
+            if preview is None:
+                return pending  # No mutation intent or retry of a rejected dry run.
+            item["expected"] = _qualified_defaulted(targets[key], preview)
             item["phase"] = "intent"
             save()
             try:
