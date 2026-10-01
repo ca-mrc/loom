@@ -10,6 +10,7 @@ from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
     NebiusKubernetesCredentials,
     create_api_client,
+    read_sdk_before_close,
 )
 from loom.nebius_pool_contract import PoolNamespaceBindingV1
 from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
@@ -430,7 +431,7 @@ class InClusterKubernetesJobApi:
             except Exception as exc:
                 raise self._translate(exc, "resource_summary") from exc
 
-        return await asyncio.to_thread(read)
+        return await read_sdk_before_close(read)
 
     async def close(self) -> None:
         try:
@@ -528,7 +529,7 @@ class InClusterKubernetesJobApi:
     async def probe_pool_namespace(self, namespace: PoolNamespaceBindingV1) -> None:
         namespace = PoolNamespaceBindingV1.model_validate_json(namespace.model_dump_json())
         try:
-            await asyncio.to_thread(self._pool_namespace, namespace)
+            await read_sdk_before_close(lambda: self._pool_namespace(namespace))
         except (ValueError, TypeError, AttributeError):
             raise KubernetesApiError("pool execution namespace identity conflict", status_code=409) from None
         except Exception as exc:
@@ -566,7 +567,7 @@ class InClusterKubernetesJobApi:
             except Exception as exc:
                 raise self._translate(exc, "observe_pool") from exc
 
-        return await asyncio.to_thread(read)
+        return await read_sdk_before_close(read)
 
     async def create_job(
         self, *, namespace: str, manifest: dict[str, Any]

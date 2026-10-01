@@ -2045,8 +2045,9 @@ omits the legacy namespace watch and uses the native build outbox controller.
 Build lease maintenance runs independently of admission HTTP and participates in
 readiness. Shutdown cancels and awaits every controller loop before closing the
 management, Kubernetes or database clients, including when another loop fails.
-The actuator's bounded synchronous SDK reads can outlive coroutine cancellation;
-draining those threads before client closure remains a runtime qualification gap.
+Global namespace/workload/log reads and usage sampling retain ownership through
+cancellation until their bounded SDK calls finish, before client closure.
+Cancellation still propagates if an SDK call fails during that drain.
 These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
