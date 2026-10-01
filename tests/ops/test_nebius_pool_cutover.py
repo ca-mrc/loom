@@ -306,6 +306,34 @@ def test_uncertain_runtime_patch_is_observed_not_repeated(cutover_inputs, tmp_pa
     assert len(api.migration.guards) == 3
 
 
+@pytest.mark.parametrize("boundary", ["producer", "runtime"])
+def test_definite_preview_conflict_returns_pending_without_a_write_or_intent(
+        cutover_inputs, tmp_path, boundary):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    preview = api.preview_workload
+    key = _key(request.manager if boundary == "producer" else request.fencing.retirement.migration.guards[0].controller)
+    calls = []
+
+    def conflict(actual_key, before, desired):
+        if actual_key == key:
+            calls.append(actual_key)
+            return None  # Validated dry-run API rejection, not an uncertain write.
+        return preview(actual_key, before, desired)
+
+    api.preview_workload = conflict
+    for index in range(2):
+        result = run(request, tokens, api, tmp_path)
+        assert result["status"] == "pending_" + boundary + "_update"
+        assert len(calls) == index + 1
+        assert key not in api.patches
+        record = json.loads((tmp_path / "cutover/cutover.json").read_text())
+        assert record["producers" if boundary == "producer" else "runtime"][key] == {"phase": "prepared", "expected": None}
+    api.preview_workload = preview
+    assert run(request, tokens, api, tmp_path)["status"] == "pool_runtime_staged_closed"
+    assert api.patches.count(key) == (2 if boundary == "producer" else 1)
+
+
 @pytest.mark.parametrize("damage", ["effective_grant", "role", "workload", "guard", "lost_parent", "lost_anchor", "lost_child"])
 def test_runtime_recovery_rejects_lost_evidence_and_authority_or_identity_drift(cutover_inputs, tmp_path, damage):
     request, tokens = cutover_inputs
@@ -367,7 +395,8 @@ def test_resources_changed_during_runtime_replacement_cannot_qualify_closed_comp
     assert creates == [len(api.resources.creates)]  # No repair/overwrite of drift.
 
 
-@pytest.mark.parametrize("damage", [None, "namespace", "uid", "running", "foreign_template", "redirect"])
+@pytest.mark.parametrize("damage", [None, "namespace", "uid", "running", "foreign_template", "redirect",
+    "preview_conflict", "preview_invalid", "preview_malformed", "preview_timeout"])
 def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutover_inputs, damage):
     from scripts.ops.nebius_pool_cutover import cutover_documents
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
@@ -397,6 +426,13 @@ def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutov
         assert message.url.path == "/apis/apps/v1/namespaces/" + guard.namespace + "/deployments/loom-control-plane"
         if damage == "redirect":
             return httpx.Response(307, headers={"Location": "https://foreign.example/"})
+        if damage in {"preview_conflict", "preview_invalid", "preview_malformed", "preview_timeout"}:
+            assert dict(message.url.params) == {"dryRun": "All"}
+            if damage == "preview_timeout":
+                raise httpx.ReadTimeout("test-only-marker")
+            code = 409 if damage == "preview_conflict" else 422
+            return httpx.Response(code, json={"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                "code": code, "reason": "Conflict" if code == 409 or damage == "preview_malformed" else "Invalid"})
         patch = json.loads(message.content)
         assert patch[:3] == [{"op": "test", "path": "/metadata/uid", "value": guard.controller["metadata"]["uid"]},
             {"op": "test", "path": "/metadata/resourceVersion", "value": "2"},
@@ -419,13 +455,19 @@ def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutov
             desired["spec"]["replicas"] = 1
         elif damage == "foreign_template":
             desired["spec"]["template"]["spec"]["containers"][0]["image"] = "foreign.example/unreviewed:latest"
-        if damage:
+        if damage in {"preview_conflict", "preview_invalid"}:
+            assert api.preview_workload(key, before, desired) is None
+        elif damage in {"preview_malformed", "preview_timeout"}:
+            with pytest.raises(ValueError):
+                api.preview_workload(key, before, desired)
+        elif damage:
             with pytest.raises(ValueError):
                 api.patch_workload(key, before, desired)
         else:
             assert api.patch_workload(key, before, desired) is True
         patches = [row for row in calls if row.method == "PATCH"]
-        assert len(patches) == (1 if damage in {None, "redirect"} else 0)
+        assert len(patches) == (1 if damage in {None, "redirect", "preview_conflict", "preview_invalid",
+            "preview_malformed", "preview_timeout"} else 0)
 
 
 def test_https_resource_stage_routes_only_fixed_catalog_secrets_and_gateway_authority(cutover_inputs, tmp_path):
