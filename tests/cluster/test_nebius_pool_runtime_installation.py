@@ -97,6 +97,10 @@ async def test_actual_disabled_runtimes_and_participant_roles_deny_all_job_write
                 for namespace in (participant.execution_namespace.name, participant.build_namespace.name):
                     assert (await http.get("/api/v1/namespaces/" + namespace)).status_code == 200
                     assert (await http.get("/api/v1/namespaces/" + namespace + "/pods")).status_code == 200
+                    # A missing Pod returns 404 only after the API authorizes
+                    # scoped log reads. Reader roles must still deny exec.
+                    assert (await http.get("/api/v1/namespaces/" + namespace + "/pods/missing/log")).status_code == 404
+                    assert (await http.post("/api/v1/namespaces/" + namespace + "/pods/missing/exec")).status_code == 403
                     assert (await http.get("/apis/batch/v1/namespaces/" + namespace + "/jobs/missing")).status_code == 404
                     assert (await http.get("/api/v1/namespaces/" + namespace + "/secrets")).status_code == 403
                     path = "/apis/batch/v1/namespaces/" + namespace + "/jobs"
@@ -107,6 +111,7 @@ async def test_actual_disabled_runtimes_and_participant_roles_deny_all_job_write
                     assert (await http.delete(path + "/forbidden-job")).status_code == 403
                 assert (await http.get("/api/v1/namespaces/pool-foreign")).status_code == 403
                 assert (await http.get("/api/v1/namespaces/pool-foreign/pods")).status_code == 403
+                assert (await http.get("/api/v1/namespaces/pool-foreign/pods/missing/log")).status_code == 403
                 assert (await http.get("/api/v1/namespaces")).status_code == 403
     finally:
         await asyncio.to_thread(container.stop)

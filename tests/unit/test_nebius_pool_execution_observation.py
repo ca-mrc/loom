@@ -133,6 +133,52 @@ async def test_missing_job_is_only_absence_not_a_deletion_observation_or_retry()
     assert calls == ["namespace", "job", "namespace"]
 
 
+@pytest.mark.parametrize("damage", [None, "replaced-before", "replaced-after", "foreign-pod", "log-unavailable"])
+async def test_failed_execution_retains_scrubbed_logs_only_for_the_same_qualified_pod(damage):
+    runtime, job, pod, namespace = fixture()
+    pod.status = _pod(phase="Failed", terminated_reason="Error").status
+    if damage == "foreign-pod":
+        pod.metadata.owner_references[0].uid = str(uuid4())
+    reads, logs = [], []
+
+    def current_pod(name, namespace_name, **kwargs):
+        assert (name, namespace_name, kwargs) == (pod.metadata.name, runtime.namespace.name, {"_request_timeout": 20})
+        reads.append(name)
+        current = copy.deepcopy(pod)
+        if (damage == "replaced-before" and len(reads) == 1) or (damage == "replaced-after" and len(reads) == 2):
+            current.metadata.uid = str(uuid4())
+        return current
+
+    def log(**kwargs):
+        assert kwargs == {"name": pod.metadata.name, "namespace": runtime.namespace.name,
+            "container": "execution", "tail_lines": 100, "limit_bytes": 4096, "_request_timeout": 20}
+        logs.append(kwargs)
+        if damage == "log-unavailable":
+            raise TimeoutError("log unavailable")
+        return "worker failed token=fixture-private-value"
+
+    api = InClusterKubernetesJobApi.__new__(InClusterKubernetesJobApi)
+    api._batch = SimpleNamespace(read_namespaced_job=lambda *args, **kwargs: job)
+    api._core = SimpleNamespace(read_namespace=lambda *args, **kwargs: namespace,
+        list_namespaced_pod=lambda *args, **kwargs: SimpleNamespace(api_version="v1", kind="PodList",
+            items=[pod], metadata=SimpleNamespace(_continue="")),
+        read_namespaced_pod=current_pod, read_namespaced_pod_log=log)
+    if damage in {"replaced-before", "replaced-after", "foreign-pod"}:
+        with pytest.raises(KubernetesApiError):
+            await api.observe_pool(runtime)
+        assert len(logs) == (1 if damage == "replaced-after" else 0)
+    else:
+        observed = await api.observe_pool(runtime)
+        assert observed.normalized_state == "failed" and observed.pod_uid == pod.metadata.uid
+        assert len(reads) == 2 and len(logs) == 1
+        if damage == "log-unavailable":
+            assert observed.container_logs == ()
+        else:
+            excerpt, = observed.container_logs
+            assert excerpt.name == "execution"
+            assert excerpt.text == "worker failed token=[REDACTED]"
+
+
 @pytest.mark.parametrize("operation", ["probe", "observe", "usage"])
 @pytest.mark.parametrize("sdk_failure", [False, True])
 async def test_cancelled_pool_read_finishes_before_its_client_closes(operation, sdk_failure):
