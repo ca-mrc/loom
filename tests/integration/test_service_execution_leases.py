@@ -76,7 +76,9 @@ from loom.execution_runtime_contract import (
     RuntimeTaskInputV1,
     SidecarContainerV1,
 )
-from loom.models.networking import GatewayOnly
+from loom.models.networking import NetworkPolicy, resolve_effective_network_policy
+from loom.models.task import TaskConfig
+from loom.models.trial import TrialConfig
 from loom.pipeline.artifact_commit import ArtifactCommitService, PartReceiptV1
 from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom.service_execution_materialization import (
@@ -688,6 +690,27 @@ async def _seed_ready_trial(
     return trial_id, target
 
 
+async def _task_effective_network_policy(
+    session: AsyncSession, trial_id: UUID,
+) -> NetworkPolicy | None:
+    # Production requirements always freeze the task's resolved policy; fixtures
+    # whose stored config is not a full TaskConfig keep the legacy omission.
+    trial = await session.get(Trial, trial_id)
+    task = await session.get(Task, trial.task_id) if trial is not None else None
+    if trial is None or task is None:
+        return None
+    try:
+        task_config = TaskConfig.model_validate(task.config)
+        trial_config = TrialConfig.model_validate(trial.config) if trial.config else None
+    except ValueError:
+        return None
+    return resolve_effective_network_policy(
+        baseline=task_config.environment.baseline_network_policy,
+        supported=task_config.environment.network_policies_supported,
+        override=trial_config.baseline_network_policy_override if trial_config else None,
+    )
+
+
 async def _reserve(
     session: AsyncSession,
     *,
@@ -700,13 +723,17 @@ async def _reserve(
     parent_lease_id: UUID | None = None,
     deadline_seconds: int = 3600,
 ) -> ServiceExecutionLease:
+    if requirements is None:
+        requirements = _requirements().model_copy(update={
+            "effective_network_policy": await _task_effective_network_policy(session, trial_id),
+        })
     return await reserve_trial_execution(
         session,
         request_id=request_id or uuid4(),
         trial_id=trial_id,
         execution_class_id=target.execution_class_id,
         target_id=target.target_id,
-        requirements=requirements or _requirements(),
+        requirements=requirements,
         runtime_contract=runtime_contract or _runtime_contract(
             now=now, execution_class_id=target.execution_class_id,
         ),
@@ -4735,9 +4762,7 @@ async def test_actuator_requeues_only_unstarted_unschedulable_at_deadline(
             assert quota is not None
             quota.max_attempts_ceiling = 1 if exhausted else 3
             lease = await _reserve(
-                session, trial_id=trial_id, target=target, now=now, deadline_seconds=60,
-                requirements=_requirements().model_copy(
-                    update={"effective_network_policy": GatewayOnly()}),
+                session, trial_id=trial_id, target=target, now=now, deadline_seconds=60
             )
             await session.commit()
         actuator = ExecutionActuator(
