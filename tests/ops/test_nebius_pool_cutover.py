@@ -176,6 +176,60 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
 
 
+@pytest.mark.parametrize("boundary", ["initial", "producer", "retirement", "runtime", "complete"])
+def test_runtime_preflight_derives_only_original_or_journal_qualified_workloads(cutover_inputs, tmp_path, boundary):
+    from scripts.ops.nebius_pool_cutover import retained_cutover_workloads
+
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    if boundary == "producer":
+        api.busy.add(_key(request.services[0]))
+    elif boundary == "retirement":
+        api.retirement.busy = _key(request.fencing.retirement.actuators[0])
+    elif boundary == "runtime":
+        api.fail_key = _key(request.fencing.retirement.migration.guards[0].controller)
+        api.failure = "conflict"
+    if boundary != "initial":
+        run(request, tokens, api, tmp_path)
+    qualified = retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
+    assert set(qualified) == set(api.documents)
+    for key, document in qualified.items():
+        assert document["spec"] == api.documents[key]["spec"]
+    assert (tmp_path / "cutover/cutover.json").exists() is (boundary != "initial")
+
+
+@pytest.mark.parametrize("damage", ["missing_anchor", "wrong_anchor", "missing_parent", "missing_retirement",
+    "changed_retirement", "unrecorded_runtime", "changed_expected"])
+def test_runtime_preflight_never_treats_a_state_file_as_recovery_authority(cutover_inputs, tmp_path, damage):
+    from scripts.ops.nebius_pool_cutover import retained_cutover_workloads
+
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    run(request, tokens, api, tmp_path)
+    parent = tmp_path / "cutover/cutover.json"
+    operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+    marker = tmp_path / "cutover-anchor" / (operation + "-cutover.json")
+    if damage == "missing_anchor":
+        marker.unlink()
+    elif damage == "wrong_anchor":
+        marker.write_text('{}')
+    elif damage == "missing_parent":
+        parent.unlink()
+    elif damage == "missing_retirement":
+        (tmp_path / "cutover/writer-anchor" / (operation + "-retirement.json")).unlink()
+    elif damage == "changed_retirement":
+        (tmp_path / "cutover/writers/retirement.json").write_text('{}')
+    else:
+        saved = json.loads(parent.read_text())
+        if damage == "unrecorded_runtime":
+            saved['fenced'] = None
+        else:
+            next(iter(saved['runtime'].values()))['expected']['spec']['replicas'] = 1
+        parent.write_text(json.dumps(saved))
+    with pytest.raises(ValueError):
+        retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
+
+
 @pytest.mark.parametrize("failure", ["before", "after"])
 def test_each_participant_acl_intent_is_recovered_independently_without_repeating_sql(cutover_inputs, tmp_path, failure):
     request, tokens = cutover_inputs
