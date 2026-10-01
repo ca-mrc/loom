@@ -270,6 +270,25 @@ def test_manager_catalog_is_mounted_without_changing_existing_authorities(runtim
     assert len(load_pool_profiles(catalog).execution) == 3
 
 
+def test_manager_initializers_follow_the_qualified_candidate(runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_manager
+
+    request, _, _, original = runtime_inputs
+    target = wire_manager(request=request, original=original)
+    initializers = target['spec']['template']['spec']['initContainers']
+    assert initializers
+    assert all(row['image'] == request.registration.candidate['images']['service']['image_ref'] for row in initializers)
+
+
+def test_manager_rejects_an_unqualified_initializer_image(runtime_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_manager
+
+    request, _, _, original = runtime_inputs
+    original['spec']['template']['spec']['initContainers'][0]['image'] = 'registry.example/foreign@sha256:' + 'f' * 64
+    with pytest.raises(ValueError, match='pool_manager_runtime_unqualified'):
+        wire_manager(request=request, original=original)
+
+
 def test_all_participant_processes_consume_same_binding_and_preserve_data(runtime_inputs, monkeypatch):
     from scripts.ops.nebius_pool_runtime import wire_participant
 
