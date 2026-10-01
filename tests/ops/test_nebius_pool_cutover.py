@@ -282,6 +282,33 @@ def test_runtime_renderer_rejects_an_incomplete_shared_service_roster_before_any
     assert not api.patches and not api.retirement.patches and not api.resources.creates
 
 
+@pytest.mark.parametrize("resource", ["gateway", "machine", "catalog"])
+def test_resources_changed_during_runtime_replacement_cannot_qualify_closed_completion(cutover_inputs, tmp_path, monkeypatch, resource):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    patch = api.patch_workload
+    creates = []
+
+    def change_staged_resource(key, before, desired):
+        result = patch(key, before, desired)
+        if desired["kind"] == "CronJob":
+            creates.append(len(api.resources.creates))
+            if resource == "gateway":
+                api.resources.resources["Deployment:loom-nebius-management:loom-pool-gateway"]["spec"]["replicas"] = 1
+            elif resource == "machine":
+                secret = next(row for row in api.resources.resources.values() if row["kind"] == "Secret")
+                secret["data"]["token"] = "Zm9yZWlnbg=="
+            else:
+                catalog = next(row for row in api.resources.resources.values() if row["kind"] == "ConfigMap" and "profiles.json" in row["data"])
+                catalog["data"]["profiles.json"] = "{}"
+        return result
+
+    monkeypatch.setattr(api, "patch_workload", change_staged_resource)
+    with pytest.raises(ValueError):
+        run(request, tokens, api, tmp_path)
+    assert creates == [len(api.resources.creates)]  # No repair/overwrite of drift.
+
+
 @pytest.mark.parametrize("damage", [None, "namespace", "uid", "running", "foreign_template", "redirect"])
 def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutover_inputs, damage):
     from scripts.ops.nebius_pool_cutover import cutover_documents
