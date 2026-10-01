@@ -1049,3 +1049,32 @@ def test_foreign_replication_controller_without_a_pod_template_is_not_a_writer_c
         "metadata": {"namespace": "foreign", "name": "adopt-only", "uid": str(uuid4()), "resourceVersion": "1"},
         "spec": {"selector": {"legacy": "retained"}, "replicas": 0, **template}})
     binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("subject", [
+    {"kind": "ServiceAccount", "namespace": "foreign", "name": "unregistered-controller"},
+    {"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": "unregistered-automation"},
+    {"kind": "Group", "apiGroup": "rbac.authorization.k8s.io", "name": "unregistered-writers"},
+])
+def test_unregistered_cluster_wide_job_writer_cannot_bypass_participant_inventory(
+        cutover_inputs, cutover_binding_inventory, subject):
+    request, tokens = cutover_inputs
+    extra = copy.deepcopy(cutover_binding_inventory["clusterrolebindings"][0])
+    extra["metadata"].update(name="unregistered-cluster-writer", uid=str(uuid4()))
+    extra["subjects"] = [subject]
+    cutover_binding_inventory["clusterrolebindings"].append(extra)
+    with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory)
+
+
+def test_native_controller_identity_cannot_be_borrowed_by_an_in_cluster_workload(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+    rows = writer_workload_inventory(request)
+    borrowed = copy.deepcopy(request.fencing.retirement.actuators[0])
+    borrowed["metadata"].update(namespace="kube-system", name="borrowed-controller", uid=str(uuid4()))
+    borrowed["spec"]["replicas"] = 0
+    borrowed["spec"]["template"]["spec"]["serviceAccountName"] = "job-controller"
+    rows["deployments"].append(borrowed)
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
