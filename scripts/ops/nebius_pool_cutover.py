@@ -31,6 +31,7 @@ from scripts.ops.nebius_pool_migration import (
     close_and_register_pool,
     migration_contract,
 )
+from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
 from scripts.ops.nebius_pool_retirement import MARKER as RETIREMENT_MARKER
 from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_document
 from scripts.ops.nebius_pool_role_fencing import (
@@ -62,6 +63,7 @@ class PoolCutoverRequest:
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     management_origin: str
     kubernetes_endpoint: str
+    platform_authority: PoolPlatformAuthority | None = None
 
 
 class PoolCutoverAPI(Protocol):
@@ -146,6 +148,7 @@ def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
 
 def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[str, Any]:
     return {"migration": migration_contract(request.fencing.retirement.migration),
+        **({"platform_authority": request.platform_authority.model_dump(mode="json")} if request.platform_authority is not None else {}),
         "roles": {"originals": [_stable(row) for row in request.fencing.originals], "targets": role_fence_documents(request.fencing)},
         "writers": {key: {"uid": _uid(row), "document": _stable(row)} for key, row in retirement_documents(request.fencing.retirement).items()},
         "producers": {key: {"uid": _uid(row), "document": _stable(row)} for key, row in documents["producers"].items()},

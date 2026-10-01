@@ -42,6 +42,7 @@ from scripts.ops.nebius_pool_migration import (
     _hash,
 )
 from scripts.ops.nebius_pool_migration_guard import qualify_cutover_readiness_page
+from scripts.ops.nebius_pool_platform_authority import platform_controller_subjects
 from scripts.ops.nebius_pool_retirement import (
     _closed,
     qualify_closed_workload_drain,
@@ -262,7 +263,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                 for resource, kind in (("roles", "Role"), ("clusterroles", "ClusterRole"),
                     ("rolebindings", "RoleBinding"), ("clusterrolebindings", "ClusterRoleBinding"))}
             qualify_retained_writer_bindings(self.request.fencing, inventory,
-                staged_authority=self._recorded_writer_authority(inventory))
+                staged_authority=self._recorded_writer_authority(inventory), platform_authority=self.request.platform_authority)
         except Exception:
             raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
         try:
@@ -270,7 +271,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                 retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir))
             workloads = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
                 for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
-            qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected)
+            qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected,
+                platform_subjects=platform_controller_subjects(self.request.platform_authority))
             if (self.state_dir is not None and self.anchor_dir is not None
                     and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir) != expected):
                 raise ValueError

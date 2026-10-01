@@ -33,6 +33,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_cutover import cutover_documents, stage_pool_cutover
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+    from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
     from scripts.ops.nebius_pool_retirement import retirement_documents
 
     from loom_service.pool_management.installation import PoolInstallation
@@ -53,6 +54,26 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             namespaces[name] = namespace.metadata.uid
         kube_system = await asyncio.to_thread(core.read_namespace, "kube-system")
         binding = replace(binding, namespace_uid=namespaces[binding.namespace], kube_system_uid=kube_system.metadata.uid)
+        platform_resources = []
+        bootstrap_deadline = time.monotonic() + 30
+        for name in ("cluster-admin", "system:controller:cronjob-controller", "system:controller:job-controller",
+                "system:controller:generic-garbage-collector", "system:controller:namespace-controller",
+                "system:controller:ttl-after-finished-controller"):
+            for method in (rbac.read_cluster_role, rbac.read_cluster_role_binding):
+                # API discovery/namespace creation can precede bootstrap RBAC.
+                # Wait for actual objects, never manufacture their permissions.
+                while True:
+                    try:
+                        document = await asyncio.to_thread(method, name)
+                        break
+                    except client.ApiException as error:
+                        if error.status != 404:
+                            raise
+                        assert time.monotonic() < bootstrap_deadline, "disposable bootstrap RBAC did not appear"
+                        await asyncio.sleep(0.1)
+                platform_resources.append(core.api_client.sanitize_for_serialization(document))
+        platform_authority = PoolPlatformAuthority(schema_version="loom.pool-platform-authority.v1",
+            kube_system_uid=kube_system.metadata.uid, resources=tuple(platform_resources))
         originals = {**retirement_documents(request.fencing.retirement), **cutover_documents(request)["producers"]}
         accounts, installed = set(), {}
         for key, document in originals.items():
@@ -103,6 +124,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
                 "subjects": [{"kind": "ServiceAccount", "name": "loom-execution-actuator", "namespace": participant.execution_namespace.name}]})
         request = replace(request, fencing=replace(request.fencing, retirement=retirement, originals=tuple(roles)),
+            platform_authority=platform_authority,
             manager=installed[_key(request.manager)], services=tuple(installed[_key(row)] for row in request.services),
             collector_config=core.api_client.sanitize_for_serialization(actual_config))
 
@@ -153,6 +175,20 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             assert not (tmp_path / "cutover").exists()
             assert methods and all(method == "GET" for method, _path, _query in methods)
             await asyncio.to_thread(rbac.delete_namespaced_role_binding, "foreign-shares-retained-role", role_namespace)
+            methods.clear()
+
+            # Cluster-wide authority is in scope even when the subject is not
+            # one of the retiring accounts. This is only a disposable cluster.
+            await asyncio.to_thread(rbac.create_cluster_role_binding, {
+                "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+                "metadata": {"name": "unregistered-cluster-writer"},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"},
+                "subjects": [{"kind": "User", "apiGroup": "rbac.authorization.k8s.io", "name": "unregistered-automation"}]})
+            with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+                await asyncio.to_thread(api.preflight, request)
+            assert not (tmp_path / "cutover").exists()
+            assert methods and all(method == "GET" for method, _path, _query in methods)
+            await asyncio.to_thread(rbac.delete_cluster_role_binding, "unregistered-cluster-writer")
             methods.clear()
 
             # A second consumer still has the retained identity even when its

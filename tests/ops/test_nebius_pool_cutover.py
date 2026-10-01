@@ -25,6 +25,35 @@ from tests.unit.test_nebius_management_render import management_inputs as manage
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
+def platform_writer_authority(kube_system_uid):
+    from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
+
+    resources = []
+    for name, subjects, rules in (
+        ("cluster-admin", [{"kind": "Group", "name": "system:masters", "apiGroup": "rbac.authorization.k8s.io"}],
+            [{"apiGroups": ["*"], "resources": ["*"], "verbs": ["*"]}, {"nonResourceURLs": ["*"], "verbs": ["*"]}]),
+        ("system:controller:job-controller", [{"kind": "ServiceAccount", "name": "job-controller", "namespace": "kube-system"}],
+            [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["get", "list", "patch", "update", "watch"]},
+                {"apiGroups": ["batch"], "resources": ["jobs/status"], "verbs": ["update"]},
+                {"apiGroups": ["batch"], "resources": ["jobs/finalizers"], "verbs": ["update"]},
+                {"apiGroups": [""], "resources": ["pods"], "verbs": ["create", "delete", "list", "patch", "watch"]},
+                {"apiGroups": ["", "events.k8s.io"], "resources": ["events"], "verbs": ["create", "patch", "update"]}]),
+    ):
+        for kind in ("ClusterRole", "ClusterRoleBinding"):
+            document = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": kind,
+                "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1",
+                    "labels": {"kubernetes.io/bootstrapping": "rbac-defaults"},
+                    "annotations": {"rbac.authorization.kubernetes.io/autoupdate": "true"}}}
+            if kind == "ClusterRole":
+                document["rules"] = rules
+            else:
+                document.update(subjects=subjects,
+                    roleRef={"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name})
+            resources.append(document)
+    return PoolPlatformAuthority(schema_version="loom.pool-platform-authority.v1", kube_system_uid=kube_system_uid,
+        resources=tuple(resources))
+
+
 @pytest.fixture
 def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_inputs):
     from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
@@ -44,7 +73,8 @@ def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_
     fencing = replace(fencing_inputs, retirement=retirement)
     request = PoolCutoverRequest(fencing=fencing, manager=manager, services=tuple(services.values()),
         collector_config=configmap, profiles={key: desired_profile(migration, doc) for key, doc in services.items()},
-        management_origin="https://manage.example.com", kubernetes_endpoint="https://kubernetes.default.svc")
+        management_origin="https://manage.example.com", kubernetes_endpoint="https://kubernetes.default.svc",
+        platform_authority=platform_writer_authority(migration.registration.binding.kube_system_uid))
     return request, tokens
 
 
@@ -591,17 +621,8 @@ def cutover_binding_inventory(cutover_inputs):
             continue
         document["metadata"].update(uid=str(uuid4()), resourceVersion="1")
         inventories["rolebindings"].append(document)
-    for name, subjects in (("cluster-admin", [{"kind": "Group", "name": "system:masters",
-            "apiGroup": "rbac.authorization.k8s.io"}]),
-            ("system:controller:job-controller", [{"kind": "ServiceAccount", "name": "job-controller",
-                "namespace": "kube-system"}])):
-        inventories["clusterroles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
-            "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1"},
-            "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "delete"]}]})
-        inventories["clusterrolebindings"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
-            "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1"},
-            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name},
-            "subjects": subjects})
+    for row in request.platform_authority.resources:
+        inventories["clusterroles" if row["kind"] == "ClusterRole" else "clusterrolebindings"].append(copy.deepcopy(row))
     inventories["clusterroles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
         "metadata": {"name": "system:discovery", "uid": str(uuid4()), "resourceVersion": "1"},
         "rules": [{"nonResourceURLs": ["/api", "/apis", "/version"], "verbs": ["get"]},
@@ -728,9 +749,12 @@ def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_d
             extra["metadata"]["namespace"] = "foreign"
         elif damage == "foreign_scoped_writer":
             extra["subjects"] = [{"kind": "ServiceAccount", "namespace": "foreign", "name": "unknown-writer"}]
-        extra["roleRef"].update(kind="ClusterRole", name="cluster-admin")
+        extra["roleRef"].update(kind="ClusterRole", name="unexpected-named-writer")
         rows["rolebindings"].append(extra)
-        rows["clusterroles"][0]["rules"][0]["resourceNames"] = ["one-named-job"]
+        rows["clusterroles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+            "metadata": {"name": "unexpected-named-writer", "uid": str(uuid4()), "resourceVersion": "1"},
+            "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["patch"],
+                "resourceNames": ["one-named-job"]}]})
     elif damage in {"cluster_group", "namespace_group", "serviceaccount_user"}:
         subject = binding["subjects"][0]
         kind, name = "Group", "system:serviceaccounts"
@@ -738,8 +762,10 @@ def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_d
             name += ":" + subject["namespace"]
         elif damage == "serviceaccount_user":
             kind, name = "User", "system:serviceaccount:" + subject["namespace"] + ":" + subject["name"]
-        rows["clusterrolebindings"][0]["subjects"] = [{"kind": kind, "name": name,
-            "apiGroup": "rbac.authorization.k8s.io"}]
+        extra = copy.deepcopy(rows["clusterrolebindings"][0])
+        extra["metadata"].update(name="unexpected-subject-grant", uid=str(uuid4()))
+        extra["subjects"] = [{"kind": kind, "name": name, "apiGroup": "rbac.authorization.k8s.io"}]
+        rows["clusterrolebindings"].append(extra)
     elif damage == "unresolved":
         binding["roleRef"]["name"] = "missing"
     elif damage == "role_drift":
@@ -812,7 +838,11 @@ def test_retained_binding_gate_does_not_adopt_or_reduce_unrelated_authority(
             "metadata": {"name": "management", "namespace": namespace, "uid": str(uuid4()), "resourceVersion": "1"},
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "management"},
             "subjects": [{"kind": "ServiceAccount", "namespace": namespace, "name": account}]})
-    binding_preflight(request, tokens, rows)
+    if boundary == "foreign_owner":
+        with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+            binding_preflight(request, tokens, rows)
+    else:
+        binding_preflight(request, tokens, rows)
 
 
 def test_binding_drift_during_other_preflight_checks_cannot_reach_producer_downtime(
@@ -1078,3 +1108,96 @@ def test_native_controller_identity_cannot_be_borrowed_by_an_in_cluster_workload
     rows["deployments"].append(borrowed)
     with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
         binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("damage", ["missing_authority", "cluster", "role_uid", "binding_uid", "rules",
+    "subjects", "role_ref", "missing_role", "missing_binding", "alias_binding", "aggregation"])
+def test_platform_authority_requires_retained_live_objects_not_only_native_names(
+        cutover_inputs, cutover_binding_inventory, damage):
+    request, tokens = cutover_inputs
+    rows = cutover_binding_inventory
+    binding_preflight(request, tokens, rows)
+    role, binding = rows["clusterroles"][1], rows["clusterrolebindings"][1]
+    if damage == "missing_authority":
+        request = replace(request, platform_authority=None)
+    elif damage == "cluster":
+        request = replace(request, platform_authority=request.platform_authority.model_copy(update={"kube_system_uid": uuid4()}))
+    elif damage == "role_uid":
+        role["metadata"]["uid"] = str(uuid4())
+    elif damage == "binding_uid":
+        binding["metadata"]["uid"] = str(uuid4())
+    elif damage == "rules":
+        role["rules"][0]["verbs"].append("create")
+    elif damage == "subjects":
+        binding["subjects"].append({"kind": "ServiceAccount", "name": "unexpected", "namespace": "kube-system"})
+    elif damage == "role_ref":
+        binding["roleRef"]["name"] = "cluster-admin"
+    elif damage == "missing_role":
+        rows["clusterroles"].remove(role)
+    elif damage == "missing_binding":
+        rows["clusterrolebindings"].remove(binding)
+    elif damage == "alias_binding":
+        extra = copy.deepcopy(binding)
+        extra["metadata"].update(name="native-looking-alias", uid=str(uuid4()))
+        rows["clusterrolebindings"].append(extra)
+    else:
+        role["aggregationRule"] = {"clusterRoleSelectors": [{"matchLabels": {"foreign": "true"}}]}
+    with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+        binding_preflight(request, tokens, rows)
+
+
+@pytest.mark.parametrize("damage", ["native_create", "native_wildcard", "native_secrets", "native_aggregation",
+    "native_subject", "native_role_ref", "bootstrap_label", "admin_subject", "admin_role_ref", "admin_alias",
+    "unreferenced_role", "duplicate_uid", "owned", "deleting", "zero_cluster"])
+def test_platform_input_rejects_privilege_broadening_even_when_retained_as_an_original(cutover_inputs, damage):
+    from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
+
+    request, _ = cutover_inputs
+    payload = request.platform_authority.model_dump(mode="json")
+    PoolPlatformAuthority.model_validate(payload)
+    admin, admin_binding, role, binding = payload["resources"]
+    if damage == "native_create":
+        role["rules"][0]["verbs"].append("create")
+    elif damage == "native_wildcard":
+        role["rules"][0]["verbs"] = ["*"]
+    elif damage == "native_secrets":
+        role["rules"].append({"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]})
+    elif damage == "native_aggregation":
+        role["aggregationRule"] = {"clusterRoleSelectors": [{"matchLabels": {"foreign": "true"}}]}
+    elif damage == "native_subject":
+        binding["subjects"][0]["namespace"] = "foreign"
+    elif damage == "native_role_ref":
+        binding["roleRef"]["name"] = "cluster-admin"
+    elif damage == "bootstrap_label":
+        role["metadata"]["labels"].clear()
+    elif damage == "admin_subject":
+        admin_binding["subjects"][0]["name"] = "system:authenticated"
+    elif damage == "admin_role_ref":
+        admin_binding["roleRef"]["name"] = role["metadata"]["name"]
+    elif damage == "admin_alias":
+        admin_binding["metadata"]["name"] = "foreign-admin"
+    elif damage == "unreferenced_role":
+        payload["resources"].remove(binding)
+    elif damage == "duplicate_uid":
+        role["metadata"]["uid"] = admin["metadata"]["uid"]
+    elif damage == "owned":
+        role["metadata"]["ownerReferences"] = [{"apiVersion": "v1", "kind": "ConfigMap", "name": "foreign", "uid": str(uuid4())}]
+    elif damage == "deleting":
+        role["metadata"]["deletionTimestamp"] = "2026-10-01T00:00:00Z"
+    else:
+        payload["kube_system_uid"] = "00000000-0000-0000-0000-000000000000"
+    with pytest.raises(ValueError, match="pool_platform_authority_unqualified"):
+        PoolPlatformAuthority.model_validate(payload)
+
+
+def test_cutover_replay_cannot_replace_its_retained_platform_authority(cutover_inputs, tmp_path):
+    request, tokens = cutover_inputs
+    api = CutoverAPI(request)
+    assert run(request, tokens, api, tmp_path)["status"] == "pool_runtime_staged_closed"
+    authority = request.platform_authority.model_copy(deep=True)
+    authority.resources[0]["metadata"]["uid"] = str(uuid4())
+    changed = replace(request, platform_authority=authority)
+    api = CutoverAPI(changed)
+    with pytest.raises(ValueError):
+        run(changed, tokens, api, tmp_path)
+    assert not api.patches and not api.retirement.patches and not api.resources.creates

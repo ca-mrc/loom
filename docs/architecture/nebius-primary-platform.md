@@ -2246,11 +2246,24 @@ or intended reader shape and UID, with the expected actuator subject. Foreign
 subjects sharing a reduced Role, unresolved
 references, duplicate identities and extra named/group/cross-namespace grants to
 retired identities reject preflight. Separate Job writers in participant execution
-or build namespaces also reject. Discovery/self-inspection readers are permitted;
-unrelated operator, native-controller and foreign bindings are preserved, not
-declared fenced by name. This is retained binding correspondence, not full external
-writer/backend acceptance; effective reviews after reduction and the parent's
-installed qualification remain required.
+or build namespaces and unregistered cluster-wide Job writers also reject,
+including User and Group subjects. Discovery/self-inspection readers and unrelated
+namespace-local grants outside the pool are preserved.
+
+Kubernetes controllers and provider administrators are an explicit platform trust
+boundary, not writers the application migration can fence. Protected private inputs
+must retain their complete ClusterRoles and ClusterRoleBindings with original UIDs,
+bound to the kube-system namespace UID and immutable cutover journal. Live objects
+must match these snapshots. Supported administrative bindings are `cluster-admin`
+for `system:masters`, `kubeadm:cluster-admins`, and the `nebius:admin`/`nebius:editor`
+groups, with their corresponding fixed role references. Native CronJob, Job, garbage
+collection, namespace and finished-Job TTL controllers require exact bootstrap
+bindings and bounded native rules; aggregation, widened capabilities, extra subjects
+and alias bindings do not qualify. Application workloads cannot borrow these native
+ServiceAccounts, even at zero replicas. The installer grants or removes none of
+these platform permissions and does not claim to revoke external administrator
+credentials. Effective reviews after participant-role reduction and the parent's
+installed qualification remain required; this is not full runtime acceptance.
 
 The same snapshot also inventories Deployments, ReplicaSets, StatefulSets,
 DaemonSets, ReplicationControllers, CronJobs, Jobs and Pods. Terminal Pods are

@@ -17,6 +17,10 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_platform_authority import (
+    PoolPlatformAuthority,
+    qualify_platform_authority,
+)
 from scripts.ops.nebius_pool_retirement import (
     PoolRetirementAPI,
     PoolRetirementRequest,
@@ -151,13 +155,15 @@ def role_fence_documents(request: PoolRoleFenceRequest) -> dict[str, dict[str, A
 
 def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
                                      inventory: dict[str, list[dict[str, Any]]], *,
-                                     staged_authority: dict[str, dict[str, Any]] | None = None) -> None:
+                                     staged_authority: dict[str, dict[str, Any]] | None = None,
+                                     platform_authority: PoolPlatformAuthority | None = None) -> None:
     """Qualify affected bindings without declaring unrelated authority fenced.
 
     Complete RBAC discovery protects both sides of a Role reduction: no foreign
     subject may share a retained Role, and no retired identity may keep an extra
-    named, group or cross-namespace grant. Native/operator identities are NOT
-    exempted by name: unrelated bindings are left unchanged, not attested safe.
+    named, group or cross-namespace grant. Native/operator identities require
+    explicit, pinned platform trust; names alone are not an exemption. Unrelated
+    namespace-local bindings outside the pool remain unchanged.
     Effective rules reviews remain mandatory after the reductions. The parent
     still owns complete external-writer and runtime/backend qualification.
     """
@@ -190,6 +196,8 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
                         or key in documents or uid in uids):
                     raise ValueError
                 documents[key], uids = row, uids | {uid}
+        platform = qualify_platform_authority(platform_authority,
+            kube_system_uid=request.retirement.migration.registration.binding.kube_system_uid, documents=documents)
         for key, original in originals.items():
             actual = documents[key]
             if not any(_matches(actual, wanted, _uid(original)) for wanted in (original, targets[key])):
@@ -250,7 +258,7 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
                             "resourceRules": [rule for rule in rules if "nonResourceURLs" not in rule],
                             "nonResourceRules": [rule for rule in rules if "nonResourceURLs" in rule],
                             "evaluationError": ""}}, namespace=namespace)
-                elif namespace in writer_namespaces:
+                elif binding_key not in platform and (resource == "clusterrolebindings" or namespace in writer_namespaces):
                     # A separate subject with explicit Job writes in operation
                     # scope is not authorized merely because our old SAs differ.
                     for rule in role.get("rules", []):
@@ -267,7 +275,8 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
 def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                                       inventory: dict[str, list[dict[str, Any]]], *,
                                       originals: dict[str, dict[str, Any]],
-                                      expected: dict[str, dict[str, Any]]) -> None:
+                                      expected: dict[str, dict[str, Any]],
+                                      platform_subjects: frozenset[tuple[str, str]] = frozenset()) -> None:
     """Account for built-in workloads declaring retiring ServiceAccounts.
 
     Exact retained roots and typed UID ancestry qualify ownership, not process
@@ -315,6 +324,8 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                 if pod.get("serviceAccount", account) != account:
                     raise ValueError
                 identities[uid] = (namespace, account)
+                if identities[uid] in platform_subjects:
+                    raise ValueError  # Managed native identities are not application ServiceAccounts.
         roots: set[str] = set()
         for key, original in originals.items():
             uid = _uid(original)

@@ -51,6 +51,7 @@ from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_cutover import (
     fencing_inputs as fencing_inputs,
 )
+from tests.ops.test_nebius_pool_cutover import platform_writer_authority
 from tests.ops.test_nebius_pool_cutover import (
     retirement_inputs as retirement_inputs,
 )
@@ -150,6 +151,7 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
         "guards": guards, "actuators": request.fencing.retirement.actuators,
         "collectors": request.fencing.retirement.collectors, "roles": request.fencing.originals,
         "services": request.services, "collector_config": collector_config,
+        "platform_authority": platform_writer_authority(root.upgrade.setup.binding.kube_system_uid).model_dump(mode="json"),
         "profiles": profiles,
         "machine_token_files": token_paths, "foundation_candidate": "5" * 40}
     metadata = {"schema": "loom.nebius-pool-cutover-operation.v1", "operation_id": spec["operation_id"],
@@ -229,6 +231,7 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     assert context.request.management_origin == "https://" + root.deployment.public_host
     assert context.request.kubernetes_endpoint == "https://kubernetes.default.svc"
     assert context.request.fencing.retirement.migration.registration.binding == root.upgrade.setup.binding
+    assert context.request.platform_authority.model_dump(mode="json") == payload["platform_authority"]
     assert len(context.tokens) == len(payload["machine_token_files"])
     assert {path: path.read_bytes() for path in root.history} == before
     assert not Path(metadata["state_dir"]).exists()
@@ -236,7 +239,8 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
 
 @pytest.mark.parametrize("damage", ["hash", "extra_manager", "source", "installation", "cluster", "pool",
     "missing_database", "missing_actuator_credential", "partial_actuator_credential",
-    "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication"])
+    "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication",
+    "missing_platform", "platform_cluster", "platform_native_grant"])
 def test_private_cutover_rejects_unbound_inputs_before_transport_or_downtime(private_cutover, damage):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
@@ -275,6 +279,12 @@ def test_private_cutover_rejects_unbound_inputs_before_transport_or_downtime(pri
         Path(next(iter(payload["machine_token_files"].values()))).chmod(0o644)
     elif damage == "path":
         metadata["state_dir"] = str(Path(metadata["state_dir"]).parent / "foreign-state")
+    elif damage == "missing_platform":
+        payload.pop("platform_authority")
+    elif damage == "platform_cluster":
+        payload["platform_authority"]["kube_system_uid"] = str(uuid4())
+    elif damage == "platform_native_grant":
+        payload["platform_authority"]["resources"][2]["rules"][0]["verbs"].append("create")
     else:
         payload["publication"]["source_sha"] = "a" * 40
     if damage != "hash":

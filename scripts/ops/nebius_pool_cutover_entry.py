@@ -53,6 +53,7 @@ from scripts.ops.nebius_pool_origin_history import (
     KubectlPoolHistoryAPI,
     derive_management_history_target,
 )
+from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
 from scripts.ops.nebius_pool_registration import PoolRegistrationRequest
 from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
@@ -86,6 +87,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     roles: tuple[dict[str, Any], ...]
     services: tuple[dict[str, Any], ...]
     collector_config: dict[str, Any]
+    platform_authority: PoolPlatformAuthority
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     machine_token_files: dict[UUID, Path]
     foundation_candidate: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -157,6 +159,7 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
         if ((str(spec.operation_id), str(spec.installation_id), binding.namespace) !=
                 (str(operation_id), operation["installation_id"], operation["namespace"])
                 or str(spec.installation_id) != binding.installation_id
+                or str(inputs.platform_authority.kube_system_uid) != binding.kube_system_uid
                 or (spec.cluster_id, spec.node_group_id) != (config["cluster_id"], config["execution_node_group_id"])
                 or inputs.candidate.get("candidate_sha") != operation["candidate"]
                 or inputs.profile.get("candidate_sha") != operation["candidate"]
@@ -168,7 +171,7 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
             inputs.actuators, inputs.collectors), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
-            "https://kubernetes.default.svc")
+            "https://kubernetes.default.svc", inputs.platform_authority)
         cutover_documents(request)
         names = {row.machine_id for row in spec.machines}
         paths = set(inputs.machine_token_files.values())
