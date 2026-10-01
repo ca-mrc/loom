@@ -78,6 +78,9 @@ class CutoverAPI:
         if self.unqualified_preflight:
             raise ValueError("private-marker")
 
+    def qualify_binding(self, migration, manager):
+        assert migration == self.request.fencing.retirement.migration and manager == self.request.manager
+
     def qualify_quiescence(self):
         self.events.append("quiescence")
         if self.unqualified_queue or self.active_application_access:
@@ -456,3 +459,23 @@ def test_https_quiescence_requires_bound_database_pages_and_registered_origin_hi
             assert calls == [item for row in migration.guards for item in
                 [('database', row.participant_id, None), ('history', row.participant_id)]]
             assert external.events == ['quiescence']
+
+
+def test_https_cutover_refuses_a_history_reader_bound_to_another_manager(cutover_inputs):
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+
+    request, tokens = cutover_inputs
+    external = CutoverAPI(request)
+    migration = request.fencing.retirement.migration
+
+    def reject_binding(actual, manager):
+        assert actual == migration and manager == request.manager
+        raise ValueError('misbound management history')
+
+    history = SimpleNamespace(qualify_binding=reject_binding, qualify_pending_origins=lambda *_: None)
+    with pytest.raises(ValueError, match='misbound'):
+        with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
+            guards=SimpleNamespace(request=migration), checks=external, history=history,
+            api_server='https://cluster.example', ssl_context=ssl.create_default_context()):
+            pass
+    assert external.events == [] and external.patches == []

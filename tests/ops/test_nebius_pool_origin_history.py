@@ -82,6 +82,19 @@ def test_history_observer_binds_management_namespace_and_replays_only_reads(mana
     assert all(state.request.guards[0].namespace not in row for row in state.calls)
 
 
+def test_history_scope_rejects_another_manager_or_migration_before_any_command(management_history):
+    api, state = management_history
+    assert api.qualify_binding(state.request, state.target.controller) is None
+    wrong = copy.deepcopy(state.target.controller)
+    wrong['metadata']['uid'] = str(uuid4())
+    with pytest.raises(ValueError):
+        api.qualify_binding(state.request, wrong)
+    request = replace(state.request, guards=state.request.guards[:-1])
+    with pytest.raises(ValueError):
+        api.qualify_binding(request, state.target.controller)
+    assert state.calls == []
+
+
 @pytest.mark.parametrize('damage', ['database', 'secret', 'after_drift', 'participant', 'config', 'environment', 'report', 'origin', 'missing'])
 def test_management_history_rejects_identity_drift_or_unqualified_pages(management_history, damage):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
