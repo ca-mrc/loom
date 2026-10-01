@@ -306,6 +306,8 @@ def test_connected_readers_use_one_explicit_operator_authority_and_erase_tempora
     monkeypatch.setattr(entry, "connected_checks", connect)
     # This test owns transport lifetime; separate entry tests execute the runtime gate.
     monkeypatch.setattr(entry, "qualify_pool_runtime_databases", lambda *_args: None)
+    monkeypatch.setattr(entry, "qualify_pool_manager_database", lambda *_args: None)
+    monkeypatch.setattr(entry, "qualify_pool_provider", lambda *_args: None, raising=False)
     before = {path: path.read_bytes() for path in root.history}
     with entry.connected_pool_readers(context) as connected:
         path = connected.guards.kubeconfig
@@ -352,6 +354,8 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
         yield SimpleNamespace(_request=lambda *args: history_credential(root)), object(), "private-operator-token"
     monkeypatch.setattr(entry, "connected_checks", connect)
     monkeypatch.setattr(entry, "qualify_pool_runtime_databases", lambda *_args: None)
+    monkeypatch.setattr(entry, "qualify_pool_manager_database", lambda *_args: None)
+    monkeypatch.setattr(entry, "qualify_pool_provider", lambda *_args: None, raising=False)
     with pytest.raises(PoolMigrationError) as error:
         with entry.connected_pool_readers(context) as connected:
             path = connected.guards.kubeconfig
@@ -360,7 +364,7 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
     assert not path.exists()
 
 
-@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager"])
+@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider"])
 def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -375,7 +379,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     originals = [context.request.manager, *(row.controller for row in migration.guards), *context.request.services,
         *context.request.fencing.retirement.actuators]
     by_name = {(row['metadata']['namespace'], row['metadata']['name']): row for row in originals}
-    checked, kubeconfigs = [], []
+    checked, kubeconfigs, physical = [], [], []
     @contextmanager
     def connect(*args, **kwargs):
         yield SimpleNamespace(_request=lambda *args: history_credential(root)), object(), 'operator-fixture-token'
@@ -408,10 +412,17 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         if damage == 'manager':
             raise PoolMigrationError('management_runtime_database')
 
+    def provider_probe(selected, base):
+        assert selected == context
+        physical.append(True)
+        if damage == 'provider':
+            raise EntryError('pool cutover provider unqualified')
+
     monkeypatch.setattr(entry, 'connected_checks', connect)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_database', probe)
     monkeypatch.setattr(entry.KubectlPoolHistoryAPI, 'qualify_manager_database', manager_probe, raising=False)
+    monkeypatch.setattr(entry, 'qualify_pool_provider', provider_probe, raising=False)
     if damage:
         with pytest.raises(EntryError):
             with entry.connected_pool_readers(context):
@@ -419,6 +430,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     else:
         with entry.connected_pool_readers(context):
             assert set(checked) == set(by_name)
+            assert physical == [True]
         assert len(checked) == len(by_name)
     assert all(not path.exists() for path in kubeconfigs)
     assert not Path(metadata['state_dir']).exists()
@@ -527,6 +539,95 @@ def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(p
     else:
         entry.qualify_pool_manager_database(context, history)
         assert len(reads) == 2
+
+
+@pytest.mark.parametrize('damage', [None, 'ambient', 'cluster', 'group', 'project', 'quota', 'unavailable', 'config', 'late_config', 'credentials'])
+def test_pool_provider_preflight_binds_real_reader_and_live_configuration(collector_inputs, platform_inputs, tmp_path, monkeypatch, damage):
+    """Only SDK and Kubernetes transports are doubled; native quota parsing runs."""
+    from types import SimpleNamespace
+
+    from nebius.api.nebius.compute.v1 import PlatformServiceClient
+    from nebius.api.nebius.mk8s.v1 import NodeGroupServiceClient
+    from nebius.api.nebius.quotas.v1 import QuotaAllowanceServiceClient
+    from nebius.sdk import SDK
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+    from tests.unit.test_execution_capacity_collector import _enum, _node_group_spec, _platform_client, _quota
+
+    migration, _, configmap = copy.deepcopy(collector_inputs)
+    spec = migration.registration.spec
+    config = copy.deepcopy(platform_inputs[0])
+    config.update(cluster_id=spec.cluster_id, execution_node_group_id=spec.node_group_id)
+    credential = tmp_path / 'operator.json'
+    credential.write_text('{"private":"marker"}')
+    credential.chmod(0o600)
+    context = SimpleNamespace(request=SimpleNamespace(collector_config=configmap), inputs=SimpleNamespace(installation=spec),
+        original=SimpleNamespace(deployment=SimpleNamespace(installation=SimpleNamespace(foundation=SimpleNamespace(platform_config=config))),
+            original_inputs=SimpleNamespace(operator_cloud_credentials=credential)))
+    group = SimpleNamespace(metadata=SimpleNamespace(id=spec.node_group_id, parent_id=spec.cluster_id, resource_version=9),
+        spec=_node_group_spec(), status=SimpleNamespace(state=_enum('RUNNING'), node_count=0, target_node_count=0,
+            ready_node_count=0, reconciling=False, events=[]))
+    quotas = [_quota(parts[3], parts[4], 100 if name != 'storage' else 2000 * 1024**3, 0, index + 1)
+        for index, (name, parts) in enumerate(spec.quota_identities.items())]
+    if damage == 'cluster':
+        group.metadata.parent_id = 'foreign-cluster'
+    elif damage == 'group':
+        group.metadata.id = 'foreign-group'
+    elif damage == 'project':
+        configmap['data']['LOOM_EXECUTION_CAPACITY_COLLECTOR_NEBIUS_PROJECT_ID'] = 'foreign-project'
+    elif damage == 'quota':
+        quotas[0].status.unit = 'foreign-unit'
+    elif damage == 'unavailable':
+        group.status.state = _enum('DELETING')
+    elif damage == 'ambient':
+        for key in ('NEBIUS_PROJECT_ID', 'NEBIUS_NODE_GROUP_ID', 'QUOTA_MEMORY_NAME', 'KUBERNETES_ENDPOINT'):
+            monkeypatch.setenv('LOOM_EXECUTION_CAPACITY_COLLECTOR_' + key, 'foreign')
+    calls, closed = [], []
+
+    async def quota_read(_self, request, **kwargs):
+        calls.append('quotas')
+        assert request.parent_id == config['quota_parent_id']
+        return SimpleNamespace(items=quotas, next_page_token='')
+
+    async def group_read(_self, request, **kwargs):
+        calls.append('group')
+        assert request.id == spec.node_group_id
+        if damage == 'credentials':
+            credential.write_text('changed-private-marker')
+        return group
+
+    async def platform_read(_self, request, **kwargs):
+        assert request.parent_id == config['project_id']
+        return await _platform_client().get_by_name(request, **kwargs)
+
+    async def close(_self):
+        closed.append(True)
+
+    def get(method, path):
+        assert method == 'GET' and path == '/api/v1/namespaces/' + configmap['metadata']['namespace'] + '/configmaps/' + configmap['metadata']['name']
+        result = copy.deepcopy(configmap)
+        if damage == 'config' or (damage == 'late_config' and calls):
+            result['metadata']['uid'] = str(uuid4())
+        return result
+
+    # SDK methods themselves are the network boundary, not the capacity parser.
+    monkeypatch.setattr(SDK, '__init__', lambda *args, **kwargs: None)
+    monkeypatch.setattr(SDK, 'close', close)
+    monkeypatch.setattr(QuotaAllowanceServiceClient, '__init__', lambda *args, **kwargs: None)
+    monkeypatch.setattr(NodeGroupServiceClient, '__init__', lambda *args, **kwargs: None)
+    monkeypatch.setattr(PlatformServiceClient, '__init__', lambda *args, **kwargs: None)
+    monkeypatch.setattr(QuotaAllowanceServiceClient, 'list', quota_read)
+    monkeypatch.setattr(NodeGroupServiceClient, 'get', group_read)
+    monkeypatch.setattr(PlatformServiceClient, 'get_by_name', platform_read)
+    if damage not in {None, 'ambient'}:
+        with pytest.raises(EntryError) as error:
+            entry.qualify_pool_provider(context, SimpleNamespace(_request=get))
+        assert 'private' not in str(error.value)
+    else:
+        entry.qualify_pool_provider(context, SimpleNamespace(_request=get))
+        assert calls == ['quotas', 'group'] and closed == [True]
+    if calls:
+        assert closed == [True]
 
 
 @pytest.mark.parametrize("damage", ["failed_run", "unmerged", "failed_gate", "forged_app", "expired",
