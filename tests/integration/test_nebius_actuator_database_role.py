@@ -34,10 +34,12 @@ from tests.integration.test_service_execution_leases import (
 
 
 @pytest.fixture
-def global_role_database(platform_database):
+def global_role_database(platform_database):  # noqa: F811 -- imported shared fixture
     from tests.integration.conftest import _isolated_migration_database
 
-    yield from _isolated_migration_database(platform_database, template_name="template0", prepare_template=False)
+    url = make_url(platform_database).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
+    for database in _isolated_migration_database(url, template_name="template0", prepare_template=False):
+        yield make_url(database).set(drivername="postgresql").render_as_string(hide_password=False)
 
 
 @pytest.mark.parametrize("kind", ["execution", "build"])
@@ -71,9 +73,25 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
     schedulers = async_sessionmaker(scheduler, expire_on_commit=False)
     owner, candidate = str(uuid4()), "a" * 40
     try:
+        with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
+            for held_owner, held_candidate in ((None, None), (str(uuid4()), candidate), (owner, "f" * 40)):
+                if held_owner is not None:
+                    db.execute("INSERT INTO nebius_rollout_guard(id,owner,candidate_sha) VALUES(1,%s,%s)",
+                        (held_owner, held_candidate))
+                with pytest.raises(psycopg.errors.RaiseException, match="guard unqualified"):
+                    db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
+                db.rollback()
+                assert db.execute("SELECT has_table_privilege('loom_actuator','nebius_pool_execution_outbox','INSERT')").fetchone() == (False,)
+                db.execute("DELETE FROM nebius_rollout_guard")
         async with owners.begin() as session:
             assert (await acquire(session, owner=owner, candidate=candidate))["status"] == "acquired"
         with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
+            if kind == "build":
+                db.execute("DELETE FROM alembic_version")
+                with pytest.raises(psycopg.errors.RaiseException, match="not closed and idle"):
+                    db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
+                db.rollback()
+                db.execute("INSERT INTO alembic_version(version_num) VALUES('0172')")
             with db.cursor() as cursor:
                 cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 reports = []
@@ -83,6 +101,13 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                     if not cursor.nextset():
                         break
             assert reports == [({"status": "staged"},)]
+            if kind == "execution":
+                db.execute("GRANT UPDATE(mode) ON nebius_pool_bindings TO loom_actuator")
+                for action in ("observe", "stage"):
+                    with pytest.raises(psycopg.errors.RaiseException, match="management authority unqualified"):
+                        db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
+                    db.rollback()
+                db.execute("REVOKE UPDATE(mode) ON nebius_pool_bindings FROM loom_actuator")
         async with owners.begin() as session:
             await release(session, owner=owner, candidate=candidate)
         if kind == "execution":

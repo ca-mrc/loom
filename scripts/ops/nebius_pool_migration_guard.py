@@ -14,6 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
@@ -28,7 +29,82 @@ from scripts.ops.nebius_pool_migration import (
 from sqlalchemy.engine import make_url
 
 from loom.nebius_platform_render import digest
+from loom.nebius_rollout_guard import ACTIVITY_SQL, LOCK_KEY
 from loom_service.environment_management.candidates import _json
+
+
+def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
+    """Fixed participant ACL transition, never a general SQL or bootstrap flag.
+
+    Both actions require the exact durable idle guard. Staging adds only the
+    actuator's local journals and source-lock columns; it cannot open intake or
+    grant access to management capacity/credential state. Unknown exec results
+    are recovered with observation, not an automatic repeated write.
+    """
+    if (str(UUID(owner)) != owner or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
+            or action not in {"stage", "observe"}):
+        raise ValueError("pool_runtime_role_scope_unqualified")
+    grants = """
+        GRANT SELECT, INSERT, UPDATE ON nebius_pool_execution_outbox, nebius_pool_build_outbox TO loom_actuator;
+        GRANT SELECT ON tasks, batches TO loom_actuator;
+        GRANT UPDATE (registered_at) ON tasks TO loom_actuator;
+        GRANT UPDATE (pool_origin) ON batches TO loom_actuator;
+    """ if action == "stage" else ""
+    # pool_origin is immutable under the published trigger: the column grant
+    # permits source-row locks, not class promotion. Task content is read-only;
+    # its registration timestamp is the only non-content lock column.
+    return f"""BEGIN {'READ ONLY' if action == 'observe' else ''};
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
+DO $pool_runtime_role$
+DECLARE item RECORD;
+BEGIN
+    IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR NOT EXISTS (
+        SELECT 1 FROM nebius_rollout_guard WHERE id=1 AND owner='{owner}' AND candidate_sha='{candidate}'
+    ) THEN RAISE EXCEPTION 'pool runtime role guard unqualified'; END IF;
+    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0172' OR EXISTS (
+        SELECT 1 FROM ({ACTIVITY_SQL}) activity
+        WHERE trials<>0 OR executions<>0 OR builds<>0 OR build_cleanup<>0
+    ) OR EXISTS (SELECT 1 FROM nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released'))
+      OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released'))
+    THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
+        AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
+      OR EXISTS (SELECT 1 FROM pg_auth_members WHERE member='loom_actuator'::regrole)
+    THEN RAISE EXCEPTION 'pool runtime role identity unqualified'; END IF;
+    {grants}
+    FOR item IN SELECT unnest(ARRAY['nebius_pool_execution_outbox','nebius_pool_build_outbox']) AS name LOOP
+        IF NOT has_table_privilege('loom_actuator',item.name,'SELECT')
+          OR NOT has_table_privilege('loom_actuator',item.name,'INSERT')
+          OR NOT has_table_privilege('loom_actuator',item.name,'UPDATE')
+          OR has_table_privilege('loom_actuator',item.name,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+        THEN RAISE EXCEPTION 'pool runtime journal authority unqualified'; END IF;
+    END LOOP;
+    FOR item IN SELECT c.relname,a.attname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='public' AND c.relname IN ('tasks','batches')
+        AND a.attnum>0 AND NOT a.attisdropped LOOP
+        IF has_column_privilege('loom_actuator',format('public.%I',item.relname),item.attname,'UPDATE')
+           IS DISTINCT FROM ((item.relname='tasks' AND item.attname='registered_at')
+                          OR (item.relname='batches' AND item.attname='pool_origin'))
+        THEN RAISE EXCEPTION 'pool runtime source authority unqualified'; END IF;
+    END LOOP;
+    IF NOT has_table_privilege('loom_actuator','tasks','SELECT')
+      OR NOT has_table_privilege('loom_actuator','batches','SELECT')
+      OR has_table_privilege('loom_actuator','tasks','INSERT,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR has_table_privilege('loom_actuator','batches','INSERT,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+      OR has_any_column_privilege('loom_actuator','tasks','INSERT,REFERENCES')
+      OR has_any_column_privilege('loom_actuator','batches','INSERT,REFERENCES')
+    THEN RAISE EXCEPTION 'pool runtime source authority unqualified'; END IF;
+    FOR item IN SELECT unnest(ARRAY['nebius_pool_bindings','nebius_pool_participants','nebius_pool_requests',
+        'nebius_pool_machines','nebius_pool_machine_credentials','nebius_pool_captures','nebius_pool_observations',
+        'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations']) AS name LOOP
+        IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
+        THEN RAISE EXCEPTION 'pool runtime management authority unqualified'; END IF;
+    END LOOP;
+END $pool_runtime_role$;
+COMMIT;
+SELECT json_build_object('status','{'staged' if action == 'stage' else 'qualified'}');
+"""
 
 
 class KubectlPoolGuardAPI:
@@ -267,3 +343,22 @@ class KubectlPoolGuardAPI:
             return {"status": report["status"]}
         except Exception:
             raise PoolMigrationError("guard_" + action if action in {"observe", "acquire"} else "guard_scope") from None
+
+    def runtime_role(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
+        """Stage/qualify one exact participant DB; leave its intake closed."""
+        try:
+            if (action not in {"stage", "observe"} or target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            before = self._database(target)
+            query = pool_runtime_role_sql(owner=str(self.request.registration.spec.operation_id),
+                candidate=self.request.registration.candidate["candidate_sha"], action=action)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            if (report != {"status": "staged" if action == "stage" else "qualified"}
+                    or _uid(self._database(target)) != _uid(before)):
+                raise ValueError
+            return report
+        except Exception:
+            raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe"} else "runtime_role_scope") from None

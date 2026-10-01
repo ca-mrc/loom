@@ -2173,6 +2173,16 @@ qualified controller; the database path never acquires or releases a guard. The
 protected parent must supply the binding before retiring that controller.
 This direct-database binding rejects an unresolved pooled-engine override; the
 parent must qualify pooled-to-backend correspondence before using that topology.
+The same retained database binding supports a separate fixed runtime-role stage.
+It requires the exact idle rollout guard and schema, rejects privileged or
+role-member actuator identities, and grants only local outbox reads/inserts/updates
+and source-row lock columns. Task content, batch identity/provenance, management
+capacity/credentials and journal deletion remain denied; qualification includes
+column-specific grants. An uncertain stage response is recovered by a read-only
+qualification, not a repeated write. Neither action releases a guard or opens
+admission. Normal bootstrap retains pre-cutover permissions; a connected protected
+installer or refresh that replays bootstrap must restage and qualify these runtime
+permissions before reopening intake. This stage is not an installed cutover.
 An independent anchor and parent journal bind closure to registration; missing or
 changed recovery evidence cannot start another registration. Successful closure
 and registration explicitly leave writer migration incomplete. Controller
