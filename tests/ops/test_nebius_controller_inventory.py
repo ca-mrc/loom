@@ -58,7 +58,7 @@ def observe(cluster):
     return preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")["controller_inventory"]
 
 
-def test_discovers_guest_target_shared_database_reference_and_collector_group_without_secret_reads():
+def test_discovers_guest_target_and_collector_with_only_explicit_database_secret_read():
     cluster = Installed()
     report = observe(cluster)
     controllers = {row["name"]: row for row in report["controllers"]}
@@ -77,7 +77,8 @@ def test_discovers_guest_target_shared_database_reference_and_collector_group_wi
         "subjects": [{"kind": "ServiceAccount", "name": "actuator", "namespace": "execution"}],
         "rules": [{"verbs": ["create", "delete"], "resource_names": []}]}]
     assert "private-" not in json.dumps(report)
-    assert all(call[0] in {"get", "config"} and call[1] != "secret" for call in cluster.calls)
+    assert all(call[0] in {"get", "config"} for call in cluster.calls)
+    assert [call for call in cluster.calls if call[1] == "secret"] == [("get", "secret", "database", "execution")]
     assert "resolved_database_identity" in report["unverified"]
 
 

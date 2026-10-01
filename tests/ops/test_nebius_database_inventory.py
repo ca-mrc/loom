@@ -46,18 +46,21 @@ def test_shared_credential_references_are_resolved_once_without_exposing_authent
 
 
 @pytest.mark.parametrize('damage', ['host_query', 'database_query', 'service_query', 'port_query', 'fragment', 'invalid_port',
-    'scheme', 'bad_encoding', 'deleting', 'wrong_name', 'wrong_namespace', 'missing_uid', 'missing_version', 'missing_key', 'read_error'])
+    'zero_port', 'duplicate_query', 'scheme', 'bad_encoding', 'deleting', 'wrong_name', 'wrong_namespace', 'missing_uid', 'missing_version', 'missing_key', 'read_error'])
 def test_ambiguous_or_unqualified_database_endpoint_is_not_reported(damage, monkeypatch):
     cluster = Databases()
     url = 'postgresql://private-user:private-password@loom-postgres.platform.svc:5432/loom'
     if damage.endswith('_query'):
         query = {'host_query': 'host=private-host', 'database_query': 'dbname=private-db',
-            'service_query': 'service=private-service', 'port_query': 'port=5433'}[damage]
+            'service_query': 'service=private-service', 'port_query': 'port=5433',
+            'duplicate_query': 'sslmode=verify-full&sslmode=disable'}[damage]
         url += '?' + query
     elif damage == 'fragment':
         url += '#private-fragment'
     elif damage == 'invalid_port':
         url = url.replace(':5432/', ':65536/')
+    elif damage == 'zero_port':
+        url = url.replace(':5432/', ':0/')
     elif damage == 'scheme':
         url = url.replace('postgresql:', 'https:')
     cluster.secret['data']['actuator-url'] = base64.b64encode(url.encode()).decode()
