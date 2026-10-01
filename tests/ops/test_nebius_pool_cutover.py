@@ -410,3 +410,49 @@ def test_https_resource_stage_routes_only_fixed_catalog_secrets_and_gateway_auth
             with pytest.raises(ValueError):
                 api.create_resource(marked)
         assert not calls  # Rejected before even an operator request.
+
+
+@pytest.mark.parametrize('damage', [None, 'schema', 'origin_history', 'unknown_origin'])
+def test_https_quiescence_requires_bound_database_pages_and_registered_origin_history(cutover_inputs, monkeypatch, damage):
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+
+    from loom.nebius_pool_priority import PoolWorkOriginV1
+
+    request, tokens = cutover_inputs
+    migration = request.fencing.retirement.migration
+    calls = []
+    external = CutoverAPI(request)
+
+    def database_page(target, *, after):
+        calls.append(('database', target.participant_id, after))
+        assert target in migration.guards and after is None
+        participant = next(row for row in migration.registration.spec.participants
+            if row.participant_id == target.participant_id)
+        return {'status': 'observed', 'schema_revision': '0171' if damage == 'schema' else '0172', 'rows': [{
+            'key': 'batch:' + str(participant.participant_id), 'source_matches': True,
+            'origin': None if damage == 'unknown_origin' else {
+                'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
+                'submission_id': str(participant.participant_id), 'kind': 'environment', 'application': None}}]}
+
+    def registered_origins(target, origins):
+        assert target in migration.guards
+        assert len(origins) == 1 and isinstance(origins[0], PoolWorkOriginV1)
+        calls.append(('history', target.participant_id))
+        if damage == 'origin_history':
+            raise ValueError('private-marker')
+
+    external.qualify_pending_origins = registered_origins
+    guards = SimpleNamespace(request=migration, cutover_readiness_page=database_page)
+    with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
+            guards=guards, checks=external, api_server='https://cluster.example',
+            ssl_context=ssl.create_default_context()) as api:
+        monkeypatch.setattr(api, '_scope', lambda: None)
+        if damage:
+            with pytest.raises(ValueError):
+                api.qualify_quiescence()
+            assert external.events == []
+        else:
+            api.qualify_quiescence()
+            assert calls == [item for row in migration.guards for item in
+                [('database', row.participant_id, None), ('history', row.participant_id)]]
+            assert external.events == ['quiescence']
