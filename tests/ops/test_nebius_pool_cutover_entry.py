@@ -360,7 +360,7 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
     assert not path.exists()
 
 
-@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop"])
+@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager"])
 def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -372,7 +372,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     metadata, _, root = private_cutover
     context = entry.load_pool_cutover_inputs(metadata)
     migration = context.request.fencing.retirement.migration
-    originals = [*(row.controller for row in migration.guards), *context.request.services,
+    originals = [context.request.manager, *(row.controller for row in migration.guards), *context.request.services,
         *context.request.fencing.retirement.actuators]
     by_name = {(row['metadata']['namespace'], row['metadata']['name']): row for row in originals}
     checked, kubeconfigs = [], []
@@ -401,9 +401,17 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         if damage == component:
             raise PoolMigrationError('runtime_database')
 
+    def manager_probe(self):
+        assert self.target.controller == context.request.manager
+        checked.append((self.target.namespace, 'loom-service'))
+        kubeconfigs.append(self.kubeconfig)
+        if damage == 'manager':
+            raise PoolMigrationError('management_runtime_database')
+
     monkeypatch.setattr(entry, 'connected_checks', connect)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_database', probe)
+    monkeypatch.setattr(entry.KubectlPoolHistoryAPI, 'qualify_manager_database', manager_probe, raising=False)
     if damage:
         with pytest.raises(EntryError):
             with entry.connected_pool_readers(context):
@@ -469,6 +477,56 @@ def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_ret
     else:
         entry.qualify_pool_runtime_databases(context, guards)
         assert len(set(reads)) == 3 * len(migration.guards)
+
+
+@pytest.mark.parametrize('damage', [None, 'running_again', 'backend', 'credential_drift'])
+def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(private_cutover, damage):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from scripts.ops.nebius_pool_origin_history import derive_management_history_target
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    metadata, _, root = private_cutover
+    context = entry.load_pool_cutover_inputs(metadata)
+    api = CutoverAPI(context.request)
+    for document in api.documents.values():
+        document['metadata'].setdefault('resourceVersion', '1')
+    stage_pool_cutover(request=context.request, tokens=context.tokens, api=api,
+        state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+    target = derive_management_history_target(original=context.original, predecessor=context.predecessor, credential=history_credential(root))
+    reads = []
+
+    def get(kind, name, namespace):
+        assert kind == 'deployment' and (namespace, name) == (target.namespace, 'loom-service')
+        value = copy.deepcopy(api.documents['Deployment:' + namespace + ':' + name])
+        if damage == 'running_again':
+            value['spec']['replicas'] = 1
+        return value
+
+    def credential(original, **binding):
+        assert original == context.request.manager
+        assert binding == {'url_variable': 'LOOM_SVC_DB_URL', 'credential_uid': target.database.credential_uid,
+            'credential_resource_version': target.database.credential_resource_version}
+        reads.append(True)
+        if damage == 'credential_drift' and len(reads) > 1:
+            raise ValueError('private-marker')
+        return 'postgresql+psycopg://fixture:private-marker@loom-postgres.' + (
+            'foreign' if damage == 'backend' else target.namespace) + '.svc:5432/loom'
+
+    history = SimpleNamespace(request=context.request.fencing.retirement.migration, target=target, _get=get,
+        qualify_binding=lambda request, manager: None,
+        _database=lambda selected, **kwargs: {'metadata': {'uid': target.database.statefulset['metadata']['uid']}},
+        _workload_database_url=credential,
+        qualify_manager_database=lambda: pytest.fail('attempted exec in a retired manager'))
+    if damage:
+        with pytest.raises(EntryError):
+            entry.qualify_pool_manager_database(context, history)
+    else:
+        entry.qualify_pool_manager_database(context, history)
+        assert len(reads) == 2
 
 
 @pytest.mark.parametrize("damage", ["failed_run", "unmerged", "failed_gate", "forged_app", "expired",

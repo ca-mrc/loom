@@ -88,6 +88,81 @@ def test_history_observer_binds_management_namespace_and_replays_only_reads(mana
     assert all(state.request.guards[0].namespace not in row for row in state.calls)
 
 
+@pytest.mark.parametrize('damage', [None, 'settings', 'pooled_settings', 'pod', 'secret', 'history', 'backend'])
+def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage):
+    """A template Secret alone cannot qualify the manager's effective settings."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = management_history
+    manager = copy.deepcopy(state.target.controller)
+    manager['spec']['selector'] = {'matchLabels': {'app': 'loom-service'}}
+    manager['spec']['template']['metadata']['labels'] = {'app': 'loom-service'}
+    state.target = replace(state.target, controller=copy.deepcopy(manager))
+    # Reconstruct the real reader so its immutable history hash binds this input.
+    selected = type(api)(request=api.request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    manager['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
+    namespace = state.target.namespace
+    replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': 'loom-service-abc',
+        'namespace': namespace, 'uid': str(uuid4()), 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
+            'name': 'loom-service', 'uid': manager['metadata']['uid'], 'controller': True}]},
+        'spec': {'template': copy.deepcopy(manager['spec']['template'])}}
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'loom-service-abc-def', 'namespace': namespace,
+        'uid': str(uuid4()), 'labels': {'app': 'loom-service'}, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet',
+            'name': replica['metadata']['name'], 'uid': replica['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(manager['spec']['template']['spec']),
+        'status': {'phase': 'Running', 'containerStatuses': [{'name': 'loom-service', 'ready': True}]}}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
+    environment.update(LOOM_SVC_DB_URL=base64.b64decode(state.secret['data']['service-url']).decode(),
+        LOOM_SVC_MINIO_ACCESS_KEY='fixture', LOOM_SVC_MINIO_SECRET_KEY='fixture')
+    if damage in {'settings', 'pooled_settings'}:
+        environment['LOOM_SVC_DB_URL_POOL' if damage == 'pooled_settings' else 'LOOM_SVC_DB_URL'] = (
+            'postgresql+psycopg://foreign:private-marker@loom-postgres.foreign.svc:5432/loom')
+    elif damage == 'history':
+        selected.target.controller['metadata']['uid'] = str(uuid4())
+    elif damage == 'backend':
+        state.database['metadata']['uid'] = str(uuid4())
+    processes = []
+
+    def run(args):
+        if args[0] == 'exec':
+            assert args[:9] == ['exec', '-n', namespace, 'pod/loom-service-abc-def', '-c', 'loom-service', '--', 'python', '-c']
+            result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False, timeout=30,
+                cwd=api.kubeconfig.parent, env=environment)
+            processes.append(result)
+            if result.returncode:
+                raise ValueError('private-transport-marker')
+            if damage == 'secret':
+                state.secret['metadata']['resourceVersion'] = 'different'
+            return json.loads(result.stdout)
+        if args[:2] == ['get', 'deployment']:
+            assert args[2:5] == ['loom-service', '-n', namespace]
+            return copy.deepcopy(manager)
+        if args[:2] == ['get', 'replicaset']:
+            return copy.deepcopy(replica)
+        if args[:2] == ['get', '--raw'] and args[2] == f'/api/v1/namespaces/{namespace}/pods?labelSelector=app%3Dloom-service&limit=100':
+            observed = copy.deepcopy(pod)
+            if damage == 'pod' and processes:
+                observed['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [observed]}
+        return api._run(args)
+
+    monkeypatch.setattr(selected, '_run', run)
+    if damage:
+        with pytest.raises(PoolMigrationError) as error:
+            selected.qualify_manager_database()
+        assert error.value.stage == 'management_runtime_database'
+    else:
+        selected.qualify_manager_database()
+        assert len(processes) == 1 and json.loads(processes[0].stdout) == {'status': 'qualified'}
+    assert all('private-marker' not in (row.stdout + row.stderr).decode() for row in processes)
+    assert not state.executed  # No SQL query or write is part of this probe.
+
+
 @pytest.mark.parametrize('override', [
     {'value': 'postgresql+psycopg://foreign:private-marker@foreign.svc/loom'},
     {'valueFrom': {'secretKeyRef': {'name': 'foreign-db', 'key': 'url'}}},
