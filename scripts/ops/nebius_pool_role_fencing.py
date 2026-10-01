@@ -142,6 +142,121 @@ def role_fence_documents(request: PoolRoleFenceRequest) -> dict[str, dict[str, A
         raise ValueError("pool_role_fence_inputs_unqualified") from None
 
 
+def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
+                                     inventory: dict[str, list[dict[str, Any]]], *,
+                                     staged_authority: dict[str, dict[str, Any]] | None = None) -> None:
+    """Qualify affected bindings without declaring unrelated authority fenced.
+
+    Complete RBAC discovery protects both sides of a Role reduction: no foreign
+    subject may share a retained Role, and no retired identity may keep an extra
+    named, group or cross-namespace grant. Native/operator identities are NOT
+    exempted by name: unrelated bindings are left unchanged, not attested safe.
+    Effective rules reviews remain mandatory after the reductions. The parent
+    still owns complete external-writer and runtime/backend qualification.
+    """
+    try:
+        originals = {_key(row): row for row in request.originals}
+        staged = {} if staged_authority is None else staged_authority
+        targets = role_fence_documents(request)
+        subjects, _ = role_fence_review_scope(request)
+        writer_namespaces = {namespace.name for participant in request.retirement.migration.registration.spec.participants
+            for namespace in (participant.execution_namespace, participant.build_namespace)}
+        expected_subjects = {}
+        for row in participant_readonly_roles(request=request.retirement.migration):
+            if row["kind"] == "RoleBinding":
+                key = "Role:" + row["metadata"]["namespace"] + ":" + row["roleRef"]["name"]
+                expected_subjects[key] = {(item["namespace"], item["name"]) for item in row["subjects"]}
+        kinds = {"roles": "Role", "clusterroles": "ClusterRole",
+            "rolebindings": "RoleBinding", "clusterrolebindings": "ClusterRoleBinding"}
+        if set(inventory) != set(kinds):
+            raise ValueError
+        documents: dict[str, dict[str, Any]] = {}
+        uids: set[str] = set()
+        for resource, kind in kinds.items():
+            for row in inventory[resource]:
+                metadata = row["metadata"]
+                uid, key = _uid(row), _key(row)
+                if (row.get("apiVersion") != "rbac.authorization.k8s.io/v1" or row.get("kind") != kind
+                        or not isinstance(metadata.get("name"), str) or not metadata["name"]
+                        or not isinstance(metadata.get("resourceVersion"), str) or not metadata["resourceVersion"]
+                        or (kind in {"Role", "RoleBinding"}) != bool(metadata.get("namespace"))
+                        or key in documents or uid in uids):
+                    raise ValueError
+                documents[key], uids = row, uids | {uid}
+        for key, original in originals.items():
+            actual = documents[key]
+            if not any(_matches(actual, wanted, _uid(original)) for wanted in (original, targets[key])):
+                raise ValueError
+
+        def accounts(subject: dict[str, Any]) -> set[tuple[str, str]]:
+            kind, name = subject["kind"], subject["name"]
+            if not isinstance(name, str) or not name or len(name) > 1024:
+                raise ValueError
+            if kind == "ServiceAccount":
+                if (subject.keys() - {"kind", "name", "namespace", "apiGroup"}
+                        or subject.get("apiGroup", "") != "" or not subject.get("namespace")):
+                    raise ValueError
+                return {(subject["namespace"], name)}
+            if (kind not in {"User", "Group"} or set(subject) != {"kind", "name", "apiGroup"}
+                    or subject["apiGroup"] != "rbac.authorization.k8s.io"):
+                raise ValueError
+            return {(namespace, account) for namespace, account in subjects
+                if (kind == "User" and name == f"system:serviceaccount:{namespace}:{account}")
+                or (kind == "Group" and name in {"system:authenticated", "system:serviceaccounts",
+                    "system:serviceaccounts:" + namespace})}
+
+        found = set()
+        for resource in ("rolebindings", "clusterrolebindings"):
+            for binding in inventory[resource]:
+                reference = binding["roleRef"]
+                namespace = binding["metadata"].get("namespace", "-")
+                if (set(reference) != {"apiGroup", "kind", "name"}
+                        or reference["apiGroup"] != "rbac.authorization.k8s.io"
+                        or reference["kind"] not in {"Role", "ClusterRole"}
+                        or (resource == "clusterrolebindings" and reference["kind"] != "ClusterRole")):
+                    raise ValueError
+                key = reference["kind"] + ":" + (namespace if reference["kind"] == "Role" else "-") + ":" + reference["name"]
+                role = documents[key]
+                entries = binding.get("subjects", [])
+                if not isinstance(entries, list) or len(entries) > 1000:
+                    raise ValueError
+                identities = [accounts(entry) for entry in entries]
+                binding_key = _key(binding)
+                if binding_key in staged:
+                    if (key not in staged or not _matches(binding, staged[binding_key], _uid(staged[binding_key]))
+                            or not _matches(role, staged[key], _uid(staged[key]))):
+                        raise ValueError
+                elif key in originals:
+                    _snapshot(binding)
+                    if (not identities or any(entry["kind"] == "Group" or not identity
+                            or not identity <= expected_subjects[key] for entry, identity in zip(entries, identities, strict=True))
+                            or set().union(*identities) != expected_subjects[key]):
+                        raise ValueError
+                    found.add(key)
+                elif any(identity & set(subjects) for identity in identities):
+                    _snapshot(binding)
+                    if "aggregationRule" in role:
+                        raise ValueError
+                    rules = role.get("rules", [])
+                    qualify_pool_reader_rules({"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
+                        "spec": {}, "status": {"incomplete": False,
+                            "resourceRules": [rule for rule in rules if "nonResourceURLs" not in rule],
+                            "nonResourceRules": [rule for rule in rules if "nonResourceURLs" in rule],
+                            "evaluationError": ""}}, namespace=namespace)
+                elif namespace in writer_namespaces:
+                    # A separate subject with explicit Job writes in operation
+                    # scope is not authorized merely because our old SAs differ.
+                    for rule in role.get("rules", []):
+                        if (set(rule.get("apiGroups", [])) & {"batch", "*"}
+                                and set(rule.get("resources", [])) & {"jobs", "*"}
+                                and set(rule.get("verbs", [])) & {"*", "create", "update", "patch", "delete", "deletecollection"}):
+                            raise ValueError
+        if found != set(originals):
+            raise ValueError
+    except Exception:
+        raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
+
+
 def fence_pool_roles(*, request: PoolRoleFenceRequest, api: PoolRoleFenceAPI,
                      state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     try:

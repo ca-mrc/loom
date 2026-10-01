@@ -5,6 +5,7 @@ import asyncio
 import copy
 import os
 import ssl
+import sys
 import time
 from dataclasses import replace
 from uuid import UUID
@@ -134,13 +135,52 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
         tls.load_cert_chain(configuration.cert_file, configuration.key_file)
         methods = []
         with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=guards, guards=guards, checks=Checks(), history=Checks(),
-                api_server=configuration.host, ssl_context=tls) as api:
+                api_server=configuration.host, ssl_context=tls,
+                state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor") as api:
             for http in (api.client, api.retirement.client, api.fencing.client):
                 http.event_hooks["request"].append(lambda message: methods.append((message.method, message.url.path, str(message.url.query))))
+            original_role = request.fencing.originals[0]
+            role_namespace = original_role["metadata"]["namespace"]
+            await asyncio.to_thread(rbac.create_namespaced_role_binding, role_namespace, {
+                "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                "metadata": {"name": "foreign-shares-retained-role"},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": original_role["metadata"]["name"]},
+                "subjects": [{"kind": "ServiceAccount", "name": "default", "namespace": "kube-system"}]})
+            with pytest.raises(ValueError, match="preserve_evidence"):
+                await asyncio.to_thread(stage_pool_cutover, request=request, tokens=tokens, api=api,
+                    state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
+            assert not (tmp_path / "cutover").exists()
+            assert methods and all(method == "GET" for method, _path, _query in methods)
+            await asyncio.to_thread(rbac.delete_namespaced_role_binding, "foreign-shares-retained-role", role_namespace)
+            methods.clear()
+
+            def observed_stage():
+                # Only disposable-fixture source locations; never exception
+                # values, credentials, manifests or production diagnostics.
+                failures = []
+                def trace(frame, event, value):
+                    if not frame.f_code.co_filename.endswith(("nebius_pool_cutover_live.py", "nebius_pool_role_fencing.py")):
+                        return None
+                    if event == "exception" and issubclass(value[0], Exception):
+                        failures.append((frame.f_code.co_name, frame.f_lineno, value[0].__name__))
+                        key = frame.f_locals.get("key")
+                        if value[0] is KeyError and isinstance(key, str) and key.startswith(("Role:", "ClusterRole:")):
+                            failures.append(("unresolved RBAC reference", key))
+                    return trace
+                prior = sys.gettrace()
+                sys.settrace(trace)
+                try:
+                    return stage_pool_cutover(request=request, tokens=tokens, api=api,
+                        state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
+                except Exception:
+                    print("disposable cutover qualification locations:", failures)
+                    raise
+                finally:
+                    sys.settrace(prior)
+
             deadline = time.monotonic() + 120
             while True:
-                result = await asyncio.to_thread(stage_pool_cutover, request=request, tokens=tokens, api=api,
-                    state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
+                result = await asyncio.to_thread(observed_stage)
                 if result["status"] == "pool_runtime_staged_closed":
                     break
                 assert result["status"] in {"pending_producer_update", "pending_producer_drain", "pending_drain",

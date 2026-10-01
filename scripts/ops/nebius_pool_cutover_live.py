@@ -9,15 +9,22 @@ from __future__ import annotations
 import copy
 import json
 import ssl
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlencode
 from uuid import UUID
 
+from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
+from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_stage import (
     _MARKER,
     HTTPSManagementStageAPI,
+    _comparison_snapshot,
     _qualified_defaulted,
+    _validate_record,
 )
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
@@ -27,14 +34,17 @@ from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
     PoolMigrationAPI,
     PoolMigrationRequest,
+    _hash,
 )
 from scripts.ops.nebius_pool_migration_guard import qualify_cutover_readiness_page
 from scripts.ops.nebius_pool_retirement import (
+    _closed,
     qualify_closed_workload_drain,
     retirement_documents,
     stopped_document,
 )
 from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
+from scripts.ops.nebius_pool_role_fencing import qualify_retained_writer_bindings
 from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 
 from loom.nebius_platform_render import digest
@@ -63,11 +73,18 @@ class PoolCutoverGuards(Protocol):
 class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
     def __init__(self, *, request: PoolCutoverRequest, tokens: dict[UUID, str], migration: PoolMigrationAPI,
                  guards: PoolCutoverGuards, checks: PoolCutoverChecks, history: PoolCutoverHistory, api_server: str,
-                 ssl_context: ssl.SSLContext, token: str | None = None):
+                 ssl_context: ssl.SSLContext, token: str | None = None,
+                 state_dir: Path | None = None, anchor_dir: Path | None = None):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
         history.qualify_binding(guards.request, request.manager)
+        if ((state_dir is None) != (anchor_dir is None)
+                or (state_dir is not None and anchor_dir is not None and (
+                    state_dir != state_dir.resolve() or anchor_dir != anchor_dir.resolve()
+                    or state_dir == anchor_dir or state_dir in anchor_dir.parents or anchor_dir in state_dir.parents))):
+            raise ValueError("pool cutover journal binding differs")
+        self.state_dir, self.anchor_dir = state_dir, anchor_dir
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
         self.history = history
         self.binding = registration.binding
@@ -137,7 +154,108 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         if request != self.request:
             raise ValueError("pool cutover request differs")
         self._scope()
+        self.qualify_writer_bindings()
         self.checks.preflight(request)
+        self.qualify_writer_bindings()
+
+    def _recorded_writer_authority(self, inventory: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
+        """Observe approved successor grants, including uncertain CREATE intents.
+
+        An operation label or desired renderer alone never approves a writer.
+        Parent anchor, retained closed/fenced receipts and authority-stage intent
+        must correspond. No journal update, CREATE retry or resource adoption.
+        """
+        state, anchor = self.state_dir, self.anchor_dir
+        if state is None or anchor is None:
+            return {}
+        spec = self.guards.request.registration.spec
+        marker = anchor / (str(spec.operation_id) + "-cutover.json")
+        parent_path, path = state / "cutover.json", state / "authority" / "stage.json"
+        if not marker.exists() and not marker.is_symlink():
+            if any(item.exists() or item.is_symlink() for item in (parent_path, path)):
+                raise ValueError
+            return {}
+        identity = {"schema": "loom.nebius-pool-cutover.v1", "operation_id": str(spec.operation_id),
+            "state_dir": str(state), "contract_sha256": self.contract_sha256}
+        record = json.loads(private_state._private_read(parent_path, limit=4 * 1024**2))
+        if (json.loads(private_state._private_read(marker)) != identity
+                or set(record) != {*identity, "producers", "fenced", "runtime_access", "phases", "runtime"}
+                or any(record[key] != value for key, value in identity.items())
+                or not isinstance(record["phases"], dict)):
+            raise ValueError
+        if "authority" not in record["phases"]:
+            if path.exists() or path.is_symlink():
+                raise ValueError
+            return {}
+        fenced = record["fenced"]
+        if (not isinstance(fenced, dict) or set(fenced) != {"migration.json", "retirement.json", "role-fencing.json"}
+                or any(_hash(state / "writers" / name) != checksum for name, checksum in fenced.items())):
+            raise ValueError
+        _closed(self.guards.request, state / "writers", state / "writer-anchor")
+        # An interrupted stage may have recorded its parent intent before its
+        # child file exists. No successor is approved until the child intent does.
+        checksum = record["phases"]["authority"]
+        if not path.exists() and not path.is_symlink():
+            if checksum is not None:
+                raise ValueError
+            return {}
+        if checksum is not None and checksum != _hash(path):
+            raise ValueError
+        documents = {_key(row): row for row in self.catalog["authority"]}
+        stage = json.loads(private_state._private_read(path, limit=4 * 1024**2))
+        _validate_record(stage, {"schema": "loom.nebius-management-stage.v1", "binding": asdict(self.binding),
+            "revision": digest(documents), "phase": "pool-cutover-authority"}, documents)
+        live = {_key(row): row for rows in inventory.values() for row in rows}
+        approved = {}
+        for key, item in stage["resources"].items():
+            actual = live.get(key)
+            if checksum is not None and item["status"] != "created":
+                raise ValueError
+            if item["status"] == "prepared":
+                if actual is not None:
+                    raise ValueError
+                continue
+            if actual is None:
+                if item["status"] == "created":
+                    raise ValueError
+                continue
+            # Aggregation is authority, not an API-server default. A partial
+            # stage's contains-oriented dry-run record cannot approve it.
+            if "aggregationRule" in actual:
+                raise ValueError
+            if (_comparison_snapshot(actual) != item["expected"]
+                    or (item["status"] == "created" and (
+                        _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]))):
+                raise ValueError
+            approved[key] = actual
+        return approved
+
+    def qualify_writer_bindings(self) -> None:
+        """Complete live discovery, not a supplied writer list or replica count."""
+        try:
+            revision: str | None = None
+
+            def read(method: str, path: str) -> dict[str, Any] | None:
+                nonlocal revision
+                # One API-server snapshot for all four RBAC collections. A
+                # continuation already pins its initial revision and cannot be
+                # combined with an explicit resourceVersion query.
+                if revision is not None and "continue=" not in path:
+                    path += "&" + urlencode({"resourceVersion": revision, "resourceVersionMatch": "Exact"})
+                page = self._request(method, path)
+                current = None if page is None else page.get("metadata", {}).get("resourceVersion")
+                if not isinstance(current, str) or not 0 < len(current) <= 1024 or revision not in (None, current):
+                    raise ValueError
+                revision = current
+                return page
+
+            inventory = {resource: inventory_resources(read, "rbac.authorization.k8s.io/v1", resource, kind)
+                for resource, kind in (("roles", "Role"), ("clusterroles", "ClusterRole"),
+                    ("rolebindings", "RoleBinding"), ("clusterrolebindings", "ClusterRoleBinding"))}
+            qualify_retained_writer_bindings(self.request.fencing, inventory,
+                staged_authority=self._recorded_writer_authority(inventory))
+        except Exception:
+            raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
 
     def qualify_quiescence(self) -> None:
         self._scope()

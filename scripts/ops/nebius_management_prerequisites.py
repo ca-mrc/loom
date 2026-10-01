@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -34,6 +35,54 @@ from loom_service.environment_management.deployment import RenderedManagement
 
 class ManagementPrerequisiteError(RuntimeError):
     """Private credential, artifact and inventory contents must not escape."""
+
+
+def inventory_resources(request: Callable[[str, str], dict[str, Any] | None],
+                        api: str, resource: str, kind: str) -> list[dict[str, Any]]:
+    """Fixed read-only collections; incomplete or unstable pages never qualify."""
+    collections = {("v1", "nodes", "Node"), ("v1", "pods", "Pod"),
+        ("v1", "persistentvolumeclaims", "PersistentVolumeClaim"),
+        ("networking.k8s.io/v1", "ingresses", "Ingress"),
+        ("autoscaling/v2", "horizontalpodautoscalers", "HorizontalPodAutoscaler"),
+        *(("apps/v1", resource, kind) for resource, kind in (
+            ("deployments", "Deployment"), ("statefulsets", "StatefulSet"),
+            ("replicasets", "ReplicaSet"), ("daemonsets", "DaemonSet"))),
+        ("batch/v1", "jobs", "Job"), ("batch/v1", "cronjobs", "CronJob"),
+        *(("rbac.authorization.k8s.io/v1", resource, kind) for resource, kind in (
+            ("roles", "Role"), ("clusterroles", "ClusterRole"),
+            ("rolebindings", "RoleBinding"), ("clusterrolebindings", "ClusterRoleBinding")))}
+    try:
+        if (api, resource, kind) not in collections:
+            raise ValueError()
+        prefix = "/api/v1/" if api == "v1" else "/apis/" + api + "/"
+        token, version = "", None
+        seen: set[str] = set()
+        result: list[dict[str, Any]] = []
+        for _ in range(30):
+            query = {"limit": "100", **({"continue": token} if token else {})}
+            if kind == "Pod":
+                query["fieldSelector"] = "status.phase!=Succeeded,status.phase!=Failed"
+            page = request("GET", prefix + resource + "?" + urlencode(query))
+            if (page is None or page.get("apiVersion") != api or page.get("kind") != kind + "List"
+                    or not isinstance(page.get("items"), list) or len(page["items"]) > 100
+                    or not page.get("metadata", {}).get("resourceVersion")
+                    or any(row.get("apiVersion", api) != api or row.get("kind", kind) != kind for row in page["items"])):
+                raise ValueError()
+            current = page["metadata"]["resourceVersion"]
+            if version is not None and current != version:
+                raise ValueError()
+            version = current
+            # Kubernetes typed lists omit TypeMeta from individual items.
+            result.extend({"apiVersion": api, "kind": kind, **row} for row in page["items"])
+            token = page["metadata"].get("continue", "")
+            if not token:
+                return result
+            if not isinstance(token, str) or token in seen:
+                raise ValueError()
+            seen.add(token)
+        raise ValueError()
+    except Exception:
+        raise ManagementPrerequisiteError("management resource inventory unqualified") from None
 
 
 class ManagementPrerequisiteSettings(BaseModel):
@@ -90,48 +139,7 @@ class HTTPSManagementPrerequisites(ManagementKubernetesTransport):
 
     def inventory(self, api: str, resource: str, kind: str) -> list[dict[str, Any]]:
         """Only fixed prerequisite collections, with complete stable pagination."""
-        collections = {("v1", "nodes", "Node"), ("v1", "pods", "Pod"),
-                       ("v1", "persistentvolumeclaims", "PersistentVolumeClaim"),
-                       ("networking.k8s.io/v1", "ingresses", "Ingress"),
-                       ("autoscaling/v2", "horizontalpodautoscalers", "HorizontalPodAutoscaler"),
-                       *(("apps/v1", resource, kind) for resource, kind in (
-                           ("deployments", "Deployment"), ("statefulsets", "StatefulSet"),
-                           ("replicasets", "ReplicaSet"), ("daemonsets", "DaemonSet"))),
-                       ("batch/v1", "jobs", "Job"), ("batch/v1", "cronjobs", "CronJob")}
-        try:
-            if (api, resource, kind) not in collections:
-                raise ValueError()
-            prefix = "/api/v1/" if api == "v1" else "/apis/" + api + "/"
-            token, version = "", None
-            seen: set[str] = set()
-            result: list[dict[str, Any]] = []
-            for _ in range(30):
-                query = {"limit": "100", **({"continue": token} if token else {})}
-                if kind == "Pod":
-                    query["fieldSelector"] = "status.phase!=Succeeded,status.phase!=Failed"
-                page = self._request("GET", prefix + resource + "?" + urlencode(query))
-                if (page is None or page.get("apiVersion") != api or page.get("kind") != kind + "List"
-                        or not isinstance(page.get("items"), list) or len(page["items"]) > 100
-                        or not page.get("metadata", {}).get("resourceVersion")
-                        or any(row.get("apiVersion", api) != api or row.get("kind", kind) != kind for row in page["items"])):
-                    raise ValueError()
-                current = page["metadata"]["resourceVersion"]
-                if version is not None and current != version:
-                    raise ValueError()
-                version = current
-                # Typed Kubernetes lists omit TypeMeta on each item. Inherit
-                # only absent fields from the fixed, verified collection type;
-                # an explicitly conflicting type still fails above.
-                result.extend({"apiVersion": api, "kind": kind, **row} for row in page["items"])
-                token = page["metadata"].get("continue", "")
-                if not token:
-                    return result
-                if not isinstance(token, str) or token in seen:
-                    raise ValueError()
-                seen.add(token)
-            raise ValueError()
-        except Exception:
-            raise ManagementPrerequisiteError("management resource inventory unqualified") from None
+        return inventory_resources(self._request, api, resource, kind)
 
     def public_route(self, request: ManagementInstallRequest) -> None:
         try:

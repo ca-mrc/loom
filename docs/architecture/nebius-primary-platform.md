@@ -2238,6 +2238,26 @@ migration incomplete: the protected parent owns complete external-writer
 inventory and fresh qualification before activation. It never removes an
 unexpected grant automatically.
 
+Connected cutover preflight now reads complete, stable-paginated Role, ClusterRole,
+RoleBinding and ClusterRoleBinding collections before producer downtime. Each
+collection is pinned to the same API-server resource version, then requalified
+after the other preflight reads. Every retained Role must have its exact original
+or intended reader shape and UID, with the expected actuator subject. Foreign
+subjects sharing a reduced Role, unresolved
+references, duplicate identities and extra named/group/cross-namespace grants to
+retired identities reject preflight. Separate Job writers in participant execution
+or build namespaces also reject. Discovery/self-inspection readers are permitted;
+unrelated operator, native-controller and foreign bindings are preserved, not
+declared fenced by name. This is retained binding correspondence, not full external
+writer/backend acceptance; effective reviews after reduction and the parent's
+installed qualification remain required.
+
+On recovery, successor gateway grants qualify only through the bound parent
+anchor, retained closed/fenced receipts and fixed authority-stage journal. Exact
+recorded UIDs/snapshots or unresolved CREATE intents are observed without writes;
+matching names/labels do not authorize adoption, and aggregation cannot widen a
+partial stage's authority.
+
 The connected cutover parent now sequences producer shutdown, closed
 registration, workload retirement, effective-role fencing, dedicated material,
 runtime ACL qualification, gateway configuration/authority and disabled runtime

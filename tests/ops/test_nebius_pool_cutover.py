@@ -330,7 +330,6 @@ def test_fixed_https_runtime_patch_binds_uid_namespace_and_disabled_target(cutov
         **{row.namespace: str(row.namespace_uid) for row in migration.guards},
         **{ns.name: str(ns.uid) for row in migration.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace)}}
     calls = []
-
     def respond(message):
         calls.append(message)
         if message.method == "GET" and message.url.path.startswith("/api/v1/namespaces/"):
@@ -506,10 +505,18 @@ def cutover_binding_inventory(cutover_inputs):
             "metadata": {"name": name, "uid": str(uuid4()), "resourceVersion": "1"},
             "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name},
             "subjects": subjects})
+    inventories["clusterroles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+        "metadata": {"name": "system:discovery", "uid": str(uuid4()), "resourceVersion": "1"},
+        "rules": [{"nonResourceURLs": ["/api", "/apis", "/version"], "verbs": ["get"]},
+            {"apiGroups": ["authorization.k8s.io"], "resources": ["selfsubjectrulesreviews"], "verbs": ["create"]}]})
+    inventories["clusterrolebindings"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+        "metadata": {"name": "system:discovery", "uid": str(uuid4()), "resourceVersion": "1"},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "system:discovery"},
+        "subjects": [{"kind": "Group", "name": "system:authenticated", "apiGroup": "rbac.authorization.k8s.io"}]})
     return inventories
 
 
-def binding_preflight(request, tokens, inventories, *, partial=False):
+def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified_hook=None, journal=None):
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 
     migration = request.fencing.retirement.migration
@@ -533,17 +540,33 @@ def binding_preflight(request, tokens, inventories, *, partial=False):
                     "pod-security.kubernetes.io/enforce": "restricted"}}})
         resource = message.url.path.rsplit("/", 1)[-1]
         assert message.url.path == "/apis/rbac.authorization.k8s.io/v1/" + resource
-        assert dict(message.url.params) == {"limit": "100"}
+        continuation = message.url.params.get("continue")
+        assert dict(message.url.params) == {"limit": "100", **({"continue": "next"} if continuation else {}),
+            **({"resourceVersion": "7", "resourceVersionMatch": "Exact"} if resource != "roles" and not continuation else {})}
         metadata = {"resourceVersion": "7"}
-        if partial:
-            metadata["continue"] = "unresolved-next-page"
+        entries = inventories[resource]
+        if page_mode and resource == "rolebindings":
+            if not continuation:
+                metadata["continue"], entries = "next", entries[:1]
+            else:
+                entries = entries[1:]
+                if page_mode == "changed_version":
+                    metadata["resourceVersion"] = "8"
+                elif page_mode == "repeated_token":
+                    metadata["continue"] = "next"
         return httpx.Response(200, json={"apiVersion": "rbac.authorization.k8s.io/v1",
-            "kind": kinds[resource] + "List", "metadata": metadata, "items": inventories[resource]})
+            "kind": kinds[resource] + "List", "metadata": metadata, "items": entries})
 
     external = CutoverAPI(request)
+    if qualified_hook is not None:
+        def checked_preflight(actual):
+            assert actual == request
+            qualified_hook()
+        external.preflight = checked_preflight
     with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=external.migration,
             guards=SimpleNamespace(request=migration), checks=external, history=external,
-            api_server="https://cluster.example", ssl_context=ssl.create_default_context()) as api:
+            api_server="https://cluster.example", ssl_context=ssl.create_default_context(),
+            state_dir=journal[0] if journal else None, anchor_dir=journal[1] if journal else None) as api:
         api.client.close()
         api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
         api.preflight(request)
@@ -551,7 +574,8 @@ def binding_preflight(request, tokens, inventories, *, partial=False):
 
 
 @pytest.mark.parametrize("damage", ["foreign_subject", "extra_named_grant", "cluster_group",
-    "cross_namespace_grant", "unresolved", "role_drift", "duplicate", "missing_role", "missing_binding"])
+    "cross_namespace_grant", "unresolved", "role_drift", "duplicate", "missing_role", "missing_binding",
+    "foreign_scoped_writer", "namespace_group", "serviceaccount_user", "aggregated_reader"])
 def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_downtime(
         cutover_inputs, cutover_binding_inventory, damage):
     request, tokens = cutover_inputs
@@ -559,16 +583,24 @@ def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_d
     binding = rows["rolebindings"][0]
     if damage == "foreign_subject":
         binding["subjects"].append({"kind": "ServiceAccount", "name": "foreign-writer", "namespace": "foreign"})
-    elif damage in {"extra_named_grant", "cross_namespace_grant"}:
+    elif damage in {"extra_named_grant", "cross_namespace_grant", "foreign_scoped_writer"}:
         extra = copy.deepcopy(binding)
         extra["metadata"].update(name="unexpected", uid=str(uuid4()))
         if damage == "cross_namespace_grant":
             extra["metadata"]["namespace"] = "foreign"
+        elif damage == "foreign_scoped_writer":
+            extra["subjects"] = [{"kind": "ServiceAccount", "namespace": "foreign", "name": "unknown-writer"}]
         extra["roleRef"].update(kind="ClusterRole", name="cluster-admin")
         rows["rolebindings"].append(extra)
         rows["clusterroles"][0]["rules"][0]["resourceNames"] = ["one-named-job"]
-    elif damage == "cluster_group":
-        rows["clusterrolebindings"][0]["subjects"] = [{"kind": "Group", "name": "system:serviceaccounts",
+    elif damage in {"cluster_group", "namespace_group", "serviceaccount_user"}:
+        subject = binding["subjects"][0]
+        kind, name = "Group", "system:serviceaccounts"
+        if damage == "namespace_group":
+            name += ":" + subject["namespace"]
+        elif damage == "serviceaccount_user":
+            kind, name = "User", "system:serviceaccount:" + subject["namespace"] + ":" + subject["name"]
+        rows["clusterrolebindings"][0]["subjects"] = [{"kind": kind, "name": name,
             "apiGroup": "rbac.authorization.k8s.io"}]
     elif damage == "unresolved":
         binding["roleRef"]["name"] = "missing"
@@ -578,10 +610,41 @@ def test_connected_cutover_rejects_unqualified_retained_writer_bindings_before_d
         rows["roles"].append(copy.deepcopy(rows["roles"][0]))
     elif damage == "missing_role":
         rows["roles"].pop(0)
+    elif damage == "aggregated_reader":
+        rows["clusterroles"][-1]["aggregationRule"] = {"clusterRoleSelectors": [{"matchLabels": {"foreign": "true"}}]}
     else:
         rows["rolebindings"].pop(0)
-    with pytest.raises(ValueError, match="pool.*binding"):
+    with pytest.raises(ValueError, match=r"pool.*binding"):
         binding_preflight(request, tokens, rows)
+
+
+@pytest.mark.parametrize("page_mode", ["complete", "late_foreign", "changed_version", "repeated_token"])
+def test_connected_writer_binding_inventory_cannot_qualify_only_the_first_page(
+        cutover_inputs, cutover_binding_inventory, page_mode):
+    request, tokens = cutover_inputs
+    if page_mode == "late_foreign":
+        cutover_binding_inventory["rolebindings"][-1]["subjects"].append({
+            "kind": "ServiceAccount", "namespace": "foreign", "name": "late-writer"})
+    if page_mode == "complete":
+        binding_preflight(request, tokens, cutover_binding_inventory, page_mode=page_mode)
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, page_mode=page_mode)
+
+
+@pytest.mark.parametrize("restricted", ["first", "all"])
+def test_binding_preflight_accepts_exact_reader_roles_during_journaled_parent_recovery(
+        cutover_inputs, cutover_binding_inventory, restricted):
+    from scripts.ops.nebius_pool_role_fencing import role_fence_documents
+
+    request, tokens = cutover_inputs
+    targets = role_fence_documents(request.fencing)
+    rows = cutover_binding_inventory["roles"]
+    for index, original in enumerate(rows):
+        if index == 0 or restricted == "all":
+            rows[index] = {**copy.deepcopy(targets[_key(original)]), "metadata": {
+                **copy.deepcopy(targets[_key(original)]["metadata"]), "uid": original["metadata"]["uid"], "resourceVersion": "2"}}
+    binding_preflight(request, tokens, cutover_binding_inventory)
 
 
 def test_connected_binding_preflight_preserves_unrelated_native_and_operator_authority(
@@ -591,3 +654,94 @@ def test_connected_binding_preflight_preserves_unrelated_native_and_operator_aut
     assert {row.url.path.rsplit("/", 1)[-1] for row in calls
         if row.url.path.startswith("/apis/rbac.authorization.k8s.io/v1/")} == {
             "roles", "clusterroles", "rolebindings", "clusterrolebindings"}
+
+
+@pytest.mark.parametrize("boundary", ["foreign_owner", "management_producer"])
+def test_retained_binding_gate_does_not_adopt_or_reduce_unrelated_authority(
+        cutover_inputs, cutover_binding_inventory, boundary):
+    request, tokens = cutover_inputs
+    rows = cutover_binding_inventory
+    if boundary == "foreign_owner":
+        rows["clusterroles"][0]["metadata"]["ownerReferences"] = [{"apiVersion": "v1", "kind": "ConfigMap",
+            "name": "foreign-controller", "uid": str(uuid4()), "controller": True}]
+    else:
+        namespace = request.manager["metadata"]["namespace"]
+        account = request.manager["spec"]["template"]["spec"]["serviceAccountName"]
+        rows["roles"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+            "metadata": {"name": "management", "namespace": namespace, "uid": str(uuid4()), "resourceVersion": "1"},
+            "rules": [{"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "delete"]}]})
+        rows["rolebindings"].append({"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+            "metadata": {"name": "management", "namespace": namespace, "uid": str(uuid4()), "resourceVersion": "1"},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "management"},
+            "subjects": [{"kind": "ServiceAccount", "namespace": namespace, "name": account}]})
+    binding_preflight(request, tokens, rows)
+
+
+def test_binding_drift_during_other_preflight_checks_cannot_reach_producer_downtime(
+        cutover_inputs, cutover_binding_inventory):
+    request, tokens = cutover_inputs
+
+    def add_foreign_subject():
+        cutover_binding_inventory["rolebindings"][0]["subjects"].append({
+            "kind": "ServiceAccount", "namespace": "foreign", "name": "racing-writer"})
+
+    with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, qualified_hook=add_foreign_subject)
+
+
+@pytest.mark.parametrize("damage", [None, "unrecorded", "anchor", "role_uid", "foreign_subject", "receipt", "intent",
+    "intent_extra_rules", "intent_extra_subject", "intent_aggregation"])
+def test_gateway_writer_permissions_require_actual_retained_cutover_stage_proof(
+        cutover_inputs, cutover_binding_inventory, tmp_path, damage):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+
+    request, tokens = cutover_inputs
+    external = CutoverAPI(request)
+    assert run(request, tokens, external, tmp_path)["status"] == "pool_runtime_staged_closed"
+    rows = cutover_binding_inventory
+    rows["roles"] = list(copy.deepcopy(external.fencing.roles).values())
+    resources = {"Role": "roles", "RoleBinding": "rolebindings",
+        "ClusterRole": "clusterroles", "ClusterRoleBinding": "clusterrolebindings"}
+    for document in cutover_documents(request)["authority"]:
+        rows[resources[document["kind"]]].append(copy.deepcopy(external.resources.resources[_key(document)]))
+    journal = (tmp_path / "cutover", tmp_path / "cutover-anchor")
+    if damage == "unrecorded":
+        journal = None
+    elif damage == "anchor":
+        marker, = (tmp_path / "cutover-anchor").glob("*-cutover.json")
+        payload = json.loads(marker.read_text())
+        payload["contract_sha256"] = "sha256:" + "0" * 64
+        marker.write_text(json.dumps(payload))
+    elif damage == "role_uid":
+        rows["roles"][-1]["metadata"]["uid"] = str(uuid4())
+    elif damage == "foreign_subject":
+        rows["rolebindings"][-1]["subjects"].append({"kind": "ServiceAccount", "namespace": "foreign", "name": "forged"})
+    elif damage in {"receipt", "intent", "intent_extra_rules", "intent_extra_subject", "intent_aggregation"}:
+        parent = tmp_path / "cutover" / "cutover.json"
+        path = tmp_path / "cutover" / "authority" / "stage.json"
+        record, stage = json.loads(parent.read_text()), json.loads(path.read_text())
+        kind = "ClusterRole" if damage == "intent_aggregation" else "Role" if damage == "intent_extra_rules" else "RoleBinding"
+        key, item = next((key, value) for key, value in stage["resources"].items() if key.startswith(kind + ":"))
+        item.update(status="create_intent", uid=None, observed=None)
+        if damage in {"intent_extra_rules", "intent_extra_subject"}:
+            actual = next(row for row in rows[resources[kind]] if _key(row) == key)
+            field, extra = ("rules", {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}) if kind == "Role" else (
+                "subjects", {"kind": "ServiceAccount", "namespace": "foreign", "name": "forged-successor"})
+            actual[field].append(copy.deepcopy(extra))
+            item["expected"][field].append(copy.deepcopy(extra))
+        elif damage == "intent_aggregation":
+            actual = next(row for row in rows[resources[kind]] if _key(row) == key)
+            actual["aggregationRule"] = item["expected"]["aggregationRule"] = {
+                "clusterRoleSelectors": [{"matchLabels": {"foreign": "true"}}]}
+        path.write_text(json.dumps(stage))
+        if damage != "receipt":
+            # Simulate interruption after the API CREATE, before its UID receipt.
+            record["phases"]["authority"] = None
+            parent.write_text(json.dumps(record))
+    if damage in {None, "intent"}:
+        before = {path: path.read_bytes() for path in (tmp_path / "cutover").rglob("*.json")}
+        binding_preflight(request, tokens, rows, journal=journal)
+        assert {path: path.read_bytes() for path in before} == before
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+            binding_preflight(request, tokens, rows, journal=journal)
