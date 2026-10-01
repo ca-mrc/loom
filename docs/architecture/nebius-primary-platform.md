@@ -2178,7 +2178,11 @@ It requires the exact idle rollout guard and schema, rejects privileged or
 role-member actuator identities, and grants only local outbox reads/inserts/updates
 and source-row lock columns. Task content, batch identity/provenance, management
 capacity/credentials and journal deletion remain denied; qualification includes
-column-specific grants. An uncertain stage response is recovered by a read-only
+column-specific grants. Registered-source builds may read published source and
+incarnation records and insert materialization pins; they cannot publish, mutate,
+retire or unpin sources. The source-row lock column is immutable, and qualification
+requires complete pin-insert authority, not merely one insertable column.
+An uncertain stage response is recovered by a read-only
 qualification, not a repeated write. Neither action releases a guard or opens
 admission. Normal bootstrap retains pre-cutover permissions; a connected protected
 installer or refresh that replays bootstrap must restage and qualify these runtime

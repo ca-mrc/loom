@@ -49,10 +49,15 @@ def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
         GRANT SELECT ON tasks, batches TO loom_actuator;
         GRANT UPDATE (registered_at) ON tasks TO loom_actuator;
         GRANT UPDATE (pool_origin) ON batches TO loom_actuator;
+        GRANT SELECT ON task_bundle_sources, task_bundle_source_incarnations, task_bundle_source_references TO loom_actuator;
+        GRANT UPDATE (created_at) ON task_bundle_sources TO loom_actuator;
+        GRANT INSERT ON task_bundle_source_references TO loom_actuator;
     """ if action == "stage" else ""
     # pool_origin is immutable under the published trigger: the column grant
     # permits source-row locks, not class promotion. Task content is read-only;
-    # its registration timestamp is the only non-content lock column.
+    # its registration timestamp is the only non-content lock column. Registered
+    # source rows are immutable (including created_at); source refs may be pinned,
+    # never published, retired or unpinned by this execution/build login.
     return f"""BEGIN {'READ ONLY' if action == 'observe' else ''};
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_runtime_role$
@@ -80,11 +85,13 @@ BEGIN
         THEN RAISE EXCEPTION 'pool runtime journal authority unqualified'; END IF;
     END LOOP;
     FOR item IN SELECT c.relname,a.attname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        JOIN pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='public' AND c.relname IN ('tasks','batches')
+        JOIN pg_attribute a ON a.attrelid=c.oid WHERE n.nspname='public'
+        AND c.relname IN ('tasks','batches','task_bundle_sources')
         AND a.attnum>0 AND NOT a.attisdropped LOOP
         IF has_column_privilege('loom_actuator',format('public.%I',item.relname),item.attname,'UPDATE')
            IS DISTINCT FROM ((item.relname='tasks' AND item.attname='registered_at')
-                          OR (item.relname='batches' AND item.attname='pool_origin'))
+                          OR (item.relname='batches' AND item.attname='pool_origin')
+                          OR (item.relname='task_bundle_sources' AND item.attname='created_at'))
         THEN RAISE EXCEPTION 'pool runtime source authority unqualified'; END IF;
     END LOOP;
     IF NOT has_table_privilege('loom_actuator','tasks','SELECT')
@@ -94,6 +101,23 @@ BEGIN
       OR has_any_column_privilege('loom_actuator','tasks','INSERT,REFERENCES')
       OR has_any_column_privilege('loom_actuator','batches','INSERT,REFERENCES')
     THEN RAISE EXCEPTION 'pool runtime source authority unqualified'; END IF;
+    FOR item IN SELECT unnest(ARRAY['task_bundle_sources','task_bundle_source_incarnations',
+        'task_bundle_source_references']) AS name LOOP
+        IF NOT has_table_privilege('loom_actuator',item.name,'SELECT')
+          OR has_table_privilege('loom_actuator',item.name,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege('loom_actuator',item.name,'REFERENCES')
+          OR has_any_column_privilege('loom_actuator',item.name,'INSERT')
+             IS DISTINCT FROM (item.name='task_bundle_source_references')
+          OR (item.name='task_bundle_source_references'
+              AND NOT has_table_privilege('loom_actuator',item.name,'INSERT'))
+          OR (item.name<>'task_bundle_sources' AND has_any_column_privilege('loom_actuator',item.name,'UPDATE'))
+        THEN RAISE EXCEPTION 'pool runtime source journal authority unqualified'; END IF;
+    END LOOP;
+    FOR item IN SELECT unnest(ARRAY['task_bundle_source_writes','task_bundle_source_versions']) AS name LOOP
+        IF has_table_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          OR has_any_column_privilege('loom_actuator',item.name,'SELECT,INSERT,UPDATE,REFERENCES')
+        THEN RAISE EXCEPTION 'pool runtime source publication authority unqualified'; END IF;
+    END LOOP;
     FOR item IN SELECT unnest(ARRAY['nebius_pool_bindings','nebius_pool_participants','nebius_pool_requests',
         'nebius_pool_machines','nebius_pool_machine_credentials','nebius_pool_captures','nebius_pool_observations',
         'nebius_pool_effects','nebius_pool_cleanup_observations','nebius_pool_cancellations']) AS name LOOP
