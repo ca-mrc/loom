@@ -109,6 +109,16 @@ def test_extra_effective_grant_blocks_fencing_even_when_recorded_roles_are_reado
     assert len(api.patches) == 6  # Recovery observes; it does not repeat role writes.
 
 
+@pytest.mark.parametrize("account", ["system:masters", "", None])
+def test_malformed_retained_review_subject_is_rejected_before_any_downtime(fencing_inputs, tmp_path, account):
+    request = copy.deepcopy(fencing_inputs)
+    request.retirement.collectors[0]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"] = account
+    api = Roles(request, initialize(request.retirement, tmp_path))
+    with pytest.raises(ValueError):
+        run(request, api, tmp_path)
+    assert api.patches == [] and api.retirement.patches == []
+
+
 def rules_review(namespace="loom-nebius-exec-0"):
     return {"apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectRulesReview",
         "spec": {"namespace": namespace}, "status": {"incomplete": False,
@@ -132,7 +142,7 @@ def test_complete_reader_rules_include_named_reads_and_standard_self_inspection(
 
 
 @pytest.mark.parametrize("damage", ["write", "named_write", "pod_create", "deployment", "exec", "secret",
-    "impersonation", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write",
+    "impersonation", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write", "nonresource_unknown",
     "incomplete", "missing_incomplete", "false_string", "evaluation_error", "namespace", "kind", "missing_rules", "malformed_rule"])
 def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(damage):
     from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
@@ -157,6 +167,8 @@ def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(
         rules.append(extras[damage])
     elif damage == "nonresource_write":
         review["status"]["nonResourceRules"][0]["verbs"] = ["post"]
+    elif damage == "nonresource_unknown":
+        review["status"]["nonResourceRules"][0]["nonResourceURLs"] = ["*"]
     elif damage in {"incomplete", "false_string"}:
         review["status"]["incomplete"] = True if damage == "incomplete" else "false"
     elif damage == "missing_incomplete":
