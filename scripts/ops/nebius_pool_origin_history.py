@@ -6,15 +6,24 @@ Every pending-origin page is qualified against original registration/source hist
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_material import _documents as material_documents
+from scripts.ops.nebius_management_refresh_predecessor import (
+    CompletedRefresh,
+    CompletedUpgrade,
+    load_completed_refresh,
+    load_completed_upgrade,
+)
+from scripts.ops.nebius_management_stage import _comparison_snapshot
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -107,6 +116,68 @@ class PoolManagementHistoryTarget:
     database: PoolGuardDatabase
 
 
+def derive_management_history_target(*, original: CompletedUpgrade, predecessor: CompletedUpgrade | CompletedRefresh,
+                                     credential: dict[str, Any]) -> PoolManagementHistoryTarget:
+    """Derive a fixed scope from completed journals and qualified live credential.
+
+    Do not re-render or resume the historical installer. Its hash-bound database
+    and material journals establish original resource identity; the immediately
+    completed manager successor establishes the original producer template. The
+    transport still must qualify actual backend correspondence before each read.
+    """
+    try:
+        if load_completed_upgrade(original.selector) != original:
+            raise ValueError
+        if isinstance(predecessor, CompletedRefresh):
+            if load_completed_refresh(predecessor.selector, original=original) != predecessor:
+                raise ValueError
+        elif predecessor != original:
+            raise ValueError
+        binding = original.upgrade.setup.binding
+
+        def recorded(path: Path) -> dict[str, Any]:
+            raw = private_state._private_read(path, limit=4 * 1024**2)
+            if hashlib.sha256(raw).hexdigest() != original.history[path]:
+                raise ValueError
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise ValueError
+            return value
+
+        material = recorded(original.upgrade.original_state / "bootstrap/material/material.json")
+        if material["binding"] != asdict(binding) or material["status"] != "delivered":
+            raise ValueError
+        expected = material_documents(material["material"], binding, material["operation_id"])["loom-platform-db"]
+        if (_snapshot(credential) != expected
+                or _uid(credential) != material["resources"]["loom-platform-db"]["uid"]):
+            raise ValueError
+        version = credential["metadata"]["resourceVersion"]
+        if not isinstance(version, str) or not 0 < len(version) <= 128:
+            raise ValueError
+        journal = recorded(original.upgrade.original_state / "database/stage.json")
+        keys = {kind + ":" + binding.namespace + ":loom-postgres" for kind in ("StatefulSet", "Service")}
+        if (journal["schema"] != "loom.nebius-management-stage.v1" or journal["binding"] != asdict(binding)
+                or journal["phase"] != "20-database.yaml" or set(journal["resources"]) != keys):
+            raise ValueError
+        retained = {}
+        for key, item in journal["resources"].items():
+            document = copy.deepcopy(item["observed"])
+            if (item["status"] != "created" or _comparison_snapshot(document) != item["expected"]
+                    or document["metadata"].get("namespace") != binding.namespace
+                    or document["metadata"].get("name") != "loom-postgres"
+                    or key != document["kind"] + ":" + binding.namespace + ":loom-postgres"):
+                raise ValueError
+            document["metadata"]["uid"] = item["uid"]
+            _uid(document)
+            retained[document["kind"]] = document
+        return PoolManagementHistoryTarget(namespace=binding.namespace, namespace_uid=UUID(binding.namespace_uid),
+            controller=copy.deepcopy(predecessor.active), database=PoolGuardDatabase(
+                statefulset=retained["StatefulSet"], service=retained["Service"],
+                credential_uid=UUID(_uid(credential)), credential_resource_version=version))
+    except Exception:
+        raise ValueError("pool_management_history_predecessor_unqualified") from None
+
+
 def _target_contract(target: PoolManagementHistoryTarget) -> dict[str, Any]:
     return {"namespace": target.namespace, "namespace_uid": str(target.namespace_uid), "controller": target.controller,
         "database": {"statefulset": target.database.statefulset, "service": target.database.service,
@@ -159,3 +230,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 raise ValueError
         except Exception:
             raise PoolMigrationError("management_origin_history") from None
+
+    def qualify_binding(self, request: PoolMigrationRequest, manager: dict[str, Any]) -> None:
+        """The cutover's retained producer must be this history source's manager."""
+        if request != self.request or manager != self.target.controller:
+            raise PoolMigrationError("management_history_binding")

@@ -116,6 +116,9 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                 return {"status": "observed", "schema_revision": "0172", "rows": []}
 
         class Checks:
+            def qualify_binding(self, actual, manager):
+                assert actual == migration and manager == request.manager
+
             def preflight(self, actual):
                 assert actual == request
 

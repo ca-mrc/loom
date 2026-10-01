@@ -81,7 +81,10 @@ def load_failed_refresh(request: ManagementRefreshInstallRequest, selector: Supe
             if expected is not None and checksum != expected:
                 raise ValueError
             history[path] = checksum
-            return json.loads(raw)
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise ValueError
+            return value
 
         identity = _identity(request, state, source)
         parent = read(state / 'refresh.json', selector.refresh_sha256)

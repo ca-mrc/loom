@@ -2265,8 +2265,13 @@ after the read. The same history validator serves locked ordinary admission and
 protected readback: suspended or destroyed applications may retain legitimate
 older queued work, but missing history, changed source, wrong incarnation,
 environment or cluster fail closed. No probe Job, new grant, source rewrite or
-admission opening is performed. The protected entry still must derive this
-separate database binding from the completed manager predecessor; a supplied
+admission opening is performed. The fixed scope derivation reloads completed
+upgrade/refresh evidence and the hash-bound original database/material journals,
+then checks the live database credential against its original immutable material.
+It preserves the latest completed manager template and never replays the original
+installation. The history reader must match the cutover's exact manager and
+migration inputs before transport creation. The protected entry still must
+connect this derivation and qualify actual backend correspondence; a supplied
 projection alone is not registration proof.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.

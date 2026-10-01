@@ -47,6 +47,7 @@ class PoolCutoverChecks(Protocol):
 
 
 class PoolCutoverHistory(Protocol):
+    def qualify_binding(self, request: PoolMigrationRequest, manager: dict[str, Any]) -> None: ...
     def qualify_pending_origins(self, target: PoolGuardTarget, origins: tuple[PoolWorkOriginV1, ...]) -> None:
         """Qualify retained management registration/history, not just JSON shape."""
         ...
@@ -66,6 +67,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
+        history.qualify_binding(guards.request, request.manager)
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
         self.history = history
         self.binding = registration.binding

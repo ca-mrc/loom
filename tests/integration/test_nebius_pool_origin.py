@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -15,6 +16,10 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.integration.test_nebius_pool_auth import credential
+from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
+from tests.ops.test_nebius_pool_origin_history import management_history as management_history
+from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_contract import participant
 
@@ -160,6 +165,58 @@ async def test_fixed_history_readback_denies_unknown_or_misbound_original_work(a
         report['rows'].append(report['rows'][0])
     with pytest.raises(ValueError):
         qualify_management_history_page(report, origins=(origin,), participant=binding, cluster_id=cluster)
+
+
+async def test_bound_management_transport_reads_real_retained_history_without_opening_admission(applications, management_history, monkeypatch):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom_service.pool_management.installation import PoolInstallation
+
+    transport, state = management_history
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='bound-history-stop',
+        action='suspend', expected_generation=1)
+    async with factory.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == binding.pool_id).values(mode='closed'))
+    before = await registry.get_operation(operation.operation_id, principal=alice)
+    spec = state.request.registration.spec
+    development, = (row for row in spec.participants if row.environment_class == 'development')
+    spec = PoolInstallation.model_validate(spec.model_dump() | {
+        'cluster_id': plan['prepared'].registration.cluster_id,
+        'participants': tuple(row.model_copy(update={'environment_id': origin.data_environment_id})
+            if row.participant_id == development.participant_id else row for row in spec.participants)})
+    request = replace(state.request, registration=replace(state.request.registration, spec=spec))
+    participant, = (row for row in request.guards if row.participant_id == development.participant_id)
+    api = KubectlPoolHistoryAPI(request=request, target=state.target,
+        kubeconfig=transport.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    url = factory.kw['bind'].url.set(drivername='postgresql').render_as_string(hide_password=False)
+    with psycopg.connect(url, autocommit=True) as connection:
+        def run(args):
+            response = transport._run(args)  # Only Kubernetes identity/exec transport is doubled.
+            if args[0] != 'exec':
+                return response
+            with connection.cursor() as cursor:
+                cursor.execute(args[-1], prepare=False)
+                rows = []
+                while True:
+                    if cursor.description:
+                        rows.extend(cursor.fetchall())
+                    if not cursor.nextset():
+                        break
+                assert len(rows) == 1
+                return rows[0][0]
+
+        monkeypatch.setattr(api, '_run', run)
+        api.qualify_pending_origins(participant, (origin,))
+        wrong = origin.model_copy(update={'application': origin.application.model_copy(update={'source_digest': 'sha256:' + 'f' * 64})})
+        with pytest.raises(PoolMigrationError):
+            api.qualify_pending_origins(participant, (wrong,))
+    assert sum(row[0] == 'exec' for row in state.calls) == 2
+    async with factory() as session:
+        assert (await session.get(NebiusPoolBinding, binding.pool_id)).mode == 'closed'
+    assert await registry.get_operation(operation.operation_id, principal=alice) == before
 
 
 @pytest.mark.parametrize("field,value", [
