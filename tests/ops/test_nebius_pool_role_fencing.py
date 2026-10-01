@@ -5,6 +5,7 @@ import copy
 import json
 import ssl
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -141,8 +142,22 @@ def test_complete_reader_rules_include_named_reads_and_standard_self_inspection(
     qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
 
 
+def test_actual_retained_collector_rules_remain_qualified_readers(platform_inputs):
+    from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
+
+    from loom.nebius_platform_render import build_platform
+
+    config, candidate, profile = platform_inputs
+    documents = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+    role, = [row for rows in documents.values() for row in rows if row["kind"] == "ClusterRole"
+        and row["metadata"]["name"] == config["execution_namespace"] + "-collector"]
+    review = rules_review()
+    review["status"]["resourceRules"].extend(role["rules"])
+    qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
+
+
 @pytest.mark.parametrize("damage", ["write", "named_write", "pod_create", "deployment", "exec", "secret",
-    "impersonation", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write", "nonresource_unknown",
+    "impersonation", "node_proxy", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write", "nonresource_unknown",
     "incomplete", "missing_incomplete", "false_string", "evaluation_error", "namespace", "kind", "missing_rules", "malformed_rule"])
 def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(damage):
     from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
@@ -157,6 +172,7 @@ def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(
         "exec": {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["get"]},
         "secret": {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]},
         "impersonation": {"apiGroups": [""], "resources": ["serviceaccounts"], "verbs": ["impersonate"]},
+        "node_proxy": {"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]},
         "token": {"apiGroups": [""], "resources": ["serviceaccounts/token"], "verbs": ["create"]},
         "wildcard_resource": {"apiGroups": [""], "resources": ["*"], "verbs": ["get"]},
         "wildcard_group": {"apiGroups": ["*"], "resources": ["pods"], "verbs": ["get"]},
