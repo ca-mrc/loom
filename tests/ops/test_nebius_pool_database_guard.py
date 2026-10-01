@@ -170,6 +170,25 @@ def test_database_observer_never_exposes_unqualified_query_output(database_guard
     assert 'private-marker' not in str(error.value)
 
 
+@pytest.mark.parametrize('source', [
+    {'value': 'postgresql+psycopg://user:private-marker@other-database/loom'},
+    {'valueFrom': {'secretKeyRef': {'name': 'another-database', 'key': 'pool-url'}}},
+])
+def test_direct_database_binding_cannot_ignore_pooled_engine_override(database_guard, monkeypatch, source):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    api, state = database_guard
+    state.target.controller['spec']['template']['spec']['containers'][0]['env'].append(
+        {'name': 'LOOM_CP_DB_URL_POOL', **source})
+    # Construct a new binding to this original template, not a post-bind drift.
+    replacement = KubectlPoolGuardAPI(request=state.request, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(replacement, '_run', api._run)
+    with pytest.raises(PoolMigrationError):
+        replacement.guard(state.target, 'observe')
+    assert not any(args[0] == 'exec' for args in state.calls)
+
+
 def test_bound_acquisition_uses_live_controller_then_observation_survives_retirement(database_guard, monkeypatch):
     api, state = database_guard
     controller = copy.deepcopy(state.target.controller)
