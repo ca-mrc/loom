@@ -88,3 +88,62 @@ def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_input
         profile["guest_runtime"] = "host-docker"
     with pytest.raises(NebiusPlatformError):
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize("readiness", [None, False, True])
+def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path, readiness):  # noqa: F811
+    from scripts.ops.deploy_nebius_platform import load_render
+
+    from loom_control_plane.execution_capacity_targets import validate_capacity_owner
+
+    config, candidate, profile = guest_inputs(platform_inputs)
+    original = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
+    if readiness is not None:
+        profile["supports_emulated_pkcs11"] = readiness
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    data = files["10-config-network.yaml"][0]["data"]
+    assert json.loads(data["profile.json"]).get("supports_emulated_pkcs11") == readiness
+    assert data["guest-catalog.json"] == original["10-config-network.yaml"][0]["data"]["guest-catalog.json"]
+    auth = json.loads(data["emulated-auth-catalog.json"])
+    target, = ExecutionTopologyV1.model_validate(auth["topology"]).targets
+    assert target.target_id == "nebius-auth-fixture"
+    assert target.execution_class_id == "linux-amd64-cpu-guest-auth-v1"
+    owner, = ExecutionTopologyV1.model_validate(json.loads(data["catalog.json"])["topology"]).targets
+    validate_capacity_owner(target, owner)
+    deployments = [row for row in files["60-execution.yaml"] if row["kind"] == "Deployment"]
+    assert {row["metadata"]["name"] for row in deployments} == {
+        "loom-execution-actuator", "nebius-guest-fixture-actuator", "nebius-auth-fixture-actuator",
+    }
+    auth_pod = next(row for row in deployments if row["metadata"]["name"] == "nebius-auth-fixture-actuator")["spec"]["template"]["spec"]
+    env = {entry["name"]: entry.get("value") for entry in auth_pod["containers"][0]["env"]}
+    assert env["LOOM_EXECUTION_ACTUATOR_TARGET_ID"] == "nebius-auth-fixture"
+    assert "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER" not in env
+    assert len([row for row in files["60-execution.yaml"] if row["kind"] == "CronJob"]) == 1
+    policy = next(row for row in files["10-config-network.yaml"] if row["kind"] == "NetworkPolicy" and row["metadata"]["name"] == "postgres-private")
+    peers = policy["spec"]["ingress"][0]["from"]
+    assert any(row.get("podSelector", {}).get("matchLabels", {}).get("app.kubernetes.io/name") == "nebius-auth-fixture-actuator" for row in peers)
+    write_platform(files, config, candidate, tmp_path)
+    _, readback, _ = load_render(tmp_path)
+    assert readback["emulated_auth_execution_target"] == config["emulated_auth_execution_target"]
+
+
+@pytest.mark.parametrize("damage", ["missing-target", "missing-runtime", "missing-guest", "same-owner", "same-guest", "bad-fields"])
+def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs, damage):  # noqa: F811
+    config, candidate, profile = guest_inputs(platform_inputs)
+    config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
+    profile["supports_emulated_pkcs11"] = True
+    if damage == "missing-target":
+        del config["emulated_auth_execution_target"]
+    elif damage == "missing-runtime":
+        del profile["guest_runtime"]
+    elif damage == "missing-guest":
+        del config["guest_execution_target"]
+    elif damage == "same-owner":
+        config["emulated_auth_execution_target"]["target_id"] = config["target_id"]
+    elif damage == "same-guest":
+        config["emulated_auth_execution_target"]["target_id"] = "nebius-guest-fixture"
+    else:
+        config["emulated_auth_execution_target"]["device"] = "/dev/card"
+    with pytest.raises(NebiusPlatformError):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)

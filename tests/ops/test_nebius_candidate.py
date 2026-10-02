@@ -123,16 +123,19 @@ def test_publication_workflow_passes_only_explicit_readiness(ready: str) -> None
             assert (flag in result.stdout.splitlines()) is (ready == "true")
 
 
-@pytest.mark.parametrize("ready,volume,artifact,mode,valid", [
-    ("false", "", "", "platform", True),
-    ("true", "1024", "10737418240", "platform", True),
-    ("true", "", "10737418240", "platform", False),
-    ("true", "1024", "", "platform", False),
-    ("invalid", "1024", "10737418240", "platform", False),
-    ("false", "1024", "10737418240", "platform", False),
-    ("true", "1024", "10737418240", "harness", True),
+@pytest.mark.parametrize("ready,volume,artifact,mode,auth,valid", [
+    ("false", "", "", "platform", "false", True),
+    ("true", "1024", "10737418240", "platform", "false", True),
+    ("true", "", "10737418240", "platform", "false", False),
+    ("true", "1024", "", "platform", "false", False),
+    ("invalid", "1024", "10737418240", "platform", "false", False),
+    ("false", "1024", "10737418240", "platform", "false", False),
+    ("true", "1024", "10737418240", "harness", "true", True),
+    ("true", "1024", "10737418240", "platform", "true", True),
+    ("false", "", "", "platform", "true", False),
+    ("true", "1024", "10737418240", "platform", "invalid", False),
 ])
-def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, artifact, mode, valid):
+def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, artifact, mode, auth, valid):
     workflow = yaml.safe_load((candidate.ROOT / candidate.WORKFLOW).read_text())
     step = next(step for step in workflow["jobs"]["publish"]["steps"]
                 if step.get("name") == "Build and publish the fixed candidate")
@@ -146,11 +149,14 @@ def test_publication_workflow_preserves_explicit_guest_budgets(ready, volume, ar
              "NEBIUS_TASK_IDENTITY_READY": "true", "NEBIUS_REGISTRY_PREFIX": "fixture",
              "NEBIUS_GUEST_RUNTIME_READY": ready, "NEBIUS_GUEST_RUNTIME_VOLUME_MIB": volume,
              "NEBIUS_GUEST_MAX_ARTIFACT_BYTES": artifact,
+             "NEBIUS_EMULATED_PKCS11_READY": auth,
              "NEBIUS_IMAGE_UPLOAD_TIMEOUT_SECONDS": "900", "NEBIUS_SIGNING_KEY_ID": "fixture",
              "work": "/unused", "RUNNER_TEMP": "/unused"},
     )
     assert (result.returncode == 0) is valid, result.stderr
     arguments = result.stdout.splitlines()
+    if valid:
+        assert ("--supports-emulated-pkcs11" in arguments) is (auth == "true" and mode == "platform")
     if valid and ready == "true" and mode == "platform":
         for flag, value in (("--guest-runtime", "qemu-tcg-v1"),
                             ("--guest-runtime-volume-mib", volume),
@@ -235,7 +241,7 @@ def test_cli_create_plain_candidate_and_check_shape(
             str(output),
             *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
             *(["--guest-runtime", "qemu-tcg-v1", "--guest-runtime-volume-mib", "1024",
-               "--guest-max-artifact-bytes", "6442450944"] if enabled else []),
+               "--guest-max-artifact-bytes", "6442450944", "--supports-emulated-pkcs11"] if enabled else []),
         ],
         capture_output=True,
         text=True,
@@ -246,6 +252,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert profile.get("guest_runtime") == ("qemu-tcg-v1" if enabled else None)
     assert profile.get("guest_runtime_volume_mib") == (1024 if enabled else None)
     assert profile.get("guest_max_artifact_bytes") == (6 * 1024**3 if enabled else None)
+    assert profile.get("supports_emulated_pkcs11", False) is enabled
     assert profile["runtime_volume_mib"] == 32
     assert profile["max_artifact_bytes"] == 1024**3
     assert profile["execution_class_id"] == (
@@ -271,6 +278,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     config, _, _ = request.getfixturevalue("platform_inputs")
     if enabled:
         config["guest_execution_target"] = {"target_id": "nebius-guest-fixture"}
+        config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
         config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
         config["task_identity_policy"] = {
             "mode": "private-root-v1", "target_id": config["target_id"],

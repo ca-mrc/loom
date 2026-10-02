@@ -91,6 +91,7 @@ def _original(request: ManagementUpgradeRequest) -> tuple[dict[str, Any], str]:
         # this upgrade. All other retained data/infrastructure fields stay fixed;
         # prerequisite checks still require the exact current shared ConfigMap.
         config.pop('guest_execution_target', None)
+        config.pop('emulated_auth_execution_target', None)
         foundation['platform_config_json'] = json.dumps(config, sort_keys=True)
     if (before != after or original.deployment.installation.provider_runtime is None
             or any(publication not in setup.deployment.installation.publications

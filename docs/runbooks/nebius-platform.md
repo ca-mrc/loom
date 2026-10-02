@@ -255,6 +255,11 @@ disabled; a repeated bootstrap preserves its operator intent.
 Configure the protected `nebius-candidate` workflow explicitly:
 
 - `NEBIUS_GUEST_RUNTIME_READY=true` selects `qemu-tcg-v1`.
+- `NEBIUS_EMULATED_PKCS11_READY=true` additionally enables the emulated-auth
+  profile capability. It requires guest and task-identity readiness plus a
+  distinct `emulated_auth_execution_target: {"target_id": "<auth guest target>"}`
+  in the environment. Retain the historical guest target; this creates a new
+  immutable class/target instead of changing an installed definition.
 - `NEBIUS_GUEST_RUNTIME_VOLUME_MIB` supplies 1024–4096 MiB for the runtime payload.
 - `NEBIUS_GUEST_MAX_ARTIFACT_BYTES` supplies the guest transfer/output limit,
   at most 10 GiB. The 4000 MiB Singularity workflow needs a limit above its full
@@ -267,8 +272,13 @@ plans; ordinary plan budgets remain unchanged. Preserve the settings on later
 publications while the installation uses this runtime.
 
 Deploy the matching candidate/profile and declared target through the normal
-idle guard. Before activating it, require a fresh owner capacity observation
-whose `placement.target_scope` contains both IDs, observed guest actuator health,
+idle guard. For emulated authentication, first stage its distinct target with
+`NEBIUS_EMULATED_PKCS11_READY` unset or false. Bootstrap leaves the new target
+disabled, and the unchanged profile rejects authentication task admission.
+Qualify the installed guest before publishing the readiness opt-in; retain the
+target declaration on that publication and subsequent rollouts. Before
+activating it, require a fresh owner capacity observation
+whose `placement.target_scope` contains the owner and every registered sibling ID, observed guest actuator health,
 and installed capability/lifecycle qualification. Use the existing authenticated
 `POST /admin/service-execution/targets/{target_id}/health` API to change guest
 intent; preserve the current observed health fields rather than inventing a

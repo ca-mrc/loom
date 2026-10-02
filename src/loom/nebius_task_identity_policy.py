@@ -82,7 +82,15 @@ def _guest_private_expression() -> str:
     )
 
 
-def identity_policy_documents(namespace: str, target_id: str, *, guest_target_id: str | None = None) -> list[dict[str, Any]]:
+def identity_policy_documents(
+    namespace: str, target_id: str, *, guest_target_id: str | None = None,
+    emulated_auth_target_id: str | None = None,
+) -> list[dict[str, Any]]:
+    guests = [value for value in (guest_target_id, emulated_auth_target_id) if value is not None]
+    if emulated_auth_target_id is not None and (
+        guest_target_id is None or emulated_auth_target_id in {target_id, guest_target_id}
+    ):
+        raise ValueError("emulated authentication target must be a distinct guest sibling")
     name = namespace + "-private-root-v1"
     # Pod defaults below explicitly constrain the inherited identity. A
     # container may inherit runAsNonRoot, but cannot override it to false.
@@ -147,8 +155,8 @@ def identity_policy_documents(namespace: str, target_id: str, *, guest_target_id
     )
     if guest_target_id is not None:
         private = f"(variables.isGuest ? ({_guest_private_expression()}) : ({private}))"
-    target_condition = (" == " + json.dumps(target_id) if guest_target_id is None
-                        else " in " + json.dumps([target_id, guest_target_id]))
+    target_condition = (" == " + json.dumps(target_id) if not guests
+                        else " in " + json.dumps([target_id, *guests]))
     validations = [
         ("!has(object.spec.hostNetwork) || !object.spec.hostNetwork", "Host networking is forbidden."),
         ("!has(object.spec.hostPID) || !object.spec.hostPID", "Host PID is forbidden."),
@@ -209,7 +217,9 @@ def identity_policy_documents(namespace: str, target_id: str, *, guest_target_id
         policy["spec"]["variables"].append({
             "name": "isGuest", "expression": "has(object.metadata.annotations) && "
             "'loom.openai.com/target-id' in object.metadata.annotations && "
-            "object.metadata.annotations['loom.openai.com/target-id'] == " + json.dumps(guest_target_id),
+            "object.metadata.annotations['loom.openai.com/target-id']" + (
+                " == " + json.dumps(guest_target_id) if len(guests) == 1 else " in " + json.dumps(guests)
+            ),
         })
         policy["spec"]["validations"].append({
             # The built-in OpenAPI quantity reference is absent from CEL's

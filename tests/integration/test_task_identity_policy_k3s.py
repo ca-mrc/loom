@@ -249,15 +249,17 @@ def test_private_root_policy_accepts_only_the_constrained_pod_shape(tmp_path: Pa
         container.stop()
 
 
-def _guest_pod(namespace: str) -> dict:
+def _guest_pod(namespace: str, *, emulated_auth: bool = False) -> dict:
     from loom.execution_contract import workload_requirements_from_task
     from loom.pipeline.keys import canonical_digest
     from tests.unit.test_guest_execution_materialization import _compile, _guest_inputs
 
-    task, trial, profile = _guest_inputs()
+    task, trial, profile = _guest_inputs(*(["emulated_pkcs11_authentication"] if emulated_auth else []))
+    if emulated_auth:
+        profile = profile.model_copy(update={"supports_emulated_pkcs11": True})
     plan = _compile(task, trial, profile)
     lease = _lease(namespace)
-    lease.target_id = "disposable-guest"
+    lease.target_id = "disposable-auth-guest" if emulated_auth else "disposable-guest"
     lease.execution_class_id = plan.execution_class_id
     lease.runtime_contract_json = plan.canonical_payload()
     lease.runtime_contract_sha256 = canonical_digest(lease.runtime_contract_json)
@@ -272,7 +274,8 @@ def _guest_pod(namespace: str) -> dict:
 
 
 @pytest.mark.timeout(240)
-def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path):
+@pytest.mark.parametrize("emulated_auth", [False, True])
+def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path, emulated_auth: bool):
     import json
     import os
     import subprocess
@@ -281,7 +284,10 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
     if os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1":
         pytest.skip("set LOOM_RUN_DISPOSABLE_K3S=1 for actual isolated admission checks")
     namespace = "loom-guest-policy-test"
-    policies = identity_policy_documents(namespace, "disposable-k3s", guest_target_id="disposable-guest")
+    policies = identity_policy_documents(
+        namespace, "disposable-k3s", guest_target_id="disposable-guest",
+        emulated_auth_target_id="disposable-auth-guest" if emulated_auth else None,
+    )
     container = _start_k3s()
     _load_client(container)
 
@@ -320,7 +326,7 @@ def test_single_policy_allows_bound_guest_and_native_shapes_only(tmp_path: Path)
             assert time.monotonic() < deadline, "policy type checking did not finish"
             time.sleep(0.2)
         assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        guest = _guest_pod(namespace)
+        guest = _guest_pod(namespace, emulated_auth=emulated_auth)
         for _ in range(60):
             result = apply([guest], dry_run=True)
             if result.exit_code == 0:

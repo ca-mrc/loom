@@ -123,8 +123,9 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
                                       "execution_namespace": config["execution_namespace"]}
     if guest:
         config['guest_execution_target'] = {'target_id': 'nebius-guest-current'}
+        config['emulated_auth_execution_target'] = {'target_id': 'nebius-auth-current'}
         profile.update(guest_runtime='qemu-tcg-v1', guest_runtime_volume_mib=1024,
-                       guest_max_artifact_bytes=64 * 1024**2)
+                       guest_max_artifact_bytes=64 * 1024**2, supports_emulated_pkcs11=True)
     foundation["platform_config_json"] = json.dumps(config)
     profile["supports_task_identity"] = True
     before = copy.deepcopy(management_inputs)
@@ -135,6 +136,7 @@ def test_manager_accepts_current_publication_without_inheriting_standalone_task_
                for doc in documents(result))
     assert "task_identity_policy" not in result.config
     assert 'guest_execution_target' not in result.config
+    assert 'emulated_auth_execution_target' not in result.config
     namespace = next(doc for doc in documents(result) if doc["kind"] == "Namespace")
     assert namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] == "restricted"
 
