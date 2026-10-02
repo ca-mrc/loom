@@ -91,3 +91,27 @@ def test_version_not_in_openapi_schema_is_not_required_but_stays_lightweight(
     client = _client(monkeypatch)
     schema = client.app.openapi()
     assert "/api/v1/version" in schema.get("paths", {})
+
+
+@pytest.mark.parametrize("digest,base", [
+    ("sha256:" + "b" * 64, "a" * 40),
+    ("sha256:" + "c" * 64, "a" * 64),
+    ("malformed", "unknown"),
+])
+def test_personal_version_reports_source_not_an_approved_commit(monkeypatch, tmp_path, digest, base):
+    # Even an older authored Dockerfile stamping its base SHA must not cause
+    # the personal source to be reported as the actual Git revision.
+    for name, value in {"SHA": "a" * 40, "KIND": "personal", "SOURCE_DIGEST": digest,
+                        "SOURCE_BASE_COMMIT": base}.items():
+        path = tmp_path / name
+        path.write_text(value + "\n")
+        monkeypatch.setenv("LOOM_BUILD_" + name + "_PATH", str(path))
+    monkeypatch.setenv("LOOM_BUILD_TIME_PATH", str(tmp_path / "missing-time"))
+    response = _client(monkeypatch).get("/api/v1/version")
+    assert response.status_code == 200
+    assert response.json() == {
+        "buildRevision": None, "buildTime": None, "buildKind": "personal",
+        "sourceDigest": digest if digest.startswith("sha256:") else None,
+        "sourceBaseCommit": None if base == "unknown" else base,
+    }
+    assert response.headers["cache-control"] == "no-store"
