@@ -94,6 +94,39 @@ def test_roundtrip_preserves_current_bytes_modes_and_links_with_deterministic_ar
     assert os.readlink(destination / "alias") == "src/api.py"
 
 
+@pytest.mark.parametrize('damage', [None, 'content', 'padding'])
+def test_large_source_verification_streams_and_qualifies_the_final_chunk(tmp_path, damage):
+    from loom.application_source_archive import extract_application_source_archive
+
+    content = b'x' * (2 * 1024**2) + b'last partial block'
+    model = manifest(entry('large.bin', content))
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode='w', format=tarfile.USTAR_FORMAT) as writer:
+        for name, body in [('manifest.json', model.canonical_bytes()), ('files/00000', content)]:
+            member = tarfile.TarInfo(name)
+            member.mode, member.size = 0o644, len(body)
+            writer.addfile(member, io.BytesIO(body))
+    raw = archive.getvalue()
+    end = raw.index(b'last partial block') + len(b'last partial block')
+    if damage is not None:
+        position = end - 1 if damage == 'content' else end
+        raw = raw[:position] + b'!' + raw[position + 1:]
+
+    class BoundedRead(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 1024**2, 'source file allocation exceeds the upload streaming bound'
+            return super().read(size)
+
+    destination = tmp_path / 'extracted'
+    destination.mkdir(mode=0o700)
+    if damage is not None:
+        with pytest.raises(ValueError, match='invalid application source archive'):
+            extract_application_source_archive(BoundedRead(raw), expected_digest=model.digest, destination=destination)
+    else:
+        assert extract_application_source_archive(BoundedRead(raw), expected_digest=model.digest, destination=destination) == model
+        assert (destination / 'large.bin').read_bytes() == content
+
+
 @pytest.mark.parametrize("damage", ["missing", "extra", "order", "name", "duplicate", "content", "size",
     "owner", "mode", "time", "link", "device", "truncated", "trailing", "padding", "digest"])
 def test_extractor_rejects_malformed_or_unbound_transport_without_creating_links(source, tmp_path, damage):
