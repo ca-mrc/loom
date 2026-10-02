@@ -909,15 +909,38 @@ spools bounded bytes privately, verifies both the transport hash and full source
 archive, then writes only verified content to the server-derived shared key. It
 reads back and hashes stored content before recording acceptance; an ETag or a
 successful PUT reply is insufficient, and an uncertain PUT is observed without
-an automatic resend. Database-clock expiry is rechecked after reception and before
+another explicit upload call. The shared S3 adapter can retry identical verified
+bytes under its existing SDK retry policy; this does not grant another source
+identity or retry a build/deployment mutation. Database-clock expiry is rechecked after reception and before
 completion. Per-process in-flight limits and reception/storage deadlines bound the
 work. Cancellation retains the spool and admission until off-loop archive
 verification finishes, then cleans private temporary state.
 
-This internal verifier is not yet wired to management HTTP routes or protected
-storage credentials. HTTP framing/authenticated non-buffering routing, CLI upload,
-global application-build admission, image building, release qualification and
-installed source-to-deploy acceptance remain unimplemented consumers.
+Management exposes `POST /api/v1/application-sources` (idempotent intent),
+`GET /api/v1/application-sources/{upload_id}` (owner status) and
+`PUT /api/v1/application-sources/{upload_id}/content` (raw
+`application/octet-stream`). Session/membership/CSRF checks and upload ownership
+precede body consumption. Only that exact configured PUT route bypasses ordinary
+JSON buffering; it retains strict framing, encoding and incremental byte limits.
+Responses are non-cacheable; HTTP/1 rejection with an unread body closes the
+connection. Personal application APIs do not expose these routes, and there is
+no caller-controlled completion endpoint.
+
+Optional protected `applications.runtime.source_upload` configuration enables the
+uploader. It names absolute `credentials_file` and private `spool_directory` paths,
+`max_inflight` (default 2, range 1–16), reception/storage deadlines (default 300
+seconds each, range 1–3600) and `upload_ttl_seconds` (default 3600, range 60–3600).
+The bounded private credential file contains only `access-key` and `secret-key`;
+the installer must supply a source-scoped identity and bounded spool volume.
+Bucket, endpoint, region and installation/data/cluster identities come from the
+protected shared configuration, never owner input or ambient credentials. The
+runtime owns the storage client and closes it on shutdown or failed startup;
+omitting these settings preserves old installation fingerprints and disables
+upload. Configuration support is not evidence that the capability is installed.
+
+Protected delivery of that credential/mount, CLI upload, global application-build
+admission, image building, release qualification and installed source-to-deploy
+acceptance remain incomplete consumers.
 
 ### Stopped application completion
 

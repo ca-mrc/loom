@@ -24,6 +24,8 @@ from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.object_access import ApplicationObjectAccessVerifier
 from loom_service.application_management.runtime import ApplicationRuntimeProvider
+from loom_service.application_management.source_runtime import open_source_uploader
+from loom_service.application_management.source_upload import ApplicationSourceUploader
 from loom_service.application_management.worker import ApplicationWorker
 from loom_service.environment_management.kubernetes_credentials import (
     ProjectedKubernetesCredentials,
@@ -35,9 +37,11 @@ _LOG = logging.getLogger(__name__)
 
 
 class ApplicationServiceRuntime:
-    def __init__(self, worker: ApplicationWorker, installation: ApplicationInstallation, login: ApplicationLogin):
+    def __init__(self, worker: ApplicationWorker, installation: ApplicationInstallation, login: ApplicationLogin,
+                 source_uploader: ApplicationSourceUploader | None = None):
         self.worker = worker
         self.login = login
+        self.source_uploader = source_uploader
         self.kubernetes = worker.coordinator.runtime.kubernetes
         self.object_verifier = worker.coordinator.object_verifier
         self.task = asyncio.create_task(worker.run(concurrency=installation.runtime.concurrency,
@@ -96,6 +100,7 @@ class ApplicationServiceRuntime:
                 foundation=manager.foundation, shared=installation.shared, storage=installation.storage))
             login = ApplicationLogin(registry, shared=installation.shared, credentials=shared_credentials,
                 ca_file=Path(str(conninfo_to_dict(dsn)["sslrootcert"])))
-            runtime = cls(ApplicationWorker(registry, coordinator), installation, login)
+            source_uploader = await resources.enter_async_context(open_source_uploader(installation, manager))
+            runtime = cls(ApplicationWorker(registry, coordinator), installation, login, source_uploader)
             resources.push_async_callback(runtime.close)  # Drain before HTTP, SDK or parent DB closes.
             yield runtime

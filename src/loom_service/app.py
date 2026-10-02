@@ -235,6 +235,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     app.state.application_runtime = runtime
                     app.state.application_manager = manager
                     app.state.application_login = runtime.login
+                    if runtime.source_uploader is not None:
+                        app.state.application_source_uploader = runtime.source_uploader
             try:
                 yield
             finally:

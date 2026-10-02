@@ -37,6 +37,25 @@ def read_protected_file(path: Path, *, limit: int) -> bytes:
         os.close(descriptor)
 
 
+class ApplicationSourceUploadSettings(BaseModel):
+    """Protected transport limits and explicit mounted source-only credentials."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    credentials_file: Path
+    spool_directory: Path
+    max_inflight: int = Field(default=2, ge=1, le=16, strict=True)
+    receive_timeout_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
+    storage_timeout_seconds: int = Field(default=300, ge=1, le=3600, strict=True)
+    upload_ttl_seconds: int = Field(default=3600, ge=60, le=3600, strict=True)
+
+    @model_validator(mode="after")
+    def _paths(self) -> Self:
+        if not self.credentials_file.is_absolute() or not self.spool_directory.is_absolute():
+            raise ValueError("application source paths must be absolute")
+        return self
+
+
 class ApplicationRuntimeSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -46,6 +65,7 @@ class ApplicationRuntimeSettings(BaseModel):
     shared_credentials_file: Path
     concurrency: int = Field(default=4, ge=1, le=16, strict=True)
     poll_seconds: int = Field(default=5, ge=1, le=60, strict=True)
+    source_upload: ApplicationSourceUploadSettings | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class ApplicationInstallation(BaseModel):

@@ -83,7 +83,7 @@ async def test_configured_lifespan_uploads_with_explicit_s3_identity_and_closes_
     _, captured = source
     body = archive_bytes(captured)
     digest = hashlib.sha256(body).hexdigest()
-    config = data["foundation"]["platform_config"]
+    config = json.loads(data["foundation"]["platform_config_json"])
     key = f"application-sources/v1/sha256/{digest}.tar"
     sdk = FakeSDK()
     monkeypatch.setattr(nebius.sdk, "SDK", lambda **kwargs: sdk)
