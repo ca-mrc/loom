@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
+from tests.integration.test_nebius_pool_installation import add_application_builder
 from tests.ops.test_nebius_management_refresh_predecessor import (
     application_management_inputs as application_management_inputs,
 )
@@ -62,6 +63,7 @@ from tests.support.execution_image_admission import (
     IMAGE_ADMISSION_KEYRING,
     signed_image_admission_bundle,
 )
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as base_management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -256,6 +258,29 @@ def test_private_cutover_loads_only_explicit_qualified_dormant_consumers(private
         key = kind + ":" + document["metadata"]["namespace"] + ":" + document["metadata"]["name"]
         assert key in retained and key not in runtime
         assert retained[key]["metadata"]["uid"] == document["metadata"]["uid"]
+
+
+async def test_protected_publication_qualifies_application_builder_tools(private_cutover, publication_http, build_inputs):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+
+    metadata, payload, _ = private_cutover
+    config, identity, token = add_application_builder(payload["installation"], build_inputs[0].recipe)
+    payload["installation"] = config
+    path = Path(metadata["inputs_path"]).parent / "application-builder-token"
+    path.write_text(token)
+    path.chmod(0o600)
+    payload["machine_token_files"][str(identity)] = str(path)
+    save_private(metadata, payload)
+    async with httpx.AsyncClient() as http:
+        # Exercise the actual private input consumer and all existing publication proof.
+        await entry.qualify_pool_publication(entry.load_pool_cutover_inputs(metadata), http)
+        profile = config["profiles"]["application_images"][0]
+        profile["settings"]["service_image"] = profile["recipe"]["trusted_image_ref"] = "foreign/service@sha256:" + "f" * 64
+        save_private(metadata, payload)
+        context = entry.load_pool_cutover_inputs(metadata)
+        with pytest.raises(EntryError):
+            await entry.qualify_pool_publication(context, http)
 
 
 @pytest.fixture
