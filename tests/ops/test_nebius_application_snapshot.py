@@ -209,6 +209,13 @@ def pool_snapshot(snapshot_objects):
         'metadata': {'name': 'loom-execution-capacity-collector-nebius', 'namespace': execution,
             'uid': str(UUID(int=10)), 'resourceVersion': '15'},
         'data': {'credentials.json': base64.b64encode(b'private-collector').decode()}}
+    objects['secret', 'loom-platform-storage', shared] = {
+        'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+        'metadata': {'name': 'loom-platform-storage', 'namespace': shared,
+            'uid': str(UUID(int=12)), 'resourceVersion': '16'},
+        'data': {key: base64.b64encode(value).decode() for key, value in {
+            'source-access-key': b'private-source-access', 'source-secret-key': b'private-source-secret',
+            'secret-key': b'private-data-secret'}.items()}}
     kinds = {'Deployment': 'apps/v1', 'StatefulSet': 'apps/v1', 'CronJob': 'batch/v1',
         'Service': 'v1', 'ConfigMap': 'v1', 'Role': 'rbac.authorization.k8s.io/v1',
         'RoleBinding': 'rbac.authorization.k8s.io/v1', 'ClusterRole': 'rbac.authorization.k8s.io/v1',
@@ -240,7 +247,7 @@ def capture_pool(pool_snapshot, tmp_path, **overrides):
     from scripts.ops.nebius_application_snapshot import capture_shared_inputs
 
     _, _, _, read, listing = pool_snapshot
-    return capture_shared_inputs(read=read, read_collection=overrides.get('read_collection', listing),
+    return capture_shared_inputs(read=overrides.get('read', read), read_collection=overrides.get('read_collection', listing),
         root=tmp_path, cluster_id='mk8scluster-test', namespace='loom-nebius-platform',
         namespace_uid='1' * 32, kube_system_uid='2' * 32)
 
@@ -262,9 +269,15 @@ def test_pool_capture_preserves_actual_private_resources_not_credential_values(p
         'sha256': '80e08e3e6e738e8067c908e490e2dd01209a038bb551805421e6219105a6a108'}
     assert payload['actuator_credential'] == {'uid': str(UUID(int=9)), 'resource_version': '14'}
     assert payload['database_credential'] == {'uid': '5' * 32, 'resource_version': '12'}
+    import hashlib
+
+    assert payload['application_source_credential'] == {'uid': str(UUID(int=12)), 'resource_version': '16',
+        'sha256': hashlib.sha256(b'{"access-key":"private-source-access","secret-key":"private-source-secret"}').hexdigest()}
     assert not any(row['kind'] == 'Secret' for row in payload['resources'])
     raw = (directory / 'pool-resources.json').read_text()
     assert 'private-collector' not in raw and 'DO-NOT-COPY' not in raw
+    assert all(value not in raw and base64.b64encode(value.encode()).decode() not in raw
+        for value in ('private-source-access', 'private-source-secret', 'private-data-secret'))
     assert set(result) == {'status', 'observation_id', 'candidate_sha'}
     assert (directory / 'pool-resources.json').stat().st_mode & 0o777 == 0o600
     assert directory.stat().st_mode & 0o777 == 0o700
@@ -272,6 +285,35 @@ def test_pool_capture_preserves_actual_private_resources_not_credential_values(p
     old = (directory / 'pool-resources.json').read_bytes()
     assert capture_pool(pool_snapshot, tmp_path)['observation_id'] != result['observation_id']
     assert (directory / 'pool-resources.json').read_bytes() == old
+
+
+@pytest.mark.parametrize('damage', ['missing', 'payload', 'type', 'stringData', 'whitespace', 'oversize', 'rotation'])
+def test_source_capture_rejects_unqualified_or_rotated_material_before_writing(pool_snapshot, tmp_path, damage):
+    from scripts.ops.nebius_application_snapshot import SnapshotError
+
+    objects, _, _, read, _ = pool_snapshot
+    key = 'secret', 'loom-platform-storage', 'loom-nebius-platform'
+    source = objects[key]
+    if damage == 'missing':
+        del source['data']['source-secret-key']
+    elif damage == 'payload':
+        source['data']['source-secret-key'] = 'not-base64'
+    elif damage == 'type':
+        source['type'] = 'kubernetes.io/tls'
+    elif damage == 'stringData':
+        source['stringData'] = {'source-secret-key': 'override'}
+    elif damage in {'whitespace', 'oversize'}:
+        source['data']['source-secret-key'] = base64.b64encode(b'contains space' if damage == 'whitespace' else b'x' * 4097).decode()
+
+    def changing_read(kind, name, namespace):
+        row = read(kind, name, namespace)
+        if damage == 'rotation' and (kind, name, namespace) == key:
+            source['metadata']['resourceVersion'] = '17'
+        return row
+
+    with pytest.raises(SnapshotError):
+        capture_pool(pool_snapshot, tmp_path, read=changing_read)
+    assert not list(tmp_path.iterdir())
 
 
 def test_pool_capture_inherits_missing_item_type_only_from_typed_collection(pool_snapshot, tmp_path):
