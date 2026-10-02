@@ -176,3 +176,21 @@ def test_expected_settings_cannot_use_ambiguous_or_indirect_configuration(settin
     with pytest.raises(ValueError) as error:
         expected_pool_runtime_settings(component, target, **options)
     assert 'private-' not in str(error.value)
+
+
+def test_fixed_probe_sanitizes_an_unavailable_runtime_module(monkeypatch, capsys):
+    import builtins
+
+    from scripts.ops.nebius_pool_runtime_settings import BOUND_POOL_SETTINGS_COMMAND
+
+    original = builtins.__import__
+    def unavailable(name, *args, **kwargs):
+        if name == 'loom.execution_image_admission':
+            raise ValueError('private-image-import-marker')
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, '__import__', unavailable)
+    monkeypatch.setattr(sys, 'argv', ['-c', 'controller', 'ab' * 32, 'cd' * 32])
+    with pytest.raises(SystemExit) as error:
+        exec(BOUND_POOL_SETTINGS_COMMAND, {})
+    captured = capsys.readouterr()
+    assert error.value.code == 1 and captured.out == '' and captured.err == 'Pool runtime settings unqualified\n'
