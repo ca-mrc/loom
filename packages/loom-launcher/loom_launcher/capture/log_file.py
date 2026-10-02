@@ -76,6 +76,13 @@ async def tail_log_file(
                 if parsed is not None:
                     yield _DictEvent(parsed) if isinstance(parsed, dict) else parsed
 
+    async def discard_stdout() -> None:
+        # Console output is not this adapter's trajectory source. Drain it
+        # without retaining bytes so bounded pipes cannot stall the agent.
+        async for _ in handle.stdout:
+            pass
+
+    stdout_task = asyncio.create_task(discard_stdout())
     wait_task = asyncio.create_task(handle.wait())
     try:
         while not wait_task.done():
@@ -90,6 +97,10 @@ async def tail_log_file(
         # Final flush after process exits.
         async for event in _drain_once(final=True):
             yield event
+        await wait_task
+        await stdout_task
     finally:
-        if not wait_task.done():
-            wait_task.cancel()
+        for task in (stdout_task, wait_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, wait_task, return_exceptions=True)
