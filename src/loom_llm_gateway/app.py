@@ -139,6 +139,8 @@ def create_app(settings: GatewaySettings) -> FastAPI:
             bucket=source_bucket,
         )
         app.state.artifact_store = artifact_store
+        app.state.output_source_store = source_store
+        app.state.output_source_bucket = source_bucket
         from loom_llm_gateway.task_egress import TaskEgressConfig, TaskEgressRuntime
 
         app.state.task_egress = (

@@ -10,6 +10,7 @@ import pytest
 from loom.execution_contract import VerifierTopology, workload_requirements_from_task
 from loom.execution_runtime_contract import (
     ExecutionRuntimeResultV1,
+    RuntimeHandoffInputV1,
     validate_runtime_plan_requirements,
 )
 from loom.models.trajectory import LLMCallEvent, Terminus2UserPromptEvent
@@ -82,7 +83,7 @@ def test_deferred_verifier_plan_restores_committed_workspace():
         item.relative_path == "artifacts/workspace.tar" and item.required
         for item in agent.output_declarations
     )
-    verifier = compile_deferred_verifier_plan(agent, task, verifier_timeout_seconds=120)
+    verifier = compile_deferred_verifier_plan(agent, task, verifier_timeout_seconds=120, handoff_input=_HANDOFF)
     assert verifier.execution_role == "verifier"
     assert verifier.verifier_execution == "skipped"
     assert [sidecar.role_name for sidecar in verifier.sidecars if sidecar.private_sandbox] == [
@@ -333,3 +334,8 @@ def test_direct_completion_keeps_task_resources_with_controller_profile():
     assert plan.controller_resources is None
     assert plan.execution_resources == plan.task_resources
     assert "controller_resources" not in plan.canonical_payload()
+
+
+_HANDOFF = RuntimeHandoffInputV1(
+    manifest_sha256="sha256:" + "d" * 64, file_count=1, total_bytes=10,
+)

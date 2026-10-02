@@ -7,6 +7,7 @@ import json
 import math
 import re
 import stat
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from uuid import UUID
@@ -42,6 +43,7 @@ from loom.execution_runtime_contract import (
     GuestExecutionV1,
     ProbeV1,
     ProcessPhaseV1,
+    RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
@@ -965,10 +967,13 @@ def _compile_terminus_plan(
                           if guest_execution is not None else profile.runtime_volume_mib)
     max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
                           if guest_execution is not None else profile.max_artifact_bytes)
-    # Guest launch keeps both sandboxes in this pod. Separate grading otherwise
-    # defers the verifier until the agent pod is gone.
-    colocated_verifier = shared or guest_execution is not None
-    sandbox_roles = ("task-sandbox", "verifier-sandbox") if guest_execution is not None else ("task-sandbox",)
+    # Guest launch keeps both sandboxes in this pod. Retained services cannot
+    # survive the agent pod, so their verifier also grades beside them.
+    # Separate grading otherwise defers the verifier until the agent pod is gone.
+    colocated_verifier = shared or guest_execution is not None or env.service_lifecycle is not None
+    sandbox_roles = (("task-sandbox", "verifier-sandbox")
+                     if guest_execution is not None or (colocated_verifier and not shared)
+                     else ("task-sandbox",))
     for role in sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
         probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
@@ -1020,7 +1025,8 @@ def _compile_terminus_plan(
         ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
         *harness_outputs,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", shared),
+        ("verifier/output.json", "verifier/output.json", "verifier",
+         shared or (colocated_verifier and guest_execution is None)),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -1101,10 +1107,63 @@ def _compile_terminus_plan(
     )
 
 
+_HANDOFF_ARCHIVE = ".loom/workspace.tar"
+_VERIFIER_OWNED_OUTPUTS = frozenset({
+    "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+})
+
+
+def verifier_handoff_path(committed_path: str) -> str | None:
+    """Where a committed agent output is staged for the deferred verifier.
+
+    The verifier reads these beside its private controller state; `.loom/` is
+    never copied into the graded sandbox.
+    """
+    if committed_path in {"artifacts/workspace.tar", "artifacts/workspace-references.json"}:
+        return ".loom/" + committed_path.removeprefix("artifacts/")
+    if committed_path.startswith("artifacts/mutable-paths/"):
+        return ".loom/" + committed_path.removeprefix("artifacts/")
+    return None
+
+
+def build_verifier_handoff_manifest(
+    *, task_revision_sha256: str, committed_files: Iterable[tuple[str, int, str]],
+) -> ServiceExecutionInputManifestV1:
+    """Bind the exact committed agent workspace that a deferred verifier grades."""
+    files = []
+    for relative_path, size_bytes, sha256 in committed_files:
+        target = verifier_handoff_path(relative_path)
+        if target is not None:
+            files.append(ServiceExecutionInputFileV1(
+                relative_path=target, size_bytes=size_bytes, sha256=sha256, mode="0644",
+            ))
+    files.sort(key=lambda item: item.relative_path.encode("utf-8"))
+    if _HANDOFF_ARCHIVE not in {item.relative_path for item in files}:
+        raise ValueError("verifier handoff archive was not committed")
+    return ServiceExecutionInputManifestV1(
+        task_revision_sha256=task_revision_sha256, files=tuple(files),
+    )
+
+
+def verifier_handoff_input(manifest: ServiceExecutionInputManifestV1) -> RuntimeHandoffInputV1:
+    return RuntimeHandoffInputV1(
+        manifest_sha256="sha256:" + hashlib.sha256(manifest.canonical_bytes()).hexdigest(),
+        file_count=len(manifest.files),
+        total_bytes=sum(item.size_bytes for item in manifest.files),
+    )
+
+
 def compile_deferred_verifier_plan(
     agent_plan: ExecutionRuntimePlanV1, task: TaskConfig, *, verifier_timeout_seconds: int,
+    handoff_input: RuntimeHandoffInputV1,
 ) -> ExecutionRuntimePlanV1:
-    """Verifier pod that grades a committed workspace after the agent pod is gone."""
+    """Verifier pod that grades a committed workspace after the agent pod is gone.
+
+    It keeps the attempt's prepared image, route and node share, so the freed
+    agent capacity is admitted again for the verifier rather than enlarged.
+    """
+    if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
+        raise ValueError("only a separate-execution attempt defers its verifier")
     task_sandbox = next(
         sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == "task-sandbox"
     )
@@ -1116,15 +1175,20 @@ def compile_deferred_verifier_plan(
     verifier_sandbox = task_sandbox.model_copy(update={
         "role_name": "verifier-sandbox", "identity": identity,
     })
-    outputs = []
-    for item in agent_plan.output_declarations:
-        required = item.required
-        if item.relative_path == "verifier/output.json":
-            required = True
-        elif item.relative_path == "artifacts/workspace.tar":
-            required = False
-        outputs.append(item.model_copy(update={"required": required}))
-    return agent_plan.model_copy(update={
+    outputs = [
+        item if item == TASK_EGRESS_OUTPUT
+        else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
+        for item in agent_plan.output_declarations
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
+    ]
+    requests = agent_plan.resource_requests
+    if requests is not None:
+        requests = (ExecutionResourceRequestsV1(
+            controller=requests.controller, verifier_sandbox=requests.task_sandbox,
+        ) if requests.controller is not None or requests.task_sandbox is not None else None)
+    argv = agent_plan.main.argv
+    module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
+    deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
         "verifier_execution": "skipped",
         "verifier": None,
@@ -1139,14 +1203,14 @@ def compile_deferred_verifier_plan(
         ),
         "main": agent_plan.main.model_copy(update={
             "role": "verifier",
-            "argv": _sandbox_phase_argv("verify-sandbox"),
+            "argv": _sandbox_phase_argv("verify-sandbox", module),
             "timeout_seconds": verifier_timeout_seconds,
         }),
         "output_declarations": tuple(outputs),
-        "resource_requests": None,
-        "task_image_materialization_id": None,
-        "node_resource_allocation": None,
+        "resource_requests": requests,
+        "handoff_input": handoff_input,
     })
+    return ExecutionRuntimePlanV1.model_validate(deferred.canonical_payload())
 
 
 __all__ = [
@@ -1165,10 +1229,13 @@ __all__ = [
     "TaskExecutionResourceRequestsV1",
     "automatic_service_execution_rejections",
     "build_service_execution_input_manifest",
+    "build_verifier_handoff_manifest",
     "compile_deferred_verifier_plan",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
     "prepare_service_execution_input_manifest",
     "service_execution_input_binding",
     "validate_task_resource_requests",
+    "verifier_handoff_input",
+    "verifier_handoff_path",
 ]

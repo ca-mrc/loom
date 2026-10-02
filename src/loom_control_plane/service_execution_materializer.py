@@ -88,7 +88,10 @@ from loom_control_plane.metrics import (
     SERVICE_EXECUTION_SOURCE_SPOOL_BYTES,
     SERVICE_EXECUTION_SOURCE_SPOOL_RETAINED,
 )
-from loom_control_plane.service_execution import recover_deleted_committed_trial
+from loom_control_plane.service_execution import (
+    defers_verification,
+    recover_deleted_committed_trial,
+)
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -553,6 +556,110 @@ def build_canonical_atif(
     return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadedSource:
+    lease_data: dict[str, Any]
+    upload_data: dict[str, Any]
+    artifact_id: UUID
+    file_inventory: tuple[tuple[int, str, int | None, str | None, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedSource:
+    artifact_id: UUID
+    prefix: str
+    record: Any
+    evidence: tuple[tuple[str, str, bytes, str], ...]
+
+
+async def _load_source(session: AsyncSession, lease: ServiceExecutionLease) -> _LoadedSource:
+    if lease.output_upload_session_id is None:
+        raise MaterializationIntegrityError("source_identity_missing")
+    upload = await session.get(ArtifactUploadSession, lease.output_upload_session_id)
+    artifact = (
+        await session.execute(
+            select(Artifact).where(
+                Artifact.control_producer_kind == "service_execution",
+                Artifact.control_producer_id == lease.id,
+            )
+        )
+    ).scalar_one_or_none()
+    files = list(
+        (
+            await session.execute(
+                select(ArtifactUploadFile)
+                .where(ArtifactUploadFile.session_id == lease.output_upload_session_id)
+                .order_by(ArtifactUploadFile.file_index)
+            )
+        ).scalars()
+    )
+    if upload is None or artifact is None:
+        raise MaterializationIntegrityError("source_identity_missing")
+    return _LoadedSource(
+        lease_data={
+            "id": lease.id,
+            "team_id": lease.team_id,
+            "trial_id": lease.trial_id,
+            "attempt": lease.attempt,
+            "output_generation": lease.output_generation,
+            "upload_session_id": lease.output_upload_session_id,
+            "output_manifest_sha256": lease.output_manifest_sha256,
+            "output_marker_sha256": lease.output_marker_sha256,
+        },
+        upload_data={
+            "id": upload.id,
+            "prefix": upload.prefix,
+            "manifest": upload.canonical_manifest_json,
+            "manifest_sha256": upload.manifest_sha256,
+            "marker_sha256": upload.committed_marker_sha256,
+            "state": upload.state,
+        },
+        artifact_id=artifact.id,
+        file_inventory=tuple(
+            (row.file_index, row.relative_path, row.actual_size, row.computed_sha256, row.state)
+            for row in files
+        ),
+    )
+
+
+def defers_verification_result(runtime_result: ExecutionRuntimeResultV1, trial_result: dict[str, Any]) -> bool:
+    return runtime_result.execution_role == "attempt" and isinstance(trial_result.get("verifier_execution"), dict)
+
+
+def _merge_verifier_execution(
+    attempt: ExecutionRuntimeResultV1, trial_result: dict[str, Any], verifier_inputs: dict[str, bytes],
+) -> tuple[ExecutionRuntimeResultV1, bytes | None]:
+    """One attempt outcome from the agent's result and its deferred verifier's."""
+    handoff = trial_result["verifier_execution"]
+    if attempt.status != "succeeded":
+        raise MaterializationIntegrityError("verifier_handoff_identity_drift")
+    if handoff.get("state") != "committed":
+        # Grading never happened; the agent's evidence is archived as partial.
+        return attempt.model_copy(update={
+            "status": "cancelled" if trial_result.get("cancelled") is True else "verifier_error",
+            "verifier_rewards": None, "partial_evidence": True,
+        }), None
+    try:
+        verifier = ExecutionRuntimeResultV1.model_validate_json(verifier_inputs[_RESULT_PATH])
+    except (KeyError, ValidationError) as exc:
+        raise MaterializationIntegrityError("verifier_runtime_result_invalid") from exc
+    if (
+        verifier.model_dump(mode="json") != handoff.get("runtime_result")
+        or verifier.execution_role != "verifier"
+        or verifier.candidate_sha != attempt.candidate_sha
+        or verifier.task_revision_sha256 != attempt.task_revision_sha256
+        or verifier.verifier_rewards != trial_result.get("reward")
+    ):
+        raise MaterializationIntegrityError("verifier_runtime_result_projection_drift")
+    status = verifier.status if verifier.status in {"succeeded", "cancelled"} else "verifier_error"
+    return attempt.model_copy(update={
+        "status": status,
+        "verifier_rewards": verifier.verifier_rewards,
+        "finished_at": max(attempt.finished_at, verifier.finished_at),
+        "partial_evidence": attempt.partial_evidence or verifier.partial_evidence,
+    }), verifier_inputs.get(_VERIFIER_PATH)
+
+
 class ServiceExecutionMaterializer:
     def __init__(
         self,
@@ -667,6 +774,8 @@ class ServiceExecutionMaterializer:
                         or_(
                             and_(
                                 ServiceExecutionLease.finalized_at.is_not(None),
+                                # A deferred verifier is archived with its parent attempt.
+                                ServiceExecutionLease.execution_role == "attempt",
                                 Trial.state.in_(("materializing", "succeeded", "failed", "cancelled")),
                             ),
                             and_(
@@ -714,6 +823,10 @@ class ServiceExecutionMaterializer:
                 return None
             if lease.finalized_at is None:
                 await recover_deleted_committed_trial(session, lease=lease, observed_at=current)
+                if lease.finalized_at is not None:
+                    # Recovered into a verifier handoff; archive once it is graded.
+                    await session.commit()
+                    return None
             claim_id = uuid4()
             lease.materialization_state = "running"
             lease.materialization_attempts += 1
@@ -792,90 +905,22 @@ class ServiceExecutionMaterializer:
             if readback_size != size or "sha256:" + digest.hexdigest() != expected:
                 raise MaterializationIntegrityError("canonical_object_readback_mismatch")
 
-    async def _load_and_materialize(self, claim: MaterializationClaim) -> MaterializationResult:
-        async with self._session_factory() as session:
-            lease = await session.get(ServiceExecutionLease, claim.lease_id)
-            if (
-                lease is None
-                or lease.materialization_state != "running"
-                or lease.materialization_claim_id != claim.claim_id
-                or lease.output_upload_session_id is None
-            ):
-                raise MaterializationIntegrityError("materialization_claim_lost")
-            upload = await session.get(ArtifactUploadSession, lease.output_upload_session_id)
-            trial = await session.get(Trial, lease.trial_id)
-            artifact = (
-                await session.execute(
-                    select(Artifact).where(
-                        Artifact.control_producer_kind == "service_execution",
-                        Artifact.control_producer_id == lease.id,
-                    )
-                )
-            ).scalar_one_or_none()
-            files = list(
-                (
-                    await session.execute(
-                        select(ArtifactUploadFile)
-                        .where(ArtifactUploadFile.session_id == lease.output_upload_session_id)
-                        .order_by(ArtifactUploadFile.file_index)
-                    )
-                ).scalars()
-            )
-            if upload is None or trial is None or artifact is None:
-                raise MaterializationIntegrityError("source_identity_missing")
-            try:
-                task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
-            except ServiceExecutionTaskSnapshotError as exc:
-                raise MaterializationIntegrityError(str(exc)) from exc
-            upload_data = {
-                "id": upload.id,
-                "prefix": upload.prefix,
-                "manifest": upload.canonical_manifest_json,
-                "manifest_sha256": upload.manifest_sha256,
-                "marker_sha256": upload.committed_marker_sha256,
-                "state": upload.state,
-            }
-            lease_data = {
-                "id": lease.id,
-                "team_id": lease.team_id,
-                "trial_id": lease.trial_id,
-                "attempt": lease.attempt,
-                "output_generation": lease.output_generation,
-                "upload_session_id": lease.output_upload_session_id,
-                "output_manifest_sha256": lease.output_manifest_sha256,
-                "output_marker_sha256": lease.output_marker_sha256,
-            }
-            gateway_calls = (await read_service_execution_llm_calls(
-                session, lease, generation=lease.output_generation,
-            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle"} else None
-            trial_config_raw = trial.config
-            trial_result_raw = trial.result
-            trial_task_id = trial.task_id
-            task_config_raw = task.config
-            artifact_id = artifact.id
-
-        if upload_data["state"] != "committed" or not isinstance(
-            upload_data["manifest"], dict
-        ):
+    async def _verify_source(self, source: _LoadedSource) -> _VerifiedSource:
+        upload_data, lease_data = source.upload_data, source.lease_data
+        if upload_data["state"] != "committed" or not isinstance(upload_data["manifest"], dict):
             raise MaterializationIntegrityError("source_commit_not_committed")
         try:
             manifest = ArtifactCommitManifestV1.model_validate_json(
                 canonical_document(upload_data["manifest"])
             )
-            task_config = TaskConfig.model_validate(task_config_raw)
-            trial_config = TrialConfig.model_validate(trial_config_raw)
         except ValidationError as exc:
             raise MaterializationIntegrityError("source_metadata_invalid", str(exc)) from exc
-        # The task snapshot was bound through Trial.task_id above. Uploaded TaskSets
-        # namespace that catalog identity without rewriting the source config's
-        # task.id. Canonical events and ATIF must use the catalog identity, while
-        # the original config remains intact for task semantics and provenance.
         manifest_body = canonical_document(manifest)
         if (
             manifest.session_id != upload_data["id"]
             or manifest.commit_kind != "service_execution_output"
             or len(manifest.artifacts) != 1
-            or manifest.artifacts[0].artifact_id != artifact_id
+            or manifest.artifacts[0].artifact_id != source.artifact_id
             or _digest(manifest_body) != upload_data["manifest_sha256"]
             or upload_data["manifest_sha256"] != lease_data["output_manifest_sha256"]
         ):
@@ -920,7 +965,7 @@ class ServiceExecutionMaterializer:
             raise MaterializationIntegrityError("commit_marker_identity_drift")
 
         record = manifest.artifacts[0]
-        item_source_key = f"{prefix}artifacts/{artifact_id}/_artifact_manifest.json"
+        item_source_key = f"{prefix}artifacts/{source.artifact_id}/_artifact_manifest.json"
         item_body = await self._read_exact(
             key=item_source_key,
             expected=record.manifest_sha256,
@@ -947,27 +992,30 @@ class ServiceExecutionMaterializer:
             raise MaterializationIntegrityError("artifact_manifest_invalid") from exc
         if item_manifest.stored_files != record.stored_files:
             raise MaterializationIntegrityError("artifact_manifest_inventory_drift")
-        db_inventory = [
-            (row.file_index, row.relative_path, row.actual_size, row.computed_sha256, row.state)
-            for row in files
-        ]
         manifest_inventory = [
             (row.file_index, row.relative_path, row.size_bytes, row.sha256, "verified")
             for row in record.stored_files
         ]
-        if db_inventory != manifest_inventory:
+        if list(source.file_inventory) != manifest_inventory:
             raise MaterializationIntegrityError("artifact_file_inventory_drift")
-
-        destination_prefix = (
-            f"trials/{lease_data['team_id']}/{lease_data['trial_id']}/attempts/"
-            f"{lease_data['attempt']}/bundles/{artifact_id}/"
+        return _VerifiedSource(
+            artifact_id=source.artifact_id, prefix=prefix, record=record,
+            evidence=(
+                (root_source_key, "_manifest.json", manifest_body, str(upload_data["manifest_sha256"])),
+                (marker_source_key, "_COMMITTED", marker_body, str(upload_data["marker_sha256"])),
+                (item_source_key, "_artifact_manifest.json", item_body, record.manifest_sha256),
+            ),
         )
+
+    async def _copy_source(
+        self, source: _VerifiedSource, *, destination_prefix: str, namespace: str,
+    ) -> tuple[list[MaterializedFile], list[MaterializedFile], dict[str, bytes]]:
         materialized: list[MaterializedFile] = []
         source_evidence: list[MaterializedFile] = []
         derivation_inputs: dict[str, bytes] = {}
-        for file in record.stored_files:
-            source_key = f"{prefix}artifacts/{artifact_id}/{file.relative_path}"
-            destination_key = destination_prefix + "files/" + file.relative_path
+        for file in source.record.stored_files:
+            source_key = f"{source.prefix}artifacts/{source.artifact_id}/{file.relative_path}"
+            destination_key = destination_prefix + "files/" + namespace + file.relative_path
             await self._copy_exact(
                 source_key=source_key,
                 destination_key=destination_key,
@@ -976,7 +1024,7 @@ class ServiceExecutionMaterializer:
             )
             materialized.append(
                 MaterializedFile(
-                    relative_path=file.relative_path,
+                    relative_path=namespace + file.relative_path,
                     media_type=file.media_type,
                     size_bytes=file.size_bytes,
                     sha256=file.sha256,
@@ -993,11 +1041,8 @@ class ServiceExecutionMaterializer:
                 derivation_inputs[file.relative_path] = await self._read_exact(
                     key=source_key, expected=file.sha256, size=file.size_bytes
                 )
-        for source_key, destination_name, body, expected in (
-            (root_source_key, "source/_manifest.json", manifest_body, str(upload_data["manifest_sha256"])),
-            (marker_source_key, "source/_COMMITTED", marker_body, str(upload_data["marker_sha256"])),
-            (item_source_key, "source/_artifact_manifest.json", item_body, record.manifest_sha256),
-        ):
+        for source_key, name, body, expected in source.evidence:
+            destination_name = "source/" + namespace + name
             await self._copy_exact(
                 source_key=source_key,
                 destination_key=destination_prefix + destination_name,
@@ -1013,6 +1058,85 @@ class ServiceExecutionMaterializer:
                     key=destination_prefix + destination_name,
                 )
             )
+        return materialized, source_evidence, derivation_inputs
+
+    async def _load_and_materialize(self, claim: MaterializationClaim) -> MaterializationResult:
+        async with self._session_factory() as session:
+            lease = await session.get(ServiceExecutionLease, claim.lease_id)
+            if (
+                lease is None
+                or lease.materialization_state != "running"
+                or lease.materialization_claim_id != claim.claim_id
+                or lease.output_upload_session_id is None
+            ):
+                raise MaterializationIntegrityError("materialization_claim_lost")
+            trial = await session.get(Trial, lease.trial_id)
+            if trial is None:
+                raise MaterializationIntegrityError("source_identity_missing")
+            attempt_source = await _load_source(session, lease)
+            try:
+                task = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
+            except ServiceExecutionTaskSnapshotError as exc:
+                raise MaterializationIntegrityError(str(exc)) from exc
+            verifier_source = None
+            handoff = (trial.result or {}).get("verifier_execution") if isinstance(trial.result, dict) else None
+            if (
+                defers_verification(lease)
+                and isinstance(handoff, dict)
+                and handoff.get("state") == "committed"
+            ):
+                child = await session.get(ServiceExecutionLease, UUID(str(handoff.get("lease_id"))))
+                if (
+                    child is None
+                    or child.parent_lease_id != lease.id
+                    or child.execution_role != "verifier"
+                    or child.trial_id != lease.trial_id
+                    or child.attempt != lease.attempt
+                    or child.output_commit_state != "committed"
+                    or child.output_upload_session_id is None
+                    or child.output_manifest_sha256 != handoff.get("output_manifest_sha256")
+                    or child.output_marker_sha256 != handoff.get("output_marker_sha256")
+                ):
+                    raise MaterializationIntegrityError("verifier_source_identity_drift")
+                verifier_source = await _load_source(session, child)
+            elif defers_verification(lease) and not isinstance(handoff, dict):
+                raise MaterializationIntegrityError("verifier_handoff_missing")
+            gateway_calls = (await read_service_execution_llm_calls(
+                session, lease, generation=lease.output_generation,
+            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle"} else None
+            trial_config_raw = trial.config
+            trial_result_raw = trial.result
+            trial_task_id = trial.task_id
+            task_config_raw = task.config
+            lease_data = attempt_source.lease_data
+            artifact_id = attempt_source.artifact_id
+
+        try:
+            task_config = TaskConfig.model_validate(task_config_raw)
+            trial_config = TrialConfig.model_validate(trial_config_raw)
+        except ValidationError as exc:
+            raise MaterializationIntegrityError("source_metadata_invalid", str(exc)) from exc
+        # The task snapshot was bound through Trial.task_id above. Uploaded TaskSets
+        # namespace that catalog identity without rewriting the source config's
+        # task.id. Canonical events and ATIF must use the catalog identity, while
+        # the original config remains intact for task semantics and provenance.
+        destination_prefix = (
+            f"trials/{lease_data['team_id']}/{lease_data['trial_id']}/attempts/"
+            f"{lease_data['attempt']}/bundles/{artifact_id}/"
+        )
+        materialized, source_evidence, derivation_inputs = await self._copy_source(
+            await self._verify_source(attempt_source), destination_prefix=destination_prefix, namespace="",
+        )
+        verifier_inputs: dict[str, bytes] = {}
+        if verifier_source is not None:
+            # The deferred verifier's committed bundle is part of this attempt's
+            # archive; its outputs never replace the agent's own evidence.
+            verifier_files, verifier_evidence, verifier_inputs = await self._copy_source(
+                await self._verify_source(verifier_source), destination_prefix=destination_prefix,
+                namespace="verifier-execution/",
+            )
+            materialized.extend(verifier_files)
+            source_evidence.extend(verifier_evidence)
         try:
             runtime_result = ExecutionRuntimeResultV1.model_validate_json(
                 derivation_inputs[_RESULT_PATH]
@@ -1028,6 +1152,17 @@ class ServiceExecutionMaterializer:
             != lease_data["output_marker_sha256"]
         ):
             raise MaterializationIntegrityError("runtime_result_projection_drift")
+        if defers_verification_result(runtime_result, trial_result_raw):
+            runtime_result, verifier_body = _merge_verifier_execution(
+                runtime_result, trial_result_raw, verifier_inputs,
+            )
+            derivation_inputs = {
+                **{key: value for key, value in derivation_inputs.items()
+                   if key not in {_VERIFIER_PATH, "diagnostics/verifier-exception.json"}},
+                **({_VERIFIER_PATH: verifier_body} if verifier_body is not None else {}),
+                **({"diagnostics/verifier-exception.json": verifier_inputs["diagnostics/verifier-exception.json"]}
+                   if "diagnostics/verifier-exception.json" in verifier_inputs else {}),
+            }
         # Cancellation can win while a completed runtime result is uploading.
         # Preserve that immutable source document, but derive public terminal
         # events from the cancellation that owns the Trial's final state.
@@ -1315,6 +1450,7 @@ class ServiceExecutionMaterializer:
                 trial.failure_message = (
                     f"{result.exception_info.exception_type}: {result.exception_info.exception_message}"
                 )[:2000]
+            await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=True)
             lease.materialization_state = "committed"
             lease.materialization_claim_id = None
             lease.materialization_claim_expires_at = None
@@ -1333,6 +1469,46 @@ class ServiceExecutionMaterializer:
             await session.commit()
             SERVICE_EXECUTION_MATERIALIZATION_COMPLETED_TOTAL.inc()
             return True
+
+    async def _settle_verifier_source(
+        self, session: AsyncSession, *, lease: ServiceExecutionLease, trial: Trial, now: datetime,
+        committed: bool, error_code: str | None = None,
+    ) -> None:
+        """Close the deferred verifier's spool together with its parent's archive."""
+        handoff = (trial.result or {}).get("verifier_execution") if isinstance(trial.result, dict) else None
+        if not isinstance(handoff, dict) or handoff.get("lease_id") is None:
+            return
+        child = await session.get(ServiceExecutionLease, UUID(str(handoff["lease_id"])), with_for_update=True)
+        if (
+            child is None
+            or child.parent_lease_id != lease.id
+            or child.output_commit_state != "committed"
+            or child.materialization_state not in {"pending", "running"}
+        ):
+            return
+        child.materialization_claim_id = None
+        child.materialization_claim_expires_at = None
+        child.materialization_next_attempt_at = None
+        child.updated_at = now
+        if committed:
+            child.materialization_state = "committed"
+            child.materialization_committed_at = now
+            child.source_cleanup_state = "retained"
+            child.source_retain_until = now + self._source_retention
+            artifact = await session.scalar(select(Artifact).where(
+                Artifact.control_producer_kind == "service_execution",
+                Artifact.control_producer_id == child.id,
+            ).with_for_update())
+            if artifact is not None:
+                artifact.artifact_metadata = {
+                    **(artifact.artifact_metadata or {}),
+                    "materialization_state": "committed",
+                    "materialized_at": now.isoformat(),
+                    "archived_with_lease_id": str(lease.id),
+                }
+        else:
+            child.materialization_state = "unavailable"
+            child.materialization_error_code = (error_code or "parent_materialization_unavailable")[:120]
 
     async def _retry(self, claim: MaterializationClaim, exc: Exception) -> None:
         now = datetime.now(UTC)
@@ -1373,6 +1549,8 @@ class ServiceExecutionMaterializer:
             trial = await session.get(Trial, lease.trial_id, with_for_update=True)
             if trial is None:
                 return
+            await self._settle_verifier_source(session, lease=lease, trial=trial, now=now, committed=False,
+                                               error_code=exc.code)
             lease.materialization_state = "unavailable"
             lease.materialization_next_attempt_at = None
             lease.materialization_claim_id = None

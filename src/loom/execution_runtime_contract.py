@@ -284,6 +284,15 @@ class RuntimeTaskInputV1(_Strict):
     total_bytes: int = Field(ge=0, le=10 * 1024**3)
 
 
+class RuntimeHandoffInputV1(_Strict):
+    """The parent attempt's committed workspace, staged under .loom/ for grading."""
+
+    schema_version: Literal["loom.runtime-handoff-input.v1"] = "loom.runtime-handoff-input.v1"
+    manifest_sha256: str = Field(pattern=_SHA256.pattern)
+    file_count: int = Field(gt=0, le=10_000)
+    total_bytes: int = Field(ge=0, le=10 * 1024**3)
+
+
 class RuntimeOutputDeclarationV1(_Strict):
     """One immutable workspace file expected in the complete Trial bundle."""
 
@@ -376,6 +385,7 @@ class ExecutionRuntimePlanV1(_Strict):
     max_log_bytes_per_stream: int = Field(default=10 * 1024 * 1024, gt=0, le=100 * 1024 * 1024)
     max_artifact_bytes: int = Field(default=1024 * 1024 * 1024, gt=0, le=10 * 1024**3)
     task_input: RuntimeTaskInputV1 | None = None
+    handoff_input: RuntimeHandoffInputV1 | None = None
     output_declarations: tuple[RuntimeOutputDeclarationV1, ...] = Field(
         default=(),
         max_length=10_000,
@@ -471,10 +481,13 @@ class ExecutionRuntimePlanV1(_Strict):
         if self.task_image_materialization_id is not None and (
             self.task_image_materialization_id.int == 0
             or self.agent_image_ref is None
-            or self.execution_role != "attempt"
             or self.composition != RuntimeComposition.INIT_PAYLOAD
         ):
             raise ValueError("prepared task images require a separate trusted attempt controller")
+        if self.handoff_input is not None and (
+            self.execution_role != "verifier" or self.task_input is None
+        ):
+            raise ValueError("a workspace handoff belongs only to a deferred verifier with task input")
         if (
             any(sidecar.private_sandbox for sidecar in self.sidecars)
             and self.agent_image_ref is None
@@ -602,6 +615,8 @@ class ExecutionRuntimePlanV1(_Strict):
             payload.pop("agent_image_ref")
         if self.task_image_materialization_id is None:
             payload.pop("task_image_materialization_id")
+        if self.handoff_input is None:
+            payload.pop("handoff_input")
         for sidecar in payload["sidecars"]:
             if not sidecar["private_sandbox"]:
                 sidecar.pop("private_sandbox")
@@ -831,6 +846,7 @@ __all__ = [
     "ProbeV1",
     "ProcessPhaseV1",
     "RuntimeComposition",
+    "RuntimeHandoffInputV1",
     "RuntimeOutputDeclarationV1",
     "RuntimeOutputEvidenceV1",
     "RuntimePhaseEvidenceV1",
