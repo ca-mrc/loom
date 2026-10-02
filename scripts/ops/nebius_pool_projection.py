@@ -12,7 +12,9 @@ from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from functools import wraps
+from io import BytesIO
 from pathlib import PurePath
+from pickle import Pickler
 from typing import Any, TypeVar
 from uuid import UUID
 
@@ -24,58 +26,56 @@ Result = TypeVar("Result")
 
 
 def _snapshot(value: Any) -> object:
-    """Fresh typed graph, not an exponentially expanded tree of shared inputs.
+    """Fresh opaque typed graph, captured by the standard-library C encoder.
 
-    References are traversal-local indices, never persistent object identities.
-    Flat records also bound equality work: nested tuple snapshots would compare
-    shared subtrees repeatedly even if their construction used a local memo.
+    These bytes are only compared in memory, NEVER deserialized or persisted.
+    Exact builtin containers use the encoder's linear reference traversal. Our
+    override alone selects custom object state: no user reducer, serializer or
+    state hook executes. Class identities stay outside the bytes, so local
+    classes need no import/global name and distinct types cannot alias.
     """
-    references: dict[int, int] = {}
-    retained: list[Any] = []  # Keep objects alive until this capture is complete.
-    records: list[object] = []
+    classes: list[type[Any]] = []
+    indices: dict[int, int] = {}
 
-    def visit(item: Any) -> object:
-        kind = type(item)
-        if item is None or kind in (str, int, bool, bytes):
-            return kind, item
-        if kind is float:
-            return kind, item.hex()
-        if kind is datetime:
-            return kind, item.isoformat(), item.fold
-        if kind is UUID:
-            return kind, item.int
-        if isinstance(item, PurePath):
-            return kind, str(item)
-        if isinstance(item, Enum):
-            return kind, item.name
-        identity = id(item)
-        if identity in references:
-            return references[identity]
-        index = len(records)
-        references[identity] = index
-        retained.append(item)
-        records.append(None)
-        record: object
-        if kind in (tuple, list):
-            record = kind, tuple(visit(child) for child in item)
-        elif kind in (set, frozenset):
-            record = kind, frozenset(visit(child) for child in item)
-        elif kind is dict:
-            record = kind, tuple((visit(key), visit(child)) for key, child in item.items())
-        elif isinstance(item, BaseModel):
-            # Raw values retain field-set/invalid model_copy drift; model_dump
-            # can normalize or omit it. No serialization hooks execute here.
-            record = (kind, visit(item.__dict__), visit(item.__pydantic_extra__),
-                visit(item.__pydantic_private__), visit(item.__pydantic_fields_set__))
-        elif not isinstance(item, type) and is_dataclass(item):
-            record = kind, tuple((field.name, visit(getattr(item, field.name))) for field in fields(item))
-        else:
-            raise TypeError("pool projection input is not memoizable: " + kind.__name__)
-        records[index] = record
-        return index
+    def reject_buffer(_buffer: object) -> None:
+        # PickleBuffer bypasses reducer_override and otherwise aliases bytes or
+        # bytearray. Its actual type still needs the renderer's qualification.
+        raise TypeError("pool projection input buffer is not memoizable")
 
-    root = visit(value)
-    return root, tuple(records)
+    class Encoder(Pickler):
+        def reducer_override(self, item: Any) -> Any:
+            if item is dict:  # The sole constructor used by our fixed encoding.
+                return NotImplemented
+            kind = type(item)
+            state: object
+            if kind is datetime:
+                state = item.isoformat(), item.fold
+            elif kind is UUID:
+                state = item.int
+            elif isinstance(item, PurePath):
+                state = str(item)
+            elif isinstance(item, Enum):
+                state = item.name
+            elif isinstance(item, BaseModel):
+                state = (item.__dict__, item.__pydantic_extra__,
+                    item.__pydantic_private__, item.__pydantic_fields_set__)
+            elif not isinstance(item, type) and is_dataclass(item):
+                state = tuple((field.name, getattr(item, field.name)) for field in fields(item))
+            else:
+                raise TypeError("pool projection input is not memoizable: " + kind.__name__)
+            kind_id = id(kind)
+            if kind_id not in indices:
+                indices[kind_id] = len(classes)
+                classes.append(kind)
+            # Items, rather than constructor arguments, let the C encoder memoize
+            # the object before traversing state, including shared/cyclic graphs.
+            return dict, (), None, None, iter((('class', indices[kind_id]), ('value', state)))
+
+    output = BytesIO()
+    Encoder(output, protocol=5, buffer_callback=reject_buffer).dump(value)
+    # Compare identity tags before class objects: a metaclass may override ==.
+    # Strong references prevent tag reuse while this snapshot remains retained.
+    return tuple(indices), output.getvalue(), tuple(classes)
 
 
 def pure_projection(function: Callable[[Request], Result]) -> Callable[[Request], Result]:
