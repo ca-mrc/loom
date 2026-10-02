@@ -2793,6 +2793,14 @@ The connected read-only manager-backend and writer-inventory checks can consume
 that bound projection. They match the actual upgraded manager, not a substituted
 old observation, while preserving the common API-server revision for workload
 and permission inventory and the original database credential identities.
+The dedicated read-only pool refresh verifier composes those checks with exact
+retained material, participant database roles, physical provider scope and
+effective gateway permissions. An open global pool retains current active
+authority and open participant guards without requiring idle work. A completed
+rollback instead retains the fenced and drained global ledger, revoked machine
+credentials and a stopped, process-drained read-only gateway; reopened legacy
+owners may keep working. Fresh full workload and authority readbacks bracket
+each qualification. The result is not a persisted or reusable write permit.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
