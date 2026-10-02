@@ -35,6 +35,10 @@ def legacy_case(request, guest_runtime_inputs):
         LOOM_EXECUTION_ACTUATOR_DB_URL='postgresql+psycopg://fixture:private-db-marker@localhost/loom',
         LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID='fixture-actuator')
     rows = env(original)
+    if component == 'controller':
+        # The renderer fixture deliberately passes {} for trust; that shape is
+        # not a valid installed keyring. Supply a valid retained configuration.
+        rows['LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON']['value'] = '{"schema_version":1,"keys":[]}'
     environment.update({name: row['value'] for name, row in rows.items() if 'value' in row})
     expected = {'component': component}
     if component in {'controller', 'actuator'}:
