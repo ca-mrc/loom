@@ -534,15 +534,15 @@ class DockerDriver:
         # but our local `container` is still valid for the in-flight call.
         container = self._container
         assert container is not None
+        assert self._client is not None
+        api = self._client.api
 
         exec_kwargs: dict[str, Any] = {
+            "container": container.id,
             "cmd": ["/bin/sh", "-c", cmd],
             "stdout": True,
             "stderr": True,
             "tty": False,
-            "detach": False,
-            "stream": False,
-            "demux": True,
         }
         if user is not None:
             exec_kwargs["user"] = str(user)
@@ -553,33 +553,60 @@ class DockerDriver:
 
         loop = asyncio.get_running_loop()
         started = loop.time()
+        cancelled = threading.Event()
+        stream_lock = threading.Lock()
+        active_stream: list[Any] = []
 
-        def _sync() -> tuple[int, bytes, bytes]:
-            result = container.exec_run(**exec_kwargs)
-            output = result.output
-            if isinstance(output, tuple):
-                stdout, stderr = output
+        def close_stream() -> None:
+            with stream_lock:
+                stream = active_stream.pop() if active_stream else None
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
+
+        def _sync() -> tuple[int, bytes, bytes, bool]:
+            exec_id = api.exec_create(**exec_kwargs)["Id"]
+            if cancelled.is_set():
+                raise DriverError("command output capture cancelled")
+            stream = api.exec_start(exec_id, stream=True, demux=True)
+            with stream_lock:
+                active_stream.append(stream)
+            stdout, stderr = bytearray(), bytearray()
+            truncated = False
+            try:
+                if cancelled.is_set():
+                    raise DriverError("command output capture cancelled")
+                for chunk in stream:
+                    if cancelled.is_set():
+                        raise DriverError("command output capture cancelled")
+                    out, err = chunk if isinstance(chunk, tuple) else (chunk, None)
+                    for target, data in ((stdout, out), (stderr, err)):
+                        if data:
+                            remaining = MAX_EXEC_STREAM_BYTES - len(target)
+                            target.extend(data[:remaining])
+                            truncated |= len(data) > remaining
+                # Keep draining after the caps, so output pressure cannot block
+                # the command or hide its actual exit code.
+                info = api.exec_inspect(exec_id)
+                return int(info["ExitCode"]), bytes(stdout), bytes(stderr), truncated
+            finally:
+                close_stream()
+
+        try:
+            if timeout_sec is not None:
+                exit_code, stdout, stderr, truncated = await asyncio.wait_for(
+                    asyncio.to_thread(_sync), timeout=timeout_sec,
+                )
             else:
-                stdout, stderr = output, b""
-            return int(result.exit_code), stdout or b"", stderr or b""
-
-        if timeout_sec is not None:
-            exit_code, stdout, stderr = await asyncio.wait_for(
-                asyncio.to_thread(_sync),
-                timeout=timeout_sec,
-            )
-        else:
-            exit_code, stdout, stderr = await asyncio.to_thread(_sync)
+                exit_code, stdout, stderr, truncated = await asyncio.to_thread(_sync)
+        except BaseException:
+            cancelled.set()
+            # Docker's CancellableStream closes its socket from another thread,
+            # including if the command has gone silent after producing output.
+            close_stream()
+            raise
 
         duration = loop.time() - started
-
-        truncated = False
-        if len(stdout) > MAX_EXEC_STREAM_BYTES:
-            stdout = stdout[:MAX_EXEC_STREAM_BYTES]
-            truncated = True
-        if len(stderr) > MAX_EXEC_STREAM_BYTES:
-            stderr = stderr[:MAX_EXEC_STREAM_BYTES]
-            truncated = True
 
         return ExecResult(
             return_code=exit_code,
