@@ -64,25 +64,31 @@ ROLLBACK;
 """
 
 
-def participant_recovery_drain_sql(operation_id: UUID, participant_id: UUID, candidate: str) -> str:
-    _participant_scope(operation_id, participant_id, candidate)
+def _participant_drain_counts_sql() -> str:
+    """One predicate for guarded observation and atomic recovery reopening."""
     # The local guard is database-wide, so count all local handoffs/activity,
     # including retired bindings and aliases. Queued work without a handoff is
     # intentionally retained, not a reason to delete tasks during rollback.
+    return f"""WITH activity AS ({ACTIVITY_SQL})
+SELECT to_jsonb(activity) || jsonb_build_object(
+        'execution_outboxes',(SELECT count(*) FROM public.nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released')),
+        'build_outboxes',(SELECT count(*) FROM public.nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released'))) AS counts
+FROM activity"""
+
+
+def participant_recovery_drain_sql(operation_id: UUID, participant_id: UUID, candidate: str) -> str:
+    _participant_scope(operation_id, participant_id, candidate)
     return _header(read_only=True) + f"""DO $pool_recovery_guard$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM public.nebius_rollout_guard WHERE id=1
         AND owner='pool-recovery:{operation_id}' AND candidate_sha='{candidate}')
     THEN RAISE EXCEPTION 'pool recovery guard unqualified'; END IF;
 END $pool_recovery_guard$;
-WITH activity AS ({ACTIVITY_SQL})
 SELECT json_build_object('schema','loom.pool-participant-drain.v1',
     'operation_id','{operation_id}','participant_id','{participant_id}','candidate_sha','{candidate}',
     'read_only',current_setting('transaction_read_only')='on',
-    'counts',to_jsonb(activity) || jsonb_build_object(
-        'execution_outboxes',(SELECT count(*) FROM public.nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released')),
-        'build_outboxes',(SELECT count(*) FROM public.nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released')))) AS report
-FROM activity;
+    'counts',drain.counts) AS report
+FROM ({_participant_drain_counts_sql()}) drain;
 ROLLBACK;
 """
 

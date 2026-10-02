@@ -138,3 +138,21 @@ async def test_recovery_release_checks_idle_after_waiting_for_the_real_admission
     finally:
         if pending is not None:
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_recovery_release_failure_after_delete_rolls_back_the_guard(sessions):
+    from scripts.ops.nebius_pool_recovery_release import pool_guard_recovery_release_sql
+
+    operation, participant, candidate = uuid4(), uuid4(), 'a' * 40
+    fence(sessions, operation, participant, candidate)
+    async with sessions.begin() as session:
+        await session.execute(text('''CREATE FUNCTION reject_recovery_release() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'test-only failure after delete'; END $$'''))
+        await session.execute(text('''CREATE TRIGGER reject_recovery_release AFTER DELETE ON nebius_rollout_guard
+            FOR EACH ROW EXECUTE FUNCTION reject_recovery_release()'''))
+    with pytest.raises(psycopg.Error):
+        read_sql(database_url(sessions), pool_guard_recovery_release_sql(operation, participant, candidate))
+    async with sessions.begin() as session:
+        assert not await admission_open(session)
+        assert (await session.execute(text('SELECT owner,candidate_sha FROM nebius_rollout_guard'))).one() == (
+            'pool-recovery:' + str(operation), candidate)

@@ -2702,6 +2702,18 @@ Exact Role and journal readbacks bracket these reviews. No workload starts and
 no admission guard is released: `pool_legacy_roles_restored_closed` still sets
 `legacy_restore_allowed` to false. Restart and reopening are separate phases.
 
+The internal recovery-release database primitive is distinct from the original
+activation release: it can remove only `pool-recovery:<operation>` for the exact
+candidate. It takes the admission lock and the guard row lock, then freshly
+checks the same six local activity/outbox counters as recovery-drain observation
+before deleting the guard. Queued work without a handoff is retained. A missing
+or foreign guard, active work, unresolved handoff or schema mismatch rolls back
+the transaction. It emits one identity-bound report; its bound transport rechecks
+the retained database and operator authority and never retries an unknown reply.
+This primitive does not establish restored runtime health or authorize reopening
+by itself. The anchored rollback parent must supply those barriers and durable
+intent before using it; no standalone deployment command exposes it.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,
