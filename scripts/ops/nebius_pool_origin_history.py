@@ -27,12 +27,14 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_upgrade,
 )
 from scripts.ops.nebius_management_stage import _comparison_snapshot
+from scripts.ops.nebius_management_switch import _stable
 from scripts.ops.nebius_pool_activation_database import (
     fence_pool_activation_sql,
     pool_activation_state_sql,
     qualify_pool_activation_report,
 )
 from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
+from scripts.ops.nebius_pool_legacy_settings import expected_legacy_runtime_settings
 from scripts.ops.nebius_pool_machine_database import (
     MachineRetirementState,
     pool_machine_retirement_sql,
@@ -382,6 +384,24 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 raise ValueError
         except Exception:
             raise PoolMigrationError('management_pool_settings') from None
+
+    def qualify_manager_legacy_settings(self, *, expected: dict[str, Any]) -> None:
+        """The restored manager must not retain effective successor settings."""
+        try:
+            def scope() -> None:
+                if (digest(migration_contract(self.request)) != self.contract_sha256
+                        or digest(_target_contract(self.target)) != self.history_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256
+                        or _stable(expected)['spec'] != _stable(self.target.controller)['spec']):
+                    raise ValueError
+
+            scope()
+            wanted = expected_legacy_runtime_settings('manager', self.target.controller)
+            self._qualify_runtime_settings(self.target, original=self.target.controller, expected=expected,
+                component='manager', wanted=wanted, legacy=True)
+            scope()
+        except Exception:
+            raise PoolMigrationError('management_legacy_settings') from None
 
     def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
         self._qualified_gateway(original=original, expected=expected)

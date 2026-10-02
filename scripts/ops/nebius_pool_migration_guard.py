@@ -28,8 +28,13 @@ from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_management_prerequisites import inventory_resources
-from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+from scripts.ops.nebius_pool_legacy_settings import (
+    BOUND_LEGACY_SETTINGS_COMMAND,
+    LegacySettingsComponent,
+    expected_legacy_runtime_settings,
+)
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -721,16 +726,48 @@ class KubectlPoolGuardAPI:
         except Exception:
             raise PoolMigrationError('runtime_pool_settings') from None
 
+    def qualify_runtime_legacy_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                        expected: dict[str, Any]) -> None:
+        """Prove exact original settings, never accept a successor as legacy."""
+        try:
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256
+                        or _stable(expected)['spec'] != _stable(original)['spec']):
+                    raise ValueError
+
+            scope()
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original['metadata']['namespace'], original['metadata']['name']
+            container, = original['spec']['template']['spec']['containers']
+            component: LegacySettingsComponent
+            if namespace == target.namespace and name in {'loom-control-plane', 'loom-service'}:
+                if container['name'] != name or (name == 'loom-control-plane' and original != target.controller):
+                    raise ValueError
+                component = 'controller' if name == 'loom-control-plane' else 'service'
+            elif (namespace == participant.execution_namespace.name and container['name'] == 'actuator'
+                    and name in {'loom-execution-actuator', *(row.target_id + '-actuator' for row in participant.targets)}):
+                component = 'actuator'
+            else:
+                raise ValueError
+            wanted = expected_legacy_runtime_settings(component, original)
+            self._qualify_runtime_settings(target, original=original, expected=expected, component=component, wanted=wanted, legacy=True)
+            scope()
+        except Exception:
+            raise PoolMigrationError('runtime_legacy_settings') from None
+
     def _qualify_runtime_settings(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                   expected: dict[str, Any], component: PoolSettingsComponent,
-                                  wanted: dict[str, Any]) -> None:
+                                  wanted: dict[str, Any], legacy: bool = False) -> None:
         """Fixed challenge inside the same qualified Pod before and after reads."""
         before = self._runtime(target, original=original, expected=expected)
         container, = original['spec']['template']['spec']['containers']
         nonce = secrets.token_hex(32)
         response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
         report = self._run(['exec', '-n', original['metadata']['namespace'], 'pod/' + before['metadata']['name'],
-            '-c', container['name'], '--', 'python', '-c', BOUND_POOL_SETTINGS_COMMAND, component, nonce, response])
+            '-c', container['name'], '--', 'python', '-c',
+            BOUND_LEGACY_SETTINGS_COMMAND if legacy else BOUND_POOL_SETTINGS_COMMAND, component, nonce, response])
         if report != {'status': 'qualified'} or _uid(self._runtime(target, original=original, expected=expected)) != _uid(before):
             raise ValueError
 

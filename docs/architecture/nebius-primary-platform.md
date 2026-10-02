@@ -2716,6 +2716,14 @@ Originally dormant workloads and the gateway remain unchanged. The
 `pool_legacy_restart_staged_closed` result asserts neither runtime health nor
 permission to reopen; restored runtime readiness and guard reopening are separate.
 
+The fixed legacy settings challenge is separate from successor qualification. It
+requires the original non-global controller/actuator settings, service runtime
+profile and management mode, with no successor pool, submission source or profile
+catalog. Actual typed runtime loaders answer a fresh challenge without printing
+settings or credentials. Retained Pod identity/readiness is checked before and
+after each probe, and the original spec cannot be substituted. These read-only
+primitives neither release an admission guard nor authorize a rollback by themselves.
+
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
 candidate. It takes the admission lock and the guard row lock, then freshly
