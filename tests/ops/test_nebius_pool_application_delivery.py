@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import copy
+import json
 from uuid import uuid4
 
 import pytest
 from tests.integration.test_nebius_pool_installation import add_application_builder, installation
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import (
+    ROOT,
     application_management_inputs as application_management_inputs,
+    render,
 )
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -111,3 +114,50 @@ def test_builder_delivery_rejects_pool_scope_drift_before_runtime_changes(delive
     changed = PoolInstallation.model_validate(value)
     with pytest.raises(ValueError, match='pool_application_delivery_unqualified'):
         derive_application_build_deployment(before, changed)
+
+
+def test_first_cutover_derives_stopped_builder_and_only_required_configuration(delivery_inputs, application_management_inputs):
+    from scripts.ops.nebius_pool_application_delivery import render_application_build_delivery
+
+    before, pool, machine_id = delivery_inputs
+    _, candidate, profile = application_management_inputs
+    active = next(doc for doc in render(application_management_inputs).files['40-services.yaml'] if doc['kind'] == 'Deployment')
+    active['metadata'].update(uid=str(uuid4()), resourceVersion='41')
+    snapshot = copy.deepcopy(active)
+    result = render_application_build_delivery(before=before, pool=pool, active=active,
+        candidate=candidate, profile=profile, repo_root=ROOT)
+    assert active == snapshot
+    assert result.deployment['metadata'] == {key: value for key, value in active['metadata'].items()
+        if key not in {'uid', 'resourceVersion'}}
+    assert result.deployment['spec']['replicas'] == 0
+    assert result.deployment['spec']['strategy'] == {'type': 'Recreate'}
+    volumes = {row['name']: row for row in result.deployment['spec']['template']['spec']['volumes']}
+    for volume in active['spec']['template']['spec']['volumes']:
+        if volume['name'] in {'management-cloud', 'application-shared'}:
+            assert volumes[volume['name']] == volume
+    assert volumes['pool-token-source']['secret']['secretName'] == 'loom-pool-machine-' + machine_id.hex
+    assert volumes['application-source-credentials']['secret']['secretName'] == result.source_secret_name
+    assert {row['kind'] for row in result.configuration} == {'ConfigMap', 'Role', 'RoleBinding'}
+    config, = (row for row in result.configuration if row['kind'] == 'ConfigMap')
+    assert config['metadata']['name'] == volumes['management-config']['configMap']['name']
+    settings = json.loads(config['data']['installation.json'])['applications']['runtime']
+    assert settings['build']['binding']['pool_id'] == str(pool.pool_id)
+    assert settings['source_upload']['credentials_file'] == '/var/run/loom-application-source-credentials/credentials.json'
+    role, = (row for row in result.configuration if row['kind'] == 'Role')
+    assert role['metadata']['namespace'] == pool.participants[0].build_namespace.name
+    assert {verb for rule in role['rules'] for verb in rule['verbs']} == {'get', 'list'}
+    binding, = (row for row in result.configuration if row['kind'] == 'RoleBinding')
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-application-provisioner', 'namespace': before.namespace}]
+
+
+def test_first_cutover_rejects_unqualified_original_manager(delivery_inputs, application_management_inputs):
+    from scripts.ops.nebius_pool_application_delivery import render_application_build_delivery
+
+    before, pool, _ = delivery_inputs
+    _, candidate, profile = application_management_inputs
+    active = next(doc for doc in render(application_management_inputs).files['40-services.yaml'] if doc['kind'] == 'Deployment')
+    active['metadata'].update(uid=str(uuid4()), resourceVersion='41')
+    active['spec']['template']['spec']['containers'][0]['env'].append({'name': 'UNQUALIFIED_RUNTIME', 'value': '1'})
+    with pytest.raises(ValueError, match='pool_application_delivery_unqualified'):
+        render_application_build_delivery(before=before, pool=pool, active=active,
+            candidate=candidate, profile=profile, repo_root=ROOT)
