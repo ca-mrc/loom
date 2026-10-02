@@ -1,11 +1,10 @@
-"""Private cutover publication and fixed API composition; no command or activation.
+"""Private cutover qualification and complete protected operation composition.
 
-The protected installer still owns installed participant completeness, successor
-startup, activation, rollback and durable refresh. This module resolves protected
-publication, binds completed history, qualifies retained runtime databases and
-the physical provider, and composes the journaled closed-cutover API. It imports
-no ambient kubeconfig and replays no old installation. Only the fixed registration
-adapter can stage its Job under held guards; the parent owns mutation ordering.
+This module resolves protected publication, binds completed history, qualifies
+retained runtime databases and the physical provider, and composes the journaled
+parent. Its fixed complete operation owns startup, opening and explicit recovery;
+individual stages are not public commands. No ambient kubeconfig or old installer
+replay is used. Registration stages its Job only under the held local guards.
 """
 from __future__ import annotations
 
@@ -56,6 +55,7 @@ from scripts.ops.nebius_pool_migration_guard import (
     KubectlPoolGuardAPI,
     qualify_database_destination,
 )
+from scripts.ops.nebius_pool_operation import PoolOperationError, run_pool_operation
 from scripts.ops.nebius_pool_origin_history import (
     KubectlPoolHistoryAPI,
     derive_management_history_target,
@@ -644,3 +644,16 @@ def connected_pool_activation_api(context: PoolCutoverContext) -> Iterator[HTTPS
     """
     with connected_pool_api(context) as parent:
         yield HTTPSPoolActivationAPI(parent=parent)
+
+
+def execute_pool_cutover(context: PoolCutoverContext, action: str) -> dict[str, Any]:
+    """Bind the complete fixed direction to freshly qualified private inputs."""
+    if action not in {'preflight', 'install', 'rollback'} or load_pool_cutover_inputs(context.operation) != context:
+        raise EntryError('pool operation private binding differs')
+    try:
+        with connected_pool_api(context) as parent:
+            return run_pool_operation(parent=parent, tokens=context.tokens, action=action)
+    except PoolOperationError:
+        raise
+    except Exception:
+        raise PoolOperationError('connection') from None

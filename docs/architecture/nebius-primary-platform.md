@@ -2815,6 +2815,21 @@ dependencies. Refresh tooling qualification imports that dependency chain before
 declaring the bundle usable, without reading private installation inputs or
 opening cluster/provider connections; checkout imports cannot satisfy that proof.
 
+The internal complete-operation adapter composes closure, startup, opening and
+the terminal receipt under one per-operation dispatch lock. Replays select the
+newest recorded phase (including an anchor without its state file) and let that
+child validate its full predecessor chain; they never restart closure after
+startup or closed recovery after legacy owners reopen. Rollback is an explicit
+direction, not a response to an uncertain network result. Completed global
+ancestry cannot be cancelled in place, and an install replay cannot reverse a
+rollback already in progress. Preflight reads retained scope without dispatching
+or claiming readiness. The private entry reloads its exact inputs before opening
+transports. Protected `nebius-rollout` exposes only whole-operation preflight,
+installation and explicit rollback, using a dedicated exact-bundle key and
+operation metadata. It exposes no individual phase command. A terminal report
+binds the operation UUID, outcome and completion digest, and explicitly reports
+`acceptance_verified: false`; installed multi-owner acceptance remains separate.
+
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
 candidate. It takes the admission lock and the guard row lock, then freshly

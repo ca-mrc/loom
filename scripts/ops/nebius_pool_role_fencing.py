@@ -48,7 +48,8 @@ class PoolRoleFenceRequest:
 
 
 class PoolRoleFenceAPI(Protocol):
-    retirement: PoolRetirementAPI
+    @property
+    def retirement(self) -> PoolRetirementAPI: ...
 
     def verify_readonly(self) -> None: ...
     def read_role(self, key: str) -> dict[str, Any]: ...

@@ -41,6 +41,14 @@ Refresh uses dedicated protected metadata and a separate exact-bundle SSH key;
 to another management authority. These are installed-operation entry points, not
 PR validation or evidence that the development environment is already accepted.
 
+The same job and concurrency carry `management-pool-preflight`,
+`management-pool-install` and `management-pool-rollback`. They require dedicated
+`NEBIUS_MANAGEMENT_POOL_OPERATION_JSON` metadata and
+`NEBIUS_MANAGEMENT_POOL_SSH_KEY`, with no other-key fallback. The metadata pins
+the exact integrated tooling/candidate and private cutover operation; rollback
+uses a separate fixed SSH command allowed only for that pool grant. A terminal
+cutover receipt is migration evidence, not multi-owner acceptance.
+
 ## Retained validation
 
 All four protected contexts remain required: `repository-checks`, `images-gate`,

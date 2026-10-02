@@ -45,7 +45,8 @@ def operation(cutover_inputs, tmp_path, monkeypatch):
 
     class RemoteAPI(ReopeningAPI):
         def successor_drained(self, key, desired):
-            assert desired['spec']['suspend' if desired['kind'] == 'CronJob' else 'replicas'] in (0, True)
+            assert desired['spec']['suspend' if desired['kind'] == 'CronJob' else 'replicas'] == (
+                True if desired['kind'] == 'CronJob' else 0)
             return self.processes_drained
 
     def runtime(*, parent):
@@ -156,6 +157,7 @@ def test_fixed_operation_refuses_concurrent_dispatch_or_unknown_action(operation
     with pytest.raises(PoolOperationError):
         state.run('open')
     assert not state.parent.state_dir.exists()
+    private_state._private_directory(state.parent.anchor_dir)
     with private_state._locked_state(state.parent.anchor_dir / 'dispatch'):
         with pytest.raises(PoolOperationError):
             state.run()

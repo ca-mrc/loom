@@ -69,9 +69,12 @@ class PoolCutoverRequest:
 
 
 class PoolCutoverAPI(Protocol):
-    migration: PoolMigrationAPI
-    fencing: PoolRoleFenceAPI
-    resources: ManagementStageAPI
+    @property
+    def migration(self) -> PoolMigrationAPI: ...
+    @property
+    def fencing(self) -> PoolRoleFenceAPI: ...
+    @property
+    def resources(self) -> ManagementStageAPI: ...
 
     def preflight(self, request: PoolCutoverRequest) -> None:
         """Qualify immutable publication/predecessor/backend and writer inventory."""
