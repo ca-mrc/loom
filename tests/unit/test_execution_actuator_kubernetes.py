@@ -856,7 +856,8 @@ def test_existing_evicted_status_keeps_specific_diagnosis_during_delete() -> Non
 
 @pytest.mark.parametrize("malformed", [False, True])
 @pytest.mark.parametrize("bearer_style", ["remote", "in-cluster"])
-async def test_resource_summary_reads_verified_kubelet_json(monkeypatch, malformed, bearer_style):
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_resource_summary_reads_verified_kubelet_json(monkeypatch, malformed, bearer_style, pinned):
     import httpx
     from kubernetes import client
     from urllib3.response import HTTPResponse
@@ -880,7 +881,7 @@ async def test_resource_summary_reads_verified_kubelet_json(monkeypatch, malform
         assert args[0] == "GET"
         assert args[1] == "https://api.example.test/api/v1/nodes/node-1"
         return HTTPResponse(body=json.dumps({"apiVersion": "v1", "kind": "Node",
-            "metadata": {"name": "node-1", "uid": "node-uid"},
+            "metadata": {"name": "node-1", "uid": "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"},
             "status": {"addresses": [{"type": "InternalIP", "address": "10.23.0.4"}]}}).encode(),
             status=200)
 
@@ -917,20 +918,36 @@ async def test_resource_summary_reads_verified_kubelet_json(monkeypatch, malform
         batch_api=client.BatchV1Api(api_client),
         core_api=client.CoreV1Api(api_client),
     )
+    options = {"expected_node_uid": "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"} if pinned else {}
     try:
         if malformed:
             from loom_execution_actuator.contracts import KubernetesApiError
 
             with pytest.raises(KubernetesApiError) as error:
-                await api.resource_summary(node_name="node-1")
+                await api.resource_summary(node_name="node-1", **options)
             assert isinstance(error.value.__cause__, json.JSONDecodeError)
         else:
-            result = await api.resource_summary(node_name="node-1")
+            result = await api.resource_summary(node_name="node-1", **options)
             assert result == {"node": {"nodeName": "node-1"},
                 "pods": [{"podRef": {"uid": "pod-1", "namespace": "ns"}}]}
         assert len(responses) == 1
     finally:
         api_client.close()
+
+
+@pytest.mark.parametrize('expected', ['', 'not-a-uid', '00000000-0000-0000-0000-000000000000',
+    'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'])
+async def test_resource_summary_rejects_missing_or_replaced_pinned_node_before_transport(monkeypatch, expected):
+    import httpx
+
+    from loom_execution_actuator.contracts import KubernetesApiError
+
+    core = _ns(read_node=lambda **_: _ns(metadata=_ns(name='node-1',
+        uid='bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb', deletion_timestamp=None)))
+    monkeypatch.setattr(httpx, 'Client', lambda **_: pytest.fail('unqualified node reached kubelet'))
+    api = InClusterKubernetesJobApi(client_module=_ns(), batch_api=_ns(), core_api=core)
+    with pytest.raises(KubernetesApiError):
+        await api.resource_summary(node_name='node-1', expected_node_uid=expected)
 
 
 @pytest.mark.parametrize("address", ["127.0.0.1", "169.254.169.254", "0.0.0.0", "8.8.8.8", "10.0.0.1@evil.test"])

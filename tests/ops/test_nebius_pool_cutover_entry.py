@@ -582,7 +582,7 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
     assert not path.exists()
 
 
-@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider"])
+@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider", "telemetry"])
 def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -597,7 +597,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     originals = [context.request.manager, *(row.controller for row in migration.guards), *context.request.services,
         *context.request.fencing.retirement.actuators]
     by_name = {(row['metadata']['namespace'], row['metadata']['name']): row for row in originals}
-    checked, kubeconfigs, physical = [], [], []
+    checked, kubeconfigs, physical, telemetry = [], [], [], []
     @contextmanager
     def connect(*args, **kwargs):
         yield SimpleNamespace(_request=lambda *args: history_credential(root)), object(), 'operator-fixture-token'
@@ -636,11 +636,18 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         if damage == 'provider':
             raise EntryError('pool cutover provider unqualified')
 
+    def telemetry_probe(self, target, *, original):
+        assert target in migration.guards and original in context.request.fencing.retirement.actuators
+        telemetry.append(original)
+        if damage == 'telemetry':
+            raise PoolMigrationError('runtime_telemetry')
+
     monkeypatch.setattr(entry, 'connected_checks', connect)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_database', probe)
     monkeypatch.setattr(entry.KubectlPoolHistoryAPI, 'qualify_manager_database', manager_probe, raising=False)
     monkeypatch.setattr(entry, 'qualify_pool_provider', provider_probe, raising=False)
+    monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_telemetry', telemetry_probe, raising=False)
     if damage:
         with pytest.raises(EntryError):
             with entry.connected_pool_readers(context):
@@ -649,6 +656,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         with entry.connected_pool_readers(context):
             assert set(checked) == set(by_name)
             assert physical == [True]
+            assert telemetry == list(context.request.fencing.retirement.actuators)
         assert len(checked) == len(by_name)
     assert all(not path.exists() for path in kubeconfigs)
     assert not Path(metadata['state_dir']).exists()

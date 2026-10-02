@@ -490,6 +490,159 @@ def test_each_running_database_consumer_is_qualified_without_sql_or_credential_o
         for result in state.processes)
 
 
+@pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
+    'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target'])
+def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    selector = api.request.registration.spec.node_selector
+    state.runtime_pod['spec']['nodeName'] = 'platform-node'
+    def node(name, labels):
+        return {'apiVersion': 'v1', 'kind': 'Node', 'metadata': {'name': name,
+            'uid': str(uuid4()), 'resourceVersion': '1', 'labels': labels},
+            'status': {'addresses': [{'type': 'InternalIP', 'address': '10.20.0.2'}]}}
+    nodes = [node('platform-node', {}), node('pool-node', selector), node('foreign-node', {'foreign': 'true'})]
+    if damage == 'scale_zero':
+        nodes.pop(1)
+    elif damage == 'missing_host':
+        nodes.pop(0)
+    elif damage == 'duplicate':
+        nodes.append(copy.deepcopy(nodes[1]))
+    elif damage == 'deleted':
+        nodes[1]['metadata']['deletionTimestamp'] = '2026-10-01T00:00:00Z'
+    elif damage == 'late_pod':
+        state.runtime_after_drift = True
+    elif damage == 'unknown_target':
+        for row in state.original['spec']['template']['spec']['containers'][0].get('env', []):
+            if row['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID':
+                row['value'] = 'foreign'
+    previous, commands = api._run, []
+
+    def run(args):
+        if args[:2] == ['get', '--raw'] and args[2].startswith('/api/v1/nodes?'):
+            items = copy.deepcopy(nodes)
+            if damage == 'late_node' and commands:
+                items[1]['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'NodeList',
+                'metadata': {'resourceVersion': '9', **({'continue': 'same'} if damage == 'partial' else {})}, 'items': items}
+        if args[:1] == ['exec']:
+            assert args[:7] == ['exec', '-n', state.original['metadata']['namespace'],
+                'pod/' + state.runtime_pod['metadata']['name'], '-c', 'actuator', '--']
+            assert args[7:9] == ['python', '-c']
+            assert len(args) == 14
+            assert args[10] == state.original['metadata']['namespace']
+            assert args[11] == next(row['value'] for row in state.original['spec']['template']['spec']['containers'][0]['env']
+                if row['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID')
+            commands.append(args)
+            state.commands.append(args)
+            if damage == 'denied':
+                raise ValueError('private-telemetry-marker')
+            return {'status': 'qualified', 'node_name': args[12],
+                'node_uid': str(uuid4()) if damage == 'wrong_report' else args[13]}
+        return previous(args)
+
+    monkeypatch.setattr(api, '_run', run)
+    actuator = state.original['spec']['template']['spec']['containers'][0]['name'] == 'actuator'
+    if not actuator or damage not in {None, 'scale_zero'}:
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_runtime_telemetry(state.target, original=state.original)
+        assert 'private-' not in str(error.value)
+    else:
+        api.qualify_runtime_telemetry(state.target, original=state.original)
+        assert [command[12] for command in commands] == (['platform-node'] if damage == 'scale_zero' else ['platform-node', 'pool-node'])
+        for command in commands:
+            assert command[13] == next(row['metadata']['uid'] for row in nodes if row['metadata']['name'] == command[12])
+    if not actuator or damage in {'missing_host', 'partial', 'duplicate', 'deleted', 'unknown_target'}:
+        assert not commands
+
+
+@pytest.mark.parametrize('damage', [None, 'namespace', 'target', 'remote', 'node_uid', 'denied',
+    'missing_counter', 'boolean_counter', 'negative_counter', 'old_image'])
+def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, damage):
+    import json
+    import os
+    import ssl
+    import sys
+
+    import httpx
+    from kubernetes import client, config
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_TELEMETRY_COMMAND
+    from urllib3.response import HTTPResponse
+
+    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+
+    uid = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+    settings = {'DB_URL': 'private-no-sql-marker', 'CONTROLLER_ID': 'observer-1',
+        'NAMESPACE': 'telemetry', 'TARGET_ID': 'nebius-dev'}
+    if damage in {'namespace', 'target'}:
+        settings['NAMESPACE' if damage == 'namespace' else 'TARGET_ID'] = 'foreign'
+    if damage == 'remote':
+        settings.update(KUBERNETES_ENDPOINT='https://remote.example.com', KUBERNETES_CA_FILE='/remote/ca',
+            KUBERNETES_NEBIUS_CREDENTIALS_FILE='/remote/key')
+    for key in os.environ:
+        if key.startswith('LOOM_EXECUTION_ACTUATOR_'):
+            monkeypatch.delenv(key)
+    for key, value in settings.items():
+        monkeypatch.setenv('LOOM_EXECUTION_ACTUATOR_' + key, value)
+    monkeypatch.setattr(sys, 'argv', ['-c', 'telemetry', 'nebius-dev', 'node-1', uid])
+    configuration = client.Configuration()
+    configuration.host = 'https://kubernetes.default.svc'
+    configuration.ssl_ca_cert = '/mounted/ca.crt'
+    configuration.api_key['authorization'] = 'bearer private-runtime-token'
+    monkeypatch.setattr(client.Configuration, '_default', None)
+    monkeypatch.setattr(config, 'load_incluster_config', lambda: client.Configuration.set_default(configuration))
+    requests, closed = [], []
+    def node_read(_self, method, url, *args, **kwargs):
+        assert (method, url) == ('GET', 'https://kubernetes.default.svc/api/v1/nodes/node-1')
+        return HTTPResponse(body=json.dumps({'apiVersion': 'v1', 'kind': 'Node',
+            'metadata': {'name': 'node-1', 'uid': str(uuid4()) if damage == 'node_uid' else uid},
+            'status': {'addresses': [{'type': 'InternalIP', 'address': '10.20.0.2'}]}}).encode(), status=200)
+    def summary(_self, url, **kwargs):
+        assert url == 'https://10.20.0.2:10250/stats/summary'
+        assert kwargs['headers'] == {'Authorization': 'bearer private-runtime-token'}
+        requests.append(url)
+        node = {'nodeName': 'node-1', 'cpu': {'usageCoreNanoSeconds': 1000},
+            'memory': {'workingSetBytes': 2000}, 'fs': {'usedBytes': 3000}}
+        if damage == 'missing_counter':
+            del node['cpu']
+        elif damage == 'boolean_counter':
+            node['memory']['workingSetBytes'] = True
+        elif damage == 'negative_counter':
+            node['fs']['usedBytes'] = -1
+        return httpx.Response(403 if damage == 'denied' else 200,
+            json={'node': node, 'pods': [{'private-foreign-workload-marker': 'never emitted'}]}, request=httpx.Request('GET', url))
+    actual_close = InClusterKubernetesJobApi.close
+    async def close(self):
+        closed.append(True)
+        await actual_close(self)
+    async def legacy_summary(self, *, node_name):
+        pytest.fail('legacy unpinned reader executed')
+    monkeypatch.setattr(client.ApiClient, 'request', node_read)
+    monkeypatch.setattr(httpx.Client, 'get', summary)
+    monkeypatch.setattr(ssl, 'create_default_context', lambda **_: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setattr(InClusterKubernetesJobApi, 'close', close)
+    if damage == 'old_image':
+        monkeypatch.setattr(InClusterKubernetesJobApi, 'resource_summary', legacy_summary)
+    if damage:
+        with pytest.raises(SystemExit) as error:
+            exec(_BOUND_TELEMETRY_COMMAND, {})
+        assert error.value.code == 1
+    else:
+        exec(_BOUND_TELEMETRY_COMMAND, {})
+    output = capsys.readouterr()
+    assert 'private-' not in output.out + output.err
+    if damage:
+        assert not output.out
+    else:
+        assert json.loads(output.out) == {'status': 'qualified', 'node_name': 'node-1', 'node_uid': uid}
+        assert not output.err
+    if damage in {'namespace', 'target', 'remote'}:
+        assert not requests and not closed
+    else:
+        assert closed == [True]
+
+
 @pytest.mark.parametrize('damage', ['loaded_url', 'secret_identity', 'secret_version', 'foreign_database',
     'pod_owner', 'pod_template', 'not_ready', 'after_drift'])
 def test_runtime_database_qualification_rejects_drift_in_every_consumer(workload_database, damage):
