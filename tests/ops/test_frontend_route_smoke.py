@@ -1848,6 +1848,9 @@ def test_web_runtime_config_script_writes_public_metadata(tmp_path: Path) -> Non
         "apiRouteBase": "https://yylx.world/prod/api",
         "buildRevision": "unknown",
         "sourceRef": "unknown",
+        "buildKind": "unknown",
+        "sourceDigest": "unknown",
+        "sourceBaseCommit": "unknown",
         "buildTime": "",
     }
 

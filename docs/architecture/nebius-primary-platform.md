@@ -1033,6 +1033,18 @@ compatibility and freeze the selected release and rendered images in the operati
 Already-frozen operation replay does not need the current catalog or a running
 builder. Resume resolves the application's recorded release, never a newer build.
 
+The application builder supplies personal kind, manifest digest and informational
+base commit as Docker build arguments, while leaving the actual Git build revision
+unknown. The service image records these beside its existing build metadata;
+`/api/v1/version` reports `buildKind`, `sourceDigest` and `sourceBaseCommit` for
+personal code and never presents that code as the base Git revision. The web image
+bakes the same fields into the loaded JavaScript and separately publishes served
+metadata for update checks. A later fetch cannot relabel an already-open page.
+Version details label personal code as not CI-approved, with separate frontend and
+responding-backend source identities. These are informational reports from authored
+code, not authorization or proof that every replica has rolled out; retained
+publication and frozen deployment evidence remain authoritative.
+
 Optional protected `applications.runtime.build` settings connect these controls
 and the automatic worker to the management service lifecycle. They bind the
 source/recipe/pool profile, management HTTPS origin, dedicated private bearer-token

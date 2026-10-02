@@ -38,6 +38,7 @@ export default function VersionInfo({
   const { hasNewerBuild } = frontendUpdateStatus(
     LOADED_BUILD_INFO.revision,
     served.data,
+    LOADED_BUILD_INFO.sourceDigest,
   );
   const revision = LOADED_BUILD_INFO.revision;
 
@@ -74,7 +75,9 @@ export default function VersionInfo({
           data-testid="sidebar-build-revision"
           className="whitespace-nowrap font-mono text-[10px] font-medium text-slate-700"
         >
-          Build {shortRevision(revision)}
+          {LOADED_BUILD_INFO.kind === "personal"
+            ? `Personal ${LOADED_BUILD_INFO.sourceDigest?.replace(/^sha256:/, "").slice(0, 12) ?? "unknown"}`
+            : `Build ${shortRevision(revision)}`}
         </span>
       </button>
 

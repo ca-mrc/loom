@@ -31,12 +31,19 @@ RUN chmod -R a+rX ./src ./packages ./database/migrations ./database/capacity_gua
     pip install --no-cache-dir -e ./packages/loom-launcher && \
     python -c 'from nebius.sdk import SDK; import loom_execution_actuator.task_image_runtime'
 ARG LOOM_BUILD_SHA=unknown
+ARG LOOM_BUILD_KIND=commit
+ARG LOOM_SOURCE_DIGEST=unknown
+ARG LOOM_SOURCE_BASE_COMMIT=unknown
 LABEL org.opencontainers.image.revision="${LOOM_BUILD_SHA}"
 # #2009: /api/v1/version reads these two files (loom_service.build_info) to
 # report this instance's own build identity without querying GitHub, k8s,
 # or the database. Build time is informational only, never a trust input.
 RUN install -d -m 0755 /opt/loom && \
     printf '%s\n' "${LOOM_BUILD_SHA}" > /opt/loom/build-sha && \
+    printf '%s\n' "${LOOM_BUILD_KIND}" > /opt/loom/build-kind && \
+    printf '%s\n' "${LOOM_SOURCE_DIGEST}" > /opt/loom/source-digest && \
+    printf '%s\n' "${LOOM_SOURCE_BASE_COMMIT}" > /opt/loom/source-base-commit && \
+    chmod 0444 /opt/loom/build-kind /opt/loom/source-digest /opt/loom/source-base-commit && \
     chmod 0444 /opt/loom/build-sha && \
     date -u +%Y-%m-%dT%H:%M:%SZ > /opt/loom/build-time && \
     chmod 0444 /opt/loom/build-time

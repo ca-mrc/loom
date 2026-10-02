@@ -106,6 +106,13 @@ Retry is available only after a failed/cancelled attempt has completed cleanup.
 It keeps the original source and recipe; use a new build key for different source.
 Ready builds cannot be retried or retargeted to different images.
 
+The version sidebar identifies personal source by digest. Its details distinguish
+the JavaScript this page loaded from the backend instance that answered, and show
+the base commit only as informational—not CI approval. A newer served build shows
+an update notice without relabelling or automatically refreshing the current page.
+Compare these reports with the ready build's source digest; they are not a substitute
+for the management operation's deployment/readiness evidence.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash
