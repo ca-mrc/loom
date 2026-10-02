@@ -212,6 +212,7 @@ def legacy_runtime_readiness_case(closed_startup):
         guards=SimpleNamespace(qualify_runtime_database=database,
             qualify_runtime_legacy_settings=lambda target, *, original, expected: probe('settings', original, expected),
             qualify_runtime_telemetry=lambda target, *, original, expected: probe('telemetry', original, expected)))
+    api._legacy_runtime_probes = lambda expected: HTTPSPoolActivationAPI._legacy_runtime_probes(api, expected)
     assert qualify(api) is None
     expected_probes = {('manager', manager_key), ('manager_settings', manager_key),
         *(('database', _key(row)) for row in originals), *(('settings', _key(row)) for row in originals),

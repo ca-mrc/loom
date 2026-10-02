@@ -2728,7 +2728,22 @@ then probes the actual retained manager and every participant's controller,
 service and active actuator. It checks their backend and legacy settings, plus
 actuator telemetry, with recovery closure and exact workload/journal readbacks
 before and after. Dormant roots and the stopped gateway are not started or probed
-as active legacy consumers. Guard reopening still requires its own parent phase.
+as active legacy consumers. Guard reopening uses a separate parent phase.
+
+The internal legacy-reopening child anchors the completed restart and records an
+ordered `prepared`/`intent`/`released` phase for every participant. Only a saved
+intent can account for an observed open guard; unrelated open or foreign guards
+fail qualification. Each release has durable intent before one fixed dispatch,
+and unknown replies only observe. Reopening the first participant does not require
+stopping its newly admitted legacy work to reopen the others: only still-fenced
+local journals must be idle. The global pool remains terminally fenced, machine
+credentials revoked and the successor gateway stopped with read-only authority.
+The same actual legacy runtime probes run under this journal-derived partial-open
+barrier; the original all-closed readiness check remains strict. The final result
+reports legacy intake open only after every release settles and fresh runtime and
+authority checks pass. It never opens global admission or rewrites the original
+activation/restart receipts. This remains an internal protected-operation phase,
+not a standalone rollback or release command.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

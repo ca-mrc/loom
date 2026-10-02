@@ -20,6 +20,11 @@ from scripts.ops.nebius_pool_gateway_retirement import (
     _gateway_record,
     qualify_gateway_retirement_drain,
 )
+from scripts.ops.nebius_pool_legacy_reopening import (
+    _reopening_record,
+    observe_legacy_reopening,
+    qualify_legacy_reopening,
+)
 from scripts.ops.nebius_pool_legacy_restart import _restart_record, qualify_legacy_restart
 from scripts.ops.nebius_pool_machine_database import MachineRetirementState
 from scripts.ops.nebius_pool_machine_retirement import (
@@ -411,31 +416,86 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             expected, record = observe()
             if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
-            parent, migration = self.parent, self.request.fencing.retirement.migration
-            parent.history.qualify_binding(migration, self.request.manager)
-            parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
-            parent.history.qualify_manager_legacy_settings(expected=expected[_key(self.request.manager)])
-            for target in migration.guards:
-                binding = target.database
-                if (binding is None or binding.actuator_credential_uid is None
-                        or binding.actuator_credential_resource_version is None):
-                    raise ValueError
-                participant, = (row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
-                service, = (row for row in self.request.services if row['metadata']['namespace'] == target.namespace)
-                actuators = tuple(row for row in self.request.fencing.retirement.actuators
-                    if row['metadata']['namespace'] == participant.execution_namespace.name)
-                for original in (target.controller, service, *actuators):
-                    actuator = original['metadata']['namespace'] != target.namespace
-                    parent.guards.qualify_runtime_database(target, original=original, expected=expected[_key(original)],
-                        credential_uid=binding.actuator_credential_uid if actuator else binding.credential_uid,
-                        credential_resource_version=binding.actuator_credential_resource_version if actuator else binding.credential_resource_version)
-                    parent.guards.qualify_runtime_legacy_settings(target, original=original, expected=expected[_key(original)])
-                    if actuator:
-                        parent.guards.qualify_runtime_telemetry(target, original=original, expected=expected[_key(original)])
+            self._legacy_runtime_probes(expected)
             if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None or observe()[1] != record:
                 raise ValueError
         except Exception:
             raise ValueError('pool_legacy_runtimes_unqualified') from None
+
+    def _legacy_runtime_probes(self, expected: dict[str, dict[str, Any]]) -> None:
+        """Same exact runtime proof under either independently qualified barrier."""
+        parent, migration = self.parent, self.request.fencing.retirement.migration
+        parent.history.qualify_binding(migration, self.request.manager)
+        parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
+        parent.history.qualify_manager_legacy_settings(expected=expected[_key(self.request.manager)])
+        for target in migration.guards:
+            binding = target.database
+            if (binding is None or binding.actuator_credential_uid is None
+                    or binding.actuator_credential_resource_version is None):
+                raise ValueError
+            participant, = (row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+            service, = (row for row in self.request.services if row['metadata']['namespace'] == target.namespace)
+            actuators = tuple(row for row in self.request.fencing.retirement.actuators
+                if row['metadata']['namespace'] == participant.execution_namespace.name)
+            for original in (target.controller, service, *actuators):
+                actuator = original['metadata']['namespace'] != target.namespace
+                parent.guards.qualify_runtime_database(target, original=original, expected=expected[_key(original)],
+                    credential_uid=binding.actuator_credential_uid if actuator else binding.credential_uid,
+                    credential_resource_version=binding.actuator_credential_resource_version if actuator else binding.credential_resource_version)
+                parent.guards.qualify_runtime_legacy_settings(target, original=original, expected=expected[_key(original)])
+                if actuator:
+                    parent.guards.qualify_runtime_telemetry(target, original=original, expected=expected[_key(original)])
+
+    def pool_recovery_drained(self) -> bool:
+        self._scope()
+        result = self.parent.history.recovery_pool_drained()
+        self._scope()
+        if type(result) is not bool:
+            raise ValueError('pool_recovery_drain_unconfirmed')
+        return result
+
+    def participant_recovery_drained(self, participant: str) -> bool:
+        result = self.parent.guards.recovery_participant_drained(self._guard(participant))
+        self._scope()
+        if type(result) is not bool:
+            raise ValueError('pool_participant_recovery_drain_unconfirmed')
+        return result
+
+    def qualify_reopening_runtimes(self) -> None:
+        """Actual restored runtimes, with only anchored partial-open allowance."""
+        try:
+            record, _ = observe_legacy_reopening(self.request, self, state=self.state, anchor=self.anchor)
+            if record is None or qualify_legacy_reopening(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            expected = observe_recovery_workloads(self.request, self, state=self.state, anchor=self.anchor)
+            self._legacy_runtime_probes(expected)
+            if (qualify_legacy_reopening(self.request, self, state=self.state, anchor=self.anchor) is not None
+                    or observe_legacy_reopening(self.request, self, state=self.state, anchor=self.anchor)[0] != record):
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_legacy_reopening_runtimes_unqualified') from None
+
+    def release_recovery_guard(self, participant: str) -> None:
+        """Only the anchored reopening parent may dispatch this fixed release."""
+        try:
+            self._scope()
+            _, record = _reopening_record(self.request, state=self.state, anchor=self.anchor)
+            if (record is None or record['guards'].get(participant) != 'intent'
+                    or self.guard_state(participant) != 'fenced'):
+                raise ValueError
+            target = self._guard(participant)
+            self.qualify_reopening_runtimes()
+            if (_reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != record
+                    or self.guard_state(participant) != 'fenced'):
+                raise ValueError
+            if self.parent.guards.release_recovery_guard(target) != 'open':
+                raise ValueError
+            self.verify_retained()
+            if (_reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != record
+                    or self.guard_state(participant) != 'open'):
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_legacy_guard_release_unconfirmed') from None
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
