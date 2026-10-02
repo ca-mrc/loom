@@ -69,6 +69,7 @@ from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
 from scripts.ops.nebius_pool_runtime import PoolCollectorCredential
 from scripts.ops.nebius_pool_startup import startup_workload_options
+from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
 
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
@@ -600,3 +601,14 @@ def connected_pool_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolCutover
                     api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token,
                     state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"])) as api:
                 yield api
+
+
+@contextmanager
+def connected_pool_startup_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolStartupAPI]:
+    """Continue the exact closed parent, with the same private authority lifetime.
+
+    Construction performs no mutation or admission opening. The journaled
+    startup stage owns ordering; this is not an independently exposed command.
+    """
+    with connected_pool_api(context) as parent:
+        yield HTTPSPoolStartupAPI(parent=parent)

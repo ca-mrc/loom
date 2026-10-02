@@ -68,6 +68,9 @@ class PoolCutoverChecks(Protocol):
 
 class PoolCutoverHistory(Protocol):
     def qualify_binding(self, request: PoolMigrationRequest, manager: dict[str, Any]) -> None: ...
+    def qualify_closed_pool(self) -> None:
+        """Read current closed registration and dedicated credentials, never replay it."""
+        ...
     def qualify_pending_origins(self, target: PoolGuardTarget, origins: tuple[PoolWorkOriginV1, ...]) -> None:
         """Qualify retained management registration/history, not just JSON shape."""
         ...

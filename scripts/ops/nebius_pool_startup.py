@@ -184,9 +184,13 @@ def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,
                     "admission_open": False, "runtime_verified": False}
 
             for key, desired in targets.items():
+                item = record["workloads"][key]
+                if item["phase"] == "started":
+                    # Every remaining write and the final barrier qualify all
+                    # roots. Replay needs one complete read, not N identical ones.
+                    continue
                 api.qualify_closed()
                 actual = _observe_workloads(api, closed, targets, record)[key]
-                item = record["workloads"][key]
                 if item["phase"] == "prepared":
                     # Preserve the server's exact representation; parent records
                     # canonicalize quantities for comparison, not for PATCHing.
