@@ -2045,8 +2045,13 @@ omits the legacy namespace watch and uses the native build outbox controller.
 Build lease maintenance runs independently of admission HTTP and participates in
 readiness. Shutdown cancels and awaits every controller loop before closing the
 management, Kubernetes or database clients, including when another loop fails.
-The actuator's bounded synchronous SDK reads can outlive coroutine cancellation;
-draining those threads before client closure remains a runtime qualification gap.
+Global namespace/workload/log reads and usage sampling retain ownership through
+cancellation until their bounded SDK calls finish, before client closure.
+Cancellation still propagates if an SDK call fails during that drain.
+Failed execution observations retain the ordinary scrubbed container-log excerpts,
+with bounded reads and exact Pod UID/ownership checks before and after fetching
+logs. An unavailable log does not erase the failure observation. Participant reader
+roles permit log GETs only in their execution/build namespaces, never Pod exec.
 These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
@@ -2168,6 +2173,20 @@ qualified controller; the database path never acquires or releases a guard. The
 protected parent must supply the binding before retiring that controller.
 This direct-database binding rejects an unresolved pooled-engine override; the
 parent must qualify pooled-to-backend correspondence before using that topology.
+The same retained database binding supports a separate fixed runtime-role stage.
+It requires the exact idle rollout guard and schema, rejects privileged or
+role-member actuator identities, and grants only local outbox reads/inserts/updates
+and source-row lock columns. Task content, batch identity/provenance, management
+capacity/credentials and journal deletion remain denied; qualification includes
+column-specific grants. Registered-source builds may read published source and
+incarnation records and insert materialization pins; they cannot publish, mutate,
+retire or unpin sources. The source-row lock column is immutable, and qualification
+requires complete pin-insert authority, not merely one insertable column.
+An uncertain stage response is recovered by a read-only
+qualification, not a repeated write. Neither action releases a guard or opens
+admission. Normal bootstrap retains pre-cutover permissions; a connected protected
+installer or refresh that replays bootstrap must restage and qualify these runtime
+permissions before reopening intake. This stage is not an installed cutover.
 An independent anchor and parent journal bind closure to registration; missing or
 changed recovery evidence cannot start another registration. Successful closure
 and registration explicitly leave writer migration incomplete. Controller
@@ -2218,6 +2237,246 @@ create bindings or gateway permissions, and its receipt still marks writer
 migration incomplete: the protected parent owns complete external-writer
 inventory and fresh qualification before activation. It never removes an
 unexpected grant automatically.
+
+Connected cutover preflight now reads complete, stable-paginated Role, ClusterRole,
+RoleBinding and ClusterRoleBinding collections before producer downtime. Each
+collection is pinned to the same API-server resource version, then requalified
+after the other preflight reads. Every retained Role must have its exact original
+or intended reader shape and UID, with the expected actuator subject. Foreign
+subjects sharing a reduced Role, unresolved
+references, duplicate identities and extra named/group/cross-namespace grants to
+retired identities reject preflight. Separate Job writers in participant execution
+or build namespaces and unregistered cluster-wide Job writers also reject,
+including User and Group subjects. Discovery/self-inspection readers and unrelated
+namespace-local grants outside the pool are preserved.
+CronJob mutation grants count as indirect Job authority: the native CronJob
+controller can create Jobs without a Job grant to the schedule's creator. Every
+existing CronJob in a participant execution/build namespace must also be an exact
+retained original, even with a different ServiceAccount or `suspend: true`.
+Revoking the creator's credential does not retire an existing schedule. Unknown
+schedules reject preflight without being adopted, suspended or deleted; schedules
+in unrelated namespaces and foreign Job/Pod occupancy remain untouched.
+
+Kubernetes controllers and provider administrators are an explicit platform trust
+boundary, not writers the application migration can fence. Protected private inputs
+must retain their complete ClusterRoles and ClusterRoleBindings with original UIDs,
+bound to the kube-system namespace UID and immutable cutover journal. Live objects
+must match these snapshots. Supported administrative bindings are `cluster-admin`
+for `system:masters`, `kubeadm:cluster-admins`, and the `nebius:admin`/`nebius:editor`
+groups, with their corresponding fixed role references. Native CronJob, Job, garbage
+collection, namespace and finished-Job TTL controllers require exact bootstrap
+bindings and bounded native rules; aggregation, widened capabilities, extra subjects
+and alias bindings do not qualify. Application workloads cannot borrow these native
+ServiceAccounts, even at zero replicas. The installer grants or removes none of
+these platform permissions and does not claim to revoke external administrator
+credentials. Effective reviews after participant-role reduction and the parent's
+installed qualification remain required; this is not full runtime acceptance.
+
+The same snapshot also inventories Deployments, ReplicaSets, StatefulSets,
+DaemonSets, ReplicationControllers, CronJobs, Jobs and Pods. Terminal Pods are
+included; zero replicas, suspension and completion do not exempt an unregistered
+consumer of a retiring ServiceAccount. Every retained root must match its original
+UID and exact original or journal-qualified recovery template. A descendant must
+resolve through an exact same-namespace, same-ServiceAccount controller chain:
+Deployment → ReplicaSet → Pod or CronJob → Job → Pod. Dangling, replaced, cyclic
+or contradictory ownership rejects preflight. Historical descendants can remain
+without deletion; this check establishes identity consumers, not execution health
+or shutdown. The existing drain and effective-permission barriers still apply.
+Unrelated identities remain untouched. External credentials and custom-controller
+authority still require the parent's separate installed qualification.
+
+On recovery, successor gateway grants qualify only through the bound parent
+anchor, retained closed/fenced receipts and fixed authority-stage journal. Exact
+recorded UIDs/snapshots or unresolved CREATE intents are observed without writes;
+matching names/labels do not authorize adoption, and aggregation cannot widen a
+partial stage's authority.
+
+An exact workload preview that receives a complete definite Kubernetes rejection
+leaves that workload prepared and returns a pending update. It records no mutation
+intent and sends no persistent update. The next invocation reads the current object
+again; malformed responses and uncertain outcomes remain failures, not retry
+permission. This covers controller-status resource-version races without weakening
+the actual write's UID, version and template preconditions.
+
+The connected cutover parent now sequences producer shutdown, closed
+registration, workload retirement, effective-role fencing, dedicated material,
+runtime ACL qualification, gateway configuration/authority and disabled runtime
+replacement. Targets are generated from the retained manager, complete shared
+API/actuator roster and one development collector; arbitrary manifests are not
+inputs. Producer Pod drain is followed by independent application-access,
+schema-readiness and queued-origin qualification. It cannot manufacture provenance
+for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
+work state and personal-access quiescence through each retained database Pod,
+qualifying its StatefulSet, Service, Secret version and Pod identity before and
+after every read-only page. Complete EndpointSlice readback also binds the Service
+UID, port, address family and ready/nonterminating backend to that exact PostgreSQL
+Pod UID/IP. Missing, additional, foreign or changed backends reject even read-only
+SQL. A direct database binding rejects an unresolved effective pooled URL for
+either the control plane or management service. Bound guard acquisition also
+checks the old control-plane container's loaded effective database URL against
+that pinned credential before opening SQL. A fixed in-container command loads
+the real typed settings once, checks a fresh HMAC challenge, then passes the same
+settings instance to the existing guard functions. Pooled or image-local `.env`
+overrides cannot silently close a different database. Only the challenge and
+response appear in arguments; no URL, password or configuration is emitted.
+Retained images need no new CLI option. Recovery still observes ownership through
+the qualified PostgreSQL Pod and never retries an uncertain acquisition. This
+check qualifies the acquisition backend. The private reader entry additionally
+checks every retained participant control plane, shared API and ordinary/guest
+actuator before yielding operator access. The actuator's namespace-local copied
+database Secret has its own pinned UID/resource version in the migration contract;
+it is not assumed identical to the platform Secret. Each original running consumer
+must have the retained Deployment/ReplicaSet/Pod lineage and load the exact
+effective URL resolved from its pinned Secret. The fixed read-only probe uses that
+image's real typed settings and a fresh HMAC; it opens no SQL connection and emits
+no credential. The resolved destination must be the already-qualified participant
+PostgreSQL backend, not another database or an unresolved pool/proxy.
+Recovery derives workload state from the same anchored parent validation used by
+the cutover, plus the retained closed-registration and retirement journals. It
+accepts only the original or precisely recorded stopped/rewired template. A state
+file or zero replicas alone never bypasses the running check. Recorded stopped
+consumers retain backend and credential-reference checks without trying to execute
+in retired Pods; drain and successor startup remain separate mandatory barriers.
+The predecessor manager is independently bound to its management database by the
+same real-settings probe and phase-aware recovery checks, never by a participant
+credential. Before returning operator access, the entry also rereads the retained
+collector ConfigMap and uses the production Nebius reader with the **collector's
+existing cloud credential**, not the operator's credential, to qualify its actual
+node group, parent cluster and native quota identities against the protected
+foundation. The private input and immutable cutover journal bind the source Secret's
+UID, resource version and content digest. The read requires that exact, undeleted
+Secret and fixed key before and after the provider request. An owner-only temporary
+file carries the credential to the SDK and is removed on success or failure; neither
+raw credentials nor SDK errors enter public reports. Ambient collector settings
+cannot supply or override these inputs. Changed configuration, credential, provider
+scope or quota identity rejects qualification before producer downtime.
+The collector renderer also binds the fixed projection, initializer and read-only
+consumer mounts; alternate volumes, command arguments, initialization environment
+or lifecycle hooks cannot substitute another credential. This qualifies the retained
+credential route and its cloud access, not a successful successor collector process.
+The read accepts a scale-zero pool and does not reserve headroom, request nodes or
+introduce a per-environment budget. Workload fit, direct-kubelet telemetry and actual
+collector startup still require qualification. These checks do not prove the complete
+external-writer inventory or an installed global activation.
+The personal-access readiness routine must retain
+the installed body, language, owner and security/search-path attributes; a
+same-named replacement is not evidence of retired access. The queue includes
+delayed trials/build consumers and unfanned native batches; quota, retry and target backoff do not hide future
+work. Unknown origins, inconsistent inherited batch origins and ambiguous legacy
+batches cannot be backfilled or silently assigned shared-development priority.
+Every observed origin still requires independent management-registration/history
+qualification before the parent advances; JSON parsing is not that authority.
+The HTTPS adapter requires a separate history reader for every pending page.
+Its fixed `REPEATABLE READ READ ONLY` query projects original application identity,
+owner, deployment generation, registration and source release from the retained
+management database, not the participant database. The manager's original database
+Secret UID/version, Service, StatefulSet and current Pod are checked before and
+after the read. The same history validator serves locked ordinary admission and
+protected readback: suspended or destroyed applications may retain legitimate
+older queued work, but missing history, changed source, wrong incarnation,
+environment or cluster fail closed. No probe Job, new grant, source rewrite or
+admission opening is performed. The fixed scope derivation reloads completed
+upgrade/refresh evidence and the hash-bound original database/material journals,
+then checks the live database credential against its original immutable material.
+It preserves the latest completed manager template and never replays the original
+installation. The history reader must match the cutover's exact manager and
+migration inputs before transport creation. The private cutover input loader now
+derives the manager from reloaded completed receipts and validates operation/path,
+physical pool, participant database and machine-material bindings before operator
+connection. Its reader context connects the history derivation and both fixed SQL
+readers to the same explicit native API endpoint, CA and short-lived bearer. A
+fresh private kubeconfig embeds only that authority, never ingress credentials,
+ambient contexts, exec plugins or client certificates; it is removed on exit,
+including parent failures. The gateway runtime separately uses its projected
+service-account authority at the fixed in-cluster endpoint. The reader context also
+resolves the exact protected GitHub publication before obtaining operator authority:
+successful publication attempt, merged squash identity, current-head Actions-app
+gates, artifact digest and signed runtime bytes must agree. Trust comes from the
+completed manager predecessor, not the supplied pool catalog. Every participant's
+replacement image/signature fields must match those publication bytes while its
+retained environment policy stays unchanged. Private inputs are reloaded after
+the remote read before obtaining operator credentials. Complete installed writer/
+inventory qualification is still required; parsing publication labels is never
+approval. No operational cutover command or admission activation is exposed by
+this reader context.
+
+The fixed connected cutover API now composes these readers with concrete
+private/runtime/provider checks and the existing guard and registration adapters.
+Its child migration preflight invokes the same parent inventory and readiness
+checks. Schema, application-access and original queued-origin qualification run
+before producer downtime as well as after producer drain, including management
+history qualification for empty participant queues. A schema mismatch requires
+the ordinary protected upgrade and its backup contract, followed by refreshed
+cutover inputs; this path does not introduce another DDL mechanism.
+Registration uses only the operation's fixed `writers/registration` journal,
+requires every participant guard to remain held, and preserves the existing
+uncertain-create readback rules. A created Job remains pending until its actual
+successful Pod and committed registration receipt qualify. Private inputs and
+reader bindings are rechecked at the concrete barriers; all child HTTPS clients
+and temporary reader credentials close with the context. Creating this context
+does not stage resources or open intake. A protected workflow operation,
+installed participant completeness, collector startup, activation, rollback and
+durable successor refresh remain required for an operational global cutover.
+Runtime ACL intent is retained separately per participant;
+unknown SQL outcomes permit qualification only, not repeated grant commands.
+
+Once runtime replacement starts, recovery must not replay the original retirement
+or fencing installer against the changed templates. The parent instead qualifies
+the anchored child hashes, held guards, restricted roles, current effective rules
+and each exact stopped old or journaled new workload. It rechecks every frozen
+producer before further mutations, including partial replacement recovery.
+Kubernetes previews qualify defaults before UID/resource-version/spec-fenced
+updates; uncertain updates are observed, never retried. Immutable material and
+gateway resource creation retain the existing single-create journals. The
+final closed-stage readback freshly qualifies every recorded material,
+configuration, authority and gateway identity after runtime replacement; drift
+is rejected without repair or recreation. The
+`pool_runtime_staged_closed` result still marks writer migration incomplete: all
+replacement Deployments remain at zero and the single collector remains suspended.
+Protected entry qualification, runtime activation, rollback and completed
+successor-refresh authority remain required; this internal parent is not a
+standalone operational command or evidence of an installed usable pool.
+
+Actuator telemetry uses the qualified Node's private `InternalIP` and fixed
+kubelet HTTPS `/stats/summary` endpoint. The cluster CA verifies the serving
+certificate and the renewable runtime bearer authorizes GET `nodes/stats`;
+GET `nodes` supplies endpoint identity. The reader preserves cumulative CPU,
+sampled memory and filesystem counters without retaining foreign Pod data.
+It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
+summaries, with no broad `nodes/proxy` fallback. The effective reader review
+accepts only GET on `nodes/stats`, not node proxy or execution authority.
+The staging attachment requires explicit `network.kubelet` private-node CIDRs
+on TCP 10250 and grants that egress only to the actuator, not the gateway or
+collector. Missing routes fail offline rendering; they are not replaced with
+unrestricted egress. Existing attachment inputs must add the approved worker and
+hosting-node routes before upgrading the reader.
+The connected protected preflight checks kubelet reachability, certificate trust
+and summary authorization **inside each retained ordinary and guest actuator Pod**
+before controller retirement. It qualifies the Deployment/ReplicaSet/Pod lineage,
+fixed ServiceAccount, loaded namespace/target settings and complete Node inventory,
+then calls the production direct reader with each selected Node's exact UID.
+Operator credentials never enter the Pod. Only nonnegative CPU, memory and
+filesystem counter availability qualifies; foreign Pod statistics and credentials
+are not returned. Changed Pod or Node identities and incomplete inventories reject
+the check. Existing images without the UID-aware reader require an ordinary
+protected rollout followed by refreshed inputs; there is no node-proxy fallback.
+
+The check covers all current physical-pool Nodes plus the actuator's hosting Node.
+At scale zero, the hosting Node still tests runtime authority/TLS/network without
+requesting a worker or creating an idle reservation. This does not prove reachability
+of future workers; collector/startup and real-task acceptance must qualify those
+when they appear. Recovery skips execution in a stopped Pod only when the same
+anchored parent already qualifies its exact stopped or rewired template; it never
+restarts a retired controller just to run a probe. Successor startup remains a
+separate barrier before admission can reopen.
+
+The standalone platform rollout checks for existing global participant settings
+and retained pool-retirement markers before any mutation and again under its idle
+guard. It refuses to overwrite these with legacy controller configuration or
+direct-writer roles, including a cutover that completes between those checks.
+This fail-closed boundary does not implement the protected successor refresh:
+durable runtime/catalog/token bindings and staged database permissions still must
+be preserved and qualified by that connected path before global activation.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified

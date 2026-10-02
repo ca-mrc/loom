@@ -29,6 +29,7 @@ _NETWORKS = frozenset(
         "source_store",
         "control_plane",
         "kubernetes_api",
+        "kubelet",
         "provider_api",
         "model_api",
     }
@@ -166,6 +167,8 @@ def validate_staging_attachment(
     _endpoint(collector["control_plane_url"], "collector control-plane URL")
     _secret(collector["token_secret"], {"key"}, "collector token Secret")
     _secret(collector["nebius_secret"], {"key"}, "Nebius observer Secret")
+    if isinstance(value["network"], dict) and "kubelet" not in value["network"]:
+        raise StagingAttachmentError("network kubelet requires explicit private node destinations")
     network = _object(value["network"], set(_NETWORKS), "network")
     for name, entries in network.items():
         if not isinstance(entries, list) or not entries or len(entries) > 32:
@@ -182,6 +185,16 @@ def validate_staging_attachment(
                 )
             if type(item["port"]) is not int or not 1 <= item["port"] <= 65535:
                 raise StagingAttachmentError(f"network {name} TCP port is invalid")
+            if name == "kubelet":
+                private_node_subnet = (
+                    any(subnet.subnet_of(parent) for parent in _RFC1918)
+                    if isinstance(subnet, ipaddress.IPv4Network)
+                    else subnet.subnet_of(ipaddress.IPv6Network("fc00::/7"))
+                )
+                if not private_node_subnet or item["port"] != 10250:
+                    raise StagingAttachmentError(
+                        "network kubelet requires private node CIDRs on TCP 10250"
+                    )
     for endpoint, name in (
         (canonical["endpoint"], "canonical_store"),
         (source["endpoint"], "source_store"),
@@ -533,7 +546,7 @@ def render_staging_attachment(
             "loom-attachment-actuator",
             {"matchLabels": {"app.kubernetes.io/name": "loom-execution-actuator"}},
             ingress=[],
-            egress=[dns, *destinations("database", "kubernetes_api")],
+            egress=[dns, *destinations("database", "kubernetes_api", "kubelet")],
         ),
         _policy(
             namespace,

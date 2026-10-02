@@ -406,17 +406,71 @@ def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
     assert "loom cluster render" not in scripts
 
 
-def test_cluster_smoke_budget_covers_observed_serial_runtime() -> None:
+def _run_cluster_test_step(tmp_path: Path, *, scope: str, shard_index: int,
+                           extra_env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    """Run the real workflow/selector, recording only the external pytest boundary."""
     contract = _workflow(".github/workflows/cluster-smoke.yml")["jobs"]["cluster-contract"]
-    # PR2251 attempt2 passed all 64 tests in 1481.61s, then the job deadline
-    # cancelled its result. Account for setup/cleanup and hosted-runner variance
-    # without removing the finite overall budget or changing per-test deadlines.
-    observed_tests_seconds = 1482
-    setup_cleanup_seconds = 180
-    runner_variance_seconds = 300
-    budget_seconds = contract["timeout-minutes"] * 60
-    assert observed_tests_seconds + setup_cleanup_seconds + runner_variance_seconds <= budget_seconds
-    assert budget_seconds <= 35 * 60
+    step = next(step for step in contract["steps"] if "manifest-owned k3s" in step.get("name", ""))
+    executable = tmp_path / "uv"
+    recorded = tmp_path / "pytest-arguments.json"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "if args[:3] == ['run', '--no-sync', 'python']:\n"
+        "    if os.environ.get('SELECTOR_FAIL') == '1':\n"
+        "        print('tests/unit/test_nebius_runtime_render.py')\n"
+        "        sys.exit(19)\n"
+        "    sys.exit(subprocess.call([sys.executable, *args[3:]]))\n"
+        "assert args[:3] == ['run', '--no-sync', 'pytest'], args\n"
+        "Path(os.environ['RECORDED_ARGS']).write_text(json.dumps(args[3:]))\n"
+        "sys.exit(int(os.environ.get('PYTEST_EXIT', '0')))\n", encoding="utf-8")
+    executable.chmod(0o700)
+    result = subprocess.run(["bash"], input=step["run"], cwd=REPO_ROOT, text=True, capture_output=True,
+        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path), "RECORDED_ARGS": str(recorded),
+            "CI_TEST_SCOPE": scope, "CI_PYTEST_MARKERS": "not legacy_pool",
+            "SHARD_INDEX": str(shard_index), "SHARD_COUNT": str(step.get("env", {}).get("SHARD_COUNT", "")),
+            **(extra_env or {})}, check=False)
+    return result, json.loads(recorded.read_text()) if recorded.exists() else []
+
+
+@pytest.mark.parametrize("scope", ["nebius", "all"])
+def test_cluster_smoke_executes_disjoint_complete_bounded_shards(tmp_path: Path, scope: str) -> None:
+    contract = _workflow(".github/workflows/cluster-smoke.yml")["jobs"]["cluster-contract"]
+    matrix = contract.get("strategy", {}).get("matrix", {}).get("include", [])
+    assert len(matrix) > 1, "the observed 35-minute serial timeout requires independent runners"
+    assert contract["strategy"]["fail-fast"] is False
+    assert not contract.get("continue-on-error", False)
+    assert 0 < contract["timeout-minutes"] <= 35
+    assert {row["shard_index"] for row in matrix} == set(range(len(matrix)))
+    step = next(step for step in contract["steps"] if "manifest-owned k3s" in step.get("name", ""))
+    assert step["env"]["SHARD_INDEX"] == "${{ matrix.shard_index }}"
+    selected = subprocess.run([sys.executable, "scripts/component_ownership.py", "test-paths",
+        "--lane", "cluster-smoke", "--test-scope", scope], cwd=REPO_ROOT, text=True,
+        capture_output=True, check=True).stdout.splitlines()
+    seen: set[str] = set()
+    for row in matrix:
+        directory = tmp_path / row["shard"]
+        directory.mkdir()
+        result, arguments = _run_cluster_test_step(directory, scope=scope, shard_index=row["shard_index"])
+        assert result.returncode == 0, result.stderr
+        assert arguments[arguments.index("-m") + 1] == "not legacy_pool"
+        paths = [value for value in arguments if value.startswith("tests/")]
+        assert paths and len(set(paths)) == len(paths)
+        assert seen.isdisjoint(paths)
+        seen.update(paths)
+    assert seen == set(selected)
+
+
+@pytest.mark.parametrize("failure", ["SELECTOR_FAIL", "PYTEST_EXIT"])
+def test_cluster_smoke_propagates_selector_and_test_failures(tmp_path: Path, failure: str) -> None:
+    result, arguments = _run_cluster_test_step(tmp_path, scope="nebius", shard_index=0,
+        extra_env={failure: "1" if failure == "SELECTOR_FAIL" else "9"})
+    assert result.returncode != 0
+    if failure == "SELECTOR_FAIL":
+        assert arguments == [], "partial selector output cannot authorize partial coverage"
 
 
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
@@ -835,8 +889,10 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
 
 
 @pytest.mark.parametrize(
-    ("required", "heavy_result"),
-    [("true", "success"), ("false", "skipped"), ("false", "success")],
+    ("required", "heavy_result", "accepted"),
+    [("true", "success", True), ("false", "skipped", True), ("false", "success", True),
+     ("true", "failure", False), ("true", "cancelled", False), ("true", "skipped", False),
+     ("false", "failure", False)],
 )
 @pytest.mark.parametrize(
     ("workflow_path", "gate_id", "result_names"),
@@ -859,6 +915,7 @@ def test_optional_gate_scripts_preserve_result_semantics(
     result_names: list[str],
     required: str,
     heavy_result: str,
+    accepted: bool,
 ) -> None:
     result = subprocess.run(
         ["bash"],
@@ -874,7 +931,7 @@ def test_optional_gate_scripts_preserve_result_semantics(
         check=False,
     )
 
-    assert result.returncode == 0, (workflow_path, required, result.stderr)
+    assert (result.returncode == 0) is accepted, (workflow_path, required, heavy_result, result.stderr)
 
 
 @pytest.mark.parametrize(

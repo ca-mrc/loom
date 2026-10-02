@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
+import psycopg
 import pytest
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
@@ -14,6 +16,10 @@ from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
 from tests.integration.test_nebius_pool_auth import credential
+from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
+from tests.ops.test_nebius_pool_origin_history import management_history as management_history
+from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 from tests.unit.test_nebius_pool_contract import participant
 
@@ -64,6 +70,153 @@ async def test_personal_priority_keeps_original_version_after_suspend_without_mu
         assert await qualify_pool_origin(session, principal, origin, target_id="nebius-default", workload_kind="task_image_build") == 3
     assert await registry.get_operation(operation.operation_id, principal=alice) == before
     assert (await registry.get_operation(stopped.operation_id, principal=alice)).phase == "pending"
+
+
+async def test_cutover_can_qualify_retained_application_history_without_opening_the_pool(applications):
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom_service.pool_management.origin import qualify_retained_pool_origin
+
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='origin-retirement',
+        action='suspend', expected_generation=1)
+    async with factory.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == binding.pool_id).values(mode='closed'))
+    async with factory() as session:
+        await session.execute(text('SET TRANSACTION READ ONLY'))
+        assert await qualify_retained_pool_origin(session, origin, participant=binding,
+            cluster_id=plan['prepared'].registration.cluster_id, workload_kind='trial') == 3
+        assert (await session.get(NebiusPoolBinding, binding.pool_id)).mode == 'closed'
+        assert not session.new and not session.dirty and not session.deleted
+    assert (await registry.get_operation(operation.operation_id, principal=alice)).phase == 'superseded'
+
+
+@pytest.mark.parametrize('damage', ['source', 'cluster', 'environment', 'generation'])
+async def test_cutover_origin_history_denies_unregistered_source_and_wrong_binding(applications, damage):
+    from loom_service.pool_management.origin import PoolOriginError, qualify_retained_pool_origin
+
+    factory, _, binding, origin, _, _, _, plan = await setup_origin(applications)
+    cluster = plan['prepared'].registration.cluster_id
+    if damage == 'source':
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update={'source_digest': 'sha256:' + 'f' * 64})})
+    elif damage == 'cluster':
+        cluster = 'mk8scluster-foreign'
+    elif damage == 'environment':
+        binding = binding.model_copy(update={'environment_id': uuid4()})
+    else:
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update={'deployment_generation': 50})})
+    async with factory() as session:
+        with pytest.raises(PoolOriginError):
+            await qualify_retained_pool_origin(session, origin, participant=binding, cluster_id=cluster, workload_kind='trial')
+
+
+async def read_management_history(factory, origins):
+    from scripts.ops.nebius_pool_origin_history import pool_management_history_sql
+
+    url = factory.kw['bind'].url.set(drivername='postgresql').render_as_string(hide_password=False)
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as connection:
+        async with connection.cursor() as cursor:
+            await cursor.execute(pool_management_history_sql(origins), prepare=False)
+            rows = []
+            while True:
+                if cursor.description:
+                    rows.extend(await cursor.fetchall())
+                if not cursor.nextset():
+                    break
+            assert len(rows) == 1
+            return rows[0][0]
+
+
+async def test_fixed_management_sql_qualifies_original_source_after_retirement_without_writes(applications):
+    from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
+
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='history-stop',
+        action='suspend', expected_generation=1)
+    before = await registry.get_operation(operation.operation_id, principal=alice)
+    report = await read_management_history(factory, (origin,))
+    assert report['read_only'] is True
+    assert qualify_management_history_page(report, origins=(origin,), participant=binding,
+        cluster_id=plan['prepared'].registration.cluster_id) == (3,)
+    assert await registry.get_operation(operation.operation_id, principal=alice) == before
+
+
+@pytest.mark.parametrize('damage', ['source', 'incarnation', 'generation', 'missing_app', 'cluster', 'environment', 'missing_row', 'extra_row'])
+async def test_fixed_history_readback_denies_unknown_or_misbound_original_work(applications, damage):
+    from scripts.ops.nebius_pool_origin_history import qualify_management_history_page
+
+    factory, _, binding, origin, _, _, _, plan = await setup_origin(applications)
+    cluster = plan['prepared'].registration.cluster_id
+    changes = {
+        'source': {'source_digest': 'sha256:' + 'f' * 64},
+        'incarnation': {'incarnation': uuid4()},
+        'generation': {'deployment_generation': 99},
+        'missing_app': {'application_id': uuid4()},
+    }
+    if damage in changes:
+        origin = origin.model_copy(update={'application': origin.application.model_copy(update=changes[damage])})
+    report = await read_management_history(factory, (origin,))
+    if damage == 'cluster':
+        cluster = 'mk8scluster-foreign'
+    elif damage == 'environment':
+        binding = binding.model_copy(update={'environment_id': uuid4()})
+    elif damage == 'missing_row':
+        report['rows'].clear()
+    elif damage == 'extra_row':
+        report['rows'].append(report['rows'][0])
+    with pytest.raises(ValueError):
+        qualify_management_history_page(report, origins=(origin,), participant=binding, cluster_id=cluster)
+
+
+async def test_bound_management_transport_reads_real_retained_history_without_opening_admission(applications, management_history, monkeypatch):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_origin_history import KubectlPoolHistoryAPI
+
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom_service.pool_management.installation import PoolInstallation
+
+    transport, state = management_history
+    factory, _, binding, origin, registry, alice, operation, plan = await setup_origin(applications)
+    await registry.transition(operation.application_id, principal=alice, idempotency_key='bound-history-stop',
+        action='suspend', expected_generation=1)
+    async with factory.begin() as session:
+        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == binding.pool_id).values(mode='closed'))
+    before = await registry.get_operation(operation.operation_id, principal=alice)
+    spec = state.request.registration.spec
+    development, = (row for row in spec.participants if row.environment_class == 'development')
+    spec = PoolInstallation.model_validate(spec.model_dump() | {
+        'cluster_id': plan['prepared'].registration.cluster_id,
+        'participants': tuple(row.model_copy(update={'environment_id': origin.data_environment_id})
+            if row.participant_id == development.participant_id else row for row in spec.participants)})
+    request = replace(state.request, registration=replace(state.request.registration, spec=spec))
+    participant, = (row for row in request.guards if row.participant_id == development.participant_id)
+    api = KubectlPoolHistoryAPI(request=request, target=state.target,
+        kubeconfig=transport.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    url = factory.kw['bind'].url.set(drivername='postgresql').render_as_string(hide_password=False)
+    with psycopg.connect(url, autocommit=True) as connection:
+        def run(args):
+            response = transport._run(args)  # Only Kubernetes identity/exec transport is doubled.
+            if args[0] != 'exec':
+                return response
+            with connection.cursor() as cursor:
+                cursor.execute(args[-1], prepare=False)
+                rows = []
+                while True:
+                    if cursor.description:
+                        rows.extend(cursor.fetchall())
+                    if not cursor.nextset():
+                        break
+                assert len(rows) == 1
+                return rows[0][0]
+
+        monkeypatch.setattr(api, '_run', run)
+        api.qualify_pending_origins(participant, (origin,))
+        wrong = origin.model_copy(update={'application': origin.application.model_copy(update={'source_digest': 'sha256:' + 'f' * 64})})
+        with pytest.raises(PoolMigrationError):
+            api.qualify_pending_origins(participant, (wrong,))
+    assert sum(row[0] == 'exec' for row in state.calls) == 2
+    async with factory() as session:
+        assert (await session.get(NebiusPoolBinding, binding.pool_id)).mode == 'closed'
+    assert await registry.get_operation(operation.operation_id, principal=alice) == before
 
 
 @pytest.mark.parametrize("field,value", [

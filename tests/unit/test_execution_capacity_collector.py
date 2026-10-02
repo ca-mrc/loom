@@ -498,8 +498,9 @@ def _quota(name: str, unit: str, limit: int, usage: int, version: int) -> Any:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expected_cluster", [None, "cluster-test", "foreign-cluster"])
 async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
-    tmp_path: Path,
+    tmp_path: Path, expected_cluster: str | None,
 ) -> None:
     gib = 1024**3
     quota_client = SimpleNamespace(
@@ -540,7 +541,12 @@ async def test_nebius_reader_validates_quota_units_region_and_node_group_state(
         quota_client=quota_client,
         node_group_client=node_group_client,
     )
-    snapshot = await reader.capture(await _ControlPlane().fetch_policy(target_id="x", pool_id="y"))
+    if expected_cluster == "foreign-cluster":
+        with pytest.raises(NebiusObservationError):
+            await reader.capture_pool(expected_cluster_id=expected_cluster)
+        return
+    snapshot = (await reader.capture_pool(expected_cluster_id=expected_cluster) if expected_cluster else
+        await reader.capture(await _ControlPlane().fetch_policy(target_id="x", pool_id="y")))
     assert snapshot.quota_vcpu_millis == 80_000
     assert snapshot.used_memory_mib == 24 * 1024
     assert snapshot.provider_capacity_state == "available"

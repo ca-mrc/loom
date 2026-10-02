@@ -35,6 +35,8 @@ class PoolGuardDatabase:
     service: dict[str, Any]
     credential_uid: UUID
     credential_resource_version: str
+    actuator_credential_uid: UUID | None = None
+    actuator_credential_resource_version: str | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -96,6 +98,13 @@ def migration_contract(request: PoolMigrationRequest) -> dict[str, Any]:
                 raise ValueError("pool migration database credential identity differs")
             binding: dict[str, Any] = {"credential_uid": str(database.credential_uid),
                 "credential_resource_version": database.credential_resource_version}
+            if database.actuator_credential_uid is not None or database.actuator_credential_resource_version is not None:
+                if (database.actuator_credential_uid is None or not database.actuator_credential_uid.int
+                        or not isinstance(database.actuator_credential_resource_version, str)
+                        or not 0 < len(database.actuator_credential_resource_version) <= 128):
+                    raise ValueError("pool migration actuator credential identity differs")
+                binding["actuator_credential"] = {"uid": str(database.actuator_credential_uid),
+                    "resource_version": database.actuator_credential_resource_version}
             for kind, version, document in (("StatefulSet", "apps/v1", database.statefulset), ("Service", "v1", database.service)):
                 if (document.get("apiVersion") != version or document.get("kind") != kind
                         or document["metadata"].get("name") != "loom-postgres"

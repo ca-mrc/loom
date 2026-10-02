@@ -156,6 +156,20 @@ def test_actual_retained_collector_rules_remain_qualified_readers(platform_input
     qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
 
 
+def test_rendered_actuator_telemetry_is_reader_only_without_node_proxy(platform_inputs):
+    from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
+
+    from loom.nebius_platform_render import build_platform
+
+    config, candidate, profile = platform_inputs
+    documents = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+    role, = [row for rows in documents.values() for row in rows if row["kind"] == "ClusterRole"
+        and row["metadata"]["name"] == config["execution_namespace"] + "-actuator-usage"]
+    review = rules_review()
+    review["status"]["resourceRules"].extend(role["rules"])
+    qualify_pool_reader_rules(review, namespace="loom-nebius-exec-0")
+
+
 @pytest.mark.parametrize("damage", ["write", "named_write", "pod_create", "deployment", "exec", "secret",
     "impersonation", "node_proxy", "token", "wildcard_resource", "wildcard_group", "wildcard_verb", "nonresource_write", "nonresource_unknown",
     "incomplete", "missing_incomplete", "false_string", "evaluation_error", "namespace", "kind", "missing_rules", "malformed_rule"])
