@@ -253,3 +253,77 @@ def test_startup_rejects_gateway_receipt_that_does_not_match_its_fixed_target(cl
     with pytest.raises(ValueError):
         start(closed_startup)
     assert not api.requests
+
+
+def test_closed_projection_bounds_full_input_captures_and_detaches_results(closed_startup, monkeypatch):
+    from scripts.ops import nebius_pool_projection as projection
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    request, _, _, _, _, root = closed_startup
+    arguments = {'state_dir': root / 'cutover', 'anchor_dir': root / 'cutover-anchor'}
+    expected = copy.deepcopy(closed_startup_documents(request, **arguments))
+    original_snapshot = projection._snapshot
+    captures = []
+
+    def capture(value):
+        captures.append(type(value))
+        return original_snapshot(value)
+
+    monkeypatch.setattr(projection, '_snapshot', capture)
+    for _ in range(3):
+        actual = closed_startup_documents(request, **arguments)
+        assert actual == expected
+        actual[0].clear()
+        actual[1].clear()
+    # One complete request qualification per read; repeated sibling renderers
+    # must not each traverse the entire retained installation again.
+    assert len(captures) <= 3
+    request.fencing.retirement.migration.guards[0].controller['spec']['replicas'] = True
+    with pytest.raises(ValueError):
+        closed_startup_documents(request, **arguments)
+
+
+@pytest.mark.parametrize('damage', ['cutover', 'child', 'permission', 'missing', 'symlink'])
+def test_closed_projection_never_reuses_private_journal_evidence(closed_startup, damage):
+    from scripts.ops.nebius_certificates import CertificateError
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    request, _, _, _, _, root = closed_startup
+    arguments = {'state_dir': root / 'cutover', 'anchor_dir': root / 'cutover-anchor'}
+    closed_startup_documents(request, **arguments)
+    path = root / 'cutover' / ('configuration/stage.json' if damage == 'child' else 'cutover.json')
+    if damage in {'cutover', 'child'}:
+        path.write_text('{}')
+    elif damage == 'permission':
+        path.chmod(0o644)
+    elif damage == 'missing':
+        path.unlink()
+    else:
+        moved = path.with_suffix('.retained')
+        path.rename(moved)
+        path.symlink_to(moved)
+    with pytest.raises((ValueError, OSError, CertificateError)):
+        closed_startup_documents(request, **arguments)
+
+
+def test_closed_projection_always_rechecks_image_admission_clock(closed_startup, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    from loom import execution_image_admission as admission
+
+    request, _, _, _, _, root = closed_startup
+    arguments = {'state_dir': root / 'cutover', 'anchor_dir': root / 'cutover-anchor'}
+    closed_startup_documents(request, **arguments)
+    before_issuance = min(row.statement.issued_at for profile in request.profiles.values()
+        for row in profile.image_admission.admissions) - timedelta(hours=1)
+
+    class EarlierClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return before_issuance
+
+    monkeypatch.setattr(admission, 'datetime', EarlierClock)
+    with pytest.raises(ValueError):
+        closed_startup_documents(request, **arguments)
