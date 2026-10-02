@@ -8,6 +8,11 @@ Hosted readiness additionally requires registered class/target bindings, fresh
 health, capacity admission, the matching namespace policy, and installed
 capability qualification.
 
+The separately enabled `emulated_pkcs11_authentication` capability supports
+trial-owned software tokens, local SSH Unix-socket forwarding and actual PAM/sudo
+authentication inside the guest. It grants no physical-card access or host-device
+authority. The broader `pkcs11_authentication` declaration remains unsupported.
+
 ## Admission and immutable plans
 
 `GuestExecutionClassV1` extends the execution class with a versioned,
@@ -15,6 +20,9 @@ guest-local capability set. New class identities are
 `linux-amd64-cpu-guest-v1` and `linux-amd64-cpu-guest-web-v1`. Existing ordinary
 class serialization is unchanged. Trusted-host privilege, Docker sockets,
 mounts, devices, host networking and shared kernel changes remain forbidden.
+The emulated-auth classes are `linux-amd64-cpu-guest-auth-v1` and
+`linux-amd64-cpu-guest-auth-web-v1`; they add only emulated authentication to the
+historical guest capabilities. Historical class definitions remain unchanged.
 
 A deployment profile opts in with `guest_runtime = "qemu-tcg-v1"`, task identity
 support and at least 1024 MiB of runtime volume. `guest_runtime_volume_mib` and
@@ -23,7 +31,10 @@ ordinary plan budgets unchanged. Only tasks declaring a guest
 capability select a guest class; ordinary tasks retain their original class.
 The compiler requires the Terminus controller with two private sandboxes and
 explicit root task/verifier identities. Unresolved prerequisites and external
-cluster, PKCS#11 or DPDK requirements remain admission rejections.
+cluster, general PKCS#11 or DPDK requirements remain admission rejections.
+Emulated authentication additionally requires the deployment profile's explicit
+`supports_emulated_pkcs11 = true`. Only a task declaring that capability selects
+the new class; enabling the profile does not rebind existing guest tasks.
 
 Each sidecar carries `guest_execution` with schema
 `loom.guest-execution.v1`, runtime `qemu-tcg-v1`, and the sorted, unique declared
@@ -138,6 +149,15 @@ remove or rename an installed guest, or replace its ordinary owner: those
 operations require a separately designed retirement protocol. Disabling/draining
 the guest retains its capacity accounting and cleanup authority.
 
+Emulated authentication adds `emulated_auth_execution_target: {"target_id":
+"<distinct auth guest target>"}` beside the retained historical guest target.
+Its catalog (`emulated-auth-catalog.json`), actuator, health and operator intent
+are independent; its collector, quota, namespace and capacity owner remain
+shared. Readiness and this configuration must agree. The namespace policy applies
+the same exact guest restrictions to both declared target IDs. Neither guest
+may be removed or renamed through a normal rollout. This standalone extension
+does not extend the separate shared-pool cutover's fixed participant roster.
+
 [The guest payload build](../../deploy/guest-runtime/README.md) locks kernel,
 QEMU, Docker, Buildx and dependency versions/checksums. The execution-runtime
 image adds static Go launcher and sandbox binaries. Ordinary plans do not copy
@@ -152,3 +172,10 @@ acceptance still requires the real Singularity and pinned Node/LLDB/llnode
 workflows, large-artifact round trips, deployed lifecycle reconciliation and
 ordinary-entrypoint qualification. Incomplete original task packages retain
 separate input blockers.
+
+`tests/integration/test_guest_emulated_auth.py` adds a generic SoftHSM/PAM fixture
+to the Docker lane. It verifies real signatures, forwarding-dependent sudo,
+invalid PIN/certificate rejection, simultaneous guest isolation and state-disk
+retirement with the same outer confinement. Benchmark instructions, private
+grading and solutions are not part of this fixture. Local evidence does not
+replace installed qualification or the original task's recorded outcome.

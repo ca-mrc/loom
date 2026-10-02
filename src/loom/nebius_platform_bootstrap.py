@@ -25,6 +25,8 @@ import psycopg
 from psycopg import sql
 from sqlalchemy.engine import make_url
 
+from loom.nebius_guest_target import guest_target_ids
+
 # Explicit subsystem grants. New tables receive no automatic gateway/actuator
 # grants; update this inventory with their owning runtime change.
 COMMON_EXECUTION_TABLES = (
@@ -411,9 +413,11 @@ def configure_platform(
     ]
     if sorted(observed["target_ids"]) != sorted(expected_targets):
         raise ValueError("catalog readback mismatch")
-    guest_id = config.get("guest_execution_target", {}).get("target_id")
-    if guest_id is not None:
-        guest_catalog = json.loads((config_dir / "guest-catalog.json").read_text())
+    siblings = guest_target_ids(config)
+    for guest_id in siblings:
+        filename = ("guest-catalog.json" if guest_id == config["guest_execution_target"]["target_id"]
+                    else "emulated-auth-catalog.json")
+        guest_catalog = json.loads((config_dir / filename).read_text())
         guest_targets = guest_catalog.get("topology", {}).get("targets", [])
         if (len(guest_targets) != 1 or guest_targets[0].get("target_id") != guest_id
                 or guest_targets[0].get("capacity_owner_target_id") != config["target_id"]):
@@ -446,7 +450,7 @@ def configure_platform(
             or binding.get("enabled") is not True
         ):
             raise ValueError("execution price target binding readback mismatch")
-        if guest_id is not None and target_config["target_id"] == config["target_id"]:
+        for guest_id in siblings if target_config["target_id"] == config["target_id"] else ():
             guest_binding = request("PUT", "/admin/execution-target-price-bindings/" + guest_id, {
                 "price_snapshot_id": price["id"], "enabled": True,
                 "reason": "Guest sibling uses its ordinary physical owner's immutable price snapshot",

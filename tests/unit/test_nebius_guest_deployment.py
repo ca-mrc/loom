@@ -91,8 +91,9 @@ def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_input
 
 
 def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path):  # noqa: F811
-    from loom_control_plane.execution_capacity_targets import validate_capacity_owner
     from scripts.ops.deploy_nebius_platform import load_render
+
+    from loom_control_plane.execution_capacity_targets import validate_capacity_owner
 
     config, candidate, profile = guest_inputs(platform_inputs)
     original = build_platform(config, candidate, profile, {}, repo_root=ROOT)

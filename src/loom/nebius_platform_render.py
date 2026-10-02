@@ -28,7 +28,7 @@ from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     TaskExecutionResourceRequestsV1,
 )
-from loom.nebius_guest_target import guest_target_id
+from loom.nebius_guest_target import emulated_auth_target_id, guest_target_id, guest_target_ids
 from loom.nebius_task_identity_policy import (
     identity_namespace_labels,
     identity_policy_documents,
@@ -112,12 +112,13 @@ def validate_environment(config: dict[str, Any]) -> None:
             "task_egress",
             "task_identity_policy",
             "guest_execution_target",
+            "emulated_auth_execution_target",
         }
         != expected
     ):
         raise NebiusPlatformError("platform configuration has missing or unknown fields")
     try:
-        guest_target_id(config)
+        guest_target_ids(config)
         validate_identity_policy(config)
     except ValueError as exc:
         raise NebiusPlatformError(str(exc)) from exc
@@ -1188,8 +1189,7 @@ def _execution_documents(
             doc["spec"]["hard"] = _execution_quota(config, execution_docs)
     if builder is not None:
         execution_docs.extend(_task_image_builder_documents(config, builder))
-    guest_id = guest_target_id(config)
-    if guest_id is not None:
+    for guest_id in guest_target_ids(config):
         # Reuse namespace RBAC and network policy, with independent controller
         # health/lease identity. The physical collector and native builder stay
         # on the ordinary owner; cloning either would duplicate its authority.
@@ -1394,13 +1394,18 @@ def _build_platform(
         raise NebiusPlatformError("non-executing templates cannot inherit execution authority")
     validate_environment(config)
     guest_id = guest_target_id(config)
+    auth_id = emulated_auth_target_id(config)
     if profile.get("guest_runtime") not in (None, "qemu-tcg-v1"):
         raise NebiusPlatformError("unsupported guest runtime")
     if profile.get("guest_runtime") is not None and guest_id is None:
         raise NebiusPlatformError("guest runtime readiness requires a distinct guest execution target")
     if guest_id is not None and (not execution_enabled or not validate_identity_policy(config)):
         raise NebiusPlatformError("guest execution requires the constrained private-root namespace policy")
-    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity"):
+    if profile.get("supports_emulated_pkcs11", False) != (auth_id is not None):
+        raise NebiusPlatformError("emulated authentication readiness requires its distinct guest target")
+    if auth_id is not None and profile.get("guest_runtime") != "qemu-tcg-v1":
+        raise NebiusPlatformError("emulated authentication requires the explicit guest runtime")
+    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity", "supports_emulated_pkcs11"):
         if type(profile.get(capability, False)) is not bool:
             raise NebiusPlatformError(f"runtime profile {capability} must be a boolean")
     if profile.get("supports_task_web_egress", False) != ("task_egress" in config):
@@ -1459,7 +1464,9 @@ def _build_platform(
     files["00-namespaces.yaml"] = [_namespace(ns), _namespace(ex)]
     if validate_identity_policy(config):
         files["00-namespaces.yaml"][1]["metadata"]["labels"].update(identity_namespace_labels())
-        files["00-task-identity-policy.yaml"] = identity_policy_documents(ex, config["target_id"], guest_target_id=guest_id)
+        files["00-task-identity-policy.yaml"] = identity_policy_documents(
+            ex, config["target_id"], guest_target_id=guest_id, emulated_auth_target_id=auth_id,
+        )
     db_host = f"loom-postgres.{ns}.svc"
     cm = _obj("ConfigMap", "loom-platform-config", ns)
     target = {
@@ -1511,13 +1518,18 @@ def _build_platform(
         "catalog.json": canonical(catalog).decode(),
         "public-tls.json": canonical(public_tls_config(config)).decode(),
     }
-    if guest_id is not None:
+    for sibling_id, filename, auth in (
+        (guest_id, "guest-catalog.json", False), (auth_id, "emulated-auth-catalog.json", True),
+    ):
+        if sibling_id is None:
+            continue
         guest_class = nebius_guest_execution_class(
             supports_task_web_egress=profile.get("supports_task_web_egress", False),
+            supports_emulated_pkcs11=auth,
         )
-        guest_target = dict(target, target_id=guest_id, execution_class_id=guest_class.class_id,
-                            capacity_owner_target_id=config["target_id"], health_check_id=guest_id)
-        cm["data"]["guest-catalog.json"] = canonical({
+        guest_target = dict(target, target_id=sibling_id, execution_class_id=guest_class.class_id,
+                            capacity_owner_target_id=config["target_id"], health_check_id=sibling_id)
+        cm["data"][filename] = canonical({
             "execution_class": guest_class.model_dump(mode="json"),
             "topology": {**catalog["topology"], "execution_class_id": guest_class.class_id,
                          "targets": [guest_target]},
@@ -1966,10 +1978,10 @@ def _build_platform(
                 for regional in config.get("regional_execution_targets", [])
             ]
         )
-        if guest_id is not None:
+        for sibling_id in guest_target_ids(config):
             database_policy["spec"]["ingress"][0]["from"].append({
                 "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ex}},
-                "podSelector": {"matchLabels": {"app.kubernetes.io/name": guest_id + "-actuator"}},
+                "podSelector": {"matchLabels": {"app.kubernetes.io/name": sibling_id + "-actuator"}},
             })
     files["00-namespaces.yaml"].extend(doc for doc in execution_docs if doc["kind"] == "Namespace")
     files["60-execution.yaml"] = [doc for doc in execution_docs if doc["kind"] != "Namespace"]

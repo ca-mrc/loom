@@ -415,9 +415,9 @@ class ExecutionRuntimePlanV1(_Strict):
             supported = guest_definition.guest_execution.supported_capabilities
             for sidecar in guests:
                 assert sidecar.guest_execution is not None
-                declared = frozenset(sidecar.guest_execution.capabilities)
-                if not declared <= supported or (
-                    ("emulated_pkcs11_authentication" in declared)
+                declared_guest = frozenset(sidecar.guest_execution.capabilities)
+                if not declared_guest <= supported or (
+                    ("emulated_pkcs11_authentication" in declared_guest)
                     != ("emulated_pkcs11_authentication" in supported)
                 ):
                     raise ValueError("guest capabilities do not match the immutable class")
