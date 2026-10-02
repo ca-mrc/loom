@@ -127,11 +127,18 @@ func secureInputDirectory(root, directory string) error {
 }
 
 func decodeTaskInputManifest(payload []byte, p plan) (taskInputManifest, error) {
-	if p.TaskInput == nil {
+	return decodeInputManifest(payload, p, p.TaskInput, false)
+}
+
+// A handoff carries only the parent attempt's committed workspace evidence. It
+// is staged under the private controller directory and never joins the task
+// bundle digest.
+func decodeInputManifest(payload []byte, p plan, binding *taskInput, handoff bool) (taskInputManifest, error) {
+	if binding == nil {
 		return taskInputManifest{}, fmt.Errorf("task input binding is absent")
 	}
 	digest := sha256.Sum256(payload)
-	if "sha256:"+hex.EncodeToString(digest[:]) != p.TaskInput.ManifestSHA256 {
+	if "sha256:"+hex.EncodeToString(digest[:]) != binding.ManifestSHA256 {
 		return taskInputManifest{}, fmt.Errorf("task input manifest digest mismatch")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
@@ -144,7 +151,7 @@ func decodeTaskInputManifest(payload []byte, p plan) (taskInputManifest, error) 
 		return taskInputManifest{}, fmt.Errorf("task input manifest contains trailing JSON")
 	}
 	if manifest.SchemaVersion != "loom.service-execution-input-manifest.v1" ||
-		manifest.TaskRevisionSHA256 != p.TaskRevisionSHA256 || len(manifest.Files) != p.TaskInput.FileCount {
+		manifest.TaskRevisionSHA256 != p.TaskRevisionSHA256 || len(manifest.Files) != binding.FileCount {
 		return taskInputManifest{}, fmt.Errorf("task input manifest identity mismatch")
 	}
 	total := int64(0)
@@ -154,16 +161,17 @@ func decodeTaskInputManifest(payload []byte, p plan) (taskInputManifest, error) 
 		if clean != file.RelativePath || clean == "." || strings.HasPrefix(clean, "/") ||
 			strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") ||
 			(file.Mode != "0644" && file.Mode != "0755") || file.SizeBytes < 0 ||
-			!sha256Value.MatchString(file.SHA256) || (previous != "" && previous >= file.RelativePath) {
+			!sha256Value.MatchString(file.SHA256) || (previous != "" && previous >= file.RelativePath) ||
+			(handoff && (!strings.HasPrefix(clean, ".loom/") || file.Mode != "0644")) {
 			return taskInputManifest{}, fmt.Errorf("task input file inventory is invalid")
 		}
 		previous = file.RelativePath
 		total += file.SizeBytes
-		if total < 0 || total > p.TaskInput.TotalBytes {
+		if total < 0 || total > binding.TotalBytes {
 			return taskInputManifest{}, fmt.Errorf("task input size exceeds its binding")
 		}
 	}
-	if total != p.TaskInput.TotalBytes {
+	if total != binding.TotalBytes {
 		return taskInputManifest{}, fmt.Errorf("task input total size mismatch")
 	}
 	return manifest, nil
@@ -173,40 +181,63 @@ func (b *workloadBroker) materializeInputs(ctx context.Context, p plan, workspac
 	if p.TaskInput == nil {
 		return nil
 	}
-	if err := secureDirectory(workspace); err != nil {
-		return err
-	}
-	manifestResponse, err := b.getInput(ctx, b.endpoint("/inputs/manifest"))
+	bundleDigest, err := b.materializeManifest(ctx, p, workspace, p.TaskInput, "/inputs", false)
 	if err != nil {
 		return err
+	}
+	if bundleDigest != p.TaskRevisionSHA256 {
+		return fmt.Errorf("materialized task bundle checksum mismatch")
+	}
+	return nil
+}
+
+// materializeHandoff stages the parent attempt's committed workspace for a
+// deferred verifier, after the task bundle has been verified.
+func (b *workloadBroker) materializeHandoff(ctx context.Context, p plan, workspace string) error {
+	if p.HandoffInput == nil {
+		return nil
+	}
+	_, err := b.materializeManifest(ctx, p, workspace, p.HandoffInput, "/inputs/handoff", true)
+	return err
+}
+
+func (b *workloadBroker) materializeManifest(
+	ctx context.Context, p plan, workspace string, binding *taskInput, route string, handoff bool,
+) (string, error) {
+	if err := secureDirectory(workspace); err != nil {
+		return "", err
+	}
+	manifestResponse, err := b.getInput(ctx, b.endpoint(route+"/manifest"))
+	if err != nil {
+		return "", err
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(manifestResponse.Body, maxInputManifestBytes+1))
 	closeErr := manifestResponse.Body.Close()
 	if readErr != nil {
-		return readErr
+		return "", readErr
 	}
 	if closeErr != nil {
-		return closeErr
+		return "", closeErr
 	}
 	if len(payload) > maxInputManifestBytes {
-		return fmt.Errorf("task input manifest exceeds 16 MiB")
+		return "", fmt.Errorf("task input manifest exceeds 16 MiB")
 	}
-	manifest, err := decodeTaskInputManifest(payload, p)
+	manifest, err := decodeInputManifest(payload, p, binding, handoff)
 	if err != nil {
-		return err
+		return "", err
 	}
 	bundleDigest := sha256.New()
 	for index, file := range manifest.Files {
 		destination := filepath.Join(workspace, filepath.FromSlash(file.RelativePath))
 		if !isWithin(workspace, destination) {
-			return fmt.Errorf("task input path escapes workspace")
+			return "", fmt.Errorf("task input path escapes workspace")
 		}
 		if err := secureInputDirectory(workspace, filepath.Dir(destination)); err != nil {
-			return err
+			return "", err
 		}
-		response, err := b.getInput(ctx, b.endpoint(fmt.Sprintf("/inputs/files/%d", index)))
+		response, err := b.getInput(ctx, b.endpoint(fmt.Sprintf("%s/files/%d", route, index)))
 		if err != nil {
-			return err
+			return "", err
 		}
 		mode := os.FileMode(0o644)
 		if file.Mode == "0755" {
@@ -215,7 +246,7 @@ func (b *workloadBroker) materializeInputs(ctx context.Context, p plan, workspac
 		output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 		if err != nil {
 			response.Body.Close()
-			return err
+			return "", err
 		}
 		fileDigest := sha256.New()
 		bundleDigest.Write([]byte{0})
@@ -230,21 +261,18 @@ func (b *workloadBroker) materializeInputs(ctx context.Context, p plan, workspac
 		if copyErr != nil || closeBodyErr != nil || closeFileErr != nil {
 			_ = os.Remove(destination)
 			if copyErr != nil {
-				return copyErr
+				return "", copyErr
 			}
 			if closeBodyErr != nil {
-				return closeBodyErr
+				return "", closeBodyErr
 			}
-			return closeFileErr
+			return "", closeFileErr
 		}
 		actualSHA := "sha256:" + hex.EncodeToString(fileDigest.Sum(nil))
 		if written != file.SizeBytes || actualSHA != file.SHA256 {
 			_ = os.Remove(destination)
-			return fmt.Errorf("task input file identity mismatch")
+			return "", fmt.Errorf("task input file identity mismatch")
 		}
 	}
-	if "sha256:"+hex.EncodeToString(bundleDigest.Sum(nil)) != p.TaskRevisionSHA256 {
-		return fmt.Errorf("materialized task bundle checksum mismatch")
-	}
-	return nil
+	return "sha256:" + hex.EncodeToString(bundleDigest.Sum(nil)), nil
 }

@@ -586,10 +586,13 @@ def workload_requirements_from_task(
             and not _task_declares_guest_execution(task)
         )
     else:
+        # Retained services cannot outlive the agent pod, so the compiler
+        # grades them in it with a separate verifier sandbox.
         separate = (
             is_workspace_harness(trial.agent_name)
             and resolve_verifier_env_mode(task, trial) == "separate"
             and not _task_declares_guest_execution(task)
+            and task.environment.service_lifecycle is None
         )
     verifier_topology = (
         VerifierTopology.SEPARATE_EXECUTION if separate else VerifierTopology.IN_ATTEMPT

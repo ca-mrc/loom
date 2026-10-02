@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import stat
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -38,6 +39,7 @@ from loom.execution_runtime_contract import (
     ExecutionResourceRequestsV1,
     ExecutionRuntimePlanV1,
     ProcessPhaseV1,
+    RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     TaskExecutionResourceRequestsV1,
@@ -907,6 +909,49 @@ def runtime_profile_rejections(
     return ()
 
 
+_HANDOFF_ARCHIVE = ".loom/workspace.tar"
+
+
+def verifier_handoff_path(committed_path: str) -> str | None:
+    """Where a committed agent output is staged for the deferred verifier.
+
+    The verifier reads these beside its private controller state; `.loom/` is
+    never copied into the graded sandbox.
+    """
+    if committed_path in {"artifacts/workspace.tar", "artifacts/workspace-references.json"}:
+        return ".loom/" + committed_path.removeprefix("artifacts/")
+    if committed_path.startswith("artifacts/mutable-paths/"):
+        return ".loom/" + committed_path.removeprefix("artifacts/")
+    return None
+
+
+def build_verifier_handoff_manifest(
+    *, task_revision_sha256: str, committed_files: Iterable[tuple[str, int, str]],
+) -> ServiceExecutionInputManifestV1:
+    """Bind the exact committed agent workspace that a deferred verifier grades."""
+    files = []
+    for relative_path, size_bytes, sha256 in committed_files:
+        target = verifier_handoff_path(relative_path)
+        if target is not None:
+            files.append(ServiceExecutionInputFileV1(
+                relative_path=target, size_bytes=size_bytes, sha256=sha256, mode="0644",
+            ))
+    files.sort(key=lambda item: item.relative_path.encode("utf-8"))
+    if _HANDOFF_ARCHIVE not in {item.relative_path for item in files}:
+        raise ValueError("verifier handoff archive was not committed")
+    return ServiceExecutionInputManifestV1(
+        task_revision_sha256=task_revision_sha256, files=tuple(files),
+    )
+
+
+def verifier_handoff_input(manifest: ServiceExecutionInputManifestV1) -> RuntimeHandoffInputV1:
+    return RuntimeHandoffInputV1(
+        manifest_sha256="sha256:" + hashlib.sha256(manifest.canonical_bytes()).hexdigest(),
+        file_count=len(manifest.files),
+        total_bytes=sum(item.size_bytes for item in manifest.files),
+    )
+
+
 __all__ = [
     "MAX_INPUT_BYTES",
     "MAX_INPUT_FILES",
@@ -923,10 +968,13 @@ __all__ = [
     "TaskExecutionResourceRequestsV1",
     "automatic_service_execution_rejections",
     "build_service_execution_input_manifest",
+    "build_verifier_handoff_manifest",
     "compile_deferred_verifier_plan",
     "compile_service_execution_plan",
     "load_service_execution_runtime_profile",
     "prepare_service_execution_input_manifest",
     "service_execution_input_binding",
     "validate_task_resource_requests",
+    "verifier_handoff_input",
+    "verifier_handoff_path",
 ]

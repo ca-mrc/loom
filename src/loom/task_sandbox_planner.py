@@ -30,6 +30,7 @@ from loom.execution_runtime_contract import (
     GuestExecutionV1,
     ProbeV1,
     ProcessPhaseV1,
+    RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
@@ -55,6 +56,10 @@ VERIFY_SANDBOX_PHASE = "verify-sandbox"
 # Kubernetes treats a healthy slow sandbox as failed.
 _GUEST_STARTUP_FAILURE_THRESHOLD = 75
 _MIN_SANDBOX_EXEC_LIMIT_SECONDS = 900
+# Outputs a deferred verifier produces; everything else belongs to the attempt.
+_VERIFIER_OWNED_OUTPUTS = frozenset({
+    "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+})
 
 
 def guest_capabilities(task: TaskConfig) -> frozenset[GuestExecutionCapability]:
@@ -103,12 +108,15 @@ class TaskSandboxPlanRequest:
 class _Topology:
     guest_execution: GuestExecutionV1 | None
     shared: bool
+    retained_services: bool
 
     @property
     def colocated_verifier(self) -> bool:
-        # Guest launch keeps both sandboxes in this pod. Separate grading
-        # otherwise defers the verifier until the agent pod is gone (#2212).
-        return self.shared or self.guest_execution is not None
+        # Guest launch keeps both sandboxes in this pod. Retained services
+        # cannot survive the agent pod, so their verifier also grades beside
+        # them. Separate grading otherwise defers the verifier until the agent
+        # pod is gone (#2212).
+        return self.shared or self.guest_execution is not None or self.retained_services
 
     @property
     def in_place_verifier(self) -> bool:
@@ -116,7 +124,12 @@ class _Topology:
 
     @property
     def sandbox_roles(self) -> tuple[str, ...]:
-        return (TASK_SANDBOX, VERIFIER_SANDBOX) if self.guest_execution is not None else (TASK_SANDBOX,)
+        fresh_verifier = self.guest_execution is not None or (self.colocated_verifier and not self.shared)
+        return (TASK_SANDBOX, VERIFIER_SANDBOX) if fresh_verifier else (TASK_SANDBOX,)
+
+    @property
+    def verifier_output_required(self) -> bool:
+        return self.shared or (self.colocated_verifier and self.guest_execution is None)
 
 
 def _topology(task: TaskConfig, trial: TrialConfig) -> _Topology:
@@ -124,6 +137,7 @@ def _topology(task: TaskConfig, trial: TrialConfig) -> _Topology:
     return _Topology(
         guest_execution=GuestExecutionV1(capabilities=tuple(sorted(capabilities))) if capabilities else None,
         shared=resolve_verifier_env_mode(task, trial) == "shared",
+        retained_services=task.environment.service_lifecycle is not None,
     )
 
 
@@ -182,7 +196,7 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
         *native,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier", topology.shared),
+        ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
         ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
     ):
         outputs.append(RuntimeOutputDeclarationV1(
@@ -308,11 +322,16 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
 
 def compile_deferred_verifier_plan(
     agent_plan: ExecutionRuntimePlanV1, task: TaskConfig, *, verifier_timeout_seconds: int,
+    handoff_input: RuntimeHandoffInputV1,
 ) -> ExecutionRuntimePlanV1:
     """Verifier pod that grades a committed workspace after the agent pod is gone.
 
-    Only the plan shape; automatic child-lease creation is #2212.
+    It keeps the attempt's prepared image, route and node share, so the freed
+    agent capacity is admitted again for the verifier rather than enlarged.
+    Only the plan shape; lease scheduling is #2212.
     """
+    if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
+        raise ValueError("only a separate-execution attempt defers its verifier")
     task_sandbox = next(sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == TASK_SANDBOX)
     user = task.verifier.user if task.verifier.user is not None else task.environment.user
     identity = resolve_sandbox_identity(
@@ -320,15 +339,21 @@ def compile_deferred_verifier_plan(
         default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
     )
     verifier_sandbox = task_sandbox.model_copy(update={"role_name": VERIFIER_SANDBOX, "identity": identity})
-    outputs = []
-    for item in agent_plan.output_declarations:
-        required = item.required
-        if item.relative_path == "verifier/output.json":
-            required = True
-        elif item.relative_path == "artifacts/workspace.tar":
-            required = False
-        outputs.append(item.model_copy(update={"required": required}))
-    return agent_plan.model_copy(update={
+    outputs = [
+        item if item == TASK_EGRESS_OUTPUT
+        else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
+        for item in agent_plan.output_declarations
+        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
+    ]
+    requests = agent_plan.resource_requests
+    if requests is not None:
+        requests = (ExecutionResourceRequestsV1(
+            controller=requests.controller, verifier_sandbox=requests.task_sandbox,
+        ) if requests.controller is not None or requests.task_sandbox is not None else None)
+    # Keep the attempt's trusted controller module; the phase is fixed.
+    argv = agent_plan.main.argv
+    module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
+    deferred = agent_plan.model_copy(update={
         "execution_role": "verifier",
         "verifier_execution": "skipped",
         "verifier": None,
@@ -340,14 +365,14 @@ def compile_deferred_verifier_plan(
         ),
         "main": agent_plan.main.model_copy(update={
             "role": "verifier",
-            "argv": sandbox_phase_argv(VERIFY_SANDBOX_PHASE),
+            "argv": sandbox_phase_argv(VERIFY_SANDBOX_PHASE, module),
             "timeout_seconds": verifier_timeout_seconds,
         }),
         "output_declarations": tuple(outputs),
-        "resource_requests": None,
-        "task_image_materialization_id": None,
-        "node_resource_allocation": None,
+        "resource_requests": requests,
+        "handoff_input": handoff_input,
     })
+    return ExecutionRuntimePlanV1.model_validate(deferred.canonical_payload())
 
 
 __all__ = [

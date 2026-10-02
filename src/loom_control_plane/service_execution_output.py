@@ -38,10 +38,17 @@ from loom.pipeline.keys import canonical_digest
 from loom.service_execution_materialization import (
     MAX_INPUT_MANIFEST_BYTES,
     ServiceExecutionInputManifestV1,
+    build_verifier_handoff_manifest,
     service_execution_input_binding,
+    verifier_handoff_input,
+    verifier_handoff_path,
 )
 from loom.trajectory.storage import ObjectStore
-from loom_control_plane.service_execution import record_committed_runtime_result
+from loom_control_plane.service_execution import (
+    VerifierHandoffUnavailableError,
+    committed_handoff_files,
+    record_committed_runtime_result,
+)
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
     resolve_service_execution_task_snapshot,
@@ -190,6 +197,42 @@ async def resolve_service_execution_input(
     )
 
 
+@dataclass(frozen=True)
+class ResolvedServiceExecutionHandoff:
+    manifest: ServiceExecutionInputManifestV1
+    manifest_body: bytes
+    source_keys: tuple[str, ...]
+
+
+async def resolve_service_execution_handoff(
+    session: AsyncSession, *, lease: ServiceExecutionLease,
+) -> ResolvedServiceExecutionHandoff:
+    plan = _runtime_plan(lease)
+    if plan.handoff_input is None or lease.parent_lease_id is None:
+        raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
+    parent = await session.get(ServiceExecutionLease, lease.parent_lease_id)
+    if parent is None or parent.trial_id != lease.trial_id or parent.attempt != lease.attempt:
+        raise ServiceExecutionBrokerError("verifier_handoff_unavailable")
+    try:
+        files, keys = await committed_handoff_files(session, parent=parent)
+    except VerifierHandoffUnavailableError as exc:
+        raise ServiceExecutionBrokerError("verifier_handoff_unavailable") from exc
+    try:
+        manifest = build_verifier_handoff_manifest(
+            task_revision_sha256=plan.task_revision_sha256, committed_files=files,
+        )
+    except ValueError as exc:
+        raise ServiceExecutionBrokerError("verifier_handoff_unavailable") from exc
+    if verifier_handoff_input(manifest) != plan.handoff_input:
+        raise ServiceExecutionBrokerError("verifier_handoff_identity_drift")
+    by_target = {verifier_handoff_path(path): key for (path, _, _), key in zip(files, keys, strict=True)}
+    return ResolvedServiceExecutionHandoff(
+        manifest=manifest,
+        manifest_body=manifest.canonical_bytes(),
+        source_keys=tuple(by_target[item.relative_path] for item in manifest.files),
+    )
+
+
 def _runtime_plan(lease: ServiceExecutionLease) -> ExecutionRuntimePlanV1:
     if lease.runtime_contract_json is None or lease.runtime_contract_sha256 is None:
         raise ServiceExecutionBrokerError("runtime_identity_unavailable")
@@ -199,6 +242,11 @@ def _runtime_plan(lease: ServiceExecutionLease) -> ExecutionRuntimePlanV1:
         return ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
     except ValueError as exc:
         raise ServiceExecutionBrokerError("runtime_identity_invalid") from exc
+
+
+def _defers_verification(plan: ExecutionRuntimePlanV1) -> bool:
+    """A separate-mode attempt is graded later by its own verifier lease."""
+    return plan.execution_role == "attempt" and plan.verifier_execution == "separate_execution"
 
 
 def _validate_runtime_result(
@@ -243,9 +291,11 @@ def _validate_runtime_result(
         or reported_outputs != declared_outputs
         or (
             result.status == "succeeded"
+            and not _defers_verification(plan)
             and any(item.kind == "verifier" for item in plan.output_declarations)
             and result.verifier_rewards is None
         )
+        or (_defers_verification(plan) and result.verifier_rewards is not None)
         or any(
             stream.bytes_saved > plan.max_log_bytes_per_stream
             for phase in result.phases
@@ -756,7 +806,9 @@ class ServiceExecutionOutputRouteService:
                 "outputs": [item.model_dump(mode="json") for item in runtime_result.outputs],
                 "verifier_rewards": runtime_result.verifier_rewards,
             }
-            if not output_already_committed:
+            # The attempt's bundle remains the trial's source; a deferred verifier
+            # is merged into it when the attempt materializes.
+            if not output_already_committed and current.execution_role == "attempt":
                 if trial.trajectory_index is not None:
                     raise ServiceExecutionBrokerError("trajectory_index_identity_drift")
                 trial.trajectory_index = trajectory_index
@@ -776,6 +828,7 @@ class ServiceExecutionOutputRouteService:
 
 
 __all__ = [
+    "ResolvedServiceExecutionHandoff",
     "ServiceExecutionBrokerError",
     "ServiceExecutionFileCompleteV1",
     "ServiceExecutionOutputCommitV1",
@@ -784,5 +837,7 @@ __all__ = [
     "ServiceExecutionPeerV1",
     "ServiceExecutionTokenRequestV1",
     "authorize_service_execution_peer",
+    "committed_handoff_files",
     "mint_service_execution_peer_token",
+    "resolve_service_execution_handoff",
 ]

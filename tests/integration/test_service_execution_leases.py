@@ -22,6 +22,7 @@ from loom.auth import AuthContext, verify_step_jwt
 from loom.db.schema import (
     AdminAuditEvent,
     Artifact,
+    ArtifactUploadSession,
     Batch,
     DataLifecycleAuthority,
     DataLifecycleObject,
@@ -72,6 +73,7 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimeResultV1,
     ProbeV1,
     ProcessPhaseV1,
+    RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
@@ -130,7 +132,10 @@ from loom_control_plane.service_execution_output import (
     mint_service_execution_peer_token,
     resolve_service_execution_input,
 )
-from loom_control_plane.service_execution_scheduler import reserve_next_service_execution
+from loom_control_plane.service_execution_scheduler import (
+    reserve_next_service_execution,
+    reserve_next_verifier_executions,
+)
 from loom_control_plane.trial_cancellation import cancel_trial_under_authority
 from loom_execution_actuator.contracts import (
     ExecutionTerminationSummaryV1,
@@ -456,6 +461,63 @@ def _runtime_contract(
             else None
         ),
     )
+
+
+def _deferred_verifier_contract(**updates: Any) -> ExecutionRuntimePlanV1:
+    return ExecutionRuntimePlanV1.model_validate({
+        **_runtime_contract(execution_role="verifier", verifier_execution="skipped").canonical_payload(),
+        "task_input": {"manifest_sha256": "sha256:" + "4" * 64, "file_count": 1, "total_bytes": 1},
+        "handoff_input": {"manifest_sha256": "sha256:" + "5" * 64, "file_count": 1, "total_bytes": 1},
+        **updates,
+    })
+
+
+async def _hand_off_to_verifier(session: AsyncSession, *, parent_id: UUID, now: datetime) -> None:
+    """The durable state a committed, finalized separate-mode attempt leaves behind."""
+    parent = await session.get(ServiceExecutionLease, parent_id)
+    assert parent is not None
+    trial = await session.get(Trial, parent.trial_id)
+    assert trial is not None
+    plan = ExecutionRuntimePlanV1.model_validate(parent.runtime_contract_json)
+    upload = ArtifactUploadSession(
+        id=uuid4(),
+        team_id=trial.team_id,
+        commit_kind="service_execution_output",
+        service_execution_lease_id=parent.id,
+        service_execution_generation=parent.resource_generation,
+        service_execution_role="attempt",
+        service_execution_runtime_contract_sha256=parent.runtime_contract_sha256,
+        service_execution_candidate_sha=plan.candidate_sha,
+        service_execution_task_revision_sha256=plan.task_revision_sha256,
+        service_execution_command_identity_sha256=plan.command_identity_sha256,
+        idempotency_key=uuid4().hex,
+        request_digest="sha256:" + "6" * 64,
+        prefix=f"service-execution/{parent.id}/{uuid4().hex}/",
+        state="committed",
+        expected_total_max_bytes=1024,
+        canonical_manifest_json={},
+        manifest_sha256="sha256:" + "7" * 64,
+        committed_marker_sha256="sha256:" + "8" * 64,
+        expires_at=now + timedelta(hours=1),
+        committed_at=now,
+    )
+    session.add(upload)
+    await session.flush()
+    parent.output_commit_state = "committed"
+    parent.output_generation = parent.resource_generation
+    parent.output_upload_session_id = upload.id
+    parent.output_manifest_sha256 = upload.manifest_sha256
+    parent.output_marker_sha256 = upload.committed_marker_sha256
+    parent.output_committed_at = now
+    parent.observed_state = "finalized"
+    parent.finalized_at = now
+    trial.state = "running"
+    trial.result = {
+        "schema_version": "loom.service-execution-trial-result.v1",
+        "reward": None,
+        "aggregate_reward": None,
+        "verifier_execution": {"state": "pending", "parent_lease_id": str(parent.id)},
+    }
 
 
 def _complete_output_contract(*, now: datetime) -> ExecutionRuntimePlanV1:
@@ -2508,18 +2570,25 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
             )
             await session.commit()
 
+        verifier_requirements = _requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION)
+        async with sessions() as session:
+            # A pod that merely exited has not committed and handed off its workspace.
+            with pytest.raises(ServiceExecutionConflict, match="verifier parent result is not ready"):
+                await _reserve(
+                    session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2),
+                    requirements=verifier_requirements, runtime_contract=_deferred_verifier_contract(),
+                    parent_lease_id=parent.id,
+                )
+
+        async with sessions() as session:
+            await _hand_off_to_verifier(session, parent_id=parent.id, now=now + timedelta(seconds=1))
+            await session.commit()
+
         async with sessions() as session:
             with pytest.raises(ServiceExecutionConflict, match="verifier parent cleanup is not complete"):
                 await _reserve(
-                    session,
-                    trial_id=trial_id,
-                    target=target,
-                    now=now + timedelta(seconds=2),
-                    requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
-                    runtime_contract=_runtime_contract(
-                        execution_role="verifier",
-                        verifier_execution="skipped",
-                    ),
+                    session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2),
+                    requirements=verifier_requirements, runtime_contract=_deferred_verifier_contract(),
                     parent_lease_id=parent.id,
                 )
 
@@ -2531,16 +2600,18 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
             await session.commit()
 
         async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict, match="requires a workspace handoff"):
+                await _reserve(
+                    session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2),
+                    requirements=verifier_requirements,
+                    runtime_contract=_deferred_verifier_contract(handoff_input=None),
+                    parent_lease_id=parent.id,
+                )
+
+        async with sessions() as session:
             verifier = await _reserve(
-                session,
-                trial_id=trial_id,
-                target=target,
-                now=now + timedelta(seconds=2),
-                requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
-                runtime_contract=_runtime_contract(
-                    execution_role="verifier",
-                    verifier_execution="skipped",
-                ),
+                session, trial_id=trial_id, target=target, now=now + timedelta(seconds=2),
+                requirements=verifier_requirements, runtime_contract=_deferred_verifier_contract(),
                 parent_lease_id=parent.id,
             )
             await session.commit()
@@ -2559,7 +2630,7 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
                 .all()
             )
             assert trial is not None
-            assert (trial.state, trial.attempt_count) == ("claimed", 1)
+            assert (trial.state, trial.attempt_count) == ("running", 1)
             assert [item.execution_role for item in rows] == ["attempt", "verifier"]
             assert verifier.parent_lease_id == parent.id
             assert verifier.attempt == parent.attempt
@@ -2567,13 +2638,7 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
             assert rows[0].job_name.endswith("-a")
 
         async with sessions() as session:
-            mismatched = _runtime_contract(
-                execution_role="verifier",
-                verifier_execution="skipped",
-            )
-            mismatched = ExecutionRuntimePlanV1.model_validate(
-                {**mismatched.canonical_payload(), "candidate_sha": "9" * 40}
-            )
+            mismatched = _deferred_verifier_contract(candidate_sha="9" * 40)
             with pytest.raises(ServiceExecutionConflict, match="parent lease is not eligible"):
                 await _reserve(
                     session,
@@ -2586,6 +2651,154 @@ async def test_separate_verifier_is_a_parent_bound_execution_lease(
                     runtime_contract=mismatched,
                     parent_lease_id=parent.id,
                 )
+    finally:
+        await engine.dispose()
+
+
+async def _separate_attempt_awaiting_verifier(
+    sessions: async_sessionmaker[AsyncSession], *, now: datetime,
+) -> tuple[UUID, ServiceExecutionLease, ExecutionTargetV1]:
+    async with sessions() as session:
+        trial_id, target = await _seed_ready_trial(session, now=now)
+        parent = await _reserve(
+            session, trial_id=trial_id, target=target, now=now,
+            requirements=_requirements(verifier_topology=VerifierTopology.SEPARATE_EXECUTION),
+            runtime_contract=_runtime_contract(verifier_execution="separate_execution"),
+        )
+        await session.commit()
+    async with sessions() as session:
+        await _hand_off_to_verifier(session, parent_id=parent.id, now=now)
+        row = await session.get(ServiceExecutionLease, parent.id)
+        assert row is not None
+        row.cleanup_state = "complete"
+        row.cleanup_requested_at = now
+        row.cleanup_deadline_at = now + timedelta(seconds=30)
+        row.desired_state = "deleted"
+        row.observed_state = "deleted"
+        row.deleted_at = now
+        await session.commit()
+    return trial_id, parent, target
+
+
+@pytest.fixture
+def _stub_verifier_plan(monkeypatch: pytest.MonkeyPatch) -> list[ExecutionRuntimePlanV1]:
+    import loom_control_plane.service_execution_scheduler as scheduler
+
+    plans: list[ExecutionRuntimePlanV1] = []
+    task = SimpleNamespace(verifier=SimpleNamespace(timeout_sec=60))
+
+    async def snapshot(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(config={})
+
+    async def files(*_args: Any, **_kwargs: Any) -> tuple[list[Any], list[str]]:
+        return [], []
+
+    def compile_plan(agent_plan: ExecutionRuntimePlanV1, *_args: Any, **kwargs: Any) -> ExecutionRuntimePlanV1:
+        plan = _deferred_verifier_contract(handoff_input=kwargs["handoff_input"].model_dump(mode="json"))
+        plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(scheduler, "resolve_service_execution_task_snapshot", snapshot)
+    monkeypatch.setattr(scheduler, "TaskConfig", SimpleNamespace(model_validate=lambda _config: task))
+    monkeypatch.setattr(scheduler, "committed_handoff_files", files)
+    monkeypatch.setattr(scheduler, "build_verifier_handoff_manifest", lambda **_kwargs: {})
+    monkeypatch.setattr(scheduler, "verifier_handoff_input", lambda _manifest: RuntimeHandoffInputV1(
+        manifest_sha256="sha256:" + "5" * 64, file_count=1, total_bytes=1,
+    ))
+    monkeypatch.setattr(scheduler, "compile_deferred_verifier_plan", compile_plan)
+    return plans
+
+
+async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        trial_id, parent, target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+        async with sessions() as session:
+            reserved = await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=5),
+            )
+            await session.commit()
+        assert [item.parent_lease_id for item in reserved] == [parent.id]
+        verifier = reserved[0]
+        assert verifier.execution_role == "verifier"
+        assert verifier.attempt == parent.attempt
+        assert verifier.target_id == parent.target_id
+        assert verifier.workload_requirements_sha256 == parent.workload_requirements_sha256
+
+        # A repeated or concurrent pass observes the child and reserves nothing.
+        async with sessions() as session:
+            assert await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=6),
+            ) == []
+            rows = (await session.execute(
+                select(ServiceExecutionLease).where(ServiceExecutionLease.trial_id == trial_id)
+            )).scalars().all()
+            assert sorted(item.execution_role for item in rows) == ["attempt", "verifier"]
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.state == "running"
+            assert trial.result["verifier_execution"]["state"] == "pending"
+    finally:
+        await engine.dispose()
+
+
+async def test_scheduler_skips_cancelled_handoff_and_fails_stale_one(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+) -> None:
+    import loom_control_plane.service_execution_scheduler as scheduler
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        cancelled_trial, _, target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+        async with sessions() as session:
+            trial = await session.get(Trial, cancelled_trial)
+            assert trial is not None
+            trial.cancellation_requested_at = now
+            await session.commit()
+        async with sessions() as session:
+            assert await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(seconds=5),
+            ) == []
+        assert _stub_verifier_plan == []
+
+        stale_trial, _, stale_target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+
+        async def blocked(*_args: Any, **_kwargs: Any) -> ServiceExecutionLease:
+            raise ServiceExecutionConflict("target is not ready")
+
+        original = scheduler.reserve_trial_execution
+        scheduler.reserve_trial_execution = blocked  # type: ignore[assignment]
+        try:
+            async with sessions() as session:
+                # Within the handoff window an unavailable target is a wait.
+                assert await reserve_next_verifier_executions(
+                    session, pool_id=stale_target.logical_pool_id,
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(minutes=5),
+                ) == []
+                await session.commit()
+                trial = await session.get(Trial, stale_trial)
+                assert trial is not None and trial.state == "running"
+            async with sessions() as session:
+                assert await reserve_next_verifier_executions(
+                    session, pool_id=stale_target.logical_pool_id,
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now + timedelta(minutes=31),
+                ) == []
+                await session.commit()
+        finally:
+            scheduler.reserve_trial_execution = original  # type: ignore[assignment]
+        async with sessions() as session:
+            trial = await session.get(Trial, stale_trial)
+            assert trial is not None
+            assert trial.state == "failed"
+            assert trial.result["verifier_execution"]["state"] == "unavailable"
     finally:
         await engine.dispose()
 

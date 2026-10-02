@@ -63,6 +63,9 @@ func main() {
 	if p.TaskInput != nil {
 		inputContext, stopInput := context.WithTimeout(ctx, 10*time.Minute)
 		err = broker.materializeInputs(inputContext, p, filepath.Clean(*workspace))
+		if err == nil {
+			err = broker.materializeHandoff(inputContext, p, filepath.Clean(*workspace))
+		}
 		stopInput()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "materialize task input:", err)

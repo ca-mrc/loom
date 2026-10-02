@@ -18,7 +18,11 @@ import loom.hosted_harness as hosted
 import loom.task_sandbox_planner as planner
 from loom.execution_contract import VerifierTopology, workload_requirements_from_task
 from loom.execution_resource_allocation import allocate_node_resources
-from loom.execution_runtime_contract import ContainerResourcesV1, validate_runtime_plan_requirements
+from loom.execution_runtime_contract import (
+    ContainerResourcesV1,
+    RuntimeHandoffInputV1,
+    validate_runtime_plan_requirements,
+)
 from loom.hosted_harness import SANDBOX_CONTROLLER_MODULE, HostedHarnessSpec, NativeOutput
 from loom.models.networking import NetworkPolicy, PublicWeb
 from loom.models.trial import TrialConfig
@@ -101,11 +105,18 @@ def test_separate_mode_emits_the_existing_deferred_verifier_contract() -> None:
     task, _, request = _request()
     plan = compile_task_sandbox_plan(request)
 
-    verifier = compile_deferred_verifier_plan(plan, task, verifier_timeout_seconds=60)
+    verifier = compile_deferred_verifier_plan(
+        plan, task, verifier_timeout_seconds=60,
+        handoff_input=RuntimeHandoffInputV1(manifest_sha256="sha256:" + "5" * 64, file_count=1, total_bytes=1),
+    )
 
     assert verifier.execution_role == "verifier"
     assert verifier.main.argv[4] == "verify-sandbox"
     assert [s.role_name for s in verifier.sidecars if s.private_sandbox] == ["verifier-sandbox"]
+    assert verifier.main.argv[3] == plan.main.argv[3]  # the attempt's trusted controller module
+    assert {o.relative_path for o in verifier.output_declarations} <= {
+        "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
+    }
 
 
 def test_guest_extension_keeps_two_colocated_guests_for_any_workspace_harness() -> None:

@@ -171,6 +171,7 @@ type plan struct {
 	MaxLogBytesPerStream       int64                      `json:"max_log_bytes_per_stream"`
 	MaxArtifactBytes           int64                      `json:"max_artifact_bytes"`
 	TaskInput                  *taskInput                 `json:"task_input"`
+	HandoffInput               *taskInput                 `json:"handoff_input,omitempty"`
 	OutputDeclarations         []outputDeclaration        `json:"output_declarations"`
 	RuntimeContractSHA256      string                     `json:"-"`
 }
@@ -275,7 +276,7 @@ func (p plan) validate() error {
 	if p.TaskImageMaterializationID != nil &&
 		(!materializationID.MatchString(*p.TaskImageMaterializationID) ||
 			*p.TaskImageMaterializationID == "00000000-0000-0000-0000-000000000000" ||
-			p.AgentImageRef == nil || p.ExecutionRole != "attempt" || p.Composition != "init_payload") {
+			p.AgentImageRef == nil || p.Composition != "init_payload") {
 		return fmt.Errorf("prepared task images require a nonzero materialization UUID and separate trusted attempt controller")
 	}
 	if p.RunAsUser <= 0 || p.RunAsUser > 2_147_483_647 ||
@@ -303,6 +304,13 @@ func (p plan) validate() error {
 		p.TaskInput.FileCount > 10_000 || p.TaskInput.TotalBytes < 0 ||
 		p.TaskInput.TotalBytes > 10*1024*1024*1024) {
 		return fmt.Errorf("invalid task input binding")
+	}
+	if p.HandoffInput != nil && (p.HandoffInput.SchemaVersion != "loom.runtime-handoff-input.v1" ||
+		!sha256Value.MatchString(p.HandoffInput.ManifestSHA256) || p.HandoffInput.FileCount <= 0 ||
+		p.HandoffInput.FileCount > 10_000 || p.HandoffInput.TotalBytes < 0 ||
+		p.HandoffInput.TotalBytes > 10*1024*1024*1024 ||
+		p.ExecutionRole != "verifier" || p.TaskInput == nil) {
+		return fmt.Errorf("invalid workspace handoff binding")
 	}
 	if len(p.Setup) > 32 || len(p.Sidecars) > 32 {
 		return fmt.Errorf("runtime plan exceeds phase or sidecar bounds")

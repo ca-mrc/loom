@@ -11,6 +11,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -119,6 +120,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -227,6 +229,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -339,6 +342,7 @@
     "execution_class_id": "linux-amd64-cpu-guest-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -592,6 +596,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -759,6 +764,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -948,6 +954,7 @@
     "execution_class_id": "linux-amd64-cpu-guest-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1213,6 +1220,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1392,6 +1400,7 @@
     "execution_class_id": "linux-amd64-cpu-pod-v1",
     "execution_role": "attempt",
     "fs_group": 65532,
+    "handoff_input": null,
     "image_admission": [
       "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
