@@ -495,6 +495,42 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     assert not Path(metadata["state_dir"]).exists()
 
 
+def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is_readonly(private_cutover, monkeypatch):
+    from contextlib import contextmanager
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    metadata, _, _ = private_cutover
+    selected = entry.load_pool_cutover_inputs(metadata)
+    parent = CutoverAPI(selected.request)
+    parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    opened = []
+
+    @contextmanager
+    def connect(context):
+        assert context == selected
+        opened.append('opened')
+        try:
+            yield parent
+        finally:
+            opened.append('closed')
+
+    monkeypatch.setattr(entry, 'connected_pool_api', connect)
+    assert entry.execute_pool_cutover(selected, 'preflight') == {
+        'status': 'preflight_qualified', 'operation_id': metadata['operation_id']}
+    assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
+    assert opened == ['opened', 'closed']
+    with pytest.raises(EntryError):
+        entry.execute_pool_cutover(selected, 'open')
+    path = Path(metadata['inputs_path'])
+    path.write_bytes(path.read_bytes() + b'\n')
+    with pytest.raises(EntryError):
+        entry.execute_pool_cutover(selected, 'install')
+    assert opened == ['opened', 'closed'] and not parent.state_dir.exists()
+
+
 def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
