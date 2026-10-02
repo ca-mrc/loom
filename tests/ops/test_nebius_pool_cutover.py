@@ -54,6 +54,45 @@ def platform_writer_authority(kube_system_uid):
         resources=tuple(resources))
 
 
+def test_cutover_projection_reuses_only_exact_inputs_and_detaches_outputs(cutover_inputs, monkeypatch):
+    from scripts.ops import nebius_pool_cutover as cutover
+
+    request, _ = cutover_inputs
+    render = cutover.wire_manager
+    calls = []
+
+    def counted(**kwargs):
+        calls.append(None)
+        return render(**kwargs)
+
+    monkeypatch.setattr(cutover, "wire_manager", counted)
+    first = cutover.cutover_documents(request)
+    original = copy.deepcopy(first)
+    key = _key(request.manager)
+    first["runtime"][key]["spec"]["replicas"] = 100
+    assert cutover.cutover_documents(request) == original
+    assert len(calls) == 1
+
+    request.manager["spec"]["template"]["metadata"].setdefault("annotations", {})["example.com/revision"] = "next"
+    changed = cutover.cutover_documents(request)
+    assert changed["runtime"][key]["spec"]["template"]["metadata"]["annotations"]["example.com/revision"] == "next"
+    assert len(calls) == 2
+    # Equality alone would alias True and 1, bypassing the original validator.
+    request.manager["spec"]["replicas"] = True
+    with pytest.raises(ValueError):
+        cutover.cutover_documents(request)
+
+
+def test_pure_projection_never_reuses_mutated_model_inputs(cutover_inputs):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+
+    request, _ = cutover_inputs
+    cutover_documents(request)
+    changed = replace(request, collector_credential=request.collector_credential.model_copy(update={"uid": UUID(int=0)}))
+    with pytest.raises(ValueError):
+        cutover_documents(changed)
+
+
 @pytest.fixture
 def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_inputs):
     from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
