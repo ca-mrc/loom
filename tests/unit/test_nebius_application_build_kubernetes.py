@@ -39,8 +39,10 @@ async def test_projected_native_reader_rotates_identity_without_ambient_configur
         assert url.startswith(binding.endpoint + "/")
         calls.append((url, kwargs["headers"]["authorization"]))
         if "/jobs/" in url:
-            token.write_text("rotated-reader-token")
-            token.chmod(0o440)
+            replacement = tmp_path / "next-projected-token"
+            replacement.write_text("rotated-reader-token")
+            replacement.chmod(0o440)
+            replacement.replace(token)
             raise ApiException(status=404)
         assert url.endswith("/namespaces/" + runtime.namespace.name)
         return urllib3.HTTPResponse(body=json.dumps(namespace).encode(), status=200)
