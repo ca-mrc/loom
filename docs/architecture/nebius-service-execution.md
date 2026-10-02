@@ -198,9 +198,11 @@ not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public
 workspace. The deferred-plan compiler emits a fixed verifier command without
 inspecting or rewriting the preceding agent command, and the reservation path
-gates a child lease on parent cleanup. Automatic child-lease reservation is not
-wired yet; [#2212](https://github.com/qianyi-sun/loom/issues/2212) owns that
-on-demand lifecycle. A future workspace-reading harness supplies its own
+gates a child lease on parent cleanup. Since
+[#2212](https://github.com/qianyi-sun/loom/issues/2212) the control-plane
+scheduler reserves that child automatically once the agent pod is deleted; see
+[On-demand separate verifier](#on-demand-separate-verifier). Tasks with a
+service lifecycle still grade in the agent pod. A future workspace-reading harness supplies its own
 trusted agent phase and evidence declarations while reusing this topology,
 deferred-plan contract, allocation and cleanup gate. The implementation
 checklist is in [`hosted-agent-harness.md`](hosted-agent-harness.md).
@@ -1080,6 +1082,39 @@ digests and publishes a signed result reference. It does not attach to the
 task container, mount another trial's volume, or receive agent/provider
 credentials. The trial becomes terminal only after Loom records both execution
 conditions and the verifier result under the same attempt generation.
+
+#### On-demand separate verifier
+
+A separate-mode attempt commits its outputs without rewards and leaves the
+trial `running` with `result.verifier_execution.state = "pending"`. Its pod is
+then deleted, so no capacity is held while grading waits. The control-plane
+scheduler pass reserves one verifier lease per attempt after parent cleanup
+completes. Its request id is derived from the parent lease and child plan, so
+repeated or concurrent passes are no-ops. The child keeps the parent's target
+and requirements and receives the parent's committed `workspace.tar`,
+workspace references and mutable paths through the plan's `handoff_input`. The
+runtime places them under `.loom/` outside the task-bundle digest.
+
+The verifier lease's finalize sets the reward and moves the trial on; the
+materializer archives both bundles, with verifier files under
+`verifier-execution/`. Failure paths:
+
+- Cancellation while waiting creates no child; an existing child is cancelled
+  with the attempt.
+- If the child cannot be reserved within 30 minutes of the parent's
+  `deleted_at`, or hits a permanent error, the trial fails with
+  `verifier_unavailable`. A verifier that fails before output does the same.
+- The agent is never re-run, and verifier retry is not implemented because one
+  verifier per attempt is a database constraint.
+
+Trial detail exposes `execution_phases`: agent, awaiting verifier and verifier,
+each with reserved seconds and requests (costs for admins), plus the handoff
+gap, reservation overlap and handed-off workspace size. For a modeled trial
+with a 600 s agent run and 120 s of grading, holding a colocated 2.2-CPU pod
+reserves 1584 CPU-seconds. On demand, a 1.2-CPU agent pod and a 1.2-CPU
+verifier pod reserve 864 CPU-seconds, at the cost of the wait for verifier
+capacity (`test_service_execution_phases.py`). Deployed Nebius acceptance of
+this lifecycle is pending.
 
 GPU, ARM64-only, desktop/GUI, privileged, hostPath, host-network,
 nested-container, host-device, and host-specialized workloads are rejected by

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from loom.service_execution_phases import PhaseCost, PhaseLease, execution_phases
+from loom.service_execution_phases import (
+    PhaseCost,
+    PhaseLease,
+    execution_phases,
+    reserved_cpu_seconds,
+)
 
 _T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 
@@ -75,6 +80,34 @@ def test_separate_attempt_reports_gap_overlap_and_handoff_storage() -> None:
     assert phases["reservation_overlap_seconds"] == 0.0
     assert phases["handoff_storage_bytes"] == 4096
     assert phases["reserved_seconds"] == 160.0
+
+
+def test_on_demand_verifier_reserves_less_than_holding_the_agent_pod_through_grading() -> None:
+    """Before/after measurement for one modeled trial.
+
+    Agent runs 600s; grading runs 120s; the verifier lease waits 30s for capacity.
+    A colocated pod requests 2.2 CPU (controller + task + verifier sandboxes) for
+    the whole trial. On demand, the agent pod drops the verifier sandbox
+    (1.2 CPU) and the verifier pod requests 1.2 CPU only while grading.
+    """
+
+    now = _T0 + timedelta(hours=2)
+    holding = execution_phases(
+        [_lease("attempt", start=0, deleted=600 + 120, mode="in_attempt")],
+        verifier_execution=None, costs={"attempt-lease": _cost(2200)}, now=now,
+    )
+    on_demand = execution_phases(
+        [_lease("attempt", start=0, deleted=600), _lease("verifier", start=630, deleted=630 + 120)],
+        verifier_execution={"state": "committed"},
+        costs={"attempt-lease": _cost(1200), "verifier-lease": _cost(1200)},
+        now=now,
+    )
+    assert holding is not None and on_demand is not None
+    assert reserved_cpu_seconds(holding) == 1584.0
+    assert reserved_cpu_seconds(on_demand) == 864.0
+    assert on_demand["reservation_overlap_seconds"] == 0.0
+    # Wall time grows by the wait; reserved capacity shrinks by the grading delta.
+    assert on_demand["phases"][1]["reserved_seconds"] == 0.0
 
 
 def test_no_attempt_lease_omits_phases() -> None:

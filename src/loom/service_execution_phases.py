@@ -77,6 +77,16 @@ def _lease_phase(name: PhaseName, lease: PhaseLease, cost: PhaseCost | None, now
     }
 
 
+def reserved_cpu_seconds(phases: Mapping[str, Any]) -> float:
+    """Reserved CPU-seconds across phases; the measure #2212 reduces."""
+
+    return sum(
+        (item["reserved_seconds"] or 0.0) * item["requested"]["cpu_millis"] / 1000
+        for item in phases["phases"]
+        if item["requested"] is not None
+    )
+
+
 def execution_phases(
     leases: Sequence[PhaseLease],
     *,
