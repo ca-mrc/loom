@@ -26,6 +26,7 @@ from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -454,9 +455,24 @@ class KubectlPoolGuardAPI:
         if actual != {"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": True}:
             raise ValueError
 
-    def _runtime(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _runtime(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any] | None = None,
+                 expected: dict[str, Any] | None = None) -> dict[str, Any]:
         self._namespaces(target)
         original = target.controller if original is None else original
+        workload = original if expected is None else expected
+        # Only the protected caller can select a journal-qualified successor.
+        # Its template does not replace the retained workload's identity/scope.
+        if (any(workload.get(field) != original.get(field) for field in ('apiVersion', 'kind'))
+                or _uid(workload) != _uid(original)
+                or any(workload['metadata'].get(field) != original['metadata'].get(field) for field in ('namespace', 'name'))
+                or workload['spec']['selector'] != original['spec']['selector']
+                or type(workload['spec'].get('replicas')) is not int or workload['spec']['replicas'] != 1):
+            raise ValueError
+        retained, replacement = original['spec']['template']['spec'], workload['spec']['template']['spec']
+        if (len(retained['containers']) != 1 or len(replacement['containers']) != 1
+                or replacement['containers'][0]['name'] != retained['containers'][0]['name']
+                or replacement.get('serviceAccountName', 'default') != retained.get('serviceAccountName', 'default')):
+            raise ValueError
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         if namespace != target.namespace:
             if not isinstance(target, PoolGuardTarget):
@@ -478,7 +494,7 @@ class KubectlPoolGuardAPI:
         if label not in {"app", "app.kubernetes.io/name"} or selector["matchLabels"][label] != name:
             raise ValueError
         controller = self._get("deployment", name, namespace)
-        if _uid(controller) != _uid(original) or _snapshot(controller) != _snapshot(original):
+        if not _matches(controller, workload, _uid(original)):
             raise ValueError
         status = controller.get("status", {})
         if (status.get("observedGeneration", 0) < controller["metadata"].get("generation", 1)
@@ -576,12 +592,14 @@ class KubectlPoolGuardAPI:
         return base64.b64decode(secret["data"][reference["key"]], validate=True).decode()
 
     def qualify_runtime_database(self, target: PoolGuardTarget, *, original: dict[str, Any],
-                                 credential_uid: UUID, credential_resource_version: str) -> None:
+                                 credential_uid: UUID, credential_resource_version: str,
+                                 expected: dict[str, Any] | None = None) -> None:
         """Prove one retained running consumer uses this participant's backend.
 
         The protected parent supplies the original workload and pinned credential
-        identity. Stopped/journaled replacement workloads are a different phase;
-        zero replicas are never accepted as runtime correspondence here.
+        identity. A protected caller may pass its anchored successor template;
+        this read-only probe does not authorize that template or start workloads.
+        Zero replicas are never accepted as runtime correspondence here.
         """
         try:
             if (target not in self.request.guards or target.database is None
@@ -604,7 +622,7 @@ class KubectlPoolGuardAPI:
             else:
                 raise ValueError
             self._qualify_runtime_binding(target, original=original, component=component, url_variable=variable,
-                credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+                credential_uid=credential_uid, credential_resource_version=credential_resource_version, expected=expected)
         except Exception:
             raise PoolMigrationError("runtime_database") from None
 
@@ -633,7 +651,8 @@ class KubectlPoolGuardAPI:
             selected[name] = _uid(node)
         return dict(sorted(selected.items()))
 
-    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any]) -> None:
+    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                  expected: dict[str, Any] | None = None) -> None:
         """Read direct statistics inside the exact retained actuator Pod.
 
         No token issuance, permission changes, database connection, arbitrary
@@ -657,7 +676,7 @@ class KubectlPoolGuardAPI:
                     or len(settings) != len(container["env"])
                     or settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != namespace):
                 raise ValueError
-            before = self._runtime(target, original=original)
+            before = self._runtime(target, original=original, expected=expected)
             host = before["spec"]["nodeName"]
             nodes = self._telemetry_nodes(host)
             for node_name, uid in nodes.items():
@@ -665,7 +684,7 @@ class KubectlPoolGuardAPI:
                     "python", "-c", _BOUND_TELEMETRY_COMMAND, namespace, target_id, node_name, uid])
                 if report != {"status": "qualified", "node_name": node_name, "node_uid": uid}:
                     raise ValueError
-            after = self._runtime(target, original=original)
+            after = self._runtime(target, original=original, expected=expected)
             if (_uid(after) != _uid(before) or after["spec"]["nodeName"] != host or self._telemetry_nodes(host) != nodes
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
@@ -676,14 +695,23 @@ class KubectlPoolGuardAPI:
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,
                                  credential_resource_version: str,
-                                 database_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> None:
+                                 database_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL",
+                                 expected: dict[str, Any] | None = None) -> None:
         """Shared read-only probe; callers first qualify their fixed target scope."""
         namespace = original["metadata"]["namespace"]
         container, = original["spec"]["template"]["spec"]["containers"]
         before_database = self._database(target, url_variable=database_variable)
-        before = self._runtime(target, original=original)
+        before = self._runtime(target, original=original, expected=expected)
         url = self._workload_database_url(original, url_variable=url_variable,
             credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+        if expected is not None:
+            replacement, = expected['spec']['template']['spec']['containers']
+            retained_entry, = (row for row in container['env'] if row['name'] == url_variable)
+            replacement_entry, = (row for row in replacement['env'] if row['name'] == url_variable)
+            if (retained_entry != replacement_entry
+                    or self._workload_database_url(expected, url_variable=url_variable,
+                        credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url):
+                raise ValueError
         qualify_database_destination(url, target.namespace)
         # CP/API use PostgresDsn; the actuator intentionally retains a str.
         expected_url = url if component == "actuator" else str(PostgresDsn(url))
@@ -692,7 +720,7 @@ class KubectlPoolGuardAPI:
         report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
             "python", "-c", _BOUND_DATABASE_COMMAND, component, nonce, response])
         if (report != {"status": "qualified"}
-                or _uid(self._runtime(target, original=original)) != _uid(before)
+                or _uid(self._runtime(target, original=original, expected=expected)) != _uid(before)
                 or self._workload_database_url(original, url_variable=url_variable,
                     credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url
                 or _uid(self._database(target, url_variable=database_variable)) != _uid(before_database)):

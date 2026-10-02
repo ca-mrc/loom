@@ -258,8 +258,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         except Exception:
             raise PoolMigrationError("startup_closed_registration") from None
 
-    def qualify_manager_database(self) -> None:
-        """Bind the running predecessor manager to its distinct retained backend."""
+    def qualify_manager_database(self, *, expected: dict[str, Any] | None = None) -> None:
+        """Bind the retained manager (or anchored successor) to its own backend."""
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
                     or digest(_target_contract(self.target)) != self.history_sha256
@@ -268,6 +268,7 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             database = self.target.database
             self._qualify_runtime_binding(self.target, original=self.target.controller, component="service",
                 url_variable="LOOM_SVC_DB_URL", database_variable="LOOM_SVC_DB_URL",
-                credential_uid=database.credential_uid, credential_resource_version=database.credential_resource_version)
+                credential_uid=database.credential_uid, credential_resource_version=database.credential_resource_version,
+                expected=expected)
         except Exception:
             raise PoolMigrationError("management_runtime_database") from None
