@@ -913,8 +913,13 @@ another explicit upload call. The shared S3 adapter can retry identical verified
 bytes under its existing SDK retry policy; this does not grant another source
 identity or retry a build/deployment mutation. Database-clock expiry is rechecked after reception and before
 completion. Per-process in-flight limits and reception/storage deadlines bound the
-work. Cancellation retains the spool and admission until off-loop archive
-verification finishes, then cleans private temporary state.
+work. At most two archive verifiers run concurrently, independently of the
+configured reception/storage limit, to bound parsed-manifest memory in the
+management Pod. Other admitted uploads wait with their private disk spool;
+cancellation before verification releases that spool without starting a parser.
+Cancellation during verification retains the spool and admission until off-loop
+verification finishes, then cleans private temporary state. Manifest validation
+uses sorted-path prefix lookup rather than expanding every directory ancestor.
 
 Management exposes `POST /api/v1/application-sources` (idempotent intent),
 `GET /api/v1/application-sources/{upload_id}` (owner status) and
@@ -941,8 +946,8 @@ upload. Configuration support is not evidence that the capability is installed.
 `ApplicationClient` connects packaged source to these authenticated intent,
 status and streaming-upload routes. It checks every returned source identity and
 upload ID, uses the same frozen archive on an explicit CSRF rejection, and never
-automatically retries an uncertain network write. This is the transport for the
-forthcoming build command, not a standalone deployment command or CI approval.
+automatically retries an uncertain network write. This is the transport used by
+the build command, not a standalone deployment command or CI approval.
 The native application Job adapter shares the existing task-image
 prepare/rootless-build/publish rendering mechanism. Its protected claim binds
 owner, source upload, build attempt, installation/data/cluster and an immutable
@@ -1130,9 +1135,10 @@ namespace, never to a shared controller, execution worker or personal namespace.
 Ordinary actuator wiring selects the environment credential explicitly and does
 not require an actuator for the dedicated application-build target.
 
-Protected manager mounting and worker configuration, the user-facing build command, the
-durable management worker, image building, release qualification and installed
-source-to-deploy acceptance remain incomplete consumers.
+Protected manager mounting and worker configuration, the user-facing build
+command, durable management worker, image building and release qualification
+are implemented as described above. Protected installation and live multi-owner
+source-to-deploy acceptance remain separate, unproven delivery steps.
 
 ### Stopped application completion
 

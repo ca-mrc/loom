@@ -114,7 +114,9 @@ async def test_upload_reception_does_not_multiply_memory_heavy_verification(
 
     monkeypatch.setattr(source_upload, "_verify_off_loop", held)
     store = FakeObjectStore()
-    uploader = source_upload.ApplicationSourceUploader(registry, store, spool_directory=tmp_path, max_inflight=3)
+    spool = tmp_path / "spool"
+    spool.mkdir(mode=0o700)
+    uploader = source_upload.ApplicationSourceUploader(registry, store, spool_directory=spool, max_inflight=3)
     tasks = [asyncio.create_task(uploader.upload(row.upload_id, principal=alice, body=receive())) for row in receipts]
     cancelled = None
     try:
@@ -135,7 +137,7 @@ async def test_upload_reception_does_not_multiply_memory_heavy_verification(
             assert receipts[index].upload_id not in entered
         else:
             assert result.phase == "source_verified"
-    assert peak == 2 and active == 0 and not list(tmp_path.iterdir())
+    assert peak == 2 and active == 0 and not list(spool.iterdir())
     if cancelled is not None:
         result = await uploader.upload(receipts[cancelled].upload_id, principal=alice, body=source_chunks(body))
         assert result.phase == "source_verified"

@@ -66,6 +66,9 @@ class ApplicationSourceUploader:
         self.max_inflight, self.receive_timeout = max_inflight, receive_timeout_seconds
         self.storage_timeout = storage_timeout_seconds
         self._active = 0
+        # Reception/storage stream through disk. Parsed manifests need a separate
+        # memory bound in the 1Gi manager even when up to 16 uploads are admitted.
+        self._verification_slots = asyncio.Semaphore(2)
 
     async def _stored(self, receipt: ApplicationSourceUploadV1, key: str) -> None:
         checksum, size = hashlib.sha256(), 0
@@ -110,7 +113,8 @@ class ApplicationSourceUploader:
                     raise ManagementError("application_source_invalid", 422)
                 spool.flush()
                 try:
-                    await _verify_off_loop(spool, receipt, self.directory)
+                    async with self._verification_slots:
+                        await _verify_off_loop(spool, receipt, self.directory)
                 except ValueError:
                     raise ManagementError("application_source_invalid", 422) from None
                 # Recheck DB-clock expiry after potentially slow reception.
