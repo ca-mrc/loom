@@ -31,6 +31,7 @@ from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
     Artifact,
+    ExecutionCostReservation,
     LlmCall,
     ServiceExecutionLease,
     ServiceExecutionLeaseHistory,
@@ -98,6 +99,13 @@ class _HistoricalSnapshotSession(AsyncSession):
             # 0172's origin is intentionally absent on this historical schema.
             # Recovery must not depend on it, synthesize it, or lazy-load it.
             state.statement = state.statement.options(defer(Trial.pool_origin, raiseload=True))
+        # 0173's verifier retry number is likewise absent before that revision.
+        if ServiceExecutionLease in entities:
+            state.statement = state.statement.options(
+                defer(ServiceExecutionLease.verifier_retry, raiseload=True))
+        if ExecutionCostReservation in entities:
+            state.statement = state.statement.options(
+                defer(ExecutionCostReservation.verifier_retry, raiseload=True))
 
 
 @pytest.fixture
@@ -724,7 +732,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             sessions = async_sessionmaker(engine, expire_on_commit=False)
             async with sessions() as session:
                 assert await session.scalar(text(
-                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id}) == lease_before
+                    "SELECT to_jsonb(e) - 'verifier_retry' FROM execution_leases e WHERE id=:id"),
+                    {"id": lease.id}) == lease_before
                 trial = await session.get(Trial, trial_id)
                 assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
                         trial.failure_message, trial.attempt_count) == original_outcome
