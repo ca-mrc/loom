@@ -62,7 +62,7 @@ class ApplicationImageBuildClaimV1(BaseModel):
     storage_region: str = Field(pattern=r"^[a-z0-9-]{1,63}$")
     source_bucket: str = Field(pattern=_BUCKET)
     cache_bucket: str | None = Field(default=None, pattern=_BUCKET)
-    registry_repository: str = Field(pattern=r"^cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+/[a-z0-9][a-z0-9/._-]*$")
+    registry_repository: str = Field(max_length=200, pattern=r"^cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+/[a-z0-9][a-z0-9/._-]*$")
 
     @model_validator(mode="after")
     def _bindings(self) -> Self:
@@ -76,3 +76,41 @@ class ApplicationImageBuildClaimV1(BaseModel):
     @property
     def source_key(self) -> str:
         return application_source_object_key(self.source.archive_sha256)
+
+    @property
+    def cache_key(self) -> str:
+        # The common bounded blob store may share identical app source/recipe
+        # across owners. This domain cannot collide with task materializations.
+        return canonical_digest({"schema_version": "loom.application-image-cache.v1",
+            "source_digest": self.source.source_digest, "recipe_digest": self.recipe.digest}).removeprefix("sha256:")
+
+
+class ApplicationImagePublicationV1(BaseModel):
+    """A complete trusted publisher receipt, not an owner-supplied image claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    schema_version: Literal["loom.application-image-publication.v1"] = "loom.application-image-publication.v1"
+    build_id: UUID
+    attempt: int = Field(gt=0, le=2**63 - 1, strict=True)
+    upload_id: UUID
+    installation_id: UUID
+    owner_user_id: UUID
+    owner_team_id: UUID
+    data_environment_id: UUID
+    cluster_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,128}$")
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    recipe_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    schema_revision: str = Field(pattern=r"^[a-zA-Z0-9_]{1,64}$")
+    cpu_arch: Literal["x86_64", "arm64"]
+    registry_images: dict[Literal["service", "web"], str]
+
+    @model_validator(mode="after")
+    def _complete(self) -> Self:
+        import re
+
+        if (set(self.registry_images) != {"service", "web"}
+                or any(not value.int for value in self.__dict__.values() if isinstance(value, UUID))
+                or any(len(ref) > 280 or re.fullmatch(_IMAGE, ref) is None for ref in self.registry_images.values())):
+            raise ValueError("application publication is incomplete or invalid")
+        return self

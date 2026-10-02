@@ -952,8 +952,25 @@ paths and output format. Application Jobs carry their own build identity, not
 synthetic Task or materialization fields. Credentials remain outside the
 untrusted build phase and publication sees the build volume read-only. Personal
 build arguments distinguish the source digest from its informational base commit
-and never label that commit as a CI-approved build. This renderer does not yet
-implement the trusted application runtime or admit/launch application builds.
+and never label that commit as a CI-approved build.
+
+The trusted application runtime verifies the exact uploaded archive size, SHA256
+and source manifest before extraction. It parses migration revision literals and
+their complete acyclic ancestry, including historical merges, without importing
+developer Python or running migrations. The single declared head must match the
+protected shared schema. This is a metadata compatibility check, not a claim that
+arbitrary application code is semantically safe; personal code receives no DDL
+authority. Only the rootless build phase executes developer build instructions.
+
+Publication validates exactly two bounded local OCI outputs against the recipe's
+architecture, preserves digests through Skopeo, and reads back each immutable
+registry manifest. The final receipt binds both images to owner, source, recipe,
+installation/data/cluster and build attempt. Interrupted progress has a distinct
+schema and cannot qualify a release; unknown publication is not retried. Native
+cache keys include a separate application domain, source digest and recipe
+(including platform); the existing bounded blob store and GC are shared without
+fabricating Tasks. Source/registry credentials never enter the build context.
+These runtime helpers do not yet admit or launch application builds.
 Protected delivery of the credential/mount, the user-facing build command, global
 application-build admission, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.
