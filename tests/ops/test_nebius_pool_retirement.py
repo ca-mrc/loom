@@ -84,6 +84,36 @@ def retire(request, api, tmp_path):
     return retire_pool_workloads(request=request, api=api, state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
 
 
+def test_stopped_roster_qualifies_once_and_returns_detached_exact_templates(retirement_inputs, monkeypatch):
+    from scripts.ops import nebius_pool_retirement as retirement
+
+    request = retirement_inputs
+    originals = (*request.collectors, *request.actuators, *(row.controller for row in request.migration.guards))
+    expected = {}
+    for original in originals:
+        value = copy.deepcopy(original)
+        for field in ("uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "selfLink"):
+            value["metadata"].pop(field, None)
+        value.pop("status", None)
+        value["metadata"].setdefault("annotations", {})["loom.nebius/pool-retirement-operation"] = str(
+            request.migration.registration.spec.operation_id)
+        value["spec"]["suspend" if value["kind"] == "CronJob" else "replicas"] = True if value["kind"] == "CronJob" else 0
+        expected[value["kind"] + ":" + value["metadata"]["namespace"] + ":" + value["metadata"]["name"]] = value
+    qualified = retirement.retirement_documents
+    calls = []
+    def qualify(value):
+        calls.append(value)
+        return qualified(value)
+    monkeypatch.setattr(retirement, "retirement_documents", qualify)
+    result = retirement.stopped_documents(request)
+    assert result == expected
+    assert len(calls) == 1  # Real roster validation, not one full scan per output.
+    first = next(iter(result.values()))
+    first["spec"]["template" if first["kind"] == "Deployment" else "jobTemplate"]["private-mutation"] = True
+    assert all("private-mutation" not in repr(row) for row in originals)
+    assert retirement.stopped_documents(request) == expected
+
+
 def test_exact_old_workloads_stop_without_changing_templates_or_opening_admission(retirement_inputs, tmp_path):
     request = retirement_inputs
     api = initialize(request, tmp_path)
