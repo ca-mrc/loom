@@ -121,8 +121,17 @@ def test_completed_pool_derives_catalog_baseline_and_preserves_original_authorit
 
 @pytest.mark.timeout(420)
 def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private_cutover):
+    import ssl
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
+    from scripts.ops.nebius_management_stage import ManagementStageError
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
-    from tests.ops.test_nebius_management_refresh_predecessor import complete_refresh, load_refresh
+    from tests.ops.test_nebius_management_refresh_predecessor import (
+        complete_refresh,
+        load_refresh,
+        refresh_case,
+    )
 
     operation, _, root = private_cutover
     _, result = finish_cutover(operation)
@@ -155,3 +164,29 @@ def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private
         load_refresh(refreshed, root)
     completion.write_bytes(saved)
     assert load_refresh(refreshed, root) == prior
+    # Receipt support must not accidentally admit a live refresh through the
+    # legacy manager-only verifier, including when its request drops the field.
+    for baseline in (selector.model_dump(mode='json'), None):
+        request, _, state, _ = refresh_case(root, prior, pool_baseline=baseline)
+        with pytest.raises(ManagementStageError, match='pool-aware'):
+            with HTTPSManagementRefreshInstaller(request=request, original=root, predecessor=prior,
+                state_dir=state, api_server=root.original_inputs.operator_connection.endpoint, ssl_context=ssl.create_default_context(),
+                runtime_ca_pem=None, checks=SimpleNamespace()):
+                pass
+
+
+def test_predecessor_recursion_is_bounded_and_failure_does_not_poison_next_load():
+    from contextlib import ExitStack
+
+    from scripts.ops.nebius_management_refresh_predecessor import _predecessor_scope
+
+    operation = str(uuid4())
+    with _predecessor_scope('refresh', operation):
+        with pytest.raises(ValueError):
+            with _predecessor_scope('refresh', operation):
+                pytest.fail('cyclic ancestry was admitted')
+    with pytest.raises(ValueError), ExitStack() as stack:
+        for _ in range(9):
+            stack.enter_context(_predecessor_scope('pool-cutover', str(uuid4())))
+    with _predecessor_scope('refresh', operation):
+        pass  # Both duplicate and depth-limit failures release their scope.
