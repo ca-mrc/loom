@@ -22,6 +22,7 @@ import pytest
 import urllib3
 from alembic import command
 from minio import Minio
+from minio.versioningconfig import ENABLED, VersioningConfig
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -31,6 +32,7 @@ from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
     Artifact,
+    DataLifecycleObject,
     ExecutionCostReservation,
     LlmCall,
     ServiceExecutionLease,
@@ -172,17 +174,20 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade,usage_recovery",
-    [pytest.param(False, False, False, False, False, False, False, False, id="direct"),
-     pytest.param(True, False, False, False, False, False, False, False, id="terminus"),
-     pytest.param(True, True, False, False, False, False, False, False, id="accounting-repair"),
-     pytest.param(True, True, True, False, False, False, False, False, id="prepared-snapshot"),
-     pytest.param(True, False, False, True, False, False, False, False, id="typed-failure"),
-     pytest.param(True, False, False, False, True, False, False, False, id="verifier-archive"),
-     pytest.param(True, False, False, False, True, True, False, False, id="verifier-archive-corrupt"),
-     pytest.param(True, False, False, False, True, False, True, False, id="verifier-archive-history-upgrade"),
-     pytest.param(True, False, False, False, False, False, False, True, id="usage-archive"),
-     pytest.param(True, False, False, False, False, True, False, True, id="usage-archive-corrupt")],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade,usage_recovery,versioned",
+    [pytest.param(False, False, False, False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, False, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, False, False, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, False, False, False, id="verifier-archive-corrupt"),
+     pytest.param(True, False, False, False, True, False, True, False, False, id="verifier-archive-history-upgrade"),
+     pytest.param(True, False, False, False, False, False, False, True, False, id="usage-archive"),
+     pytest.param(True, False, False, False, False, True, False, True, False, id="usage-archive-corrupt"),
+     pytest.param(False, False, False, False, False, False, False, False, True, id="versioned-direct"),
+     pytest.param(True, False, False, False, False, False, False, False, True, id="versioned-terminus"),
+     pytest.param(True, True, False, False, False, False, False, False, True, id="versioned-accounting-repair")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
@@ -193,11 +198,15 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     corrupt_recovery: bool,
     archival_history_upgrade: bool,
     usage_recovery: bool,
+    versioned: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
 ) -> None:
     spool_container, canonical_container = independent_minio_endpoints
+    if versioned:
+        for bucket in ("artifacts", "trajectories"):
+            canonical_container.get_client().set_bucket_versioning(bucket, VersioningConfig(ENABLED))
     source_store, canonical_store = _store(spool_container), _store(canonical_container)
     engine = create_async_engine(isolated_migration_postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -813,6 +822,25 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 archive.body.close()
             for (bucket, key), expected in original_objects.items():
                 assert await canonical_store.get_object(bucket=bucket, key=key) == expected
+
+        # The durable index/registry must identify the versions that actually
+        # exist, including corrected accounting and preserved source evidence.
+        async with sessions() as session:
+            registered = set((await session.execute(select(
+                DataLifecycleObject.bucket, DataLifecycleObject.object_key,
+                DataLifecycleObject.version_id,
+            ).where(DataLifecycleObject.authority_id == artifact.lifecycle_authority_id))).all())
+        for item in [*files, *evidence]:
+            actual = canonical_container.get_client().stat_object(item["bucket"], item["key"])
+            assert bool(actual.version_id) is versioned
+            assert item.get("version_id") == actual.version_id
+            assert (item["bucket"], item["key"], actual.version_id) in registered
+        for name in ("trajectory", "atif"):
+            key = trajectory_index[f"{name}_uri"].removeprefix("s3://trajectories/")
+            actual = canonical_container.get_client().stat_object("trajectories", key)
+            assert bool(actual.version_id) is versioned
+            assert trajectory_index[f"{name}_version_id"] == actual.version_id
+            assert ("trajectories", key, actual.version_id) in registered
 
         # Compute is gone and source GC is now ACK-authorized. Canonical files,
         # raw trace/accounting, source evidence, and derived ATIF remain readable.
