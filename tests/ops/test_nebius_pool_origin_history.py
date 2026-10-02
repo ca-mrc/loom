@@ -211,6 +211,131 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     assert not state.executed  # No SQL query or write is part of this probe.
 
 
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'machine_settings', 'epoch_settings', 'token',
+    'original_running', 'unready', 'uid', 'pod', 'replica_owner', 'template', 'account', 'name',
+    'registration', 'db_reference', 'secret', 'backend', 'history', 'authority'])
+def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, monkeypatch, damage):
+    """The new gateway has no running predecessor; only its scalar start is valid."""
+    import hashlib
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    from loom_service.pool_management.installation import PoolInstallation
+    from loom_service.pool_management.installation_render import render_gateway
+
+    api, state = management_history
+    spec = api.request.registration.spec.model_dump(mode='json')
+    machine, = (row for row in spec['machines'] if row['role'] == 'gateway')
+    token = api.kubeconfig.parent / 'gateway-token'
+    token.write_text('private-gateway-marker')
+    token.chmod(0o600)
+    machine['token_sha256'] = hashlib.sha256(token.read_bytes()).hexdigest()
+    migration = replace(api.request, registration=replace(api.request.registration, spec=PoolInstallation.model_validate(spec)))
+    selected = type(api)(request=migration, target=state.target, kubeconfig=api.kubeconfig, executable=api.executable)
+    namespace, name = state.target.namespace, 'loom-pool-gateway'
+    original, = render_gateway(migration.registration.spec, namespace=namespace,
+        service_image=migration.registration.candidate['images']['service']['image_ref'],
+        kubernetes_endpoint='https://kubernetes.default.svc')['workload']
+    original['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+    container, = original['spec']['template']['spec']['containers']
+    rows = {row['name']: row for row in container['env']}
+    rows['LOOM_POOL_GATEWAY_BEARER_TOKEN_FILE']['value'] = str(token)
+    expected = copy.deepcopy(original)
+    expected['spec']['replicas'] = 1
+    current = copy.deepcopy(expected)
+    current['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
+    replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': name + '-abc', 'namespace': namespace,
+        'uid': str(uuid4()), 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
+            'name': name, 'uid': original['metadata']['uid'], 'controller': True}]},
+        'spec': {'template': copy.deepcopy(expected['spec']['template'])}}
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': name + '-abc-def', 'namespace': namespace,
+        'uid': str(uuid4()), 'labels': {'app.kubernetes.io/name': name},
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+            'uid': replica['metadata']['uid'], 'controller': True}]}, 'spec': copy.deepcopy(expected['spec']['template']['spec']),
+        'status': {'phase': 'Running', 'containerStatuses': [{'name': 'gateway', 'ready': True}]}}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
+    environment.update({row['name']: row['value'] for row in container['env'] if 'value' in row})
+    environment['LOOM_POOL_GATEWAY_DB_URL'] = base64.b64decode(state.secret['data']['service-url']).decode()
+    if damage == 'db_settings':
+        environment['LOOM_POOL_GATEWAY_DB_URL'] = 'postgresql+psycopg://foreign:private-marker@foreign.svc/loom'
+    elif damage == 'machine_settings':
+        environment['LOOM_POOL_GATEWAY_MACHINE_ID'] = str(uuid4())
+    elif damage == 'epoch_settings':
+        environment['LOOM_POOL_GATEWAY_ADMISSION_EPOCH'] = str(spec['admission_epoch'] + 1)
+    elif damage == 'token':
+        token.write_text('private-other-marker')
+    elif damage == 'original_running':
+        original['spec']['replicas'] = 1
+    elif damage == 'unready':
+        current['status']['readyReplicas'] = 0
+    elif damage == 'uid':
+        current['metadata']['uid'] = str(uuid4())
+    elif damage == 'replica_owner':
+        replica['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage in {'template', 'account', 'name', 'registration', 'db_reference'}:
+        for document in (expected, current):
+            if damage == 'template':
+                document['spec']['template']['spec']['containers'][0]['image'] = 'registry.example/foreign@sha256:' + 'f' * 64
+            elif damage == 'account':
+                document['spec']['template']['spec']['serviceAccountName'] = 'foreign'
+            elif damage == 'name':
+                document['metadata']['name'] = 'foreign'
+            else:
+                settings = {row['name']: row for row in document['spec']['template']['spec']['containers'][0]['env']}
+                if damage == 'registration':
+                    settings['LOOM_POOL_GATEWAY_MACHINE_ID']['value'] = str(uuid4())
+                else:
+                    settings['LOOM_POOL_GATEWAY_DB_URL']['valueFrom']['secretKeyRef']['key'] = 'controller-url'
+    elif damage == 'backend':
+        state.database['metadata']['uid'] = str(uuid4())
+    elif damage == 'history':
+        selected.target.controller['metadata']['uid'] = str(uuid4())
+    elif damage == 'authority':
+        api.kubeconfig.write_bytes(b'private-changed-authority')
+    processes, calls = [], []
+
+    def run(args):
+        calls.append(args)
+        if args[0] == 'exec':
+            assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
+            assert 'private-' not in repr(args)
+            result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False, timeout=30,
+                cwd=api.kubeconfig.parent, env=environment)
+            processes.append(result)
+            if result.returncode:
+                raise ValueError('private-probe-error')
+            if damage == 'secret':
+                state.secret['metadata']['resourceVersion'] = 'changed'
+            return json.loads(result.stdout)
+        if args[:2] == ['get', 'deployment']:
+            assert args[2:5] == [name, '-n', namespace]
+            return copy.deepcopy(current)
+        if args[:2] == ['get', 'replicaset']:
+            return copy.deepcopy(replica)
+        if args[:2] == ['get', '--raw'] and args[2] == f'/api/v1/namespaces/{namespace}/pods?labelSelector=app.kubernetes.io%2Fname%3D{name}&limit=100':
+            observed = copy.deepcopy(pod)
+            if damage == 'pod' and processes:
+                observed['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [observed]}
+        return api._run(args)
+
+    monkeypatch.setattr(selected, '_run', run)
+    if damage:
+        with pytest.raises(PoolMigrationError) as error:
+            selected.qualify_gateway_runtime(original=original, expected=expected)
+        assert error.value.stage == 'gateway_runtime' and 'private-' not in str(error.value)
+    else:
+        assert selected.qualify_gateway_runtime(original=original, expected=expected) is None
+        assert len(processes) == 2 and all(row.returncode == 0 for row in processes)
+    assert all('private-' not in (row.stdout + row.stderr).decode() for row in processes)
+    assert all(row[0] in {'get', 'exec'} for row in calls)
+    assert not state.executed
+
+
 @pytest.mark.parametrize('override', [
     {'value': 'postgresql+psycopg://foreign:private-marker@foreign.svc/loom'},
     {'valueFrom': {'secretKeyRef': {'name': 'foreign-db', 'key': 'url'}}},
