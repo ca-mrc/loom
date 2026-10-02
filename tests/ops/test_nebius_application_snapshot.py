@@ -274,8 +274,20 @@ def test_pool_capture_preserves_actual_private_resources_not_credential_values(p
     assert (directory / 'pool-resources.json').read_bytes() == old
 
 
+def test_pool_capture_inherits_missing_item_type_only_from_typed_collection(pool_snapshot, tmp_path):
+    _, collections, _, _, _ = pool_snapshot
+    for collection in collections.values():
+        for row in collection['items']:
+            row.pop('kind')
+            row.pop('apiVersion')
+    result = capture_pool(pool_snapshot, tmp_path)
+    value = json.loads((tmp_path / result['observation_id'] / 'pool-resources.json').read_bytes())
+    role, = (row for row in value['resources'] if row['kind'] == 'ClusterRole')
+    assert role['apiVersion'] == 'rbac.authorization.k8s.io/v1'
+
+
 @pytest.mark.parametrize('damage', ['foreign', 'duplicate', 'pagination', 'missing-version', 'wrong-kind',
-    'deleting', 'nil-uid', 'oversize', 'too-many', 'collector-secret', 'config-drift', 'namespace-drift'])
+    'deleting', 'nil-uid', 'oversize', 'too-many', 'collector-secret', 'config-drift', 'namespace-drift', 'item-type'])
 def test_pool_capture_rejects_incomplete_or_changed_scope_without_writing(pool_snapshot, tmp_path, damage):
     from scripts.ops.nebius_application_snapshot import SnapshotError
 
@@ -297,6 +309,8 @@ def test_pool_capture_rejects_incomplete_or_changed_scope_without_writing(pool_s
         item['metadata']['deletionTimestamp'] = '2026-10-02T00:00:00Z'
     elif damage == 'nil-uid':
         item['metadata']['uid'] = str(UUID(int=0))
+    elif damage == 'item-type':
+        item['kind'] = 'Secret'
     elif damage == 'oversize':
         item['spec']['oversize'] = 'x' * (8 * 1024**2)
     elif damage == 'too-many':
