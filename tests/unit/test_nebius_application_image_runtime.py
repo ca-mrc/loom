@@ -18,6 +18,7 @@ from loom_execution_actuator.application_image_renderer import render_applicatio
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_renderer import BUILDKIT_IMAGE, TaskImageJobConfig
 from tests.unit.test_application_source import entry, manifest
+from tests.unit.test_nebius_task_image_runtime import FakeS3
 
 
 @pytest.fixture
@@ -275,7 +276,7 @@ def test_publish_validates_both_outputs_and_reads_back_exact_immutable_images(so
             kwargs["stdout"].write(images[0][1])
         return subprocess.CompletedProcess(argv, 0)
 
-    monkeypatch.setattr(runtime.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     receipt = runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt_path)
     assert receipt.build_id == claim.build_id and receipt.attempt == 1
     assert receipt.upload_id == claim.upload_id and receipt.owner_user_id == claim.owner_user_id
@@ -317,7 +318,7 @@ def test_invalid_or_uncertain_publication_never_becomes_a_ready_release(source_b
             kwargs["stdout"].write(b"different manifest")
         return subprocess.CompletedProcess(argv, 0)
 
-    monkeypatch.setattr(runtime.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
     receipt = tmp_path / "receipt.json"
     with pytest.raises((ValueError, subprocess.TimeoutExpired)):
         runtime.publish(claim, work, tmp_path / "secrets", receipt_path=receipt)
@@ -325,3 +326,61 @@ def test_invalid_or_uncertain_publication_never_becomes_a_ready_release(source_b
         assert set(json.loads(receipt.read_text()).get("registry_images", {})) != {"service", "web"}
     if damage == "lost_reply":
         assert len(calls) == 1, "unknown publication is never automatically retried"
+
+
+def test_application_cache_identity_reuses_source_recipe_not_owner_or_attempt(source_build):
+    claim = source_build[0]
+    assert claim.cache_key == claim.model_copy(update={"owner_user_id": uuid4(), "attempt": 3}).cache_key
+    assert claim.cache_key != claim.model_copy(update={"source": claim.source.model_copy(
+        update={"source_digest": "sha256:" + "f" * 64})}).cache_key
+    assert claim.cache_key != claim.model_copy(update={"recipe": claim.recipe.model_copy(
+        update={"cpu_arch": "arm64"})}).cache_key
+
+
+def test_prepare_imports_verified_shared_cache_and_closes_each_credential_client(source_build, tmp_path, monkeypatch):
+    from loom_execution_actuator import application_image_runtime as runtime
+
+    claim, payload, _, _ = source_build
+    claim = claim.model_copy(update={"cache_bucket": "shared-data"})
+    content = b'{"schemaVersion":2,"manifests":[]}'
+    sha = hashlib.sha256(content).hexdigest()
+    cache = FakeS3({f"task-build-cache/v2/{claim.cache_key}/0/manifest.json": json.dumps({"version": 1,
+        "files": [{"path": "index.json", "sha256": sha, "size": len(content)}]}).encode(),
+        f"task-build-cache/v2/blobs/{sha}": content})
+    source = SourceObject(claim, payload)
+    monkeypatch.setattr(runtime, "_client", lambda binding, secret: source if secret.name == "source" else cache)
+    work = tmp_path / "work"
+    work.mkdir()
+    runtime.prepare(claim, work, tmp_path / "secrets")
+    assert (work / "cache-in/0/index.json").read_bytes() == content
+    assert source.closed and cache.closed and all(body.closed for body in cache.bodies)
+
+
+def test_publication_exports_bounded_cache_through_the_existing_shared_blob_store(source_build, tmp_path, monkeypatch):
+    from loom_execution_actuator import application_image_runtime as runtime
+
+    claim = source_build[0].model_copy(update={"cache_bucket": "shared-data"})
+    work = tmp_path / "work"
+    work.mkdir()
+    _, body = oci_output(work, 0)
+    oci_output(work, 1)
+    content = b'{"schemaVersion":2,"manifests":[]}'
+    for index in range(2):
+        directory = work / "cache-out" / str(index)
+        directory.mkdir(parents=True)
+        (directory / "index.json").write_bytes(content)
+    cache = FakeS3({})
+    monkeypatch.setattr(runtime, "_client", lambda binding, secret: cache)
+
+    def run(argv, **kwargs):
+        if "copy" in argv:
+            Path(argv[argv.index("--digestfile") + 1]).write_text("sha256:" + hashlib.sha256(body).hexdigest())
+        else:
+            kwargs["stdout"].write(body)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    runtime.publish(claim, work, tmp_path / "secrets", receipt_path=tmp_path / "receipt")
+    assert cache.objects["task-build-cache/v2/blobs/" + hashlib.sha256(content).hexdigest()] == content
+    assert {f"task-build-cache/v2/{claim.cache_key}/{index}/manifest.json" for index in range(2)} <= cache.objects.keys()
+    assert cache.closed
