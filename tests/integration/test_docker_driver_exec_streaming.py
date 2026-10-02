@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import tracemalloc
 from pathlib import PurePosixPath
 
 import pytest
@@ -90,6 +91,38 @@ async def test_docker_exec_streaming_no_10mb_cap() -> None:
             f"expected {target_bytes} bytes through stream, got {total}"
         )
     finally:
+        await driver.stop()
+
+
+async def test_docker_exec_streaming_bounds_slow_consumer_memory() -> None:
+    """A delayed consumer must backpressure Docker without dropping either stream."""
+    driver = DockerDriver(image="alpine:3.20")
+    await driver.start()
+    tracemalloc.start()
+    try:
+        handle = await driver.exec_streaming(
+            ["sh", "-c", "head -c 33554432 /dev/zero; head -c 33554432 /dev/zero >&2; exit 7"],
+            env_vars={}, cwd=PurePosixPath("/workspace"),
+        )
+        # Deliberately pause consumption, as a slow projection or event sink can.
+        await asyncio.sleep(0.5)
+
+        async def consume(stream):
+            size = 0
+            async for chunk in stream:
+                size += len(chunk)
+                await asyncio.sleep(0.001)
+            return size
+
+        sizes = await asyncio.wait_for(
+            asyncio.gather(consume(handle.stdout), consume(handle.stderr)), timeout=20,
+        )
+        assert await asyncio.wait_for(handle.wait(), timeout=5) == 7
+        _, peak = tracemalloc.get_traced_memory()
+        assert sizes == [32 * 1024 * 1024, 32 * 1024 * 1024]
+        assert peak < 16 * 1024 * 1024, f"slow consumers buffered {peak} bytes"
+    finally:
+        tracemalloc.stop()
         await driver.stop()
 
 
