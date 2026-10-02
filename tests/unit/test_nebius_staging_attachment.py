@@ -164,7 +164,7 @@ def test_staging_attachment_separates_spool_without_second_control_plane(tmp_pat
         and row["metadata"]["name"] == "loom-nebius-staging-actuator-usage"
     )
     assert usage_role["rules"] == [
-        {"apiGroups": [""], "resources": ["nodes/proxy"], "verbs": ["get"]}
+        {"apiGroups": [""], "resources": ["nodes", "nodes/stats"], "verbs": ["get"]}
     ]
     for role_binding in (row for row in roles if row["kind"] == "ClusterRoleBinding"):
         assert role_binding["roleRef"]["name"] == role_binding["metadata"]["name"]
