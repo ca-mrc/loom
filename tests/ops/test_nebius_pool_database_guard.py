@@ -480,6 +480,82 @@ def qualify_workload(api, state):
         credential_uid=state.credential[0], credential_resource_version=state.credential[1])
 
 
+def running_successor(state):
+    """Keep original authority immutable while installing a replacement fixture."""
+    expected = copy.deepcopy(state.original)
+    expected['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
+    expected['spec']['template']['spec']['containers'][0]['image'] = 'registry.example.com/loom@sha256:' + 'b' * 64
+    state.controller.update(copy.deepcopy(expected))
+    state.replica['spec']['template'] = copy.deepcopy(expected['spec']['template'])
+    state.runtime_pod['spec'] = copy.deepcopy(expected['spec']['template']['spec'])
+    return expected
+
+
+def test_successor_database_probe_uses_expected_template_but_retains_original_authority(workload_database):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    expected = running_successor(state)
+    # Journal quantity normalization must not reject the same live resource.
+    for spec in (state.controller['spec']['template']['spec'], state.replica['spec']['template']['spec'], state.runtime_pod['spec']):
+        spec['containers'][0]['resources'] = {'requests': {'cpu': '500m', 'memory': '512Mi'}}
+    expected['spec']['template']['spec']['containers'][0]['resources'] = {'requests': {'cpu': '0.5', 'memory': '536870912'}}
+    with pytest.raises(PoolMigrationError):
+        qualify_workload(api, state)  # Original-only preflight must not adopt it.
+    assert not state.commands
+    api.qualify_runtime_database(state.target, original=state.original, expected=expected,
+        credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+    assert len(state.processes) == 1 and state.processes[0].stdout == b'{"status": "qualified"}\n'
+    assert all('private-' not in arg for command in state.commands for arg in command)
+
+
+@pytest.mark.parametrize('workload_database', ['service', 'actuator'], indirect=True)
+@pytest.mark.parametrize('damage', ['uid', 'namespace', 'selector', 'container', 'service_account',
+    'credential_key', 'pooled_url', 'env_from', 'not_ready', 'late_pod', 'effective_url'])
+def test_successor_database_probe_cannot_widen_retained_identity_or_credentials(workload_database, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    expected = running_successor(state)
+    spec = expected['spec']['template']['spec']
+    if damage == 'uid':
+        expected['metadata']['uid'] = str(uuid4())
+    elif damage == 'namespace':
+        expected['metadata']['namespace'] = 'foreign'
+    elif damage == 'selector':
+        expected['spec']['selector'] = {'matchLabels': {'app': 'foreign'}}
+    elif damage == 'container':
+        spec['containers'][0]['name'] = 'foreign'
+    elif damage == 'service_account':
+        spec['serviceAccountName'] = 'foreign-admin'
+    elif damage == 'credential_key':
+        entry, = (row for row in spec['containers'][0]['env'] if row['name'] == state.variable)
+        reference = entry['valueFrom']['secretKeyRef']
+        state.runtime_secret['data']['foreign'] = state.runtime_secret['data'][reference['key']]
+        reference['key'] = 'foreign'
+    elif damage == 'pooled_url':
+        spec['containers'][0]['env'].append({'name': state.variable + '_POOL', 'value': 'private-override'})
+    elif damage == 'env_from':
+        spec['containers'][0]['envFrom'] = [{'secretRef': {'name': 'foreign'}}]
+    elif damage == 'not_ready':
+        state.runtime_pod['status']['containerStatuses'][0]['ready'] = False
+    elif damage == 'late_pod':
+        state.runtime_after_drift = True
+    elif damage == 'effective_url':
+        state.runtime_environment[state.variable] += '?application_name=private-override'
+    # Even an exactly matching live replacement cannot change original scope.
+    state.controller.update(copy.deepcopy(expected))
+    state.replica['spec']['template'] = copy.deepcopy(expected['spec']['template'])
+    state.runtime_pod['spec'] = copy.deepcopy(spec)
+    with pytest.raises(PoolMigrationError) as error:
+        api.qualify_runtime_database(state.target, original=state.original, expected=expected,
+            credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+    assert error.value.stage == 'runtime_database'
+    if damage not in {'late_pod', 'effective_url'}:
+        assert not state.commands
+    assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
+
+
 def test_each_running_database_consumer_is_qualified_without_sql_or_credential_output(workload_database):
     api, state = workload_database
     assert qualify_workload(api, state) is None
@@ -492,7 +568,8 @@ def test_each_running_database_consumer_is_qualified_without_sql_or_credential_o
 
 @pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
     'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target', 'service_account'])
-def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage):
+@pytest.mark.parametrize('successor', [False, True])
+def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage, successor):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
     api, state = workload_database
@@ -521,6 +598,9 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
         for document in (state.original, state.controller, state.replica):
             document['spec']['template']['spec']['serviceAccountName'] = 'foreign-admin'
         state.runtime_pod['spec']['serviceAccountName'] = 'foreign-admin'
+    expected = running_successor(state) if successor else None
+    state.runtime_pod['spec']['nodeName'] = 'platform-node'
+    options = {'expected': expected} if successor else {}
     previous, commands = api._run, []
 
     def run(args):
@@ -550,10 +630,10 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     actuator = state.original['spec']['template']['spec']['containers'][0]['name'] == 'actuator'
     if not actuator or damage not in {None, 'scale_zero'}:
         with pytest.raises(PoolMigrationError) as error:
-            api.qualify_runtime_telemetry(state.target, original=state.original)
+            api.qualify_runtime_telemetry(state.target, original=state.original, **options)
         assert 'private-' not in str(error.value)
     else:
-        api.qualify_runtime_telemetry(state.target, original=state.original)
+        api.qualify_runtime_telemetry(state.target, original=state.original, **options)
         assert [command[12] for command in commands] == (['platform-node'] if damage == 'scale_zero' else ['platform-node', 'pool-node'])
         for command in commands:
             assert command[13] == next(row['metadata']['uid'] for row in nodes if row['metadata']['name'] == command[12])

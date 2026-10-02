@@ -120,7 +120,8 @@ def test_startup_registration_observer_uses_exact_management_backend(management_
 
 
 @pytest.mark.parametrize('damage', [None, 'settings', 'pooled_settings', 'pod', 'secret', 'history', 'backend'])
-def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage):
+@pytest.mark.parametrize('successor', [False, True])
+def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage, successor):
     """A template Secret alone cannot qualify the manager's effective settings."""
     import json
     import os
@@ -136,6 +137,11 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     state.target = replace(state.target, controller=copy.deepcopy(manager))
     # Reconstruct the real reader so its immutable history hash binds this input.
     selected = type(api)(request=api.request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    options = {}
+    if successor:
+        manager['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
+        manager['spec']['template']['spec']['containers'][0]['image'] = 'registry.example.com/loom@sha256:' + 'b' * 64
+        options['expected'] = copy.deepcopy(manager)
     manager['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
     namespace = state.target.namespace
     replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {'name': 'loom-service-abc',
@@ -185,10 +191,10 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     monkeypatch.setattr(selected, '_run', run)
     if damage:
         with pytest.raises(PoolMigrationError) as error:
-            selected.qualify_manager_database()
+            selected.qualify_manager_database(**options)
         assert error.value.stage == 'management_runtime_database'
     else:
-        selected.qualify_manager_database()
+        selected.qualify_manager_database(**options)
         assert len(processes) == 1 and json.loads(processes[0].stdout) == {'status': 'qualified'}
     assert all('private-marker' not in (row.stdout + row.stderr).decode() for row in processes)
     assert not state.executed  # No SQL query or write is part of this probe.
