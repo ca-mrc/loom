@@ -9,7 +9,8 @@ import (
 // Guest authority is an explicit, immutable launch mode. A class ID alone must
 // never upgrade a historical shared-kernel plan into a new execution mechanism.
 func (p plan) validateGuestExecution() error {
-	guestClass := p.ExecutionClassID == "linux-amd64-cpu-guest-v1" || p.ExecutionClassID == "linux-amd64-cpu-guest-web-v1"
+	authClass := p.ExecutionClassID == "linux-amd64-cpu-guest-auth-v1" || p.ExecutionClassID == "linux-amd64-cpu-guest-auth-web-v1"
+	guestClass := authClass || p.ExecutionClassID == "linux-amd64-cpu-guest-v1" || p.ExecutionClassID == "linux-amd64-cpu-guest-web-v1"
 	guests := 0
 	var capabilities []string
 	for _, s := range p.Sidecars {
@@ -25,6 +26,10 @@ func (p plan) validateGuestExecution() error {
 		for i, cap := range g.Capabilities {
 			switch cap {
 			case "nested_docker", "singularity_mounts", "isolated_kernel_settings":
+			case "emulated_pkcs11_authentication":
+				if !authClass {
+					return fmt.Errorf("emulated authentication requires its guest class")
+				}
 			default:
 				return fmt.Errorf("unsupported guest capability")
 			}
@@ -36,6 +41,9 @@ func (p plan) validateGuestExecution() error {
 			return fmt.Errorf("guest capability sets differ")
 		}
 		capabilities = g.Capabilities
+		if authClass != slices.Contains(capabilities, "emulated_pkcs11_authentication") {
+			return fmt.Errorf("guest capability declaration does not match immutable class")
+		}
 		if s.Identity == nil || s.Identity.RunAsUser == nil || *s.Identity.RunAsUser != 0 || s.Identity.RunAsGroup == nil || *s.Identity.RunAsGroup != 0 {
 			return fmt.Errorf("guest runtime requires explicit root task identity")
 		}

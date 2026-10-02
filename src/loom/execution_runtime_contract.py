@@ -25,10 +25,10 @@ from loom.execution_contract import (
     VerifierTopology,
     WorkloadRequirementsV1,
     evaluate_execution_admission,
-    nebius_guest_execution_class,
+    nebius_guest_class_by_id,
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
-from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
+from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.models.networking import NetworkPolicy, TaskHttpEgress, hosted_http_egress
 from loom.sandbox_identity import SandboxIdentityV1
 
@@ -198,7 +198,7 @@ class GuestExecutionV1(_Strict):
 
     schema_version: Literal["loom.guest-execution.v1"] = "loom.guest-execution.v1"
     runtime: Literal["qemu-tcg-v1"] = "qemu-tcg-v1"
-    capabilities: tuple[GuestExecutionCapability, ...] = Field(min_length=1, max_length=3)
+    capabilities: tuple[GuestExecutionCapability, ...] = Field(min_length=1, max_length=4)
 
     @field_validator("capabilities")
     @classmethod
@@ -409,10 +409,18 @@ class ExecutionRuntimePlanV1(_Strict):
     @model_validator(mode="after")
     def _roles_and_dependencies_are_closed(self) -> ExecutionRuntimePlanV1:
         guests = [sidecar for sidecar in self.sidecars if sidecar.guest_execution is not None]
-        guest_class = self.execution_class_id in {
-            nebius_guest_execution_class().class_id,
-            nebius_guest_execution_class(supports_task_web_egress=True).class_id,
-        }
+        guest_definition = nebius_guest_class_by_id(self.execution_class_id)
+        guest_class = guest_definition is not None
+        if guest_definition is not None and guest_definition.guest_execution is not None:
+            supported = guest_definition.guest_execution.supported_capabilities
+            for sidecar in guests:
+                assert sidecar.guest_execution is not None
+                declared = frozenset(sidecar.guest_execution.capabilities)
+                if not declared <= supported or (
+                    ("emulated_pkcs11_authentication" in declared)
+                    != ("emulated_pkcs11_authentication" in supported)
+                ):
+                    raise ValueError("guest capabilities do not match the immutable class")
         if guest_class != bool(guests):
             raise ValueError("guest execution class and guest plan must be selected together")
         if guests and (
@@ -765,17 +773,16 @@ def validate_runtime_plan_requirements(
 
     declared_capabilities = (requirements.execution_requirements.capabilities
                              if requirements.execution_requirements else ())
-    expected_guest = GUEST_EXECUTION_CAPABILITIES.intersection(declared_capabilities)
+    expected_guest = ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared_capabilities)
     guests = [sidecar.guest_execution for sidecar in plan.sidecars if sidecar.guest_execution is not None]
     if bool(guests) != bool(expected_guest) or bool(guests) != (
         requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
     ):
         raise ValueError("runtime guest plan does not match workload isolation and capabilities")
     if guests:
-        execution_class = nebius_guest_execution_class(
-            supports_task_web_egress=plan.execution_class_id == nebius_guest_execution_class(
-                supports_task_web_egress=True).class_id,
-        )
+        execution_class = nebius_guest_class_by_id(plan.execution_class_id)
+        if execution_class is None:
+            raise ValueError("runtime guest class is unavailable")
         admission = evaluate_execution_admission(requirements, execution_class)
         if not admission.compatible or any(frozenset(guest.capabilities) != expected_guest for guest in guests):
             raise ValueError("runtime guest plan does not match admitted workload requirements")

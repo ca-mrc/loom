@@ -134,7 +134,10 @@ func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
 }
 
 func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
-	for _, tc := range []struct{ class, capability string; allowed bool }{
+	for _, tc := range []struct {
+		class, capability string
+		allowed           bool
+	}{
 		{"linux-amd64-cpu-guest-auth-v1", "emulated_pkcs11_authentication", true},
 		{"linux-amd64-cpu-guest-auth-web-v1", "emulated_pkcs11_authentication", true},
 		{"linux-amd64-cpu-guest-v1", "emulated_pkcs11_authentication", false},
@@ -150,7 +153,9 @@ func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
 			}
 			raw, _ := json.Marshal(p)
 			_, err := decodePlan(raw)
-			if (err == nil) != tc.allowed { t.Fatalf("allowed=%v, error=%v", tc.allowed, err) }
+			if (err == nil) != tc.allowed {
+				t.Fatalf("allowed=%v, error=%v", tc.allowed, err)
+			}
 		})
 	}
 }
