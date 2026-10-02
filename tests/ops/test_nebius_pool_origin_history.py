@@ -141,6 +141,12 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     if successor:
         manager['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
         manager['spec']['template']['spec']['containers'][0]['image'] = 'registry.example.com/loom@sha256:' + 'b' * 64
+        catalog = api.kubeconfig.parent / 'profiles.json'
+        catalog.write_text(api.request.registration.spec.profiles.model_dump_json())
+        manager['spec']['template']['spec']['containers'][0]['env'].append(
+            {'name': 'LOOM_SVC_POOL_PROFILES_FILE', 'value': str(catalog)})
+        manager['spec']['template']['spec']['containers'][0]['env'].append(
+            {'name': 'LOOM_SVC_SERVICE_MODE', 'value': 'management'})
         options['expected'] = copy.deepcopy(manager)
     manager['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1, 'availableReplicas': 1, 'readyReplicas': 1}
     namespace = state.target.namespace
@@ -156,6 +162,8 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
     environment.update(LOOM_SVC_DB_URL=base64.b64decode(state.secret['data']['service-url']).decode(),
         LOOM_SVC_MINIO_ACCESS_KEY='fixture', LOOM_SVC_MINIO_SECRET_KEY='fixture')
+    if successor:
+        environment.update(LOOM_SVC_SERVICE_MODE='management', LOOM_SVC_POOL_PROFILES_FILE=str(catalog))
     if damage in {'settings', 'pooled_settings'}:
         environment['LOOM_SVC_DB_URL_POOL' if damage == 'pooled_settings' else 'LOOM_SVC_DB_URL'] = (
             'postgresql+psycopg://foreign:private-marker@loom-postgres.foreign.svc:5432/loom')
@@ -196,6 +204,9 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     else:
         selected.qualify_manager_database(**options)
         assert len(processes) == 1 and json.loads(processes[0].stdout) == {'status': 'qualified'}
+        if successor:
+            selected.qualify_manager_pool_settings(expected=options['expected'])
+            assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
     assert all('private-marker' not in (row.stdout + row.stderr).decode() for row in processes)
     assert not state.executed  # No SQL query or write is part of this probe.
 

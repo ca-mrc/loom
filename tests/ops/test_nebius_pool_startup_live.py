@@ -230,7 +230,8 @@ def test_fixed_startup_refuses_live_authority_drift_and_out_of_journal_patch(sta
         assert state.writes == []
 
 
-@pytest.mark.parametrize('damage', [None, 'incomplete', 'unanchored', 'uid', 'manager', 'database', 'telemetry', 'late_guard', 'late_runtime'])
+@pytest.mark.parametrize('damage', [None, 'incomplete', 'unanchored', 'uid', 'manager', 'database', 'telemetry',
+    'manager_settings', 'participant_settings', 'late_guard', 'late_runtime'])
 def test_started_database_proof_derives_exact_successors_and_rechecks_closure(startup_http, closed_startup, damage):
     from scripts.ops.nebius_ingress_stage import _uid
     from scripts.ops.nebius_management_switch import _stable
@@ -284,11 +285,25 @@ def test_started_database_proof_derives_exact_successors_and_rechecks_closure(st
             elif damage == 'late_runtime':
                 state.objects[_key(request.manager)]['spec']['replicas'] = 0
 
+        def manager_settings(*, expected):
+            expected_runtime(request.manager, expected)
+            probes.append(('manager_settings', _key(request.manager)))
+            if damage == 'manager_settings':
+                raise PoolMigrationError('management_pool_settings')
+
+        def participant_settings(target, *, original, expected):
+            expected_runtime(original, expected)
+            probes.append(('participant_settings', _key(original)))
+            if damage == 'participant_settings':
+                raise PoolMigrationError('runtime_pool_settings')
+
         # Remote probe transport is doubled here; the owning probe tests run
         # real settings and reject unrelated lineage, credentials and backends.
         api.parent.history.qualify_manager_database = manager
+        api.parent.history.qualify_manager_pool_settings = manager_settings
         api.parent.guards.qualify_runtime_database = database
         api.parent.guards.qualify_runtime_telemetry = telemetry
+        api.parent.guards.qualify_runtime_pool_settings = participant_settings
         if damage:
             with pytest.raises(ValueError, match='pool_startup_database_runtimes_unqualified'):
                 api.qualify_database_runtimes()
@@ -299,7 +314,9 @@ def test_started_database_proof_derives_exact_successors_and_rechecks_closure(st
             originals = [*(guard.controller for guard in request.fencing.retirement.migration.guards),
                 *request.services, *request.fencing.retirement.actuators]
             assert set(probes) == {('manager', _key(request.manager)),
+                ('manager_settings', _key(request.manager)),
                 *(('database', _key(row)) for row in originals),
+                *(('participant_settings', _key(row)) for row in originals),
                 *(('telemetry', _key(row)) for row in request.fencing.retirement.actuators)}
-            assert len(probes) == 1 + len(originals) + len(request.fencing.retirement.actuators)
+            assert len(probes) == 2 + 2 * len(originals) + len(request.fencing.retirement.actuators)
         assert not state.writes and all(call.method == 'GET' for call in state.calls)

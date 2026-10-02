@@ -556,6 +556,71 @@ def test_successor_database_probe_cannot_widen_retained_identity_or_credentials(
     assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
 
 
+@pytest.mark.parametrize('damage', [None, 'settings', 'scope', 'late_pod', 'not_ready', 'private_inputs'])
+def test_successor_pool_settings_use_retained_pod_and_registered_material(workload_database, guest_runtime_inputs, tmp_path, monkeypatch, damage):
+    import hashlib
+    import json
+
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_runtime import wire_participant
+    from tests.ops.test_nebius_pool_runtime import desired_profile, env
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    previous, state = workload_database
+    _, actuators, services, _, guest = guest_runtime_inputs
+    spec = previous.request.registration.spec.model_dump(mode='json')
+    token = tmp_path / 'pool-token'
+    token.write_text('private-runtime-machine-marker')
+    token.chmod(0o600)
+    for machine in spec['machines']:
+        if machine['participant_id'] == str(state.target.participant_id):
+            machine['token_sha256'] = hashlib.sha256(token.read_bytes()).hexdigest()
+    migration = replace(previous.request, registration=replace(previous.request.registration, spec=PoolInstallation.model_validate(spec)))
+    api = type(previous)(request=migration, kubeconfig=previous.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', previous._run)
+    identity = state.target.participant_id
+    targets = wire_participant(request=migration, participant_id=identity, management_origin='https://manage.example.com',
+        actuator=actuators[identity], service=services[identity], guest_actuators=(guest,),
+        runtime_profile=desired_profile(migration, services[identity]))
+    expected, = (value for value in targets.values() if value['metadata']['name'] == state.original['metadata']['name'])
+    expected['spec']['replicas'] = 1
+    rows = env(expected)
+    pool_variable = next((name for name in rows if name.endswith(('_GLOBAL_POOL', '_GLOBAL_POOL_JSON'))), None)
+    if pool_variable:
+        pool = json.loads(rows[pool_variable]['value'])
+        pool['bearer_token_file'] = str(token)
+        rows[pool_variable]['value'] = json.dumps(pool)
+    state.controller.update(copy.deepcopy(expected))
+    state.replica['spec']['template'] = copy.deepcopy(expected['spec']['template'])
+    state.runtime_pod['spec'] = copy.deepcopy(expected['spec']['template']['spec'])
+    state.runtime_environment.update({name: row['value'] for name, row in rows.items() if 'value' in row})
+    if damage == 'settings':
+        if pool_variable:
+            token.write_text('private-foreign-machine-marker')
+        else:
+            state.runtime_environment.pop('LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON')
+    elif damage == 'scope':
+        expected['metadata']['uid'] = str(uuid4())
+    elif damage == 'late_pod':
+        state.runtime_after_drift = True
+    elif damage == 'not_ready':
+        state.runtime_pod['status']['containerStatuses'][0]['ready'] = False
+    elif damage == 'private_inputs':
+        api.kubeconfig.write_text('private-changed-authority-marker')
+    if damage:
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_runtime_pool_settings(state.target, original=state.original, expected=expected)
+        assert error.value.stage == 'runtime_pool_settings'
+        if damage in {'scope', 'not_ready', 'private_inputs'}:
+            assert not state.commands
+    else:
+        assert api.qualify_runtime_pool_settings(state.target, original=state.original, expected=expected) is None
+        assert len(state.commands) == 1 and state.processes[0].stdout == b'{"status": "qualified"}\n'
+    assert all('private-' not in arg for command in state.commands for arg in command)
+    assert all(b'private-' not in process.stdout + process.stderr for process in state.processes)
+
+
 def test_each_running_database_consumer_is_qualified_without_sql_or_credential_output(workload_database):
     api, state = workload_database
     assert qualify_workload(api, state) is None
