@@ -917,12 +917,23 @@ To prepare those shared inputs without an unprotected Kubernetes operation, run
 protected `nebius-rollout` with `operation=inspect` and
 `prepare_shared_inputs=true`. Its fixed gateway collector verifies the shared
 namespace and cluster identities against both inspection and the retained original
-management configuration. It reads only the shared ConfigMap, service Deployment,
+management configuration. It reads the shared ConfigMap, service Deployment,
 database/auth Secrets and namespace identities; it makes no Kubernetes writes.
 The gateway retains configuration/profile/public keyring, resource UIDs, database
 name, database CA and secret-store keys under the private
 `.loom/nebius-management/shared-input-observations/<observation_id>/` directory.
 It never copies the database administrator password, JWT keys or whole Secrets.
+The same snapshot additionally retains `pool-resources.json` for cutover input
+preparation: actual Deployments, CronJobs, StatefulSets, Services, ConfigMaps,
+Roles and RoleBindings in the configured shared/execution/build namespaces,
+their namespace identities and complete ClusterRole/ClusterRoleBinding lists.
+Only identity/version pins for fixed database Secrets and an identity/version/
+SHA256 pin for the fixed collector credential are recorded, not their contents.
+Collection count/size limits and missing pages fail closed. Typed list entries
+inherit omitted Kubernetes kind/version fields from their collection; conflicting
+types are rejected. The private resource snapshot is not atomic and grants no
+authority: the protected cutover must requalify the selected live resources and
+permissions. Do not publish its raw configuration, workload or RBAC documents.
 Only the observation UUID and candidate commit return to Actions. Ordinary
 inspection does not collect credentials. Select that private snapshot when
 preparing upgrade inputs; the upgrade still checks it against live consumers.
