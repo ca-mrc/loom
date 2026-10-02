@@ -15,6 +15,7 @@ from tests.ops.test_nebius_management_gateway import (
     bundle,
     diagnostic_operation,
     operation,
+    pool_operation,
     recovery_operation,
     recovery_report,
     refresh_operation,
@@ -45,7 +46,7 @@ def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
         assert len([name for name in result.namelist() if name.endswith(".whl")]) == 2
 
 
-@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation, refresh_operation])
+@pytest.mark.parametrize("metadata_factory", [upgrade_operation, diagnostic_operation, recovery_operation, refresh_operation, pool_operation])
 def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inputs(tmp_path, metadata_factory):
     import os
     import sys
@@ -74,6 +75,8 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     elif metadata_factory is refresh_operation:
         script = ('from scripts.ops.nebius_management_refresh_entry import load_refresh_inputs; '
                   'from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller; ') + script
+    elif metadata_factory is pool_operation:
+        script = 'from scripts.ops.nebius_pool_cutover_entry import execute_pool_cutover; ' + script
     result = subprocess.run([sys.executable, '-c', script], cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[2] / 'src')})
     assert result.returncode == 0, result.stderr
@@ -250,6 +253,30 @@ def test_unknown_or_misbound_result_never_retries_or_leaks(tmp_path, monkeypatch
     assert len(calls) == 1 and "private data" not in str(error.value)
 
 
+@pytest.mark.parametrize('case', ['legacy', 'global', 'foreign_schema'])
+def test_explicit_pool_rollback_cannot_dispatch_other_schema_or_claim_global_success(tmp_path, monkeypatch, case):
+    metadata = operation(tmp_path) if case == 'foreign_schema' else pool_operation(tmp_path)
+    files = bundle(tmp_path) | {'operation.json': json.dumps(metadata).encode()}
+    content = archive(files)
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        assert args[-1] == 'loom-nebius-pool-rollback-v1'
+        report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+        report.update(status='pool_cutover_completed', outcome=case, completion_sha256='a' * 64, acceptance_verified=False)
+        return subprocess.CompletedProcess(args, 0, json.dumps(report).encode(), b'private-marker')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    args = {'action': 'rollback', 'target': 'codex@host', 'key': Path('/private/key'), 'known_hosts': Path('/private/hosts')}
+    if case == 'legacy':
+        assert module().transfer(content, **args)['outcome'] == 'legacy'
+    else:
+        with pytest.raises(module().RolloutError):
+            module().transfer(content, **args)
+    assert len(calls) == (0 if case == 'foreign_schema' else 1)
+
+
 @pytest.mark.parametrize("case", ["clean", "dirty", "different_head", "not_integrated"])
 def test_source_must_be_exact_clean_and_integrated(tmp_path, monkeypatch, case):
     metadata = operation(tmp_path)
@@ -284,8 +311,10 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
     assert not any("SERVICE_ACCOUNT" in name for name in run["env"])
 
 
-@pytest.mark.parametrize("authority", ["initial", "diagnostic", "recovery", "refresh"])
-@pytest.mark.parametrize("action", ["preflight", "install"])
+@pytest.mark.parametrize('authority,action', [
+    (authority, action) for authority in ('initial', 'diagnostic', 'recovery', 'refresh', 'pool')
+    for action in ('preflight', 'install')
+] + [('pool', 'rollback')])
 def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action):
     import os
 
@@ -307,11 +336,15 @@ def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path
     if authority == 'refresh':
         assert selector['env']['NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON'] == '${{ vars.NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON }}'
         assert runner['env']['REFRESH_SSH_KEY'] == '${{ secrets.NEBIUS_MANAGEMENT_REFRESH_SSH_KEY }}'
+    if authority == 'pool':
+        assert selector['env']['NEBIUS_MANAGEMENT_POOL_OPERATION_JSON'] == '${{ vars.NEBIUS_MANAGEMENT_POOL_OPERATION_JSON }}'
+        assert runner['env']['POOL_SSH_KEY'] == '${{ secrets.NEBIUS_MANAGEMENT_POOL_SSH_KEY }}'
     original, probe = operation(tmp_path), diagnostic_operation(tmp_path)
     probe["source_sha"] = "d" * 40
     recovery = recovery_operation(tmp_path) | {"source_sha": "e" * 40}
     refresh = refresh_operation(tmp_path)
-    selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh}[authority]
+    pool = pool_operation(tmp_path)
+    selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh, 'pool': pool}[authority]
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # Fake only external executables; run the actual checked-in shell/Python
@@ -332,6 +365,7 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
         "NEBIUS_MANAGEMENT_OPERATION_JSON": json.dumps(original), "NEBIUS_MANAGEMENT_DIAGNOSTIC_OPERATION_JSON": json.dumps(probe),
         "NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON": json.dumps(recovery), "RECOVERY_SSH_KEY": "private-recovery-key",
         'NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON': json.dumps(refresh), 'REFRESH_SSH_KEY': 'private-refresh-key',
+        'NEBIUS_MANAGEMENT_POOL_OPERATION_JSON': json.dumps(pool), 'POOL_SSH_KEY': 'private-pool-key',
         "DEPLOY_SSH_KEY": "private-original-key", "DIAGNOSTIC_SSH_KEY": "private-diagnostic-key",
         "DEPLOY_KNOWN_HOSTS": "fixture-host", "LOOM_DEPLOY_SSH_TARGET": "fixture-target", "RUNNER_TEMP": str(tmp_path),
         "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": selected["source_sha"], "EXPECTED_ACTION": action,

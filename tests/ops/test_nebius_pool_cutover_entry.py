@@ -531,6 +531,33 @@ def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is
     assert opened == ['opened', 'closed'] and not parent.state_dir.exists()
 
 
+def test_protected_main_routes_pool_preflight_through_bound_operation(private_cutover, monkeypatch, capsys):
+    from contextlib import contextmanager
+
+    from scripts.ops import nebius_management_entry as management
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    metadata, _, _ = private_cutover
+    selected = entry.load_pool_cutover_inputs(metadata)
+    parent = CutoverAPI(selected.request)
+    parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    path = Path(metadata['inputs_path']).with_name('operation.json')
+    path.write_text(json.dumps(metadata))
+    path.chmod(0o600)
+
+    @contextmanager
+    def connect(context):
+        assert context == selected
+        yield parent
+
+    monkeypatch.setattr(entry, 'connected_pool_api', connect)
+    assert management.main(str(path), 'preflight') == 0
+    assert json.loads(capsys.readouterr().out) == {'status': 'preflight_qualified',
+        **{key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
+    assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
+
+
 def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
