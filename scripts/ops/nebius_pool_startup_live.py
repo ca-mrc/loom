@@ -17,10 +17,12 @@ from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_gateway_authority import (
     gateway_review_namespaces,
     review_gateway_rules,
+    subject_review_namespaces,
 )
+from scripts.ops.nebius_pool_legacy_authority import review_legacy_rules
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement_live import _patch_result
-from scripts.ops.nebius_pool_role_fencing import role_fence_documents
+from scripts.ops.nebius_pool_role_fencing import role_fence_documents, role_fence_review_scope
 from scripts.ops.nebius_pool_startup import (
     _observe_workloads,
     _startup_record,
@@ -64,13 +66,17 @@ class HTTPSPoolStartupAPI:
     def _qualify_retained_resources(self) -> None:
         """Mode-independent identity/permission proof shared with recovery."""
         from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
+        from scripts.ops.nebius_pool_role_restoration import restored_role_options
 
         parent = self.parent
-        roles = role_fence_documents(self.request.fencing)
-        for original in self.request.fencing.originals:
-            if not _matches(parent.fencing.read_role(_key(original)), roles[_key(original)], _uid(original)):
-                raise ValueError
-        parent.fencing.verify_readonly()
+        if restored_role_options(self.request, state=self.state, anchor=self.anchor) is None:
+            roles = role_fence_documents(self.request.fencing)
+            for original in self.request.fencing.originals:
+                if not _matches(parent.fencing.read_role(_key(original)), roles[_key(original)], _uid(original)):
+                    raise ValueError
+            parent.fencing.verify_readonly()
+        else:
+            self.qualify_legacy_roles()
         # Only an anchored gateway retirement can reduce installed authority.
         # All other resources retain their exact child receipt.
         authority_options = gateway_retirement_options(self.request, state=self.state, anchor=self.anchor)
@@ -84,6 +90,41 @@ class HTTPSPoolStartupAPI:
                 if (actual is None or _uid(actual) != item["uid"]
                         or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options)):
                     raise ValueError
+
+    def qualify_legacy_roles(self) -> None:
+        """Qualify anchored partial restoration without recursive gateway drain.
+
+        Every retained subject is reviewed in its own binding scope. Bracket
+        effective reviews with exact Role and journal readbacks; this neither
+        starts a workload nor proves that admission may reopen.
+        """
+        from scripts.ops.nebius_pool_role_restoration import restored_role_options
+
+        try:
+            self._scope()
+            options = restored_role_options(self.request, state=self.state, anchor=self.anchor)
+            if options is None:
+                raise ValueError
+            journal = _hash(self.state / 'role-restoration.json')
+            originals = {_key(row): row for row in self.request.fencing.originals}
+            actual = {key: self.parent.fencing.read_role(key) for key in originals}
+            for key, row in actual.items():
+                if not any(_matches(row, wanted, _uid(originals[key])) for wanted in options[key]):
+                    raise ValueError
+            bindings = [row for resource, kind in (('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))
+                for row in inventory_resources(self.parent._request, 'rbac.authorization.k8s.io/v1', resource, kind)]
+            migration = self.request.fencing.retirement.migration
+            for subject in role_fence_review_scope(self.request.fencing)[0]:
+                for namespace in subject_review_namespaces(migration, bindings, subject=subject):
+                    review_legacy_rules(self.parent.client, request=self.request.fencing, roles=actual,
+                        subject=subject, namespace=namespace)
+            if (actual != {key: self.parent.fencing.read_role(key) for key in originals}
+                    or options != restored_role_options(self.request, state=self.state, anchor=self.anchor)
+                    or journal != _hash(self.state / 'role-restoration.json')):
+                raise ValueError
+            self._scope()
+        except Exception:
+            raise ValueError('pool_legacy_roles_unqualified') from None
 
     def _started_workloads(self) -> dict[str, dict[str, Any]]:
         self._scope()

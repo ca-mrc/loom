@@ -16,28 +16,30 @@ from scripts.ops.nebius_pool_role_fencing import qualify_pool_reader_rules
 _Grant = tuple[str, str, str, str | None]
 
 
-def gateway_review_namespaces(request: PoolMigrationRequest, bindings: Sequence[dict[str, Any]]) -> tuple[str, ...]:
-    """Include foreign RoleBindings to the gateway or any of its actual groups."""
+def subject_review_namespaces(request: PoolMigrationRequest, bindings: Sequence[dict[str, Any]], *,
+                              subject: tuple[str, str]) -> tuple[str, ...]:
+    """Include foreign RoleBindings to this account or any of its actual groups."""
     try:
         manager = request.registration.binding.namespace
+        account_namespace, account = subject
         namespaces = {manager, *(target.namespace for target in request.guards),
             *(ns.name for row in request.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))}
-        identities = {'User': {f'system:serviceaccount:{manager}:loom-pool-gateway'},
-            'Group': {'system:serviceaccounts', 'system:serviceaccounts:' + manager, 'system:authenticated'}}
+        identities = {'User': {f'system:serviceaccount:{account_namespace}:{account}'},
+            'Group': {'system:serviceaccounts', 'system:serviceaccounts:' + account_namespace, 'system:authenticated'}}
         for binding in bindings:
             if binding['apiVersion'] != 'rbac.authorization.k8s.io/v1' or binding['kind'] not in {'RoleBinding', 'ClusterRoleBinding'}:
                 raise ValueError
             subjects = binding.get('subjects', [])
             if not isinstance(subjects, list) or len(subjects) > 1000:
                 raise ValueError
-            for subject in subjects:
-                kind, name = subject['kind'], subject['name']
+            for entry in subjects:
+                kind, name = entry['kind'], entry['name']
                 if kind == 'ServiceAccount':
-                    if subject.keys() - {'kind', 'name', 'namespace', 'apiGroup'} or subject.get('apiGroup', '') != '':
+                    if entry.keys() - {'kind', 'name', 'namespace', 'apiGroup'} or entry.get('apiGroup', '') != '':
                         raise ValueError
-                    relevant = (subject['namespace'], name) == (manager, 'loom-pool-gateway')
+                    relevant = (entry['namespace'], name) == (account_namespace, account)
                 elif kind in identities:
-                    if set(subject) != {'kind', 'name', 'apiGroup'} or subject['apiGroup'] != 'rbac.authorization.k8s.io':
+                    if set(entry) != {'kind', 'name', 'apiGroup'} or entry['apiGroup'] != 'rbac.authorization.k8s.io':
                         raise ValueError
                     relevant = name in identities[kind]
                 else:
@@ -48,6 +50,15 @@ def gateway_review_namespaces(request: PoolMigrationRequest, bindings: Sequence[
                         raise ValueError
                     namespaces.add(namespace)
         return tuple(sorted(namespaces))
+    except Exception:
+        raise ValueError('pool_subject_review_scope_unqualified') from None
+
+
+def gateway_review_namespaces(request: PoolMigrationRequest, bindings: Sequence[dict[str, Any]]) -> tuple[str, ...]:
+    """Preserve the gateway's fixed identity and namespace discovery contract."""
+    try:
+        return subject_review_namespaces(request, bindings,
+            subject=(request.registration.binding.namespace, 'loom-pool-gateway'))
     except Exception:
         raise ValueError('pool_gateway_review_scope_unqualified') from None
 

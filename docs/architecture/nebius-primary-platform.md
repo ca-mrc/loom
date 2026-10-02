@@ -2682,6 +2682,26 @@ Deployment generation after a spec update, not merely zero requested replicas.
 This stage grants no write role, starts no process and releases no intake guard;
 legacy permission restoration, restart and reopening remain separate prerequisites.
 
+Closed Role restoration follows completed stopped-template restoration. It
+restores only the exact retained participant Role rules and original annotation
+shape, removing the operation's role-fencing marker. UIDs, other metadata,
+bindings, gateway authority and all workload specs remain unchanged. Each update
+requires fresh revoked-machine, gateway effective-readonly and process/journal
+drain checks, with durable intent and UID/version/full-metadata/rules CAS. An
+unknown reply permits observation only; a definite rejection may prepare again.
+The child journal binds completed template recovery and exact before/after Role
+snapshots. Without that evidence, retained readers still require restricted Roles
+and their original read-only qualification. With it, readers accept only the
+recorded per-Role recovery projections and check effective permissions separately
+for every retained account and destination, including foreign namespaces with
+bindings to the account or its actual groups. The fixed participant binding map,
+not a union of all restored rights, defines each account's required grants.
+Harmless reader/discovery/self-inspection extras remain allowed; missing required
+grants, extra writes, credential/exec access and incomplete reviews fail closed.
+Exact Role and journal readbacks bracket these reviews. No workload starts and
+no admission guard is released: `pool_legacy_roles_restored_closed` still sets
+`legacy_restore_allowed` to false. Restart and reopening are separate phases.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

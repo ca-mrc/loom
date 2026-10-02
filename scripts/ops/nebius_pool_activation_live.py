@@ -28,6 +28,7 @@ from scripts.ops.nebius_pool_machine_retirement import (
 from scripts.ops.nebius_pool_migration import PoolGuardTarget
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_pool_retirement_live import _patch_result
+from scripts.ops.nebius_pool_role_restoration import _role_record, qualify_role_restoration
 from scripts.ops.nebius_pool_shutdown import _shutdown_record
 from scripts.ops.nebius_pool_startup import (
     _startup_record,
@@ -308,6 +309,46 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
 
     def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         return self._legacy_template_patch(key, before, desired, preview=False)
+
+    def read_legacy_role(self, key: str) -> dict[str, Any]:
+        self._scope()
+        return self.parent.fencing.read_role(key)
+
+    def _legacy_role_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            originals, reduced, targets, _, record = _role_record(self.request, state=self.state, anchor=self.anchor)
+            version = before['metadata']['resourceVersion']
+            if (record is None or key not in targets or not _matches(before, reduced[key], _uid(originals[key]))
+                    or _stable(desired) != targets[key]
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
+                        'before_resource_version': None if preview else version}):
+                raise ValueError
+            if qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            if _role_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(originals[key])},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/rules', 'value': before['rules']},
+                {'op': 'replace', 'path': '/rules', 'value': targets[key]['rules']},
+                {'op': 'replace', 'path': '/metadata/annotations', 'value': targets[key]['metadata']['annotations']}
+                    if 'annotations' in targets[key]['metadata'] else {'op': 'remove', 'path': '/metadata/annotations'}]
+            path = ('/apis/rbac.authorization.k8s.io/v1/namespaces/' + originals[key]['metadata']['namespace']
+                + '/roles/' + originals[key]['metadata']['name'])
+            with self.parent.client.stream('PATCH', path + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(originals[key]))
+        except Exception:
+            raise ValueError('pool_legacy_role_update_unconfirmed') from None
+
+    def preview_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._legacy_role_patch(key, before, desired, preview=True) else None
+
+    def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._legacy_role_patch(key, before, desired, preview=False)
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
