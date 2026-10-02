@@ -188,3 +188,47 @@ async def test_protected_publication_qualifies_application_builder_tools(builder
         context = entry.load_pool_cutover_inputs(metadata)
         with pytest.raises(entry.EntryError):
             await entry.qualify_pool_publication(context, http)
+
+
+@pytest.mark.timeout(420)
+def test_builder_complete_operation_retains_source_for_future_refresh(builder_cutover_inputs, monkeypatch):
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
+    from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from tests.ops.test_nebius_pool_activation_stage import ActivationAPI
+    from tests.ops.test_nebius_pool_operation import operation as compose_operation
+
+    operation, _, root, credentials = builder_cutover_inputs
+    context = load_pool_cutover_inputs(operation)
+    state = compose_operation.__wrapped__((context.request, context.tokens), Path(operation['state_dir']).parent, monkeypatch)
+    state.parent.state_dir = Path(operation['state_dir'])
+    state.parent.anchor_dir = Path(operation['anchor_dir'])
+    state.parent._source_credentials = credentials
+    for document in state.parent.documents.values():
+        document['metadata'].setdefault('resourceVersion', '1')
+    initialize = ActivationAPI.__init__
+
+    def initialize_at_retained_state(self, selected):
+        initialize(self, selected)
+        self.state = selected[3].state
+
+    monkeypatch.setattr(ActivationAPI, '__init__', initialize_at_retained_state)
+    result = state.run()
+    assert result['status'] == 'pool_cutover_completed' and result['outcome'] == 'global'
+    assert result['acceptance_verified'] is False
+    pool = load_completed_pool(PoolPredecessorV1(operation=operation,
+        completion_sha256=result['completion_sha256']), original=root)
+    assert pool.deployment.application_builder_machine_id is not None
+    assert pool.deployment.installation.applications.runtime.build.binding.source.source_bucket == (
+        root.deployment.installation.foundation.platform_config['buckets']['source'])
+    assert pool.deployment.pool_catalog_operation_id == context.inputs.installation.operation_id
+    before = {path: path.read_bytes() for path in pool.history}
+    target = render_refresh(ManagementRefreshRenderRequest(pool.deployment, pool.deployment, pool.active,
+        context.inputs.candidate, context.inputs.profile, root.upgrade.setup.repo_root)).deployment
+    volumes = {row['name']: row for row in target['spec']['template']['spec']['volumes']}
+    key = 'Secret:' + target['metadata']['namespace'] + ':' + volumes['application-source-credentials']['secret']['secretName']
+    assert json.loads(base64.b64decode(state.parent.resources.resources[key]['data']['credentials.json'])) == credentials
+    assert pool.active == pool.completion.workloads[_key(context.request.manager)]
+    assert {path: path.read_bytes() for path in before} == before
+    assert state.run() == result
