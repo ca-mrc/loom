@@ -3537,15 +3537,24 @@ async def test_materialization_e2e_bundle_upload_preserves_per_task_assets(
     assert payload == b"per-task payload\n"
 
 
-@pytest.mark.parametrize("solver_path", ["solution/solve.sh", "solution/other.sh", None])
-async def test_uploaded_solver_controls_oracle_admission(materialization_setup, solver_path):
+@pytest.mark.parametrize("solver_path,verifier", [
+    ("solution/solve.sh", "script"), ("solution/other.sh", "script"),
+    (None, "script"), ("solution/solve.sh/child", "script"), (None, "pytest"),
+])
+async def test_uploaded_solver_controls_oracle_admission(materialization_setup, solver_path, verifier):
     """Publishing without source-derived capability rejects a real Oracle bundle."""
     app, tokens, teams = materialization_setup
     archive = io.BytesIO()
     with tarfile.open(fileobj=io.BytesIO(_bundle_tar_bytes()), mode="r:gz") as original:
         with tarfile.open(fileobj=archive, mode="w:gz") as target:
             for member in original.getmembers():
-                target.addfile(member, original.extractfile(member))
+                content = original.extractfile(member).read()
+                if member.name.endswith("task.toml") and verifier == "pytest":
+                    content = content.replace(
+                        b'name = "script"\n\n[verifier.args]\nscript_path = "verifier/check.sh"',
+                        b'name = "pytest"',
+                    )
+                _add_tar_file(target, member.name, content)
             if solver_path is not None:
                 _add_tar_file(target, f"tasks/alpha/{solver_path}", b"#!/bin/sh\necho answer\n")
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -3568,10 +3577,26 @@ async def test_uploaded_solver_controls_oracle_admission(materialization_setup, 
         )
         if solver_path == "solution/solve.sh":
             await admission
+            assert task.tags == {"oracle_eligible": "true"}
         else:
             with pytest.raises(HTTPException, match="solution_solve_sh") as rejection:
                 await admission
             assert rejection.value.status_code == 400
+            assert task.tags == {"oracle_eligible": "false"}
+        # Simulate stale metadata in this disposable DB, then let the ordinary
+        # rebuild recompute it from the unchanged immutable uploaded archive.
+        task.tags = {"oracle_eligible": "false" if solver_path == "solution/solve.sh" else "true"}
+        await session.commit()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        rebuilt = await client.post(
+            f"/api/v1/tasksets/{task_set_id}/rebuild",
+            headers={"Authorization": f"Bearer {tokens['team_a']}"},
+        )
+    assert rebuilt.status_code == 202, rebuilt.text
+    await _run_materializer_once(app)
+    async with app.state.session_factory() as session:
+        task = (await session.scalars(select(Task).where(Task.task_set_id == task_set_id))).one()
+        assert task.tags == {"oracle_eligible": "true" if solver_path == "solution/solve.sh" else "false"}
 
 
 @pytest.mark.asyncio

@@ -152,6 +152,14 @@ Supported source types are `hf`, `git`, `https`, `jsonl-inline`, and
 `script` verifier. A bundle upload contains complete task directories and can
 use each task's own verifier.
 
+For uploaded bundles, materialization derives the `oracle_eligible` catalog
+tag from the presence of the regular file `solution/solve.sh` in each validated
+task directory. Oracle admission therefore works with a script verifier and
+continues to reject tasks without a reference solver, including uploaded pytest
+tasks. The tag is published with the task revision and recomputed on rebuild;
+existing TaskSets need a normal rebuild to acquire it. This declares solver
+availability, not solver correctness or support for additional runtime features.
+
 The intake and materializer reject absolute paths, traversal, symlinks,
 hardlinks, device entries, oversized manifests/bundles, quota overflow, and
 unexpected manifest fields. In the supported `internal_trusted` workload mode,
