@@ -22,6 +22,7 @@ from scripts.ops.nebius_pool_migration import (
     _proof,
     migration_contract,
 )
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_runtime import qualify_participant_actuators
 
 from loom.nebius_platform_render import digest
@@ -47,6 +48,7 @@ class PoolRetirementAPI(Protocol):
     def drained(self, key: str) -> bool: ...
 
 
+@pure_projection
 def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, Any]]:
     try:
         migration_contract(request.migration)

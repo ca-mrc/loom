@@ -2855,6 +2855,15 @@ or fencing installer against the changed templates. The parent instead qualifies
 the anchored child hashes, held guards, restricted roles, current effective rules
 and each exact stopped old or journaled new workload. It rechecks every frozen
 producer before further mutations, including partial replacement recovery.
+Pure input-derived migration contracts and manifests use bounded, single-entry
+reuse keyed by complete type-sensitive request snapshots. Nested input changes
+are requalified and returned documents are detached; this does not cache journal
+reads, cluster identities, effective permissions, database observations or write
+outcomes. Per-request transport scope checks compare the retained inputs and
+still read the live cluster and namespace identities on every check. Image
+admission continues to qualify against the current clock; collector settings
+come only from retained inputs and explicit defaults, never operator environment
+variables or local secret files.
 Kubernetes previews qualify defaults before UID/resource-version/spec-fenced
 updates; uncertain updates are observed, never retried. Immutable material and
 gateway resource creation retain the existing single-create journals. The

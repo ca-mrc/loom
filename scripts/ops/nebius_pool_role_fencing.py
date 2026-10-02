@@ -21,6 +21,7 @@ from scripts.ops.nebius_pool_platform_authority import (
     PoolPlatformAuthority,
     qualify_platform_authority,
 )
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import (
     PoolRetirementAPI,
     PoolRetirementRequest,
@@ -132,6 +133,7 @@ are not. A resolver that cannot enumerate effective rules cannot qualify cutover
         raise ValueError("pool_role_fence_effective_authority_unqualified") from None
 
 
+@pure_projection
 def role_fence_documents(request: PoolRoleFenceRequest) -> dict[str, dict[str, Any]]:
     try:
         role_fence_review_scope(request)  # Qualify subjects before any downtime.

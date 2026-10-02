@@ -32,6 +32,7 @@ from scripts.ops.nebius_pool_migration import (
     migration_contract,
 )
 from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import MARKER as RETIREMENT_MARKER
 from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_documents
 from scripts.ops.nebius_pool_role_fencing import (
@@ -48,6 +49,7 @@ from scripts.ops.nebius_pool_runtime import (
     wire_participant,
 )
 
+from loom.execution_image_admission import ImageAdmissionKeyring, verify_execution_image_admission
 from loom.nebius_platform_render import digest
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.pool_management.installation_render import render_gateway
@@ -101,6 +103,27 @@ class PoolCutoverAPI(Protocol):
 
 def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     """Generate targets from retained originals, never accept arbitrary manifests."""
+    qualify_cutover_image_admission(request)
+    return _cutover_documents(request)
+
+
+def qualify_cutover_image_admission(request: PoolCutoverRequest) -> None:
+    """Keep current-clock admission checks outside input-only manifest reuse."""
+    try:
+        keyring = ImageAdmissionKeyring.from_json(json.dumps(
+            request.fencing.retirement.migration.registration.spec.profiles.image_admission_keyring,
+            sort_keys=True, separators=(",", ":")))
+        for profile in request.profiles.values():
+            verify_execution_image_admission(profile.image_admission, keyring=keyring,
+                required_image_refs=[value for value in (profile.task_image_ref,
+                    profile.runtime_image_ref, profile.agent_image_ref) if value is not None])
+    except Exception:
+        raise ValueError("pool_participant_runtime_unqualified") from None
+
+
+@pure_projection
+def _cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
+    """Private input-derived projection; the public entry rechecks admission."""
     migration = request.fencing.retirement.migration
     PoolCollectorCredential.model_validate(request.collector_credential.model_dump())
     spec, binding = migration.registration.spec, migration.registration.binding

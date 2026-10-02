@@ -32,6 +32,7 @@ from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     _contract,
     cutover_documents,
+    qualify_cutover_image_admission,
     retained_cutover_workloads,
 )
 from scripts.ops.nebius_pool_material import machine_documents
@@ -43,6 +44,7 @@ from scripts.ops.nebius_pool_migration import (
 )
 from scripts.ops.nebius_pool_migration_guard import qualify_cutover_readiness_page
 from scripts.ops.nebius_pool_platform_authority import platform_controller_subjects
+from scripts.ops.nebius_pool_projection import _snapshot as _input_snapshot
 from scripts.ops.nebius_pool_retirement import (
     _closed,
     qualify_closed_workload_drain,
@@ -136,6 +138,10 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
         self.history = history
         self.binding = registration.binding
+        try:
+            self._input_snapshot: object = _input_snapshot(request)
+        except TypeError:
+            self._input_snapshot = None
         self.catalog = cutover_documents(request)
         self.contract_sha256 = digest(_contract(request, self.catalog))
         self.originals = {**retirement_documents(request.fencing.retirement), **self.catalog["producers"]}
@@ -166,8 +172,19 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             _snapshot(namespace)
 
     def _scope(self) -> None:
-        if self.contract_sha256 != digest(_contract(self.request, cutover_documents(self.request))):
+        # The contract is pure in these complete typed inputs. Comparing them
+        # avoids rendering every workload for each individual live GET. Never
+        # reuse the identity observation below or any journal/runtime evidence.
+        if self._input_snapshot is None:
+            unchanged = self.contract_sha256 == digest(_contract(self.request, cutover_documents(self.request)))
+        else:
+            try:
+                unchanged = self._input_snapshot == _input_snapshot(self.request)
+            except TypeError:
+                unchanged = False
+        if not unchanged:
             raise ValueError("pool cutover inputs changed")
+        qualify_cutover_image_admission(self.request)
         self.verify_identity(self.binding)
 
     def _approved(self, document: dict[str, Any], *, writing: bool = False) -> str:
