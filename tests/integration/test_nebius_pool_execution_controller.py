@@ -77,6 +77,16 @@ class SDKBoundary:
             "items": [copy.deepcopy(item) for item in self.pods
                 if item["metadata"]["ownerReferences"][0]["name"] == name]}, "V1PodList")
 
+    def read_namespaced_pod(self, name, namespace, **kwargs):
+        from kubernetes.client import ApiException
+
+        assert namespace == self.namespace.name and kwargs["_request_timeout"] == 20
+        self.reads.append("pod")
+        current = next((item for item in self.pods if item["metadata"]["name"] == name), None)
+        if current is None:
+            raise ApiException(status=404)
+        return self.deserialize(copy.deepcopy(current), "V1Pod")
+
 
 @asynccontextmanager
 async def connected(sessions, tmp_path, *, occupied_cpu=0):
