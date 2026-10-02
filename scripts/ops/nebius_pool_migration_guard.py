@@ -11,6 +11,7 @@ import copy
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import secrets
@@ -33,6 +34,11 @@ from scripts.ops.nebius_pool_migration import (
     PoolMigrationError,
     PoolMigrationRequest,
     migration_contract,
+)
+from scripts.ops.nebius_pool_runtime_settings import (
+    BOUND_POOL_SETTINGS_COMMAND,
+    PoolSettingsComponent,
+    expected_pool_runtime_settings,
 )
 from sqlalchemy.engine import make_url
 
@@ -650,6 +656,55 @@ class KubectlPoolGuardAPI:
                 raise ValueError
             selected[name] = _uid(node)
         return dict(sorted(selected.items()))
+
+    def qualify_runtime_pool_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                      expected: dict[str, Any]) -> None:
+        """Read effective settings and the exact registered participant token."""
+        try:
+            if (target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original['metadata']['namespace'], original['metadata']['name']
+            container, = original['spec']['template']['spec']['containers']
+            component: PoolSettingsComponent
+            if namespace == target.namespace and name in {'loom-control-plane', 'loom-service'}:
+                if container['name'] != name or (name == 'loom-control-plane' and original != target.controller):
+                    raise ValueError
+                component = 'controller' if name == 'loom-control-plane' else 'service'
+            elif (namespace == participant.execution_namespace.name and container['name'] == 'actuator'
+                    and name in {'loom-execution-actuator', *(row.target_id + '-actuator' for row in participant.targets)}):
+                component = 'actuator'
+            else:
+                raise ValueError
+            machine, = (row for row in self.request.registration.spec.machines if row.participant_id == target.participant_id)
+            wanted = expected_pool_runtime_settings(component, expected,
+                token_sha256=None if component == 'service' else machine.token_sha256)
+            if component == 'service':
+                if wanted['submission_source']['data_environment_id'] != str(participant.environment_id):
+                    raise ValueError
+            elif wanted['global_pool']['participant'] != participant.model_dump(mode='json'):
+                raise ValueError
+            self._qualify_runtime_settings(target, original=original, expected=expected, component=component, wanted=wanted)
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError('runtime_pool_settings') from None
+
+    def _qualify_runtime_settings(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
+                                  expected: dict[str, Any], component: PoolSettingsComponent,
+                                  wanted: dict[str, Any]) -> None:
+        """Fixed challenge inside the same qualified Pod before and after reads."""
+        before = self._runtime(target, original=original, expected=expected)
+        container, = original['spec']['template']['spec']['containers']
+        nonce = secrets.token_hex(32)
+        response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+        report = self._run(['exec', '-n', original['metadata']['namespace'], 'pod/' + before['metadata']['name'],
+            '-c', container['name'], '--', 'python', '-c', BOUND_POOL_SETTINGS_COMMAND, component, nonce, response])
+        if report != {'status': 'qualified'} or _uid(self._runtime(target, original=original, expected=expected)) != _uid(before):
+            raise ValueError
 
     def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any],
                                   expected: dict[str, Any] | None = None) -> None:

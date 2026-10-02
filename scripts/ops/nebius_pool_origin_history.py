@@ -32,6 +32,7 @@ from scripts.ops.nebius_pool_migration import (
     migration_contract,
 )
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
 from scripts.ops.nebius_pool_startup_database import (
     pool_startup_closed_sql,
     qualify_startup_closed_report,
@@ -272,3 +273,21 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 expected=expected)
         except Exception:
             raise PoolMigrationError("management_runtime_database") from None
+
+    def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
+        """The exact manager catalog must be readable by its real runtime loader."""
+        try:
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            checksum = hashlib.sha256(self.request.registration.spec.profiles.model_dump_json().encode()).hexdigest()
+            wanted = expected_pool_runtime_settings('manager', expected, catalog_sha256=checksum)
+            self._qualify_runtime_settings(self.target, original=self.target.controller, expected=expected,
+                component='manager', wanted=wanted)
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError('management_pool_settings') from None

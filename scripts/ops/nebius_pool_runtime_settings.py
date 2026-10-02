@@ -91,8 +91,6 @@ def expected_pool_runtime_settings(component: PoolSettingsComponent, workload: d
 # opens no database/network connection, and uses the same typed settings and
 # credential/catalog readers as the real processes. Failures are secret-free.
 BOUND_POOL_SETTINGS_COMMAND = '''import hashlib, hmac, json, os, stat, sys
-from loom.execution_image_admission import ImageAdmissionKeyring
-from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 
 def catalog_digest(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
@@ -108,6 +106,8 @@ def catalog_digest(path):
     return hashlib.sha256(payload).hexdigest()
 
 try:
+    from loom.execution_image_admission import ImageAdmissionKeyring
+    from loom_execution_capacity_collector.control_plane import read_owner_only_secret
     if len(sys.argv) != 4:
         raise ValueError()
     component = sys.argv[1]

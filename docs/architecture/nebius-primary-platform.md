@@ -2469,10 +2469,23 @@ UID, namespace/name, selector, container and ServiceAccount identity. They check
 current ReplicaSet/Pod lineage, readiness, loaded effective database settings and
 the unchanged pinned Secret reference; equivalent Kubernetes resource-quantity
 spellings do not cause false drift. Actuator probes additionally qualify direct
-telemetry against the current pool-node roster. Closure and all workload roots
+telemetry against the current pool-node roster. A second fixed challenge loads
+that image's real settings classes inside the qualified Pod and verifies the
+effective global participant binding, enabled controller scheduler/materializer,
+image-admission keyring, actuator target/builder configuration and shared API
+submission identity/runtime profile. It reads machine tokens through the normal
+current-UID-owned `0600` file reader and compares their hashes with the exact
+registered participant credential; no operator credential is substituted.
+The manager's settings must select the retained catalog path, and its normal
+profile loader must accept bytes matching the immutable installed catalog before
+and after loading. Only the role and fresh challenge enter exec arguments, and
+only a bounded qualification result leaves the Pod. Import, configuration and
+file errors emit no configuration or token values. These checks make no SQL or
+network request, issue no credential and open no admission.
+Closure and all workload roots
 are rechecked afterward. An unhealthy successor does not prevent constructing
 the independent recovery connection. This barrier is not a saved health receipt,
-proof of loaded global-pool settings or permission to activate admission.
+complete gateway/collector acceptance or permission to activate admission.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,

@@ -82,8 +82,8 @@ class HTTPSPoolStartupAPI:
         """Probe only completed, journal-selected successors under closed admission.
 
         This is one read-only runtime barrier, not a durable acceptance receipt.
-        Loaded global settings, gateway authority and fresh collector evidence
-        must also qualify before the protected caller can open the bound epoch.
+        Gateway authority and fresh collector evidence must also qualify before
+        the protected caller can open the bound epoch.
         Recovery connection construction deliberately does not call this method.
         """
         try:
@@ -92,6 +92,7 @@ class HTTPSPoolStartupAPI:
             parent, migration = self.parent, self.request.fencing.retirement.migration
             parent.history.qualify_binding(migration, self.request.manager)
             parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
+            parent.history.qualify_manager_pool_settings(expected=expected[_key(self.request.manager)])
             for target in migration.guards:
                 binding = target.database
                 if (binding is None or binding.actuator_credential_uid is None
@@ -106,6 +107,7 @@ class HTTPSPoolStartupAPI:
                     parent.guards.qualify_runtime_database(target, original=original, expected=expected[_key(original)],
                         credential_uid=binding.actuator_credential_uid if actuator else binding.credential_uid,
                         credential_resource_version=binding.actuator_credential_resource_version if actuator else binding.credential_resource_version)
+                    parent.guards.qualify_runtime_pool_settings(target, original=original, expected=expected[_key(original)])
                     if actuator:
                         parent.guards.qualify_runtime_telemetry(target, original=original, expected=expected[_key(original)])
             self.qualify_closed()
