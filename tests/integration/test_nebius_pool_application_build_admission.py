@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from uuid import uuid4
 
 import pytest
@@ -12,11 +12,11 @@ from sqlalchemy import select, update
 from loom.application_source_upload import ApplicationSourceUploadBindingV1
 from loom.db.nebius_application_build_schema import (
     NebiusApplicationBuild,
-    NebiusApplicationBuildAttempt,
 )
 from loom.db.nebius_pool_schema import NebiusPoolRequest
 from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom_execution_capacity_collector.contracts import CapacityPlacement
+from loom_service.application_management.build_dispatch import ApplicationBuildDispatch
 from loom_service.application_management.source_registry import ApplicationSourceRegistry
 from tests.execution_placement_fixtures import placement_fixture
 from tests.integration.test_nebius_application_build_registry import build_registry, verified
@@ -58,16 +58,7 @@ async def setup_application_pool(environment_registry, build_inputs, **kwargs):
     for owner in owners:
         source = await verified(sources, owner)
         build = await registry.create(principal=owner, upload_id=source.upload_id, idempotency_key="build")
-        async with factory() as session:
-            attempt = await session.get(NebiusApplicationBuildAttempt, (build.build_id, 1))
-            requests.append(PoolApplicationImagePrepareV1.model_validate({
-                "pool_id": participant.pool_id, "admission_epoch": participant.admission_epoch,
-                "participant_revision": participant.binding_revision, "target_id": "native",
-                "key": {"participant_id": participant.participant_id, "workload_kind": "application_image_build",
-                    "local_work_id": build.build_id, "generation": 1},
-                "origin": {"kind": "personal_build", "submission_id": build.build_id,
-                    "data_environment_id": participant.environment_id, "application": None},
-                "deadline_at": datetime.now(UTC) + timedelta(minutes=10), "build": attempt.claim_json}))
+        requests.append(await ApplicationBuildDispatch(registry, request_lifetime_seconds=600).freeze(build.build_id, attempt=1))
     return factory, principals, requests, profiles, observer, executions, tasks, registry
 
 
@@ -76,6 +67,24 @@ async def prepare_application(factory, principal, request, profiles):
 
     async with factory.begin() as session:
         return await prepare_application_image(session, principal, request, profiles=profiles)
+
+
+@pytest.mark.parametrize("damage", ["deadline", "unfrozen"])
+async def test_admission_requires_the_exact_committed_dispatch_request(environment_registry, build_inputs, damage):
+    from loom_service.pool_management.registry import PoolAdmissionError
+
+    factory, principals, apps, profiles, _, _, _, registry = await setup_application_pool(environment_registry, build_inputs)
+    request = apps[0]
+    if damage == "deadline":
+        request = request.model_copy(update={"deadline_at": request.deadline_at + timedelta(seconds=1)})
+    else:
+        owner = environment_registry[2][0]
+        build = await registry.create(principal=owner, upload_id=request.build.upload_id, idempotency_key="not-dispatched")
+        request = request.model_copy(update={"key": request.key.model_copy(update={"local_work_id": build.build_id}),
+            "origin": request.origin.model_copy(update={"submission_id": build.build_id}),
+            "build": request.build.model_copy(update={"build_id": build.build_id})})
+    with pytest.raises(PoolAdmissionError):
+        await prepare_application(factory, principals[0], request, profiles)
 
 
 async def test_concurrent_owner_and_task_builds_share_cap_without_reserving_idle_execution_capacity(environment_registry, build_inputs):
