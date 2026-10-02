@@ -10,18 +10,21 @@ import copy
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_ingress_stage import _copy_document, _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import _qualified_defaulted, _validate_record
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
-    _read_cutover_record,
-    cutover_documents,
+    _contract,
+    _cutover_documents,
+    _read_cutover_evidence,
+    qualify_cutover_image_admission,
 )
-from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_migration import _hash, migration_contract
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import retirement_documents, stopped_documents
 
 from loom.nebius_platform_render import digest
@@ -43,6 +46,31 @@ class PoolStartupAPI(PoolWorkloadReader, Protocol):
         ...
 
 
+class _StartupProjection(TypedDict):
+    documents: dict[str, Any]
+    originals: dict[str, dict[str, Any]]
+    stopped: dict[str, dict[str, Any]]
+    contract_sha256: str
+    migration_contract_sha256: str
+
+
+@pure_projection
+def _startup_projection(request: PoolCutoverRequest) -> _StartupProjection:
+    """Derive related expectations together, never read operational evidence.
+
+    Recovery repeatedly needs this whole bundle. Memoizing siblings separately
+    retraverses their shared installation for every ancestor of every phase.
+    The existing bounded memo still snapshots the complete raw typed request on
+    every call and returns detached documents. Clock admission stays outside.
+    """
+    documents = _cutover_documents(request)
+    return {'documents': documents,
+        'originals': {**retirement_documents(request.fencing.retirement), **documents['producers']},
+        'stopped': stopped_documents(request.fencing.retirement),
+        'contract_sha256': digest(_contract(request, documents)),
+        'migration_contract_sha256': digest(migration_contract(request.fencing.retirement.migration))}
+
+
 def closed_startup_documents(request: PoolCutoverRequest, *, state_dir: Path,
                              anchor_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Derive closed roots and fixed starts from complete immutable child evidence.
@@ -50,16 +78,20 @@ def closed_startup_documents(request: PoolCutoverRequest, *, state_dir: Path,
     Retired collectors and explicitly dormant foreign-target roots stay closed.
     The gateway identity comes from its created child receipt, never its name.
     """
-    documents = cutover_documents(request)
-    record = _read_cutover_record(request, documents, state_dir, anchor_dir)
+    qualify_cutover_image_admission(request)
+    projection = _startup_projection(request)
+    documents = projection['documents']
+    record = _read_cutover_evidence(request, documents, state_dir, anchor_dir,
+        contract_sha256=projection['contract_sha256'],
+        migration_contract_sha256=projection['migration_contract_sha256'])
     if (record is None or record["fenced"] is None
             or any(item["phase"] != "stopped" for group in ("producers", "runtime") for item in record[group].values())
             or any(phase != "staged" for phase in record["runtime_access"].values())
             or set(record["phases"]) != {"material", "configuration", "authority", "workload"}
             or any(checksum is None for checksum in record["phases"].values())):
         raise ValueError
-    originals = {**retirement_documents(request.fencing.retirement), **documents["producers"]}
-    closed = stopped_documents(request.fencing.retirement)
+    originals = projection['originals']
+    closed = _copy_document(projection['stopped'])
     closed.update({key: copy.deepcopy(item["expected"]) for key, item in record["runtime"].items()})
     for key, document in closed.items():
         document["metadata"]["uid"] = _uid(originals[key])
@@ -92,6 +124,10 @@ def closed_startup_documents(request: PoolCutoverRequest, *, state_dir: Path,
             raise ValueError
         target["spec"][field] = False if field == "suspend" else 1
         targets[key] = target
+    # Filesystem reads can release the GIL. Reject changed retained inputs even
+    # if the journal bytes still match the expectation captured at entry.
+    if _startup_projection(request) != projection:
+        raise ValueError('pool_startup_inputs_changed')
     return closed, targets
 
 

@@ -114,9 +114,14 @@ def stopped_document(request: PoolRetirementRequest, key: str) -> dict[str, Any]
 
 
 def _closed(request: PoolMigrationRequest, state: Path, anchor: Path) -> str:
+    return _read_closed_migration(request, state, anchor, contract_sha256=digest(migration_contract(request)))
+
+
+def _read_closed_migration(request: PoolMigrationRequest, state: Path, anchor: Path, *, contract_sha256: str) -> str:
+    """Read all closure evidence afresh against an input-derived expectation."""
     operation = str(request.registration.spec.operation_id)
     identity = {"schema": "loom.nebius-pool-migration.v1", "operation_id": operation,
-        "state_dir": str(state), "contract_sha256": digest(migration_contract(request))}
+        "state_dir": str(state), "contract_sha256": contract_sha256}
     if json.loads(private_state._private_read(anchor / (operation + ".json"))) != identity:
         raise ValueError
     record = json.loads(private_state._private_read(state / "migration.json", limit=4 * 1024**2))

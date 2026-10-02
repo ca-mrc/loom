@@ -34,7 +34,12 @@ from scripts.ops.nebius_pool_migration import (
 from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
 from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import MARKER as RETIREMENT_MARKER
-from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_documents
+from scripts.ops.nebius_pool_retirement import (
+    _closed,
+    _read_closed_migration,
+    retirement_documents,
+    stopped_documents,
+)
 from scripts.ops.nebius_pool_role_fencing import (
     PoolRoleFenceAPI,
     PoolRoleFenceRequest,
@@ -189,13 +194,25 @@ def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[st
 def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
                          state: Path, anchor: Path) -> dict[str, Any] | None:
     """The same anchored recovery validation serves preflight and mutation."""
+    return _read_cutover_evidence(request, documents, state, anchor,
+        contract_sha256=digest(_contract(request, documents)))
+
+
+def _read_cutover_evidence(request: PoolCutoverRequest, documents: dict[str, Any], state: Path, anchor: Path, *,
+                           contract_sha256: str, migration_contract_sha256: str | None = None) -> dict[str, Any] | None:
+    """Fresh private evidence; supplied expectations must come from pure rendering.
+
+    This is the shared reader, not a cache or a caller-selected authority. The
+    ordinary entry derives expectations above; startup derives the same values
+    with its other immutable targets in one complete typed-input projection.
+    """
     if (state != state.resolve() or anchor != anchor.resolve() or state == anchor
             or state in anchor.parents or anchor in state.parents):
         raise ValueError
     migration = request.fencing.retirement.migration
     operation = str(migration.registration.spec.operation_id)
     identity = {"schema": "loom.nebius-pool-cutover.v1", "operation_id": operation,
-        "state_dir": str(state), "contract_sha256": digest(_contract(request, documents))}
+        "state_dir": str(state), "contract_sha256": contract_sha256}
     marker, path = anchor / (operation + "-cutover.json"), state / "cutover.json"
     if not marker.exists() and not marker.is_symlink():
         if state.exists() or state.is_symlink():
@@ -226,7 +243,12 @@ def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
                 or set(record["fenced"]) != {"migration.json", "retirement.json", "role-fencing.json"}
                 or any(_hash(writer_state / name) != checksum for name, checksum in record["fenced"].items())):
             raise ValueError
-        _closed(migration, writer_state, writer_anchor)
+        if migration_contract_sha256 is None:
+            # Ordinary callers retain the original post-read requalification.
+            # Startup alone supplies its bundle and rechecks it before return.
+            _closed(migration, writer_state, writer_anchor)
+        else:
+            _read_closed_migration(migration, writer_state, writer_anchor, contract_sha256=migration_contract_sha256)
     elif (any(value != "prepared" for value in record["runtime_access"].values()) or record["phases"]
             or any(item["phase"] != "prepared" for item in record["runtime"].values())):
         raise ValueError
