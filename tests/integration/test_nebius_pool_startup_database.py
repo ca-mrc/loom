@@ -19,8 +19,9 @@ from loom.db.nebius_pool_schema import (
 from loom.db.schema import Token
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation, register_installation
-from tests.integration.test_nebius_pool_installation import installation
+from tests.integration.test_nebius_pool_installation import add_application_builder, installation
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
 
 def observe(url, spec, *, mode='closed'):
@@ -50,6 +51,43 @@ def observe(url, spec, *, mode='closed'):
     assert len(rows) == 1
     qualify(spec, rows[0][0])
     return rows[0][0]
+
+
+async def test_dedicated_builder_scope_survives_startup_and_qualified_retirement(sessions, build_inputs):
+    from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
+    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql, qualify_machine_retirement_report
+    from tests.integration.test_nebius_pool_activation_fence import read_sql
+
+    config, _ = installation()
+    config, builder, _ = add_application_builder(config, build_inputs[0].recipe)
+    spec = PoolInstallation.model_validate(config)
+    async with sessions.begin() as session:
+        await register_installation(session, spec)
+    url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    assert observe(url, spec)['qualified'] is True
+
+    async def scope(value):
+        async with sessions.begin() as session:
+            await session.execute(update(NebiusPoolMachine).where(NebiusPoolMachine.machine_id == builder).values(workload_scope=value))
+
+    await scope('environment')
+    with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified'):
+        observe(url, spec)
+    await scope('application_builder')
+    read_sql(url, fence_pool_activation_sql(spec))
+    assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='observe'))) == 'active'
+    await scope('environment')
+    with pytest.raises(psycopg.errors.RaiseException, match='retirement scope unqualified'):
+        read_sql(url, pool_machine_retirement_sql(spec, action='revoke'))
+    async with sessions() as session:
+        assert set(await session.scalars(select(NebiusPoolMachine.phase))) == {'active'}
+    await scope('application_builder')
+    assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='revoke'))) == 'revoked'
+    async with sessions() as session:
+        rows = list(await session.scalars(select(NebiusPoolMachine)))
+        assert all(row.phase == 'revoked' for row in rows)
+        assert {row.machine_id: row.workload_scope for row in rows} == {
+            row.machine_id: 'application_builder' if row.machine_id == builder else 'environment' for row in spec.machines}
 
 
 @pytest.mark.parametrize('mode', ['closed', 'global'])
