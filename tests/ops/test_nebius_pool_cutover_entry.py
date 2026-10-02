@@ -649,9 +649,11 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     monkeypatch.setattr(entry, 'qualify_pool_provider', provider_probe, raising=False)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_telemetry', telemetry_probe, raising=False)
     if damage:
-        with pytest.raises(EntryError):
+        with pytest.raises(EntryError) as error:
             with entry.connected_pool_readers(context):
                 pytest.fail('unqualified runtime received operator access')
+        if damage == 'telemetry':
+            assert str(error.value) == 'pool cutover runtime telemetry unqualified'
     else:
         with entry.connected_pool_readers(context):
             assert set(checked) == set(by_name)
