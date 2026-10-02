@@ -122,7 +122,7 @@ def qualify_source_schema(context: Path, *, expected_revision: str) -> None:
             raise BuildPreparationError("source migration inventory is unbounded or empty")
         parents: dict[str, tuple[str, ...]] = {}
         for path in paths:
-            if path.name == "__init__.py":
+            if path.name in {"__init__.py", ".gitkeep"}:
                 _output_path(context, path.relative_to(context).as_posix())
                 continue
             if path.suffix != ".py":
