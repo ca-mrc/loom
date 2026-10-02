@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
-from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import psycopg
@@ -152,6 +152,43 @@ async def test_fence_transaction_failure_leaves_original_authority_unchanged(ses
     assert qualify_pool_activation_report(spec, read_sql(url, pool_activation_state_sql(spec))) == 'closed'
 
 
+async def test_last_representable_revision_remains_fenceable(sessions, tmp_path):
+    from scripts.ops.nebius_pool_activation_database import (
+        fence_pool_activation_sql,
+        pool_activation_state_sql,
+        qualify_pool_activation_report,
+    )
+
+    prepared = await prepare_startup_capacity(sessions, tmp_path, 'revision_last_openable')
+    spec, _, environment, _, _, _, _ = prepared
+    url = environment['LOOM_POOL_GATEWAY_DB_URL']
+    assert (await open_pool(prepared, tmp_path)).returncode == 0
+    assert qualify_pool_activation_report(spec, read_sql(url, fence_pool_activation_sql(spec))) == 'fenced'
+    assert qualify_pool_activation_report(spec, read_sql(url, pool_activation_state_sql(spec))) == 'fenced'
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolBinding, spec.pool_id)).policy_revision == 9_007_199_254_740_991
+
+
+async def test_commit_failure_does_not_leave_pool_open(sessions, tmp_path):
+    from scripts.ops.nebius_pool_activation_database import (
+        pool_activation_state_sql,
+        qualify_pool_activation_report,
+    )
+
+    prepared = await prepare_startup_capacity(sessions, tmp_path)
+    spec, _, environment, _, _, _, _ = prepared
+    # Deferred failure exercises the real commit error, after UPDATE succeeded.
+    async with sessions.begin() as session:
+        await session.execute(text("""CREATE FUNCTION reject_open_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN RAISE EXCEPTION 'test commit failure'; END $$"""))
+        await session.execute(text("""CREATE CONSTRAINT TRIGGER reject_open_commit
+            AFTER UPDATE ON nebius_pool_bindings DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW WHEN (NEW.mode='global') EXECUTE FUNCTION reject_open_commit()"""))
+    result = await open_pool(prepared, tmp_path)
+    assert (result.returncode, result.stdout, result.stderr) == (1, b'', b'Pool activation unconfirmed; preserve recovery evidence\n')
+    assert qualify_pool_activation_report(spec, read_sql(environment['LOOM_POOL_GATEWAY_DB_URL'], pool_activation_state_sql(spec))) == 'closed'
+
+
 async def test_fence_after_committed_open_is_terminal_for_old_opening_challenge(sessions, tmp_path):
     from scripts.ops.nebius_pool_activation_database import (
         fence_pool_activation_sql,
@@ -200,14 +237,73 @@ async def test_old_operation_cannot_fence_reconfigured_or_unrelated_pool(session
     assert await state() == before
 
 
-async def test_revision_fence_preserves_existing_closed_mode_cleanup(sessions):
-    from tests.integration.test_nebius_pool_cleanup_journal import observed
+async def test_revision_fence_preserves_charged_effects_and_real_closed_mode_cleanup(sessions, tmp_path):
+    from scripts.ops.nebius_pool_activation_database import (
+        fence_pool_activation_sql,
+        qualify_pool_activation_report,
+    )
 
-    journal, principal, receipt, _ = await observed(sessions)
-    deletion = await journal.prepare_delete(principal, receipt.reservation_id, kind='Job')
-    async with sessions.begin() as session:
-        await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == principal.pool_id).values(
-            mode='closed', policy_revision=principal.policy_revision + 1))
-    principal = replace(principal, pool_mode='closed', policy_revision=principal.policy_revision + 1)
-    assert (await journal.dispatch_delete(principal, deletion.effect_id)).phase == 'dispatched'
-    assert (await journal.observe_delete(principal, deletion.effect_id)).phase == 'observed'
+    from loom.db.nebius_pool_schema import NebiusPoolRequest
+    from loom.nebius_pool_workload import PoolExecutionPrepareV1
+    from loom_execution_capacity_collector.contracts import CapacityPlacement
+    from loom_service.pool_management.auth import resolve_pool_machine
+    from loom_service.pool_management.gateway_journal import PoolGatewayJournal
+    from tests.execution_placement_fixtures import placement_fixture
+    from tests.integration.test_nebius_pool_control import action, operate
+    from tests.integration.test_nebius_pool_registry import prepare, publish_placement
+    from tests.integration.test_nebius_pool_stop_drain import (
+        accept_drain,
+        accept_stop,
+        drain_input,
+        stop_input,
+    )
+    from tests.unit.test_nebius_pool_execution_render import inputs
+
+    prepared = await prepare_startup_capacity(sessions, tmp_path, executable=True)
+    spec, tokens, environment, _, _, _, gateway = prepared
+    assert (await open_pool(prepared, tmp_path)).returncode == 0
+    participant = spec.participants[0]
+    owner_machine, = (row for row in spec.machines if row.participant_id == participant.participant_id)
+    observer_machine, = (row for row in spec.machines if row.role == 'observer')
+
+    async def principal(machine):
+        async with sessions() as session:
+            return await resolve_pool_machine(session, 'Bearer ' + tokens[machine.machine_id])
+
+    placement = placement_fixture(target_id=spec.node_group_id, parent_id='parent', quota_nodes=2,
+        node_cpu=4000, node_memory=8192, node_storage=32768)
+    del placement['quota_resources']['memory']
+    await publish_placement(sessions, await principal(observer_machine), CapacityPlacement.model_validate(placement))
+    _, body = inputs()
+    body.update(pool_id=spec.pool_id, key=body['key'] | {'participant_id': participant.participant_id},
+        origin=body['origin'] | {'data_environment_id': participant.environment_id})
+    request = PoolExecutionPrepareV1.model_validate(body)
+    owner, gateway_principal = await principal(owner_machine), await principal(gateway)
+    profiles = spec.profiles.profiles()
+    assert (await prepare(sessions, owner, request, profiles)).phase == 'reserved'
+    receipt = await operate(sessions, owner, action(request, activation=True), profiles=profiles)
+    journal = PoolGatewayJournal(sessions)
+    created = await journal.prepare_create(gateway_principal, receipt.reservation_id, kind='Job')
+    await journal.dispatch_create(gateway_principal, created.effect_id)
+    await journal.observe_create(gateway_principal, created.effect_id, uid=uuid4(), resource_version='11')
+    stop = (await stop_input(sessions, receipt)).model_copy(update={'grace_deadline_at': datetime.now(UTC)})
+    await accept_stop(sessions, owner, stop)
+    await accept_drain(sessions, owner, drain_input(stop))
+    deletion = await journal.prepare_delete(gateway_principal, receipt.reservation_id, kind='Job')
+
+    async def retained():
+        async with sessions() as session:
+            return (await session.scalar(text('SELECT jsonb_agg(to_jsonb(r) ORDER BY request_id) FROM nebius_pool_requests r')),
+                await session.scalar(text('SELECT jsonb_agg(to_jsonb(e) ORDER BY effect_id) FROM nebius_pool_effects e')))
+
+    before = await retained()
+    assert len(before[0]) == 1 and len(before[1]) == 2
+    assert qualify_pool_activation_report(spec, read_sql(environment['LOOM_POOL_GATEWAY_DB_URL'], fence_pool_activation_sql(spec))) == 'fenced'
+    assert await retained() == before
+    refreshed = await principal(gateway)
+    assert (refreshed.pool_mode, refreshed.policy_revision) == ('closed', spec.policy_revision + 1)
+    assert (await journal.dispatch_delete(refreshed, deletion.effect_id)).phase == 'dispatched'
+    assert (await journal.observe_delete(refreshed, deletion.effect_id)).phase == 'observed'
+    async with sessions() as session:
+        row = await session.get(NebiusPoolRequest, receipt.reservation_id)
+        assert row.phase == 'cleanup_intent' and row.cleanup_observation_id is None

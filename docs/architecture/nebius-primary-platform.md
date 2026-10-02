@@ -2526,10 +2526,25 @@ which is always rolled back; this is non-mutating qualification, not a SQL
 `READ ONLY` transaction. Pod/backend/credential identity and closed authority are
 rechecked afterward. The result is not a saved capacity grant: admission opening
 must requalify current evidence under its own locked transition.
+The internal fixed opening primitive repeats that qualification and changes only
+the exact `closed/R` registration to `global/R` in the same transaction. Token
+expiry and every connected observation's freshness are checked again at the SQL
+write, and a success report follows commit. The separate protected recovery SQL
+can observe the original, opened or fenced binding without a running gateway or
+runtime token. Its cancellation fence takes the same mutation lock and changes
+either `closed/R` or `global/R` to `closed/R+1`. Repeated fencing leaves that
+revision unchanged. The old opening challenge can never authorize admission after
+this fence, including when it was already waiting on the database lock. Opening
+requires room for this successor within the canonical-JSON integer range.
+Readback and fencing bind the exact installation, physical pool and immutable
+configuration; an unrelated revision or configuration is rejected. Neither
+cancellation nor readback releases charged requests, clears effects, releases
+local guards or restores legacy writers. A failed transport response is ambiguous
+and requires readback, not a repeated opening or fencing dispatch.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,
-admission opening, uncertain-write rollback and
+anchored opening/guard-release orchestration, uncertain-write rollback and
 durable refresh remain required before protected operational activation.
 
 Once runtime replacement starts, recovery must not replay the original retirement

@@ -1,8 +1,10 @@
-"""Fixed non-mutating capacity qualification through the installed gateway.
+"""Fixed capacity qualification and internal opening through the installed gateway.
 
 Reuse admission's exact registration, observation freshness and physical quota
-checks. Row/advisory locks use READ COMMITTED, not a SQL READ ONLY transaction;
-only fixed reads are performed, and the transaction is always rolled back.
+checks. Row/advisory locks use READ COMMITTED, not a SQL READ ONLY transaction.
+The probe always rolls back. The separate opening command repeats qualification
+in its own transaction and commits only the closed-to-global mode transition.
+Neither command exposes a caller-selected action or public activation endpoint.
 """
 from __future__ import annotations
 
@@ -29,13 +31,17 @@ def expected_startup_capacity(spec: PoolInstallation) -> dict[str, Any]:
         'installation_sha256': installation_sha256, 'registration_sha256': digest(registration)}
 
 
-BOUND_POOL_CAPACITY_COMMAND = '''import asyncio, hashlib, hmac, json, re, sys
+_BOUND_POOL_CAPACITY_BODY = '''import asyncio, hashlib, hmac, json, re, sys
 
-async def probe():
+async def probe(*, activate):
     if len(sys.argv) != 3 or any(re.fullmatch("[0-9a-f]{64}", value) is None for value in sys.argv[1:]):
         raise ValueError()
-    from sqlalchemy import func, select, text
+    from datetime import timedelta
+    from sqlalchemy import exists, func, select, text, update
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+    from loom.db.nebius_pool_schema import NebiusPoolBinding
+    from loom.db.schema import Token
+    from loom.pipeline.keys import MAX_SAFE_INTEGER
     from loom_execution_capacity_collector.control_plane import read_owner_only_secret
     from loom_service.pool_management.__main__ import PoolGatewaySettings
     from loom_service.pool_management.auth import authorize_pool_machine, resolve_pool_machine
@@ -71,19 +77,51 @@ async def probe():
                     json.dumps(actual, sort_keys=True, separators=(",", ":")).encode(), "sha256").hexdigest()
                 if not hmac.compare_digest(signature, sys.argv[2]):
                     raise ValueError()
+                if activate:
+                    if current.pool.policy_revision >= MAX_SAFE_INTEGER:
+                        raise ValueError()
+                    # Time can advance during qualification. Row locks retain
+                    # authority, but expiry/freshness must still hold at write.
+                    valid_token = exists(select(Token.token_hash).where(
+                        Token.token_hash == principal.token_hash,
+                        Token.issued_at <= func.clock_timestamp(),
+                        Token.expires_at > func.clock_timestamp(),
+                        Token.revoked_at.is_(None)))
+                    statement = update(NebiusPoolBinding).where(
+                        NebiusPoolBinding.pool_id == settings.pool_id,
+                        NebiusPoolBinding.mode == "closed",
+                        NebiusPoolBinding.policy_revision == current.pool.policy_revision,
+                        valid_token,
+                        *(func.clock_timestamp() <= item.observed_at + timedelta(
+                            seconds=item.policy.observation_max_age_seconds) for item in capacities.values()),
+                    ).values(mode="global").returning(NebiusPoolBinding.mode).execution_options(synchronize_session=False)
+                    if (await session.execute(statement)).scalar_one() != "global":
+                        raise ValueError()
+                    await session.commit()
+                    return {"status": "global"}
                 return {"status": "qualified"}
             finally:
                 await session.rollback()
     finally:
         await engine.dispose()
 
+'''
+
+
+def _command(*, activate: bool) -> str:
+    failure = "Pool activation unconfirmed; preserve recovery evidence" if activate else "Pool startup capacity unqualified"
+    return _BOUND_POOL_CAPACITY_BODY + f'''
 async def run():
     async with asyncio.timeout(25):
-        return await probe()
+        return await probe(activate={activate!r})
 
 try:
     print(json.dumps(asyncio.run(run())))
 except Exception:
-    print("Pool startup capacity unqualified", file=sys.stderr)
+    print({failure!r}, file=sys.stderr)
     raise SystemExit(1)
 '''
+
+
+BOUND_POOL_CAPACITY_COMMAND = _command(activate=False)
+BOUND_POOL_ACTIVATION_COMMAND = _command(activate=True)

@@ -36,12 +36,21 @@ from tests.integration.test_nebius_pool_observation_registry import (
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-async def prepare_startup_capacity(sessions, tmp_path, damage=None):
+async def prepare_startup_capacity(sessions, tmp_path, damage=None, *, executable=False):
     from scripts.ops.nebius_pool_startup_capacity import expected_startup_capacity
 
     config, tokens = installation()
+    if executable:
+        for profile in config['profiles']['execution']:
+            profile['runtime']['node_selector'] = dict(config['node_selector'])
+        for profile in config['profiles']['task_images']:
+            profile['target']['node_selector'] = dict(config['node_selector'])
     if damage == 'revision_exhausted':
-        config['policy_revision'] = 2**63 - 1
+        config['policy_revision'] = 2**53 - 1
+    elif damage == 'revision_last_openable':
+        config['policy_revision'] = 2**53 - 2
+    elif damage == 'expires_during_validation':
+        config['admission']['observation_max_age_seconds'] = 10
     spec = PoolInstallation.model_validate(config)
     async with sessions.begin() as session:
         await register_installation(session, spec)
@@ -129,3 +138,39 @@ async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gat
     assert await retained_state() == (('global', *before[1:]) if success and operation == 'activate' else before)
     assert hashlib.sha256(token.read_bytes()).hexdigest() == (
         hashlib.sha256(b'private-wrong-machine-token').hexdigest() if damage == 'wrong_token' else gateway.token_sha256)
+
+
+@pytest.mark.parametrize('expires', ['token', 'observation'])
+async def test_opening_rechecks_expiry_at_write_after_real_capacity_validation(sessions, tmp_path, expires):
+    from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_ACTIVATION_COMMAND
+
+    spec, _, environment, _, nonce, signature, gateway = await prepare_startup_capacity(sessions, tmp_path, 'expires_during_validation')
+    if expires == 'token':
+        async with sessions.begin() as session:
+            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(gateway.token_sha256)).values(
+                expires_at=datetime.now(UTC) + timedelta(seconds=8)))
+    # A test-only pause occurs after the unmodified production capacity read.
+    # Its marker proves preflight succeeded while evidence was still current.
+    pause = f'''import asyncio
+from datetime import timedelta
+from sqlalchemy import select, func
+from loom.db.schema import Token
+from loom_service.pool_management import capacity
+original = capacity.read_connected_capacity
+async def delayed(session, pool_id, now):
+    result = await original(session, pool_id, now)
+    print("validated", flush=True)
+    current = result[pool_id]
+    deadline = current.observed_at + timedelta(seconds=current.policy.observation_max_age_seconds)
+    if {expires!r} == "token":
+        deadline = await session.scalar(select(Token.expires_at).where(Token.token_hash == bytes.fromhex({gateway.token_sha256!r})))
+    while await session.scalar(select(func.clock_timestamp())) <= deadline:
+        await asyncio.sleep(0.02)
+    return result
+capacity.read_connected_capacity = delayed
+'''
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', pause + BOUND_POOL_ACTIVATION_COMMAND, nonce, signature],
+        env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
+    assert (result.returncode, result.stdout, result.stderr) == (1, b'validated\n', b'Pool activation unconfirmed; preserve recovery evidence\n')
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolBinding, spec.pool_id)).mode == 'closed'
