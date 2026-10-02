@@ -528,8 +528,6 @@ class DockerDriver:
         # Idempotent. Only running→stopped is a real transition; calling stop()
         # from 'constructed' leaves state intact so start() can still fire.
         await self._teardown(delete=delete)
-        if self._state == "running":
-            self._state = "stopped"
 
     async def resource_snapshot(self) -> DriverResourceSnapshot | None:
         """Read one bounded Docker stats observation before container removal."""
@@ -561,6 +559,10 @@ class DockerDriver:
         wants to keep the stopped container around for inspection).
         Skipping it saves ~10s per test in the docker-tier suite.
         """
+        # Close admission before the first await. A late exec_start below also
+        # checks this state before registering any reader or returning a handle.
+        if self._state == "running":
+            self._state = "stopped"
         readers = dict(self._stream_readers)
         for stop_reader in readers.values():
             stop_reader()
@@ -711,6 +713,7 @@ class DockerDriver:
 
         exec_info = await asyncio.to_thread(api.exec_create, **exec_create_kwargs)
         exec_id = exec_info["Id"]
+        self._require_running()
 
         # `exec_start(stream=True, demux=True)` returns a SYNC generator of
         # (stdout_chunk, stderr_chunk) tuples (either side may be None for
@@ -721,6 +724,10 @@ class DockerDriver:
             stream=True,
             demux=True,
         )
+        if self._state != "running":
+            with contextlib.suppress(Exception):
+                raw_stream.close()
+            raise DriverNotStartedError("DockerDriver stopped during stream startup")
 
         loop = asyncio.get_running_loop()
         stdout_buffer = _DockerOutputBuffer(loop)
