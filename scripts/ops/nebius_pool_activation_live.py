@@ -398,6 +398,45 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         return self._legacy_restart_patch(key, before, desired, preview=False)
 
+    def qualify_legacy_runtimes(self) -> None:
+        """Fresh runtime proof behind recovery guards, never an opening receipt."""
+        try:
+            def observe() -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+                self.verify_retained()
+                record = _restart_record(self.request, state=self.state, anchor=self.anchor)[-1]
+                if record is None or any(row['phase'] != 'started' for row in record['workloads'].values()):
+                    raise ValueError
+                return observe_recovery_workloads(self.request, self, state=self.state, anchor=self.anchor), record
+
+            expected, record = observe()
+            if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            parent, migration = self.parent, self.request.fencing.retirement.migration
+            parent.history.qualify_binding(migration, self.request.manager)
+            parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
+            parent.history.qualify_manager_legacy_settings(expected=expected[_key(self.request.manager)])
+            for target in migration.guards:
+                binding = target.database
+                if (binding is None or binding.actuator_credential_uid is None
+                        or binding.actuator_credential_resource_version is None):
+                    raise ValueError
+                participant, = (row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+                service, = (row for row in self.request.services if row['metadata']['namespace'] == target.namespace)
+                actuators = tuple(row for row in self.request.fencing.retirement.actuators
+                    if row['metadata']['namespace'] == participant.execution_namespace.name)
+                for original in (target.controller, service, *actuators):
+                    actuator = original['metadata']['namespace'] != target.namespace
+                    parent.guards.qualify_runtime_database(target, original=original, expected=expected[_key(original)],
+                        credential_uid=binding.actuator_credential_uid if actuator else binding.credential_uid,
+                        credential_resource_version=binding.actuator_credential_resource_version if actuator else binding.credential_resource_version)
+                    parent.guards.qualify_runtime_legacy_settings(target, original=original, expected=expected[_key(original)])
+                    if actuator:
+                        parent.guards.qualify_runtime_telemetry(target, original=original, expected=expected[_key(original)])
+            if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None or observe()[1] != record:
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_legacy_runtimes_unqualified') from None
+
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
         if record is None:

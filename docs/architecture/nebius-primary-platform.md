@@ -2723,6 +2723,12 @@ catalog. Actual typed runtime loaders answer a fresh challenge without printing
 settings or credentials. Retained Pod identity/readiness is checked before and
 after each probe, and the original spec cannot be substituted. These read-only
 primitives neither release an admission guard nor authorize a rollback by themselves.
+The closed restart runtime barrier consumes only a completed, anchored restart,
+then probes the actual retained manager and every participant's controller,
+service and active actuator. It checks their backend and legacy settings, plus
+actuator telemetry, with recovery closure and exact workload/journal readbacks
+before and after. Dormant roots and the stopped gateway are not started or probed
+as active legacy consumers. Guard reopening still requires its own parent phase.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

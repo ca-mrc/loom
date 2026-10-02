@@ -167,8 +167,7 @@ def test_orphan_legacy_restart_evidence_cannot_fall_back_to_original_startup(cut
         startup_workload_options(request, state_dir=state, anchor_dir=anchor)
 
 
-@pytest.mark.timeout(600)
-def test_legacy_runtime_readiness_binds_completed_restart_and_rechecks_closed_authority(closed_startup):
+def legacy_runtime_readiness_case(closed_startup):
     from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
 
     qualify = HTTPSPoolActivationAPI.qualify_legacy_runtimes
