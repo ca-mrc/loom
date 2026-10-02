@@ -6,10 +6,15 @@ from uuid import uuid4
 
 import psycopg
 import pytest
-from sqlalchemy import insert, update
+from sqlalchemy import insert, select, update
 from sqlalchemy.engine import make_url
 
-from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
+from loom.db.nebius_pool_schema import (
+    NebiusPoolBinding,
+    NebiusPoolMachine,
+    NebiusPoolParticipant,
+    NebiusPoolRequest,
+)
 from loom.db.schema import Token
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation, register_installation
@@ -17,15 +22,24 @@ from tests.integration.test_nebius_pool_installation import installation
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-def observe(url, spec):
+def observe(url, spec, *, mode='closed'):
     from scripts.ops.nebius_pool_startup_database import (
         pool_startup_closed_sql,
         qualify_startup_closed_report,
     )
 
+    query, qualify = pool_startup_closed_sql, qualify_startup_closed_report
+    if mode == 'global':
+        from scripts.ops.nebius_pool_startup_database import (
+            pool_active_authority_sql,
+            qualify_active_authority_report,
+        )
+
+        query, qualify = pool_active_authority_sql, qualify_active_authority_report
+
     with psycopg.connect(make_url(url).set(drivername='postgresql').render_as_string(hide_password=False), autocommit=True) as connection:
         with connection.cursor() as cursor:
-            cursor.execute(pool_startup_closed_sql(spec), prepare=False)
+            cursor.execute(query(spec), prepare=False)
             rows = []
             while True:
                 if cursor.description:
@@ -33,21 +47,24 @@ def observe(url, spec):
                 if not cursor.nextset():
                     break
     assert len(rows) == 1
-    qualify_startup_closed_report(spec, rows[0][0])
+    qualify(spec, rows[0][0])
     return rows[0][0]
 
 
+@pytest.mark.parametrize('mode', ['closed', 'global'])
 @pytest.mark.parametrize('damage', [None, 'missing', 'mode', 'epoch', 'binding', 'participant',
     'participant_binding', 'machine_epoch', 'machine_revoked', 'foreign_machine', 'token_revoked', 'token_expired', 'token_scope'])
-async def test_startup_reads_exact_closed_pool_and_live_machine_authority(sessions, damage):
+async def test_registration_reader_requires_its_exact_pool_mode_and_machine_authority(sessions, damage, mode):
     config, _ = installation()
     spec = PoolInstallation.model_validate(config)
     if damage != 'missing':
         async with sessions.begin() as session:
             await register_installation(session, spec)
     async with sessions.begin() as session:
+        if mode == 'global':
+            await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(mode='global'))
         if damage in {'mode', 'epoch', 'binding'}:
-            values = ({'mode': 'global'} if damage == 'mode' else {'admission_epoch': spec.admission_epoch + 1} if damage == 'epoch'
+            values = ({'mode': 'global' if mode == 'closed' else 'closed'} if damage == 'mode' else {'admission_epoch': spec.admission_epoch + 1} if damage == 'epoch'
                 else {'binding_sha256': '0' * 64, 'policy_revision': spec.policy_revision + 1})
             await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(**values))
         elif damage in {'participant', 'participant_binding'}:
@@ -65,14 +82,40 @@ async def test_startup_reads_exact_closed_pool_and_live_machine_authority(sessio
             await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(spec.machines[0].token_sha256)).values(**values))
     url = sessions.kw['bind'].url.render_as_string(hide_password=False)
     if damage:
-        with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified'):
-            observe(url, spec)
+        with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified' if mode == 'closed' else 'pool_active_authority_unqualified'):
+            observe(url, spec, mode=mode)
     else:
-        first = observe(url, spec)
-        assert observe(url, spec) == first
-        assert first == {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+        first = observe(url, spec, mode=mode)
+        assert observe(url, spec, mode=mode) == first
+        assert first == {'schema': 'loom.pool-startup-closed.v1' if mode == 'closed' else 'loom.pool-active-authority.v1', 'operation_id': str(spec.operation_id),
             'installation_sha256': digest(spec.model_dump(mode='json')),
             'read_only': True, 'qualified': True}
         # Observing startup leaves the original registration exactly replayable.
-        async with sessions.begin() as session:
-            assert (await register_installation(session, spec))['mode'] == 'closed'
+        if mode == 'closed':
+            async with sessions.begin() as session:
+                assert (await register_installation(session, spec))['mode'] == 'closed'
+
+
+@pytest.mark.parametrize('phase', ['waiting', 'reserved', 'active'])
+async def test_active_authority_allows_unfinished_work_without_changing_it(sessions, tmp_path, phase):
+    from tests.integration.test_nebius_pool_control import action, operate
+    from tests.integration.test_nebius_pool_recovery_drain import request_setup
+
+    spec, url, principal, request = await request_setup(sessions, tmp_path, waiting=phase == 'waiting')
+    if phase == 'active':
+        receipt = await operate(sessions, await principal('participant'), action(request, activation=True),
+            profiles=spec.profiles.profiles())
+        assert receipt.phase == 'active'
+
+    async def snapshot():
+        async with sessions() as session:
+            return [list((await session.execute(select(model.__table__))).mappings())
+                for model in (NebiusPoolRequest, NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine, Token)]
+
+    before = await snapshot()
+    assert len(before[0]) == 1 and before[0][0]['phase'] == phase
+    assert observe(url, spec, mode='global')['qualified'] is True
+    assert await snapshot() == before
+    # This proof does not relax startup's closed-mode requirement.
+    with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified'):
+        observe(url, spec)

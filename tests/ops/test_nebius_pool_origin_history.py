@@ -89,35 +89,75 @@ def test_history_observer_binds_management_namespace_and_replays_only_reads(mana
     assert all(state.request.guards[0].namespace not in row for row in state.calls)
 
 
-@pytest.mark.parametrize('damage', [None, 'report', 'backend', 'credential', 'authority'])
-def test_startup_registration_observer_uses_exact_management_backend(management_history, damage):
+@pytest.mark.parametrize('damage', [None, 'report', 'backend', 'credential', 'authority', 'schema', 'truthy', 'extra'])
+@pytest.mark.parametrize('active', [False, True])
+def test_registration_observer_uses_exact_management_backend(management_history, damage, active):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
     from loom_service.pool_management.capacity import digest
 
     api, state = management_history
     spec = state.request.registration.spec
-    state.report = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+    state.report = {'schema': 'loom.pool-active-authority.v1' if active else 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
         'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}
     if damage == 'report':
         state.report['qualified'] = False
+    elif damage == 'schema':
+        state.report['schema'] = 'loom.pool-startup-closed.v1' if active else 'loom.pool-active-authority.v1'
+    elif damage == 'truthy':
+        state.report['qualified'] = 1
+    elif damage == 'extra':
+        state.report['unexpected'] = True
     elif damage == 'backend':
         state.after_drift = True
     elif damage == 'credential':
         state.secret['metadata']['resourceVersion'] = 'changed'
     elif damage == 'authority':
         api.kubeconfig.write_bytes(b'changed')
+    qualify = api.qualify_active_pool if active else api.qualify_closed_pool
     if damage:
         with pytest.raises(PoolMigrationError) as error:
-            api.qualify_closed_pool()
-        assert error.value.stage == 'startup_closed_registration'
+            qualify()
+        assert error.value.stage == ('active_pool_authority' if active else 'startup_closed_registration')
     else:
-        assert api.qualify_closed_pool() is None
-        assert api.qualify_closed_pool() is None
+        assert qualify() is None
+        assert qualify() is None
         commands = [row for row in state.calls if row[0] == 'exec']
         assert len(commands) == 2
         assert all(row[:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--'] for row in commands)
         assert all(state.request.guards[0].namespace not in row for row in state.calls)
+
+
+@pytest.mark.parametrize('damage', ['contract', 'target', 'authority', 'credential'])
+def test_active_pool_rechecks_authority_after_the_database_read(management_history, monkeypatch, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    from loom_service.pool_management.capacity import digest
+
+    api, state = management_history
+    spec = state.request.registration.spec
+    state.report = {'schema': 'loom.pool-active-authority.v1', 'operation_id': str(spec.operation_id),
+        'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}
+    original = api._run
+
+    def run(args):
+        result = original(args)
+        if args[0] == 'exec':
+            if damage == 'contract':
+                state.request.guards[0].controller['spec']['template']['metadata']['annotations'] = {'drift': 'true'}
+            elif damage == 'target':
+                api.target.controller['spec']['replicas'] = 0
+            elif damage == 'authority':
+                api.kubeconfig.write_bytes(b'changed-after-read')
+            else:
+                state.secret['metadata']['resourceVersion'] = 'changed-after-read'
+        return result
+
+    monkeypatch.setattr(api, '_run', run)
+    with pytest.raises(PoolMigrationError) as error:
+        api.qualify_active_pool()
+    assert error.value.stage == 'active_pool_authority'
+    assert sum(row[0] == 'exec' for row in state.calls) == 1
 
 
 @pytest.mark.parametrize('damage', [None, 'settings', 'pooled_settings', 'pod', 'secret', 'history', 'backend'])
