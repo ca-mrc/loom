@@ -272,7 +272,12 @@ plans; ordinary plan budgets remain unchanged. Preserve the settings on later
 publications while the installation uses this runtime.
 
 Deploy the matching candidate/profile and declared target through the normal
-idle guard. Before activating it, require a fresh owner capacity observation
+idle guard. For emulated authentication, first stage its distinct target with
+`NEBIUS_EMULATED_PKCS11_READY` unset or false. Bootstrap leaves the new target
+disabled, and the unchanged profile rejects authentication task admission.
+Qualify the installed guest before publishing the readiness opt-in; retain the
+target declaration on that publication and subsequent rollouts. Before
+activating it, require a fresh owner capacity observation
 whose `placement.target_scope` contains the owner and every registered sibling ID, observed guest actuator health,
 and installed capability/lifecycle qualification. Use the existing authenticated
 `POST /admin/service-execution/targets/{target_id}/health` API to change guest

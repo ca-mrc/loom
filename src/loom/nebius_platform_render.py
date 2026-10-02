@@ -1401,7 +1401,7 @@ def _build_platform(
         raise NebiusPlatformError("guest runtime readiness requires a distinct guest execution target")
     if guest_id is not None and (not execution_enabled or not validate_identity_policy(config)):
         raise NebiusPlatformError("guest execution requires the constrained private-root namespace policy")
-    if profile.get("supports_emulated_pkcs11", False) != (auth_id is not None):
+    if profile.get("supports_emulated_pkcs11", False) and auth_id is None:
         raise NebiusPlatformError("emulated authentication readiness requires its distinct guest target")
     if auth_id is not None and profile.get("guest_runtime") != "qemu-tcg-v1":
         raise NebiusPlatformError("emulated authentication requires the explicit guest runtime")

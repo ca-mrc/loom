@@ -35,6 +35,10 @@ cluster, general PKCS#11 or DPDK requirements remain admission rejections.
 Emulated authentication additionally requires the deployment profile's explicit
 `supports_emulated_pkcs11 = true`. Only a task declaring that capability selects
 the new class; enabling the profile does not rebind existing guest tasks.
+Its distinct target can be staged while this readiness flag is false or absent.
+Bootstrap registers that target disabled, and compilation continues to reject
+emulated-authentication tasks until the profile explicitly opts in. This permits
+installed qualification before enabling admission.
 
 Each sidecar carries `guest_execution` with schema
 `loom.guest-execution.v1`, runtime `qemu-tcg-v1`, and the sorted, unique declared
