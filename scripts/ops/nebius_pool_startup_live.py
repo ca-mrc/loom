@@ -98,6 +98,8 @@ class HTTPSPoolStartupAPI:
             parent.history.qualify_binding(migration, self.request.manager)
             parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
             parent.history.qualify_manager_pool_settings(expected=expected[_key(self.request.manager)])
+            gateway_key = 'Deployment:' + migration.registration.binding.namespace + ':loom-pool-gateway'
+            parent.history.qualify_gateway_runtime(original=self.closed[gateway_key], expected=expected[gateway_key])
             for target in migration.guards:
                 binding = target.database
                 if (binding is None or binding.actuator_credential_uid is None

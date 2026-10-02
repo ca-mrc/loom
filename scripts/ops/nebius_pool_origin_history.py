@@ -291,3 +291,48 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 raise ValueError
         except Exception:
             raise PoolMigrationError('management_pool_settings') from None
+
+    def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
+        """Bind the journal's closed gateway child to its actual running settings.
+
+        The startup parent supplies the retained child identity, not an operator
+        manifest. This proves DB correspondence and machine material, not projected
+        Kubernetes connectivity or effective RBAC; those are separate barriers.
+        """
+        try:
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            spec = self.request.registration.spec
+            pod = original['spec']['template']['spec']
+            container, = pod['containers']
+            if (original['metadata']['namespace'] != self.target.namespace or original['metadata']['name'] != 'loom-pool-gateway'
+                    or type(original['spec'].get('replicas')) is not int or original['spec']['replicas'] != 0
+                    or pod.get('serviceAccountName') != 'loom-pool-gateway' or container['name'] != 'gateway'):
+                raise ValueError
+            gateway_db, = (row for row in container['env'] if row['name'] == 'LOOM_POOL_GATEWAY_DB_URL')
+            manager_container, = self.target.controller['spec']['template']['spec']['containers']
+            manager_db, = (row for row in manager_container['env'] if row['name'] == 'LOOM_SVC_DB_URL')
+            if gateway_db != {**manager_db, 'name': 'LOOM_POOL_GATEWAY_DB_URL'}:
+                raise ValueError
+            machine, = (row for row in spec.machines if row.role == 'gateway')
+            wanted = expected_pool_runtime_settings('gateway', expected, token_sha256=machine.token_sha256)
+            if ((wanted['pool_id'], wanted['installation_id'], wanted['machine_id'], wanted['admission_epoch'])
+                    != (str(spec.pool_id), str(spec.installation_id), str(machine.machine_id), spec.admission_epoch)):
+                raise ValueError
+            before_database = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
+            before = self._runtime(self.target, original=original, expected=expected)
+            binding = self.target.database
+            self._qualify_runtime_binding(self.target, original=original, expected=expected, component='gateway',
+                url_variable='LOOM_POOL_GATEWAY_DB_URL', database_variable='LOOM_SVC_DB_URL',
+                credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version)
+            self._qualify_runtime_settings(self.target, original=original, expected=expected, component='gateway', wanted=wanted)
+            if (_uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before_database)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError('gateway_runtime') from None

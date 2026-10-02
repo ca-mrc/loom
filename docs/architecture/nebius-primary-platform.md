@@ -2478,7 +2478,14 @@ current-UID-owned `0600` file reader and compares their hashes with the exact
 registered participant credential; no operator credential is substituted.
 The manager's settings must select the retained catalog path, and its normal
 profile loader must accept bytes matching the immutable installed catalog before
-and after loading. Only the role and fresh challenge enter exec arguments, and
+and after loading. The gateway has no running predecessor: its closed child UID
+comes from the completed startup journal, and only a replica-count change may
+separate it from the running template. Its real settings must select the registered
+pool, installation, machine and admission epoch, the exact owner-only machine
+token and the projected Kubernetes connection. Its effective database URL must
+resolve through the same retained management `service-url` Secret reference and
+qualified backend; participant credentials cannot substitute for that binding.
+Only the role and fresh challenge enter exec arguments, and
 only a bounded qualification result leaves the Pod. Import, configuration and
 file errors emit no configuration or token values. These checks make no SQL or
 network request, issue no credential and open no admission.
@@ -2486,6 +2493,16 @@ Closure and all workload roots
 are rechecked afterward. An unhealthy successor does not prevent constructing
 the independent recovery connection. This barrier is not a saved health receipt,
 complete gateway/collector acceptance or permission to activate admission.
+The separate gateway-authority barrier resolves effective permissions through
+nonpersisted SelfSubjectRulesReview requests with request-local gateway
+impersonation. It checks every operation namespace and any foreign RoleBinding
+namespace naming the account, equivalent user or its groups. Required permissions
+must match the fixed renderer; extra named-resource grants, wildcards, Secret
+access and unresolved rules are rejected. Ordinary self-inspection/discovery is
+allowed. No bearer is minted, no grant is changed, and no impersonation persists
+on the parent client. This proves effective authority, not that the running
+gateway's projected credentials can reach Kubernetes; that runtime connection
+still needs its own proof.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,

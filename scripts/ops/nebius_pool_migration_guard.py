@@ -96,6 +96,9 @@ try:
     elif sys.argv[1] == "actuator":
         from loom_execution_actuator.config import ExecutionActuatorSettings
         value = ExecutionActuatorSettings().db_url
+    elif sys.argv[1] == "gateway":
+        from loom_service.pool_management.__main__ import PoolGatewaySettings
+        value = PoolGatewaySettings().db_url
     else:
         raise ValueError()
     actual = hmac.new(bytes.fromhex(sys.argv[2]), value.encode(), "sha256").hexdigest()
@@ -492,9 +495,20 @@ class KubectlPoolGuardAPI:
                 raise ValueError
             _snapshot(current)
         selector = original["spec"]["selector"]
+        original_replicas = original['spec'].get('replicas')
+        if original_replicas == 0:
+            # Only the newly created closed gateway has no running predecessor.
+            # Its journal-selected start may change replicas, never its template.
+            started = copy.deepcopy(original)
+            started['spec']['replicas'] = 1
+            if (expected is None or isinstance(target, PoolGuardTarget)
+                    or namespace != self.request.registration.binding.namespace or name != 'loom-pool-gateway'
+                    or retained.get('serviceAccountName') != 'loom-pool-gateway'
+                    or retained['containers'][0]['name'] != 'gateway' or not _matches(workload, started, _uid(original))):
+                raise ValueError
         if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
                 or set(selector) != {"matchLabels"} or len(selector["matchLabels"]) != 1
-                or type(original["spec"].get("replicas")) is not int or original["spec"]["replicas"] != 1):
+                or type(original_replicas) is not int or original_replicas not in (0, 1)):
             raise ValueError
         label, = selector["matchLabels"]
         if label not in {"app", "app.kubernetes.io/name"} or selector["matchLabels"][label] != name:
@@ -768,8 +782,8 @@ class KubectlPoolGuardAPI:
                         credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url):
                 raise ValueError
         qualify_database_destination(url, target.namespace)
-        # CP/API use PostgresDsn; the actuator intentionally retains a str.
-        expected_url = url if component == "actuator" else str(PostgresDsn(url))
+        # CP/API use PostgresDsn; actuator/gateway intentionally retain a str.
+        expected_url = url if component in {"actuator", "gateway"} else str(PostgresDsn(url))
         nonce = secrets.token_hex(32)
         response = hmac.new(bytes.fromhex(nonce), expected_url.encode(), "sha256").hexdigest()
         report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
