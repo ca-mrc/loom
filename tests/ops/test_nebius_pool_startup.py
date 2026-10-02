@@ -170,3 +170,37 @@ def test_startup_cannot_resume_after_closed_parent_evidence_changes(closed_start
     with pytest.raises(ValueError):
         start(closed_startup)
     assert len(api.requests) == 12
+
+
+@pytest.mark.parametrize('outcome', ['before', 'after'])
+def test_recovery_selects_only_journaled_before_or_after_an_uncertain_start(closed_startup, outcome):
+    from scripts.ops.nebius_pool_cutover import retained_cutover_workloads
+
+    request, _, _, api, _, root = closed_startup
+    api.fail_key, api.failure = _key(request.manager), 'before'
+    assert start(closed_startup)['status'] == 'pending_startup_outcome'
+    # A delayed request may commit after the first read observed the old state.
+    if outcome == 'after':
+        api.documents[api.fail_key]['spec']['replicas'] = 1
+        api.documents[api.fail_key]['metadata']['resourceVersion'] = '100'
+    expected = retained_cutover_workloads(request, state_dir=root / 'cutover',
+        anchor_dir=root / 'cutover-anchor', observed=api.documents)
+    assert expected[api.fail_key]['spec']['replicas'] == (1 if outcome == 'after' else 0)
+    assert len(api.requests) == 1
+    api.documents[api.fail_key]['spec']['replicas'] = 2
+    with pytest.raises(ValueError):
+        retained_cutover_workloads(request, state_dir=root / 'cutover',
+            anchor_dir=root / 'cutover-anchor', observed=api.documents)
+    assert len(api.requests) == 1
+
+
+def test_closed_stage_cannot_replay_after_startup_intent_even_if_nothing_started(closed_startup):
+    request, tokens, closed, api, _, root = closed_startup
+    api.fail_key, api.failure = _key(request.manager), 'before'
+    assert start(closed_startup)['status'] == 'pending_startup_outcome'
+    prior_events = copy.deepcopy(closed.events)
+    evidence = (root / 'cutover/cutover.json').read_bytes()
+    with pytest.raises(ValueError):
+        run(request, tokens, closed, root)
+    assert closed.events == prior_events
+    assert (root / 'cutover/cutover.json').read_bytes() == evidence
