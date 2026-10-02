@@ -239,3 +239,26 @@ async def test_expired_consent_without_activation_cancels_reservation(environmen
         assert row.phase == "failed" and row.activated_json is None
         assert row.activation_json == consent.model_dump(mode="json")
         assert row.terminal_receipt_json["phase"] == "cancelled_unstarted"
+
+
+async def test_automatic_loop_reaches_second_owner_and_shutdown_leaves_no_lease(environment_registry, build_inputs, tmp_path):
+    async with setup_worker(environment_registry, build_inputs, tmp_path, max_nodes=3) as (factory, _, requests, _, worker, _):
+        running = asyncio.create_task(worker.run(concurrency=1, poll_seconds=1))
+        try:
+            async with asyncio.timeout(15):
+                while True:
+                    rows = [await saved(factory, request) for request in requests]
+                    if all(row.phase == "running" for row in rows):
+                        break
+                    if running.done():
+                        running.result()
+                    await asyncio.sleep(0.05)
+                assert worker.healthy
+                async with factory() as session:
+                    assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 2
+        finally:
+            running.cancel()
+            await asyncio.gather(running, return_exceptions=True)
+        assert not worker.healthy
+        stopped = [await saved(factory, request) for request in requests]
+        assert all(row.lease_token is None for row in stopped)
