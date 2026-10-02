@@ -262,3 +262,26 @@ async def test_automatic_loop_reaches_second_owner_and_shutdown_leaves_no_lease(
         assert not worker.healthy
         stopped = [await saved(factory, request) for request in requests]
         assert all(row.lease_token is None for row in stopped)
+
+
+async def test_explicit_concurrent_retry_runs_new_pool_generation_after_old_cleanup(environment_registry, build_inputs, tmp_path):
+    async with setup_worker(environment_registry, build_inputs, tmp_path) as (factory, registry, requests, _, worker, _):
+        request = requests[0]
+        owner, _ = environment_registry[2]
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        await registry.cancel(request.build.build_id, principal=owner, attempt=1)
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        with pytest.raises(ManagementError, match="application_build_cleanup_required"):
+            await registry.retry(request.build.build_id, principal=owner, attempt=1)
+        await cleanup(factory, request)
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        replies = await asyncio.gather(*(registry.retry(request.build.build_id, principal=owner, attempt=1) for _ in range(3)))
+        assert all(reply.attempt == 2 for reply in replies)
+        await worker.reconcile_once(request.build.build_id, attempt=2)
+        async with factory() as session:
+            old, new = [await session.get(NebiusApplicationBuildAttempt, (request.build.build_id, number)) for number in (1, 2)]
+            assert old.phase == "cancelled" and old.terminal_receipt_json["phase"] == "released"
+            assert new.phase == "running" and new.pool_request_json["key"]["generation"] == 2
+            assert new.grant_json["reservation_id"] != old.grant_json["reservation_id"]
+            rows = (await session.scalars(select(NebiusPoolRequest).order_by(NebiusPoolRequest.generation))).all()
+            assert [(row.generation, row.phase) for row in rows] == [(1, "released"), (2, "create_intent")]

@@ -1006,8 +1006,16 @@ frozen request requires a pool cancellation tombstone or cleanup receipt. SQL
 retains evidence and forbids a successor attempt before prior cleanup. Heartbeats
 run independently of external reads, cancellation drains in-flight work before
 releasing its lease, and bounded keyset polling avoids first-page starvation.
-This worker implementation does not itself configure management credentials,
-install its read-only role, expose an owner build endpoint, or qualify a deployment.
+Management-only `/api/v1/application-builds` accepts a verified `upload_id` and
+an idempotency header, not caller-selected images, target, recipe or priority.
+Owner/team-scoped status and generation-checked cancel/retry controls use the same
+retained build. Cancel records intent, not capacity release. Retry requires the
+previous attempt to be failed/cancelled with cleanup completed; its expected
+attempt number is the replay key, so a repeated retry cannot create two successors.
+The successor keeps the original source and recipe. These endpoints return 503
+without the explicitly configured build registry and are absent from personal
+application services. This implementation does not itself configure management
+credentials, install the read-only role, or qualify a deployable release.
 
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected

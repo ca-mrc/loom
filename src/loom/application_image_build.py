@@ -146,6 +146,24 @@ class ApplicationImageBuildBindingV1(BaseModel):
         return self
 
 
+class ApplicationImageBuildRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    upload_id: UUID
+
+    @model_validator(mode="after")
+    def _identity(self) -> Self:
+        if not self.upload_id.int:
+            raise ValueError("application source identity required")
+        return self
+
+
+class ApplicationImageBuildAttemptRequestV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    attempt: int = Field(gt=0, le=2**63 - 1, strict=True)
+
+
 class ApplicationImageBuildStatusV1(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 

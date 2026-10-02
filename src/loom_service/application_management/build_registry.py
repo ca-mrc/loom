@@ -85,14 +85,16 @@ class ApplicationBuildRegistry:
     def _scope(self, principal: AuthContext, *, mutation: bool = False) -> tuple[UUID, UUID]:
         return owner_identity(principal, mutation=mutation)
 
-    async def _owned(self, session: AsyncSession, build_id: UUID, principal: AuthContext) -> NebiusApplicationBuild:
-        owner, team = self._scope(principal)
-        row = await session.scalar(select(NebiusApplicationBuild).where(
+    async def _owned(self, session: AsyncSession, build_id: UUID, principal: AuthContext, *,
+                     mutation: bool = False, lock: bool = False) -> NebiusApplicationBuild:
+        owner, team = self._scope(principal, mutation=mutation)
+        query = select(NebiusApplicationBuild).where(
             NebiusApplicationBuild.build_id == build_id,
             NebiusApplicationBuild.owner_user_id == owner, NebiusApplicationBuild.owner_team_id == team,
             NebiusApplicationBuild.installation_id == self.binding.source.installation_id,
             NebiusApplicationBuild.data_environment_id == self.binding.source.data_environment_id,
-            NebiusApplicationBuild.cluster_id == self.binding.source.cluster_id))
+            NebiusApplicationBuild.cluster_id == self.binding.source.cluster_id)
+        row = await session.scalar(query.with_for_update() if lock else query)
         if row is None:
             raise ManagementError("application_build_forbidden", 403)
         return row
@@ -138,3 +140,53 @@ class ApplicationBuildRegistry:
     async def status(self, build_id: UUID, *, principal: AuthContext) -> ApplicationImageBuildStatusV1:
         async with self.session_factory() as session:
             return await self._view(session, await self._owned(session, build_id, principal))
+
+    @staticmethod
+    def _attempt(value: int) -> None:
+        if type(value) is not int or not 0 < value < 2**63:
+            raise ManagementError("invalid_application_build_attempt", 422)
+
+    async def cancel(self, build_id: UUID, *, principal: AuthContext, attempt: int) -> ApplicationImageBuildStatusV1:
+        """Record owner intent only; the worker still owes pool cancellation/cleanup."""
+        self._attempt(attempt)
+        async with self.session_factory.begin() as session:
+            row = await self._owned(session, build_id, principal, mutation=True, lock=True)
+            if row.current_attempt != attempt:
+                raise ManagementError("application_build_attempt_conflict")
+            saved = await session.get(NebiusApplicationBuildAttempt, (build_id, attempt), with_for_update=True)
+            if saved is None or saved.phase in {"ready", "failed"}:
+                raise ManagementError("application_build_already_terminal")
+            row.desired_state = "cancelled"
+            await session.flush()
+            return await self._view(session, row)
+
+    async def retry(self, build_id: UUID, *, principal: AuthContext, attempt: int) -> ApplicationImageBuildStatusV1:
+        """One explicit successor per expected generation, including lost-reply replay.
+
+        The expected attempt is the retry key: repeating it cannot increment a
+        second time. Source and recipe remain the original build's inputs.
+        """
+        self._attempt(attempt)
+        async with self.session_factory.begin() as session:
+            row = await self._owned(session, build_id, principal, mutation=True, lock=True)
+            if row.current_attempt == attempt + 1:
+                return await self._view(session, row)
+            if row.current_attempt != attempt or attempt == 2**63 - 1:
+                raise ManagementError("application_build_attempt_conflict")
+            saved = await session.get(NebiusApplicationBuildAttempt, (build_id, attempt), with_for_update=True)
+            if (saved is None or saved.phase not in {"failed", "cancelled"} or saved.lease_token is not None
+                    or (saved.pool_request_json is not None and (saved.terminal_receipt_json is None
+                        or saved.terminal_receipt_json.get("phase") not in {"released", "cancelled_unstarted"}))):
+                raise ManagementError("application_build_cleanup_required")
+            source = await session.get(NebiusApplicationSourceUpload, row.upload_id, with_for_update={"read": True})
+            try:
+                _, claim = retained_build_claim(row, saved, source)
+            except (ValueError, TypeError):
+                raise ManagementError("application_build_history_conflict") from None
+            row.current_attempt, row.desired_state = attempt + 1, "running"
+            await session.flush()  # SQL qualifies the previous terminal attempt.
+            payload = claim.model_copy(update={"attempt": row.current_attempt}).model_dump(mode="json")
+            session.add(NebiusApplicationBuildAttempt(build_id=build_id, attempt=row.current_attempt,
+                claim_json=payload, claim_sha256=canonical_digest(payload).removeprefix("sha256:"), phase="queued"))
+            await session.flush()
+            return await self._view(session, row)
