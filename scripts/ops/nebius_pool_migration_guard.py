@@ -37,6 +37,10 @@ from scripts.ops.nebius_pool_migration import (
     PoolMigrationRequest,
     migration_contract,
 )
+from scripts.ops.nebius_pool_recovery_database import (
+    participant_recovery_drain_sql,
+    qualify_participant_recovery_drain,
+)
 from scripts.ops.nebius_pool_runtime_settings import (
     BOUND_POOL_SETTINGS_COMMAND,
     PoolSettingsComponent,
@@ -1022,6 +1026,28 @@ class KubectlPoolGuardAPI:
             return status
         except Exception:
             raise PoolMigrationError("activation_guard") from None
+
+    def recovery_participant_drained(self, target: PoolGuardTarget) -> bool:
+        """Include unclaimed outboxes and result cleanup in one guarded snapshot."""
+        try:
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            operation, candidate = self.request.registration.spec.operation_id, self.request.registration.candidate['candidate_sha']
+            query = participant_recovery_drain_sql(operation, target.participant_id, candidate)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            drained = qualify_participant_recovery_drain(operation, target.participant_id, candidate, report)
+            if _uid(self._database(target)) != _uid(before):
+                raise ValueError
+            scope()
+            return drained
+        except Exception:
+            raise PoolMigrationError("recovery_participant_drain") from None
 
     def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]:
         """Read frozen schema/access/backlog through the exact retained DB Pod.

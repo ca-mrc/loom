@@ -41,6 +41,10 @@ from scripts.ops.nebius_pool_migration import (
     migration_contract,
 )
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_recovery_database import (
+    pool_recovery_drain_sql,
+    qualify_pool_recovery_drain,
+)
 from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
 from scripts.ops.nebius_pool_startup_capacity import (
     BOUND_POOL_ACTIVATION_COMMAND,
@@ -311,6 +315,27 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             return status
         except Exception:
             raise PoolMigrationError("activation_pool") from None
+
+    def recovery_pool_drained(self) -> bool:
+        """Read current journal drain, never trust gateway health or a saved zero."""
+        try:
+            def scope() -> None:
+                if (digest(migration_contract(self.request)) != self.contract_sha256
+                        or digest(_target_contract(self.target)) != self.history_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            spec = self.request.registration.spec
+            before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
+            report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", pool_recovery_drain_sql(spec)])
+            drained = qualify_pool_recovery_drain(spec, report)
+            if _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before):
+                raise ValueError
+            scope()
+            return drained
+        except Exception:
+            raise PoolMigrationError("recovery_pool_drain") from None
 
     def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
         """The exact manager catalog must be readable by its real runtime loader."""

@@ -112,11 +112,11 @@ def test_recovery_drain_reads_exact_retained_database_and_rejects_drift(manageme
     if scope == 'pool':
         report['installation_sha256'] = digest(spec.model_dump(mode='json'))
         state.report = report
-        run = lambda: api.recovery_pool_drained()
     else:
         report.update(participant_id=str(state.target.participant_id), candidate_sha=api.request.registration.candidate['candidate_sha'])
         state.exec_hook = lambda query: report
-        run = lambda: api.recovery_participant_drained(state.target)
+    def run():
+        return api.recovery_pool_drained() if scope == 'pool' else api.recovery_participant_drained(state.target)
     if damage == 'pending':
         report['counts'][next(iter(report['counts']))] = 1
     elif damage == 'backend':

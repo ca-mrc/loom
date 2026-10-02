@@ -2593,6 +2593,25 @@ Foreign markers and unanchored changes are rejected. Settled or never-dispatched
 startup rows require no metadata write. This barrier leaves Pod templates and
 running cleanup processes unchanged, does not prove process drain, and still
 withholds permission to restore legacy writers.
+
+Recovery also reads both sides of the existing handoff before successor shutdown.
+The retained management database must still have this operation's terminal
+revision fence and no waiting/reserved requests, active requests, uncertain
+CREATEs, or releases lacking their matching cleanup/output evidence. Each
+participant database must retain the exact recovery owner and candidate and have
+no active claims, execution/output cleanup, native build cleanup, or unfinished
+execution/build outbox. A selected outbox blocks even before any attempt or Pod
+exists; queued work without a handoff remains available for later admission.
+These fixed queries run in read-only snapshots through the retained PostgreSQL
+Pods. The connected recovery adapter requires the settled startup fence and
+rechecks retained authority and all local/global fences around the observations.
+It never persists a zero-count result as a reusable permission. Existing
+participant controllers cancel unstarted handoffs or finish result/output drain;
+the existing gateway verifies complete cleanup before releasing capacity. A lost
+CREATE followed by absence remains charged and pending, without redispatch or a
+fabricated rejection. This read-only barrier itself neither stops processes nor
+restores legacy writers.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

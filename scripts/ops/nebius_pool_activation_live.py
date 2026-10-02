@@ -66,6 +66,34 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def guard_state(self, participant: str) -> str:
         return self.parent.guards.activation_guard(self._guard(participant), 'observe')
 
+    def _recovery_fence(self) -> dict[str, Any]:
+        _, startup = _startup_record(self.request, state=self.state, anchor=self.anchor,
+            closed=self.closed, targets=self.targets)
+        _, record = _fence_record(self.request, state=self.state, anchor=self.anchor,
+            closed=self.closed, targets=self.targets, startup=startup)
+        if (record is None or any(row['phase'] != 'fenced' for row in record['workloads'].values())
+                or self.pool_state() != 'fenced' or any(self.guard_state(str(row.participant_id)) != 'fenced'
+                    for row in self.request.fencing.retirement.migration.guards)):
+            raise ValueError('pool_recovery_fence_unconfirmed')
+        return record
+
+    def recovery_drained(self) -> bool:
+        """Fresh closed-intake drain across both journals, not shutdown authority."""
+        try:
+            self.verify_retained()
+            before = self._recovery_fence()
+            # Check every participant even when the global ledger is still busy.
+            # No status is persisted, and no callback may mutate the journals.
+            results = [self.parent.history.recovery_pool_drained()]
+            results.extend(self.parent.guards.recovery_participant_drained(row)
+                for row in self.request.fencing.retirement.migration.guards)
+            self.verify_retained()
+            if self._recovery_fence() != before or any(type(value) is not bool for value in results):
+                raise ValueError
+            return all(results)
+        except Exception:
+            raise ValueError('pool_recovery_drain_unconfirmed') from None
+
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
         if record is None:
