@@ -990,6 +990,25 @@ new demand, but its existing request remains readable for cancellation and
 uncertain-reply reconciliation. Reading that record is not activation consent;
 the automatic worker and its activation/completion evidence are separate consumers.
 
+`ApplicationBuildWorker` drives that request through the common pool's existing
+prepare/status/activate and stop/drain APIs. The attempt journal uses database-time
+leases and runner epochs; stale workers cannot commit results. Each activation
+consent and each cleanup message is retained once before HTTP, so uncertain replies
+reconcile the same build attempt without extending consent or creating another
+Job. Its Kubernetes interface only reads the exact gateway-bound Job and Pods.
+Successful publication requires completed prepare/build/publish containers without
+restarts and the complete trusted publisher receipt for this owner/source/recipe.
+The attempt remains `settling` and charged until the common pool returns its
+authenticated cleanup receipt; only then can it become `ready`. Cancellation wins
+over a result observed afterward. Failed/cancelled attempts also retain their
+charge until cleanup; an unsubmitted cancellation needs no pool call, while any
+frozen request requires a pool cancellation tombstone or cleanup receipt. SQL
+retains evidence and forbids a successor attempt before prior cleanup. Heartbeats
+run independently of external reads, cancellation drains in-flight work before
+releasing its lease, and bounded keyset polling avoids first-page starvation.
+This worker implementation does not itself configure management credentials,
+install its read-only role, expose an owner build endpoint, or qualify a deployment.
+
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected
 participant/profile binding and cancellation state under the pool transaction.

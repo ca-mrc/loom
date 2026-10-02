@@ -1,4 +1,4 @@
-"""Retain owner source uploads and frozen build intent; no execution activation.
+"""Retain owner source uploads and cleanup-qualified common-pool application builds.
 
 Revision ID: 0173
 Revises: 0172
@@ -91,8 +91,22 @@ CREATE TABLE nebius_application_build_attempts (
     build_id uuid NOT NULL REFERENCES nebius_application_builds(build_id) ON DELETE RESTRICT,
     attempt bigint NOT NULL, claim_json jsonb NOT NULL, claim_sha256 text NOT NULL, phase text NOT NULL,
     pool_request_json jsonb, pool_request_sha256 text,
+    runner_epoch bigint NOT NULL DEFAULT 0, lease_token uuid, lease_expires_at timestamptz,
+    grant_json jsonb, activation_json jsonb, activated_json jsonb,
+    settlement_json jsonb, terminal_receipt_json jsonb,
     created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(build_id,attempt),
-    CONSTRAINT nebius_application_build_attempt_state_check CHECK (attempt > 0 AND phase = 'queued'),
+    CONSTRAINT nebius_application_build_attempt_state_check CHECK (
+        attempt > 0 AND phase IN ('queued','running','settling','ready','failed','cancelled')),
+    CONSTRAINT nebius_application_build_lease_check CHECK (
+        runner_epoch >= 0 AND ((lease_token IS NULL) = (lease_expires_at IS NULL)) AND
+        (lease_token IS NULL OR runner_epoch > 0)),
+    CONSTRAINT nebius_application_build_completion_check CHECK (
+        (phase <> 'running' OR activated_json IS NOT NULL) AND
+        (phase <> 'settling' OR settlement_json IS NOT NULL) AND
+        (phase NOT IN ('ready','failed','cancelled') OR lease_token IS NULL) AND
+        (phase NOT IN ('ready','failed','cancelled') OR pool_request_json IS NULL OR terminal_receipt_json IS NOT NULL) AND
+        (phase <> 'ready' OR COALESCE(terminal_receipt_json->>'phase' = 'released' AND
+            settlement_json->>'outcome' = 'ready' AND jsonb_typeof(settlement_json->'publication') = 'object', false))),
     CONSTRAINT nebius_application_build_attempt_input_check CHECK (
         claim_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(claim_json) = 'object' AND
         COALESCE(claim_json->>'build_id' = build_id::text AND (claim_json->>'attempt')::bigint = attempt, false)),
@@ -119,16 +133,27 @@ BEGIN
           NEW.current_attempt < OLD.current_attempt OR NEW.current_attempt > OLD.current_attempt + 1 THEN
         RAISE EXCEPTION 'application build identity is immutable' USING ERRCODE='23514';
     END IF;
+    IF TG_OP = 'UPDATE' AND NEW.current_attempt <> OLD.current_attempt AND NOT EXISTS (
+        SELECT 1 FROM nebius_application_build_attempts a WHERE a.build_id=OLD.build_id
+        AND a.attempt=OLD.current_attempt AND a.phase IN ('failed','cancelled')
+        AND a.lease_token IS NULL AND (a.pool_request_json IS NULL OR
+            a.terminal_receipt_json->>'phase' IN ('released','cancelled_unstarted'))) THEN
+        RAISE EXCEPTION 'application retry requires prior cleanup' USING ERRCODE='23514';
+    END IF;
     RETURN NEW;
 END $$;
 CREATE TRIGGER nebius_application_build_retain BEFORE INSERT OR UPDATE OR DELETE
     ON nebius_application_builds FOR EACH ROW EXECUTE FUNCTION retain_nebius_application_build();
 CREATE FUNCTION retain_nebius_application_build_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE field text;
 BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'application build attempt history is retained' USING ERRCODE='23514';
     ELSIF TG_OP = 'INSERT' THEN
-        IF NEW.phase <> 'queued' OR NEW.pool_request_json IS NOT NULL OR NEW.pool_request_sha256 IS NOT NULL OR NOT EXISTS (
+        IF NEW.phase <> 'queued' OR NEW.pool_request_json IS NOT NULL OR NEW.pool_request_sha256 IS NOT NULL OR
+           NEW.runner_epoch <> 0 OR NEW.lease_token IS NOT NULL OR NEW.lease_expires_at IS NOT NULL OR
+           NEW.grant_json IS NOT NULL OR NEW.activation_json IS NOT NULL OR NEW.activated_json IS NOT NULL OR
+           NEW.settlement_json IS NOT NULL OR NEW.terminal_receipt_json IS NOT NULL OR NOT EXISTS (
             SELECT 1 FROM nebius_application_builds b
             JOIN nebius_application_source_uploads s ON s.upload_id=b.upload_id
             WHERE b.build_id=NEW.build_id AND b.current_attempt=NEW.attempt
@@ -144,11 +169,32 @@ BEGIN
             RAISE EXCEPTION 'application build attempt requires retained identity' USING ERRCODE='23514';
         END IF;
     ELSE
-        IF (to_jsonb(OLD)-ARRAY['phase','pool_request_json','pool_request_sha256']) IS DISTINCT FROM
-           (to_jsonb(NEW)-ARRAY['phase','pool_request_json','pool_request_sha256']) OR
+        IF (to_jsonb(OLD)-ARRAY['phase','pool_request_json','pool_request_sha256','runner_epoch','lease_token',
+               'lease_expires_at','grant_json','activation_json','activated_json','settlement_json','terminal_receipt_json']) IS DISTINCT FROM
+           (to_jsonb(NEW)-ARRAY['phase','pool_request_json','pool_request_sha256','runner_epoch','lease_token',
+               'lease_expires_at','grant_json','activation_json','activated_json','settlement_json','terminal_receipt_json']) OR
            (OLD.pool_request_json IS NOT NULL AND ROW(OLD.pool_request_json,OLD.pool_request_sha256)
-                IS DISTINCT FROM ROW(NEW.pool_request_json,NEW.pool_request_sha256)) THEN
+                IS DISTINCT FROM ROW(NEW.pool_request_json,NEW.pool_request_sha256)) OR
+           NEW.runner_epoch < OLD.runner_epoch OR NEW.runner_epoch > OLD.runner_epoch + 1 OR
+           (OLD.phase IN ('ready','failed','cancelled') AND to_jsonb(OLD) IS DISTINCT FROM to_jsonb(NEW)) OR
+           (OLD.phase = 'running' AND NEW.phase = 'queued') OR
+           (OLD.phase = 'settling' AND NEW.phase IN ('queued','running')) THEN
             RAISE EXCEPTION 'application build attempt inputs are immutable' USING ERRCODE='23514';
+        END IF;
+        FOREACH field IN ARRAY ARRAY['grant_json','activation_json','activated_json','settlement_json','terminal_receipt_json'] LOOP
+            IF to_jsonb(OLD)->field <> 'null'::jsonb AND
+               to_jsonb(OLD)->field IS DISTINCT FROM to_jsonb(NEW)->field THEN
+                RAISE EXCEPTION 'application build evidence is immutable' USING ERRCODE='23514';
+            END IF;
+        END LOOP;
+        IF NEW.terminal_receipt_json IS NOT NULL AND NOT COALESCE(
+            NEW.terminal_receipt_json->>'phase' IN ('released','cancelled_unstarted'), false) THEN
+            RAISE EXCEPTION 'application build requires terminal pool receipt' USING ERRCODE='23514';
+        END IF;
+        IF NEW.phase = 'ready' AND NOT EXISTS (
+            SELECT 1 FROM nebius_application_builds b WHERE b.build_id=NEW.build_id
+            AND b.current_attempt=NEW.attempt AND b.desired_state='running') THEN
+            RAISE EXCEPTION 'cancelled application build cannot become ready' USING ERRCODE='23514';
         END IF;
         IF OLD.pool_request_json IS NULL AND NEW.pool_request_json IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM nebius_application_builds b

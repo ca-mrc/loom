@@ -32,10 +32,9 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 @asynccontextmanager
 async def setup_worker(environment_registry, build_inputs, tmp_path, *, lose_reply=None, **changes):
+    from loom_service.app import create_app
     from loom_service.application_management.build_journal import ApplicationBuildJournal
     from loom_service.application_management.build_worker import ApplicationBuildWorker
-
-    from loom_service.app import create_app
     from loom_service.config import LoomServiceSettings
 
     factory, principals, requests, profiles, _, _, _, registry = await setup_application_pool(
