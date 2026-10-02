@@ -119,12 +119,25 @@ rejection code remains `direct_completion_required`; do not interpret that code
 as a fallback or rewrite. Hosted APIs may reject the unsupported selection
 earlier with a user-facing availability message.
 
-The private-sandbox compiler is still `_compile_terminus_plan`, shared by
-Terminus-2 and Oracle. It takes the controller binding and native outputs from
-the spec. Extracting its platform-owned sandbox, verifier, guest and output
-construction into a harness-neutral planner is
-[#2296](https://github.com/qianyi-sun/loom/issues/2296). Until then, keep it as
-the single private-sandbox compiler.
+## Task-sandbox planner
+
+Every workspace harness compiles through one harness-neutral planner,
+`compile_task_sandbox_plan` in `src/loom/task_sandbox_planner.py`
+([#2296](https://github.com/qianyi-sun/loom/issues/2296)). Ownership is split three ways:
+
+| Owner | Responsibility |
+|---|---|
+| **Common planner** | Task and verifier sandbox sidecars, sockets, probes, task image, identities, resources and workdir; verification topology (shared in the live task sandbox, or separate with the deferred-plan contract); the existing QEMU guest extension (two guests colocated in one Job, payload reservation in the controller envelope); attaching the frozen effective network policy and task-egress contract from #2289; common outputs (task artifacts, trajectory, usage, workspace handoff, mutable paths, references, verifier and diagnostics). |
+| **Harness spec and controller** | The controller module, phase and image; private-input permission (`stages_solution`); harness-native outputs; the controller phase implementation and its trace validation. |
+| **Lifecycle scheduler** (not the planner) | Lease creation, fencing, retries and cleanup, and automatic deferred-verifier reservation (#2212). |
+
+`compile_service_execution_plan` resolves the harness spec, the effective
+network policy and the controller image, then passes them to the planner in a
+`TaskSandboxPlanRequest`. The planner never resolves harness names, re-reads
+the task's baseline network policy, or schedules leases; a test asserts that
+its code contains no harness names. Guest selection depends only on the task's
+declared guest capabilities and the deployment's guest runtime. Direct
+completion stays on its response-only compiler and never receives a sandbox.
 
 To add a workspace harness:
 
@@ -294,6 +307,8 @@ reward does not by itself satisfy this checklist.
 
 - Typed harness specifications and registry:
   `src/loom/hosted_harness.py`
+- Harness-neutral task-sandbox planner and deferred verifier plan shape:
+  `src/loom/task_sandbox_planner.py`
 - Plan compilation and hosted admission:
   `src/loom/service_execution_materialization.py`
 - Workload topology projected for admission:
