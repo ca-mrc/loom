@@ -990,10 +990,15 @@ and share the existing build-concurrency/resource accounting with task builds an
 execution. Cancelled or obsolete waiting builds no longer protect capacity from
 other work. The native Job wrapper retains the same reservation-specific name,
 absolute phase deadlines, credential isolation and rendered-Pod resource charge
-for both build kinds. This registry support is not an installed management worker.
+for both build kinds. The existing machine-only pool API transports this typed
+request. Gateway dispatch, retained native-runtime readback and the physical
+collector bind application Jobs to build ID/attempt and observed Job UID. Stop
+and output-drain use that same attempt; neither releases capacity without the
+existing gateway absence check. This support is not an installed management worker
+or an owner-facing build endpoint.
 
-Protected delivery of the credential/mount, the user-facing build command, global
-application-build dispatch/observation, image building, release qualification and installed
+Protected delivery of the credential/mount, the user-facing build command, the
+durable management worker, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.
 
 ### Stopped application completion

@@ -16,6 +16,11 @@ def qualify_native_observation(observed: dict[str, Any], runtime: PoolNativeRunt
             "app.kubernetes.io/component": "task-image-builder",
             "loom.materialization-id": str(runtime.receipt.request_key.local_work_id),
             "loom.lease-epoch": str(runtime.lease_epoch)}
+        if runtime.receipt.request_key.workload_kind == "application_image_build":
+            labels = {"app.kubernetes.io/managed-by": "loom-pool-gateway",
+                "app.kubernetes.io/component": "application-image-builder",
+                "loom.application-build-id": str(runtime.receipt.request_key.local_work_id),
+                "loom.build-attempt": str(runtime.lease_epoch)}
         annotations = {"loom.openai.com/target-id": runtime.target_id,
             "loom.nebius/pool-reservation-id": str(runtime.receipt.reservation_id),
             "loom.nebius/pool-plan-sha256": runtime.receipt.plan_sha256,

@@ -53,6 +53,16 @@ async def test_application_gateway_lost_reply_native_readback_capture_and_drain_
         effect = await journal.observe_create(gateway, effect.effect_id, uid=uuid4(), resource_version="1")
     runtime = await readback(factory, owner, receipt)
     assert runtime.job_effect_id == effect.effect_id and runtime.receipt.job_uid == effect.observed_uid
+    from copy import deepcopy
+
+    from loom_execution_actuator.pool_native_observation import qualify_native_observation
+
+    observed_job = deepcopy(effect.document)
+    observed_job["metadata"].update(uid=str(effect.observed_uid), resourceVersion="1")
+    qualify_native_observation(observed_job, runtime)
+    observed_job["metadata"]["labels"]["loom.build-attempt"] = "2"
+    with pytest.raises(ValueError):
+        qualify_native_observation(observed_job, runtime)
     capture = await capture_scope(factory, observer)
     job, = capture.scope.jobs
     assert job.workload_kind == "application_image_build" and job.generation == 1

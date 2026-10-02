@@ -60,7 +60,8 @@ class PoolCleanupJournal:
             admission_epoch=row.admission_epoch, request_sha256=row.request_sha256)
         if (stop.action != action or drain.action != action or row.stop_json["request_sha256"] != digest(stop.model_dump(mode="json"))
                 or drain.stop_sha256 != row.stop_json["request_sha256"]
-                or (row.workload_kind == "task_image_build" and drain.output_generation != drain.lease_generation)):
+                or (row.workload_kind in {"task_image_build", "application_image_build"}
+                    and drain.output_generation != drain.lease_generation)):
             raise PoolGatewayError
         effects = list((await session.scalars(select(NebiusPoolEffect).where(
             NebiusPoolEffect.request_id == row.request_id).order_by(NebiusPoolEffect.sequence))).all())

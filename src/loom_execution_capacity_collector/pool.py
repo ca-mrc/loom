@@ -53,7 +53,7 @@ class GatewayJobBinding(BaseModel):
     job_name: str = Field(min_length=1, max_length=253)
     job_uid: str = Field(min_length=1, max_length=253)
     target_id: _TargetId
-    workload_kind: Literal["trial", "verifier", "task_image_build"]
+    workload_kind: Literal["trial", "verifier", "task_image_build", "application_image_build"]
     lease_id: str = Field(min_length=1, max_length=160)
     generation: int = Field(gt=0, strict=True)
 
@@ -105,7 +105,7 @@ class PoolObservationScope(BaseModel):
                 raise ValueError("gateway Job has no matching environment incarnation")
             if job.target_id not in environment.target_ids:
                 raise ValueError("gateway Job has no matching environment-local target")
-            expected = (environment.build_namespace if job.workload_kind == "task_image_build"
+            expected = (environment.build_namespace if job.workload_kind in {"task_image_build", "application_image_build"}
                         else environment.execution_namespace)
             if job.namespace != expected:
                 raise ValueError("gateway Job namespace does not match workload scope")
@@ -165,15 +165,21 @@ class PoolPodClassifier:
             return None
         labels = getattr(pod.metadata, "labels", None) or {}
         annotations = getattr(pod.metadata, "annotations", None) or {}
-        native = labels.get("app.kubernetes.io/component") == "task-image-builder"
-        if native != (job.workload_kind == "task_image_build"):
+        component = labels.get("app.kubernetes.io/component")
+        task_build = component == "task-image-builder"
+        app_build = component == "application-image-builder"
+        if (task_build != (job.workload_kind == "task_image_build")
+                or app_build != (job.workload_kind == "application_image_build")):
             return None
         if annotations.get("loom.openai.com/target-id") != job.target_id:
             return None
         identity: object
-        if native:
+        if task_build:
             identity = "task-image:" + str(labels.get("loom.materialization-id", ""))
             generation = labels.get("loom.lease-epoch")
+        elif app_build:
+            identity = "application-image:" + str(labels.get("loom.application-build-id", ""))
+            generation = labels.get("loom.build-attempt")
         else:
             if labels.get("app.kubernetes.io/managed-by") != "loom-execution-actuator":
                 return None

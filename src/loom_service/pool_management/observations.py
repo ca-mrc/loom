@@ -22,6 +22,7 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolParticipantV1, PoolWorkloadKind
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.pipeline.keys import canonical_digest
@@ -134,29 +135,39 @@ async def issue_pool_capture(session: AsyncSession, principal: PoolPrincipal) ->
             jobs = []
             for row in requests:
                 participant = by_id[row.participant_id]
-                if row.workload_kind not in {"trial", "verifier", "task_image_build"}:
-                    raise PoolObservationError  # No application-build adapter yet.
+                if row.workload_kind not in {"trial", "verifier", "task_image_build", "application_image_build"}:
+                    raise PoolObservationError
                 if row.plan_json is None or _digest(row.plan_json) != row.plan_sha256:
                     raise PoolObservationError
                 metadata = row.plan_json["job"]["metadata"]
-                namespace = (participant.build_namespace if row.workload_kind == "task_image_build"
+                namespace = (participant.build_namespace if row.workload_kind in {"task_image_build", "application_image_build"}
                              else participant.execution_namespace)
                 if row.namespace_uid != namespace.uid or metadata["namespace"] != namespace.name:
                     raise PoolObservationError
                 participant.target(row.target_id, cast(PoolWorkloadKind, row.workload_kind))
                 generation = row.generation
+                prefix = ""
                 if row.workload_kind == "task_image_build":
+                    prefix = "task-image:"
                     request = PoolTaskImagePrepareV1.model_validate(row.request_json)
                     generation = request.build.expected_lease_epoch + 1
                     if (metadata["labels"]["loom.lease-epoch"] != str(generation)
                             or metadata["labels"]["loom.materialization-id"] != str(row.local_work_id)):
+                        raise PoolObservationError
+                elif row.workload_kind == "application_image_build":
+                    application = PoolApplicationImagePrepareV1.model_validate(row.request_json)
+                    generation = application.build.attempt
+                    prefix = "application-image:"
+                    if (generation != row.generation or application.build.build_id != row.local_work_id
+                            or metadata["labels"]["loom.build-attempt"] != str(generation)
+                            or metadata["labels"]["loom.application-build-id"] != str(row.local_work_id)):
                         raise PoolObservationError
                 jobs.append(GatewayJobBinding.model_validate({
                     "reservation_id": row.request_id, "environment_id": participant.environment_id,
                     "incarnation": participant.incarnation, "namespace": namespace.name,
                     "job_name": metadata["name"], "job_uid": str(row.job_uid), "target_id": row.target_id,
                     "workload_kind": row.workload_kind, "generation": generation,
-                    "lease_id": ("task-image:" if row.workload_kind == "task_image_build" else "") + str(row.local_work_id),
+                    "lease_id": prefix + str(row.local_work_id),
                 }))
             scope = PoolObservationScope(
                 node_selector=pool.binding_json["node_selector"],
