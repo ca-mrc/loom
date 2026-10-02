@@ -16,7 +16,11 @@ from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement_live import _patch_result
 from scripts.ops.nebius_pool_role_fencing import role_fence_documents
-from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
+from scripts.ops.nebius_pool_startup import (
+    _observe_workloads,
+    _startup_record,
+    closed_startup_documents,
+)
 
 
 class HTTPSPoolStartupAPI:
@@ -65,6 +69,49 @@ class HTTPSPoolStartupAPI:
             parent.history.qualify_closed_pool()
         except Exception:
             raise ValueError("pool_startup_live_closure_unqualified") from None
+
+    def _started_workloads(self) -> dict[str, dict[str, Any]]:
+        self._scope()
+        _, record = _startup_record(self.request, state=self.state, anchor=self.anchor,
+            closed=self.closed, targets=self.targets)
+        if record is None or any(item['phase'] != 'started' for item in record['workloads'].values()):
+            raise ValueError
+        return _observe_workloads(self, self.closed, self.targets, record)
+
+    def qualify_database_runtimes(self) -> None:
+        """Probe only completed, journal-selected successors under closed admission.
+
+        This is one read-only runtime barrier, not a durable acceptance receipt.
+        Loaded global settings, gateway authority and fresh collector evidence
+        must also qualify before the protected caller can open the bound epoch.
+        Recovery connection construction deliberately does not call this method.
+        """
+        try:
+            expected = self._started_workloads()
+            self.qualify_closed()
+            parent, migration = self.parent, self.request.fencing.retirement.migration
+            parent.history.qualify_binding(migration, self.request.manager)
+            parent.history.qualify_manager_database(expected=expected[_key(self.request.manager)])
+            for target in migration.guards:
+                binding = target.database
+                if (binding is None or binding.actuator_credential_uid is None
+                        or binding.actuator_credential_resource_version is None):
+                    raise ValueError
+                participant, = (row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+                service, = (row for row in self.request.services if row['metadata']['namespace'] == target.namespace)
+                actuators = tuple(row for row in self.request.fencing.retirement.actuators
+                    if row['metadata']['namespace'] == participant.execution_namespace.name)
+                for original in (target.controller, service, *actuators):
+                    actuator = original['metadata']['namespace'] != target.namespace
+                    parent.guards.qualify_runtime_database(target, original=original, expected=expected[_key(original)],
+                        credential_uid=binding.actuator_credential_uid if actuator else binding.credential_uid,
+                        credential_resource_version=binding.actuator_credential_resource_version if actuator else binding.credential_resource_version)
+                    if actuator:
+                        parent.guards.qualify_runtime_telemetry(target, original=original, expected=expected[_key(original)])
+            self.qualify_closed()
+            self._started_workloads()
+        except Exception:
+            raise ValueError('pool_startup_database_runtimes_unqualified') from None
 
     def _path(self, key: str) -> str:
         original = self.closed[key]

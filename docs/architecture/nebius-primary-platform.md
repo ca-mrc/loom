@@ -2442,6 +2442,13 @@ Startup changes only replicas or suspension, preserving the retained Pod templat
 Every write records its original resourceVersion before one compare-and-swap
 request. A lost reply permits exact readback only, never a retry; seeing the old
 replica count does not prove that a delayed request cannot still commit.
+The connected startup adapter reuses the parent's HTTPS and fixed SQL authority.
+It rechecks the closed registration, held local guards, restricted effective
+writer permissions and exact staged material/configuration/authority identities.
+Every persistent PATCH tests UID, resourceVersion and the complete current spec
+before changing the one replica/suspend field. Definite API rejection permits a
+fresh prepared attempt; ambiguous responses never do. Disposable Kubernetes tests
+cover server defaults, retained identities and a lost committed PATCH response.
 
 After startup intent exists, the old closed-stage mutation path refuses replay.
 Read-only writer inventory and database readers accept only the recorded before
@@ -2452,10 +2459,24 @@ check for the exact closed pool epoch, participant and machine roster, binding
 digests and current dedicated credentials. It rejects changed/revoked/expired
 authority rather than replaying registration to reset it. Backend and operator
 identity are rechecked around that read; no raw bearer appears in its report.
-This keeps recovery available; it is not runtime acceptance. The startup stage
+This keeps recovery available; it is not runtime acceptance. A separate read-only
+database-runtime barrier requires every startup write to have a settled `started`
+journal entry, then selects the exact recorded successor templates itself. It
+probes the manager's own backend and each participant controller, service and
+ordinary/guest actuator through their original database credential identities.
+The fixed probes allow only the expected replacement while retaining Deployment
+UID, namespace/name, selector, container and ServiceAccount identity. They check
+current ReplicaSet/Pod lineage, readiness, loaded effective database settings and
+the unchanged pinned Secret reference; equivalent Kubernetes resource-quantity
+spellings do not cause false drift. Actuator probes additionally qualify direct
+telemetry against the current pool-node roster. Closure and all workload roots
+are rechecked afterward. An unhealthy successor does not prevent constructing
+the independent recovery connection. This barrier is not a saved health receipt,
+proof of loaded global-pool settings or permission to activate admission.
+The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
-an independent deployment command. Connected live startup qualification,
-runtime/collector acceptance, admission opening, uncertain-write rollback and
+an independent deployment command. Complete runtime/collector acceptance,
+admission opening, uncertain-write rollback and
 durable refresh remain required before protected operational activation.
 
 Once runtime replacement starts, recovery must not replay the original retirement

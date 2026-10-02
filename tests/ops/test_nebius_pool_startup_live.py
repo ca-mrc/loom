@@ -13,17 +13,19 @@ from uuid import uuid4
 import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
+from tests.ops import test_nebius_pool_startup as startup_fixtures
 from tests.ops.test_nebius_pool_startup import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_startup import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_startup import (
     cutover_binding_inventory as cutover_binding_inventory,
 )
-from tests.ops.test_nebius_pool_startup import cutover_inputs as unbound_cutover_inputs
 from tests.ops.test_nebius_pool_startup import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_startup import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_startup import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_startup import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_startup import runtime_inputs as runtime_inputs
+
+unbound_cutover_inputs = startup_fixtures.cutover_inputs
 
 
 @pytest.fixture
