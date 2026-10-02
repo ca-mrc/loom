@@ -11,6 +11,11 @@ from typing import Any
 from scripts.ops.nebius_ingress_stage import _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import activation_record
+from scripts.ops.nebius_pool_machine_database import MachineRetirementState
+from scripts.ops.nebius_pool_machine_retirement import (
+    _machine_record,
+    qualify_machine_retirement_drain,
+)
 from scripts.ops.nebius_pool_migration import PoolGuardTarget
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_pool_retirement_live import _patch_result
@@ -149,6 +154,30 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 current=current, children=children, pods=pods)
         except Exception:
             raise ValueError('pool_successor_drain_unconfirmed') from None
+
+    def machine_authority(self) -> MachineRetirementState:
+        self._scope()
+        state = self.parent.history.machine_retirement('observe')
+        self._scope()
+        return state
+
+    def retire_machines(self) -> None:
+        try:
+            self._scope()
+            _, _, record = _machine_record(self.request, state=self.state, anchor=self.anchor)
+            if record is None or record['phase'] != 'intent':
+                raise ValueError
+            if qualify_machine_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            if _machine_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            if self.parent.history.machine_retirement('revoke') != 'revoked':
+                raise ValueError
+            self._scope()
+            if _machine_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_machine_retirement_update_unconfirmed') from None
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)

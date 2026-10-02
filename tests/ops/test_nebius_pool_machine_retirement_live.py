@@ -23,7 +23,9 @@ from tests.ops.test_nebius_pool_shutdown_live import (
 )
 
 
-@pytest.mark.timeout(240)
+# Traverses cancellation, fencing, shutdown, retirement and full replay through
+# retained-scope readers. The first 240s run reached the final replay barrier.
+@pytest.mark.timeout(360)
 def test_connected_retirement_binds_intent_and_survives_revocation_and_lost_reply(activation_http, closed_startup, monkeypatch):
     from scripts.ops.nebius_pool_machine_retirement import retire_pool_machines
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors

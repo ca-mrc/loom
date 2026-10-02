@@ -28,21 +28,10 @@ def _participant_scope(operation_id: UUID, participant_id: UUID, candidate: str)
         raise ValueError('pool_participant_drain_scope_unqualified')
 
 
-def pool_recovery_drain_sql(spec: PoolInstallation) -> str:
-    spec = PoolInstallation.model_validate(spec.model_dump())
-    return _header(read_only=True) + f"""DO $pool_recovery_binding$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM public.nebius_pool_bindings b
-        WHERE b.pool_id='{spec.pool_id}'::uuid AND b.mode='closed'
-        AND b.policy_revision={spec.policy_revision + 1}
-        AND to_jsonb(b)-'mode'-'policy_revision'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
-    THEN RAISE EXCEPTION 'pool recovery fence unqualified'; END IF;
-END $pool_recovery_binding$;
-WITH requests AS (SELECT * FROM public.nebius_pool_requests WHERE pool_id='{spec.pool_id}'::uuid)
-SELECT json_build_object('schema','loom.pool-recovery-drain.v1',
-    'operation_id','{spec.operation_id}','installation_sha256','{digest(spec.model_dump(mode='json'))}',
-    'read_only',current_setting('transaction_read_only')='on',
-    'counts',json_build_object(
+def _pool_drain_counts_sql(spec: PoolInstallation) -> str:
+    """Same counters for read-only drain and locked credential retirement."""
+    return f"""WITH requests AS (SELECT * FROM public.nebius_pool_requests WHERE pool_id='{spec.pool_id}'::uuid)
+SELECT jsonb_build_object(
         'unstarted_requests',(SELECT count(*) FROM requests WHERE phase IN ('waiting','reserved')),
         'active_requests',(SELECT count(*) FROM requests WHERE phase NOT IN ('waiting','reserved','released','cancelled_unstarted')),
         'unconfirmed_creates',(SELECT count(*) FROM public.nebius_pool_effects e JOIN requests r USING(request_id)
@@ -54,7 +43,23 @@ SELECT json_build_object('schema','loom.pool-recovery-drain.v1',
                 AND c.plan_sha256=r.plan_sha256 AND c.namespace_uid=r.namespace_uid
                 AND c.evidence_json->>'schema_version'='loom.pool-cleanup-evidence.v1'
                 AND c.evidence_json->>'stop_sha256'=r.stop_json->>'request_sha256'
-                AND r.drain_json->>'stop_sha256'=r.stop_json->>'request_sha256'))))) AS report;
+                AND r.drain_json->>'stop_sha256'=r.stop_json->>'request_sha256')))) AS counts"""
+
+
+def pool_recovery_drain_sql(spec: PoolInstallation) -> str:
+    spec = PoolInstallation.model_validate(spec.model_dump())
+    return _header(read_only=True) + f"""DO $pool_recovery_binding$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.nebius_pool_bindings b
+        WHERE b.pool_id='{spec.pool_id}'::uuid AND b.mode='closed'
+        AND b.policy_revision={spec.policy_revision + 1}
+        AND to_jsonb(b)-'mode'-'policy_revision'=convert_from(decode('{_binding_hex(spec)}','hex'),'UTF8')::jsonb)
+    THEN RAISE EXCEPTION 'pool recovery fence unqualified'; END IF;
+END $pool_recovery_binding$;
+SELECT json_build_object('schema','loom.pool-recovery-drain.v1',
+    'operation_id','{spec.operation_id}','installation_sha256','{digest(spec.model_dump(mode='json'))}',
+    'read_only',current_setting('transaction_read_only')='on', 'counts',drain.counts) AS report
+FROM ({_pool_drain_counts_sql(spec)}) drain;
 ROLLBACK;
 """
 

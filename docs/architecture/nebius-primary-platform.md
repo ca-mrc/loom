@@ -2631,6 +2631,24 @@ are rechecked afterward.
 This phase neither deletes resources nor revokes cleanup credentials, and still
 withholds legacy-restoration authority pending successor credential retirement.
 
+An anchored machine-retirement stage subsequently rechecks both journal drains
+and every successor's process inventory before one credential transaction. The
+transaction takes the existing global mutation lock and locks the exact retained
+binding, participants, machines, credential bindings and tokens in authentication
+order. It requires the terminal pool revision, exact installation roster and
+fresh global drain, then marks only those machines revoked and timestamps only
+their dedicated tokens. Expired originals can be retired without renewal. No
+history, credential binding, epoch or unrelated token is changed or deleted.
+Readback accepts only the exact all-active or all-revoked authority; partial,
+extra or foreign registrations are rejected. Revocation is atomic, emits only
+one identity-bound report, and invalidates both new authentication and retained
+principals at their next locked authorization boundary. A lost reply leaves the
+anchored intent observation-only. The protected adapter continues to use the
+retained management PostgreSQL backend and operator scope after revocation;
+it does not require a running gateway or its token. This stage still grants no
+legacy-restoration authority: gateway Kubernetes-role retirement and safe
+workload/role restoration remain separate prerequisites.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

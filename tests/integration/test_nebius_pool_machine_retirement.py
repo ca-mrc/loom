@@ -1,7 +1,9 @@
 """Recovery revokes only exact drained machine authority in real PostgreSQL."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import psycopg
 import pytest
@@ -87,6 +89,44 @@ async def test_retirement_transaction_failure_preserves_all_authority(sessions):
     with pytest.raises(psycopg.errors.DivisionByZero):
         read_sql(url, pool_machine_retirement_sql(spec, action='revoke').replace('COMMIT;', 'SELECT 1/0; COMMIT;'))
     assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='observe'))) == 'active'
+
+
+async def test_locked_authorizations_serialize_with_machine_retirement(sessions):
+    from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
+    from scripts.ops.nebius_pool_machine_database import (
+        pool_machine_retirement_sql,
+        qualify_machine_retirement_report,
+    )
+
+    spec, tokens, url = await registered(sessions)
+    read_sql(url, fence_pool_activation_sql(spec))
+    async with sessions() as session:
+        principal = await resolve_pool_machine(session, 'Bearer ' + next(iter(tokens.values())))
+    name = 'retire-' + uuid4().hex
+    pending = None
+    try:
+        async with sessions.begin() as holder:
+            await authorize_pool_machine(holder, principal, role=principal.role, pool_id=principal.pool_id,
+                participant_id=principal.participant_id)
+            pending = asyncio.create_task(asyncio.to_thread(read_sql, url,
+                pool_machine_retirement_sql(spec, action='revoke'), application_name=name))
+            async with asyncio.timeout(5):
+                while True:
+                    async with sessions() as inspect:
+                        waiting = await inspect.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                            "WHERE application_name=:name AND datname=current_database() AND wait_event_type='Lock')"), {'name': name})
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+            assert not pending.done()
+        assert qualify_machine_retirement_report(spec, await pending) == 'revoked'
+    finally:
+        if pending is not None:
+            await asyncio.gather(pending, return_exceptions=True)
+    async with sessions.begin() as session:
+        with pytest.raises(PoolAuthenticationError):
+            await authorize_pool_machine(session, principal, role=principal.role, pool_id=principal.pool_id,
+                participant_id=principal.participant_id)
 
 
 async def test_machine_retirement_transport_emits_only_one_safe_json_report(sessions):

@@ -33,6 +33,11 @@ from scripts.ops.nebius_pool_activation_database import (
     qualify_pool_activation_report,
 )
 from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
+from scripts.ops.nebius_pool_machine_database import (
+    MachineRetirementState,
+    pool_machine_retirement_sql,
+    qualify_machine_retirement_report,
+)
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -336,6 +341,29 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             return drained
         except Exception:
             raise PoolMigrationError("recovery_pool_drain") from None
+
+    def machine_retirement(self, action: Literal['observe', 'revoke']) -> MachineRetirementState:
+        """Fixed exact-scope revocation/readback; the parent owns durable intent."""
+        try:
+            def scope() -> None:
+                if (digest(migration_contract(self.request)) != self.contract_sha256
+                        or digest(_target_contract(self.target)) != self.history_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            spec = self.request.registration.spec
+            query = pool_machine_retirement_sql(spec, action=action)
+            before = self._database(self.target, url_variable='LOOM_SVC_DB_URL')
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'loom-postgres', '--',
+                'psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c', query])
+            status = qualify_machine_retirement_report(spec, report)
+            if ((action == 'revoke' and status != 'revoked')
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before)):
+                raise ValueError
+            scope()
+            return status
+        except Exception:
+            raise PoolMigrationError('machine_retirement') from None
 
     def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
         """The exact manager catalog must be readable by its real runtime loader."""
