@@ -263,3 +263,17 @@ def test_docker_cancel_before_reader_starts_still_signals_eof() -> None:
             await driver.stop()
 
     asyncio.run(exercise())
+
+
+async def test_docker_streaming_wait_after_kill_retains_exit_status() -> None:
+    driver = DockerDriver(image="alpine:3.20")
+    await driver.start()
+    try:
+        handle = await driver.exec_streaming(
+            ["sleep", "30"], env_vars={}, cwd=PurePosixPath("/workspace"),
+        )
+        await handle.kill()
+        assert await asyncio.wait_for(handle.wait(), timeout=5) == 137
+        assert await asyncio.wait_for(handle.wait(), timeout=5) == 137
+    finally:
+        await driver.stop()

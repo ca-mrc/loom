@@ -66,3 +66,50 @@ async def test_side_channel_capture_drains_console_stdout(tmp_path, capture):
         await events.aclose()
         await kill()
         await proc.communicate()
+
+
+@pytest.mark.parametrize("capture", ["log", "http"])
+async def test_side_channel_cancellation_joins_owned_tasks(tmp_path, capture):
+    source = tmp_path / "events"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", "import time; time.sleep(30)",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    draining = asyncio.Event()
+
+    async def chunks(stream):
+        draining.set()
+        while data := await stream.read(65536):
+            yield data
+
+    async def kill():
+        if proc.returncode is None:
+            proc.kill()
+
+    handle = ExecHandle(
+        pid=proc.pid, stdout=chunks(proc.stdout), stderr=chunks(proc.stderr),
+        _wait=proc.wait, _kill=kill, sandbox=_CaptureSource(source),
+    )
+    events = (
+        tail_log_file(handle, path=PurePosixPath("/events"), poll_interval_sec=0.01)
+        if capture == "log" else poll_local_http(handle, port=9000, poll_interval_sec=0.01)
+    )
+
+    async def collect():
+        return [event async for event in events]
+
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(collect())
+    try:
+        await asyncio.wait_for(draining.wait(), timeout=3)
+        owned = asyncio.all_tasks() - before
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert all(owned_task.done() for owned_task in owned)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await events.aclose()
+        await kill()
+        await proc.communicate()
