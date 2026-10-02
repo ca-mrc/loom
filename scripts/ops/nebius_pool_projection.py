@@ -7,7 +7,6 @@ Returned documents are detached from both inputs and the retained result.
 """
 from __future__ import annotations
 
-import copy
 from collections.abc import Callable
 from dataclasses import fields, is_dataclass
 from datetime import datetime
@@ -18,6 +17,7 @@ from typing import Any, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel
+from scripts.ops.nebius_ingress_stage import _copy_document
 
 Request = TypeVar("Request")
 Result = TypeVar("Result")
@@ -72,15 +72,15 @@ with another result: each reader retains one complete entry locally.
             return function(request)
         entry = last
         if entry is not None and key == entry[0]:
-            return copy.deepcopy(entry[1])
+            return _copy_document(entry[1])
         result = function(request)
-        retained = copy.deepcopy(result)
+        retained = _copy_document(result)
         # Never associate a projection with inputs changed during its derivation.
         try:
             if _snapshot(request) == key:
                 last = key, retained
         except TypeError:
             pass
-        return copy.deepcopy(retained)
+        return _copy_document(retained)
 
     return project
