@@ -215,7 +215,8 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
 @pytest.mark.parametrize('damage', [None, 'db_settings', 'machine_settings', 'epoch_settings', 'token',
     'original_running', 'unready', 'uid', 'pod', 'replica_owner', 'template', 'account', 'name',
     'registration', 'db_reference', 'secret', 'backend', 'late_secret', 'late_backend', 'history', 'authority',
-    'kubernetes', 'kubernetes_uid', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod'])
+    'kubernetes', 'kubernetes_uid', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod',
+    'capacity', 'late_capacity_secret', 'late_capacity_backend', 'late_capacity_pod'])
 def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, projected_gateway, monkeypatch, damage):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
@@ -225,6 +226,7 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
     import sys
 
     from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_CAPACITY_COMMAND
 
     from loom_service.pool_management.installation import PoolInstallation
     from loom_service.pool_management.installation_render import render_gateway
@@ -314,8 +316,15 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         if args[0] == 'exec':
             assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
             assert 'private-' not in repr(args)
-            result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False, timeout=30,
-                cwd=api.kubeconfig.parent, env=environment)
+            if args[9] == BOUND_POOL_CAPACITY_COMMAND:
+                # This fixture doubles the remote database only; owning
+                # integration tests execute the exact command against PostgreSQL.
+                assert len(args) == 12 and all(len(value) == 64 for value in args[10:])
+                result = SimpleNamespace(returncode=1 if damage == 'capacity' else 0,
+                    stdout=b'{"status": "qualified"}\n', stderr=b'')
+            else:
+                result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False, timeout=30,
+                    cwd=api.kubeconfig.parent, env=environment)
             processes.append(result)
             if result.returncode:
                 raise ValueError('private-probe-error')
@@ -330,6 +339,12 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
             elif len(processes) == 3 and damage == 'late_kubernetes_backend':
                 state.database['metadata']['uid'] = str(uuid4())
             elif len(processes) == 3 and damage == 'late_kubernetes_pod':
+                pod['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 4 and damage == 'late_capacity_secret':
+                state.secret['metadata']['resourceVersion'] = 'changed'
+            elif len(processes) == 4 and damage == 'late_capacity_backend':
+                state.database['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 4 and damage == 'late_capacity_pod':
                 pod['metadata']['uid'] = str(uuid4())
             return json.loads(result.stdout)
         if args[:2] == ['get', 'deployment']:
@@ -351,7 +366,7 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         assert error.value.stage == 'gateway_runtime' and 'private-' not in str(error.value)
     else:
         assert selected.qualify_gateway_runtime(original=original, expected=expected) is None
-        assert len(processes) == 3 and all(row.returncode == 0 for row in processes)
+        assert len(processes) == 4 and all(row.returncode == 0 for row in processes)
         assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
     assert all('private-' not in (row.stdout + row.stderr).decode() for row in processes)
     assert all(row[0] in {'get', 'exec'} for row in calls)
