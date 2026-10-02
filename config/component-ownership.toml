@@ -322,6 +322,7 @@ source_paths = [
   "src/loom/startup_retry.py",
   "src/loom/harbor_task_import.py",
   "src/loom/hosted_harness.py",
+  "src/loom/task_sandbox_planner.py",
   "src/loom/task_runtime_compatibility.py",
   "src/loom/task_bundle_registration.py",
   "src/loom/task_bundle_source.py",
