@@ -75,7 +75,8 @@ def load_render(
         except OSError as exc:
             raise DeploymentError("task identity policy artifact is missing") from exc
         if policy_docs != identity_policy_documents(config["execution_namespace"], config["target_id"],
-                guest_target_id=config.get("guest_execution_target", {}).get("target_id")):
+                guest_target_id=config.get("guest_execution_target", {}).get("target_id"),
+                emulated_auth_target_id=config.get("emulated_auth_execution_target", {}).get("target_id")):
             raise DeploymentError("task identity policy differs from the target-bound contract")
         files[policy_file.name] = policy_docs
     elif policy_file.exists():
@@ -447,12 +448,11 @@ def verify_standalone_pool_boundary(kube: Kubectl, config: dict[str, Any]) -> No
     This is a safety barrier, not the protected pool refresh implementation.
     Check again under the idle guard: a cutover can complete after preflight.
     """
-    from loom.nebius_guest_target import guest_target_id
+    from loom.nebius_guest_target import guest_target_ids
 
     processes = [(config["namespace"], name) for name in ("loom-service", "loom-control-plane")]
     processes.append((config["execution_namespace"], "loom-execution-actuator"))
-    guest = guest_target_id(config)
-    if guest is not None:
+    for guest in guest_target_ids(config):
         processes.append((config["execution_namespace"], guest + "-actuator"))
     settings = {"LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON", "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL",
         "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"}
@@ -594,12 +594,13 @@ def validate_target_replacement(
     """Require an exact operator decision before replacing an immutable target."""
     data = current.get("data", {})
     previous = json.loads(data["environment.json"]) if "environment.json" in data else None
-    previous_guest = previous.get("guest_execution_target") if previous else None
-    proposed_guest = config.get("guest_execution_target")
-    if previous_guest is not None and previous_guest != proposed_guest:
-        raise DeploymentError("installed guest target cannot be removed or renamed by platform rollout")
-    if retire_target is not None and (previous_guest is not None or proposed_guest is not None):
-        raise DeploymentError("primary replacement with a guest sibling requires a separate retirement protocol")
+    for guest_field in ("guest_execution_target", "emulated_auth_execution_target"):
+        previous_guest = previous.get(guest_field) if previous else None
+        proposed_guest = config.get(guest_field)
+        if previous_guest is not None and previous_guest != proposed_guest:
+            raise DeploymentError("installed guest target cannot be removed or renamed by platform rollout")
+        if retire_target is not None and (previous_guest is not None or proposed_guest is not None):
+            raise DeploymentError("primary replacement with a guest sibling requires a separate retirement protocol")
     if retire_target is None:
         if previous and previous["target_id"] != config["target_id"]:
             raise DeploymentError("changed primary target requires --retire-target naming the installed target")

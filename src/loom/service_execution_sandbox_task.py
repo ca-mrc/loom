@@ -28,7 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
-from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
+from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.hosted_harness import HostedHarnessSpec, hosted_harness, workspace_controller_phases
 from loom.models.capabilities import Capabilities
@@ -122,7 +122,7 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
     network_policy = _frozen_network_policy()
     command_environment = {}
     guest = (task.environment.execution_requirements is not None
-             and bool(GUEST_EXECUTION_CAPABILITIES.intersection(task.environment.execution_requirements.capabilities)))
+             and bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(task.environment.execution_requirements.capabilities)))
     max_transfer = 256 * 1024 * 1024
     if guest:
         try:

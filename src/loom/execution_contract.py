@@ -28,6 +28,7 @@ from pydantic import (
 )
 
 from loom.execution_requirements import (
+    ALL_GUEST_EXECUTION_CAPABILITIES,
     GUEST_EXECUTION_CAPABILITIES,
     GuestExecutionCapability,
     TaskExecutionRequirementsV1,
@@ -266,6 +267,7 @@ class ExecutionTargetV1(_StrictContract):
             self.capacity_owner_target_id == self.target_id
             or self.execution_class_id not in {
                 "linux-amd64-cpu-guest-v1", "linux-amd64-cpu-guest-web-v1",
+                "linux-amd64-cpu-guest-auth-v1", "linux-amd64-cpu-guest-auth-web-v1",
             }
         ):
             raise ValueError("only a guest target may share a distinct capacity owner")
@@ -528,10 +530,8 @@ class ExecutionRoutingDecisionV1(_StrictContract):
 
 
 def _task_declares_guest_execution(task: TaskConfig) -> bool:
-    from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES
-
     declared = task.environment.execution_requirements
-    return bool(GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
+    return bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
 
 
 def workload_requirements_from_task(
@@ -547,7 +547,7 @@ def workload_requirements_from_task(
 
     env = task.environment
     capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
-    needs_guest_kernel = bool(GUEST_EXECUTION_CAPABILITIES.intersection(capabilities))
+    needs_guest_kernel = bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(capabilities))
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
         image_ref: str | None = None
@@ -789,6 +789,16 @@ NEBIUS_CPU_GUEST_WEB_EXECUTION_CLASS_V1 = ExecutionClassV1.model_validate({
     "class_id": "linux-amd64-cpu-guest-web-v1",
     "supports_task_web_egress": True,
 })
+NEBIUS_CPU_GUEST_AUTH_EXECUTION_CLASS_V1 = ExecutionClassV1.model_validate({
+    **NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1.model_dump(),
+    "class_id": "linux-amd64-cpu-guest-auth-v1",
+    "guest_execution": GuestExecutionClassV1(supported_capabilities=ALL_GUEST_EXECUTION_CAPABILITIES),
+})
+NEBIUS_CPU_GUEST_AUTH_WEB_EXECUTION_CLASS_V1 = ExecutionClassV1.model_validate({
+    **NEBIUS_CPU_GUEST_AUTH_EXECUTION_CLASS_V1.model_dump(),
+    "class_id": "linux-amd64-cpu-guest-auth-web-v1",
+    "supports_task_web_egress": True,
+})
 
 
 def nebius_cpu_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
@@ -799,9 +809,22 @@ def nebius_cpu_execution_class(*, supports_task_web_egress: bool = False) -> Exe
     )
 
 
-def nebius_guest_execution_class(*, supports_task_web_egress: bool = False) -> ExecutionClassV1:
+def nebius_guest_execution_class(
+    *, supports_task_web_egress: bool = False, supports_emulated_pkcs11: bool = False,
+) -> ExecutionClassV1:
     """Select guest-local contract support; deployment readiness is checked separately."""
+    if supports_emulated_pkcs11:
+        return (NEBIUS_CPU_GUEST_AUTH_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
+                else NEBIUS_CPU_GUEST_AUTH_EXECUTION_CLASS_V1)
     return (
         NEBIUS_CPU_GUEST_WEB_EXECUTION_CLASS_V1 if supports_task_web_egress
         else NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1
     )
+
+
+def nebius_guest_class_by_id(class_id: str) -> ExecutionClassV1 | None:
+    """Resolve only registered guest catalog definitions, without inferring readiness."""
+    return next((item for item in (
+        NEBIUS_CPU_GUEST_EXECUTION_CLASS_V1, NEBIUS_CPU_GUEST_WEB_EXECUTION_CLASS_V1,
+        NEBIUS_CPU_GUEST_AUTH_EXECUTION_CLASS_V1, NEBIUS_CPU_GUEST_AUTH_WEB_EXECUTION_CLASS_V1,
+    ) if item.class_id == class_id), None)
