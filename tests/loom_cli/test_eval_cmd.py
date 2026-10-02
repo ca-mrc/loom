@@ -1626,6 +1626,84 @@ def test_network_policy_override_rejects_invalid_cli_shapes(
         _network_policy_override(kind, destinations)
 
 
+def test_batch_show_displays_authored_override_and_resolved_network_policy(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    override = {"kind": "web-allowlist", "destinations": [
+        {"host": "pypi.org", "protocol": "https"},
+    ]}
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(200, json={
+        "id": _BATCH_ID,
+        "network_policy": {
+            "authored_defaults": [
+                {"policy": {"kind": "gateway-only"}, "task_ids": ["task-a", "task-b"]},
+                {"policy": {"kind": "public-web"}, "task_ids": ["task-c"]},
+            ],
+            "requested_override": override,
+            "resolved_effective": [{"policy": override, "task_ids": ["task-a", "task-b", "task-c"]}],
+            "unavailable_task_ids": ["historical-task"],
+        },
+    })
+    capsys.readouterr()
+    assert main(["eval", "batch", "show", _BATCH_ID]) == 0
+    out = capsys.readouterr().out
+    assert "task_defaults: gateway-only (2 tasks); public-web (1 task)" in out
+    assert "selected_override: web-allowlist: https://pypi.org" in out
+    assert "resolved_policy: web-allowlist: https://pypi.org (3 tasks)" in out
+    assert "policy_unavailable: historical-task" in out
+    assert "frozen_policy:" not in out
+
+
+@pytest.mark.parametrize("effective", [None, {"kind": "public-web"}])
+def test_trial_show_displays_only_the_frozen_network_policy(
+    effective: dict[str, str] | None,
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID,
+        "config": {"baseline_network_policy_override": {"kind": "gateway-only"}},
+        "materialization": {"network_policy": {
+            "task_default": {"kind": "gateway-only"},
+            "requested_override": {"kind": "public-web"},
+            "effective": effective,
+        }},
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "task_default: gateway-only" in out
+    assert "selected_override: public-web" in out
+    assert f"frozen_policy: {'public-web' if effective else '(unavailable)'}" in out
+    assert "frozen_policy: gateway-only" not in out
+
+
+def test_batch_show_no_override_and_missing_policy_groups_are_explicit(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(200, json={
+        "id": _BATCH_ID,
+        "network_policy": {"authored_defaults": [], "requested_override": None, "resolved_effective": []},
+    })
+    capsys.readouterr()
+    assert main(["eval", "batch", "show", _BATCH_ID]) == 0
+    out = capsys.readouterr().out
+    assert "task_defaults: (unavailable)" in out
+    assert "selected_override: (none; task default)" in out
+    assert "resolved_policy: (unavailable)" in out
+
+
+def test_batch_show_network_policy_json_remains_unchanged(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {"id": _BATCH_ID, "network_policy": {
+        "authored_defaults": [], "requested_override": None, "resolved_effective": [],
+    }}
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(200, json=payload)
+    capsys.readouterr()
+    assert main(["eval", "batch", "show", _BATCH_ID, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
 def test_batch_create_rejects_verifier_env_mode_with_skip_verifier(
     mock_server: MockServer,
     capsys: pytest.CaptureFixture[str],

@@ -248,7 +248,7 @@ class NebiusCapacityReader:
             raise NebiusObservationError("capacity policy is disabled")
         return await self.capture_pool()
 
-    async def capture_pool(self) -> ProviderCapacitySnapshot:
+    async def capture_pool(self, *, expected_cluster_id: str | None = None) -> ProviderCapacitySnapshot:
         """Read the configured native group without inventing a target policy."""
         from nebius.api.nebius.mk8s.v1 import (
             GetNodeGroupRequest,
@@ -290,6 +290,10 @@ class NebiusCapacityReader:
         metadata = node_group.metadata
         if metadata.id != self._settings.nebius_node_group_id:
             raise NebiusObservationError("Nebius node group identity does not match")
+        if expected_cluster_id is not None and (
+            not expected_cluster_id or getattr(metadata, "parent_id", None) != expected_cluster_id
+        ):
+            raise NebiusObservationError("Nebius node group cluster does not match")
         placement = await self._node_group_placement(node_group)
         status = node_group.status
         spec = node_group.spec

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -38,7 +39,8 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
         'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
             'uid': database['metadata']['uid'], 'controller': True}]},
         'spec': copy.deepcopy(database['spec']['template']['spec']),
-        'status': {'phase': 'Running', 'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
+        'status': {'phase': 'Running', 'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
+            'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
     pod['spec']['volumes'].append({'name': 'data', 'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
     secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'namespace': target.namespace,
         'name': 'loom-platform-db', 'uid': str(uuid4()), 'resourceVersion': '7'}, 'data': {
@@ -53,6 +55,17 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
     api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
     state = SimpleNamespace(request=request, target=target, database=database, service=service, pod=pod, secret=secret,
         calls=[], status='held', continuation=False, second_pod=False, executed=False, after_drift=False, exec_hook=None)
+    state.endpoints = {'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList',
+        'metadata': {'resourceVersion': '3'}, 'items': [{
+            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSlice', 'metadata': {
+                'name': 'loom-postgres-abcde', 'namespace': target.namespace, 'uid': str(uuid4()),
+                'labels': {'kubernetes.io/service-name': 'loom-postgres'},
+                'ownerReferences': [{'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
+                    'uid': service['metadata']['uid'], 'controller': True}]},
+            'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0].get('name'), 'port': 5432, 'protocol': 'TCP'}],
+            'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True, 'serving': True, 'terminating': False},
+                'targetRef': {'kind': 'Pod', 'namespace': target.namespace, 'name': 'loom-postgres-0',
+                    'uid': pod['metadata']['uid']}}]}]}
 
     def run(args):
         state.calls.append(args)
@@ -69,6 +82,11 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
             uid = request.registration.binding.kube_system_uid if name == 'kube-system' else str(target.namespace_uid)
             return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name, 'uid': uid}}
         if kind == '--raw':
+            if args == ['get', '--raw', f'/apis/discovery.k8s.io/v1/namespaces/{target.namespace}/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Dloom-postgres&limit=100']:
+                endpoints = copy.deepcopy(state.endpoints)
+                if state.executed and getattr(state, 'endpoint_after_drift', False):
+                    endpoints['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+                return endpoints
             assert args == ['get', '--raw', f'/api/v1/namespaces/{target.namespace}/pods?labelSelector=app%3Dloom-postgres&limit=100']
             rows = [state.pod] * (2 if state.second_pod else 1)
             if state.executed and state.after_drift:
@@ -83,6 +101,65 @@ def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
 
     monkeypatch.setattr(api, '_run', run)
     return api, state
+
+
+@pytest.mark.parametrize('damage', ['wrong_pod', 'wrong_address', 'wrong_service', 'wrong_port', 'not_ready',
+    'terminating', 'extra_backend', 'missing_backend', 'pagination', 'after_drift'])
+def test_database_read_requires_actual_service_to_postgres_backend_correspondence(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    row = state.endpoints['items'][0]
+    endpoint = row['endpoints'][0]
+    if damage == 'wrong_pod':
+        endpoint['targetRef']['uid'] = str(uuid4())
+    elif damage == 'wrong_address':
+        endpoint['addresses'] = ['10.20.0.3']
+    elif damage == 'wrong_service':
+        row['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'wrong_port':
+        row['ports'][0]['port'] = 5433
+    elif damage == 'not_ready':
+        endpoint['conditions']['ready'] = False
+    elif damage == 'terminating':
+        endpoint['conditions']['terminating'] = True
+    elif damage == 'extra_backend':
+        extra = copy.deepcopy(endpoint)
+        extra['targetRef']['uid'] = str(uuid4())
+        row['endpoints'].append(extra)
+    elif damage == 'missing_backend':
+        state.endpoints['items'] = []
+    elif damage == 'pagination':
+        state.endpoints['metadata']['continue'] = 'next'
+    else:
+        state.endpoint_after_drift = True
+    with pytest.raises(PoolMigrationError):
+        api.guard(state.target, 'observe')
+    assert sum(args[0] == 'exec' for args in state.calls) == (1 if damage == 'after_drift' else 0)
+
+
+@pytest.mark.parametrize('families', [('IPv4',), ('IPv6',), ('IPv4', 'IPv6')])
+def test_database_backend_qualifies_every_service_address_family(database_guard, monkeypatch, families):
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    original, state = database_guard
+    addresses = {'IPv4': '10.20.0.2', 'IPv6': 'fd00::2'}
+    state.service['spec']['ipFamilies'] = list(families)
+    state.pod['status']['podIP'] = addresses[families[0]]
+    state.pod['status']['podIPs'] = [{'ip': addresses[family]} for family in families]
+    row = state.endpoints['items'][0]
+    state.endpoints['items'] = []
+    for family in families:
+        endpoint = copy.deepcopy(row)
+        endpoint['metadata'].update(uid=str(uuid4()), name='loom-postgres-' + family.lower())
+        endpoint['addressType'] = family
+        endpoint['endpoints'][0]['addresses'] = [addresses[family]]
+        state.endpoints['items'].append(endpoint)
+    target = replace(state.target, database=replace(state.target.database, service=copy.deepcopy(state.service)))
+    request = replace(state.request, guards=(target, *state.request.guards[1:]))
+    api = KubectlPoolGuardAPI(request=request, kubeconfig=original.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', original._run)
+    assert api.guard(target, 'observe') == {'status': 'held'}
 
 
 @pytest.mark.parametrize('status', ['open', 'held', 'skipped_locked'])
@@ -160,6 +237,75 @@ def test_acquire_checks_database_identity_before_writing(database_guard):
     assert not any(args[0] == 'exec' for args in state.calls)
 
 
+@pytest.mark.parametrize('action,status', [('stage', 'staged'), ('observe', 'qualified')])
+def test_runtime_role_stage_binds_original_database_without_the_retired_controller(database_guard, action, status):
+    api, state = database_guard
+    state.status = status
+    assert api.runtime_role(state.target, action) == {'status': status}
+    command, = [args for args in state.calls if args[0] == 'exec']
+    assert command[:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
+
+
+@pytest.mark.parametrize('damage', ['database_uid', 'after_drift', 'wrong_report', 'release', 'extra_report', 'config'])
+def test_runtime_role_stage_denies_drift_unknown_receipts_and_arbitrary_actions(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    state.status, action = 'staged', 'stage'
+    if damage == 'database_uid':
+        state.database['metadata']['uid'] = str(uuid4())
+    elif damage == 'after_drift':
+        state.after_drift = True
+    elif damage == 'wrong_report':
+        state.status = 'released'
+    elif damage == 'release':
+        action = 'release'
+    elif damage == 'extra_report':
+        state.calls.clear()
+        state.exec_hook = lambda query: {'status': 'staged', 'unqualified': 'private-marker'}
+    else:
+        api.kubeconfig.write_text('changed-private-config')
+    with pytest.raises(PoolMigrationError):
+        api.runtime_role(state.target, action)
+    assert sum(args[0] == 'exec' for args in state.calls) == (0 if damage in {'database_uid', 'release', 'config'} else 1)
+
+
+@pytest.mark.parametrize('damage', ['database_uid', 'after_drift', 'extra_report', 'config', 'cursor', 'origin', 'environment', 'source'])
+def test_cutover_database_pages_bind_identity_and_reject_unsafe_receipts(database_guard, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    participant = next(row for row in state.request.registration.spec.participants
+        if row.participant_id == state.target.participant_id)
+    identity = str(uuid4())
+    report = {'status': 'observed', 'schema_revision': '0172', 'rows': [{
+        'key': 'batch:' + identity, 'source_matches': True, 'origin': {
+            'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
+            'submission_id': identity, 'kind': 'environment', 'application': None}}]}
+    after = None
+    if damage == 'database_uid':
+        state.database['metadata']['uid'] = str(uuid4())
+    elif damage == 'after_drift':
+        state.after_drift = True
+    elif damage == 'extra_report':
+        report['private-marker'] = 'unqualified'
+    elif damage == 'config':
+        api.kubeconfig.write_text('changed-private-config')
+    elif damage == 'cursor':
+        after = "batch:';DELETE FROM trials;--"
+    elif damage == 'origin':
+        report['rows'][0]['origin'] = None
+    elif damage == 'environment':
+        report['rows'][0]['origin']['data_environment_id'] = str(uuid4())
+    else:
+        report['rows'][0]['source_matches'] = False
+    state.exec_hook = lambda query: report
+    with pytest.raises(PoolMigrationError) as error:
+        api.cutover_readiness_page(state.target, after=after)
+    assert 'private-marker' not in str(error.value)
+    assert sum(args[0] == 'exec' for args in state.calls) == (0 if damage in {'database_uid', 'config', 'cursor'} else 1)
+
+
 def test_database_observer_never_exposes_unqualified_query_output(database_guard):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
@@ -207,8 +353,10 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
             'phase': 'Running', 'containerStatuses': [{'name': 'loom-control-plane', 'ready': True}]}}
     database_run = api._run
     writes = []
+    operations = []
 
     def run(args):
+        operations.append(args)
         if args[:2] == ['get', 'deployment']:
             return controller
         if args[:2] == ['get', 'replicaset']:
@@ -217,8 +365,12 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
             return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [pod]}
         if args[:1] == ['exec'] and args[5] == 'loom-control-plane':
             assert args[3] == 'pod/loom-control-plane-abc-def'
-            assert args[7:] == ['python', '-m', 'loom.nebius_rollout_guard', 'acquire', '--owner',
-                str(state.request.registration.spec.operation_id), '--candidate', state.request.registration.candidate['candidate_sha']]
+            assert args[7:9] == ['python', '-c']
+            assert args[10:13] == ['acquire', str(state.request.registration.spec.operation_id),
+                state.request.registration.candidate['candidate_sha']]
+            assert len(args) == 15 and len(bytes.fromhex(args[13])) == 32
+            assert len(bytes.fromhex(args[14])) == 32
+            assert not any('private-marker' in argument for argument in args)
             writes.append(args)
             return {'status': 'acquired', 'active': {'trials': 0}}
         return database_run(args)
@@ -226,6 +378,352 @@ def test_bound_acquisition_uses_live_controller_then_observation_survives_retire
     monkeypatch.setattr(api, '_run', run)
     assert api.guard(state.target, 'acquire') == {'status': 'acquired'}
     assert len(writes) == 1
-    assert sum(args[:2] == ['get', 'secret'] for args in state.calls) == 2
+    credential_reads = [index for index, args in enumerate(operations) if args[:2] == ['get', 'secret']]
+    write, = [index for index, args in enumerate(operations) if args[:1] == ['exec']]
+    assert min(credential_reads) < write < max(credential_reads)
     monkeypatch.setattr(api, '_run', database_run)
     assert api.guard(state.target, 'observe') == {'status': 'held'}
+
+
+@pytest.fixture(params=['controller', 'service', 'actuator', 'guest'])
+def workload_database(request, database_guard, guest_runtime_inputs, monkeypatch):
+    """Real rendered Pods/settings; only the remote Kubernetes transport is doubled."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    previous, state = database_guard
+    migration, actuators, services, _, guest = guest_runtime_inputs
+    target = state.target
+    migration = replace(migration, guards=(target, *migration.guards[1:]))
+    original = {'controller': target.controller, 'service': services[target.participant_id],
+        'actuator': actuators[target.participant_id], 'guest': guest}[request.param]
+    controller = copy.deepcopy(original)
+    controller['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
+        'updatedReplicas': 1, 'availableReplicas': 1}
+    namespace, name = original['metadata']['namespace'], original['metadata']['name']
+    container, = original['spec']['template']['spec']['containers']
+    variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL',
+        'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL', 'guest': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[request.param]
+    reference, = (row['valueFrom']['secretKeyRef'] for row in container['env'] if row['name'] == variable)
+    url = f'postgresql+psycopg://fixture:private-runtime-marker@loom-postgres.{target.namespace}.svc:5432/loom'
+    if namespace == target.namespace:
+        secret = state.secret
+    else:
+        secret = {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': reference['name'],
+            'namespace': namespace, 'uid': str(uuid4()), 'resourceVersion': '11'}, 'data': {}}
+    secret['data'][reference['key']] = base64.b64encode(url.encode()).decode()
+    replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+        'name': name + '-abc', 'namespace': namespace, 'uid': str(uuid4()),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment', 'name': name,
+            'uid': controller['metadata']['uid'], 'controller': True}]},
+        'spec': {'template': copy.deepcopy(controller['spec']['template'])}}
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+        'name': name + '-abc-def', 'namespace': namespace, 'uid': str(uuid4()),
+        'labels': copy.deepcopy(controller['spec']['selector']['matchLabels']),
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+            'uid': replica['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(controller['spec']['template']['spec']),
+        'status': {'phase': 'Running', 'containerStatuses': [{'name': container['name'], 'ready': True}]}}
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
+    environment.update({variable: url, 'LOOM_CP_MINIO_ACCESS_KEY': 'fixture', 'LOOM_CP_MINIO_SECRET_KEY': 'fixture',
+        'LOOM_CP_STEP_JWT_SIGNING_KEY': 'runtime-database-test-key-00000000',
+        'LOOM_SVC_MINIO_ACCESS_KEY': 'fixture', 'LOOM_SVC_MINIO_SECRET_KEY': 'fixture',
+        'LOOM_EXECUTION_ACTUATOR_NAMESPACE': namespace, 'LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID': pod['metadata']['name'],
+        'LOOM_EXECUTION_ACTUATOR_TARGET_ID': 'fixture-target'})
+    api = KubectlPoolGuardAPI(request=migration, kubeconfig=previous.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    state.original, state.controller, state.runtime_pod, state.replica = original, controller, pod, replica
+    state.runtime_secret, state.runtime_environment, state.variable = secret, environment, variable
+    state.credential = (UUID(secret['metadata']['uid']), secret['metadata']['resourceVersion'])
+    state.commands, state.processes, state.runtime_after_drift = [], [], False
+    database_run = previous._run
+
+    def run(args):
+        if args[:1] == ['exec']:
+            assert args[:7] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', container['name'], '--']
+            assert args[7:9] == ['python', '-c']
+            state.commands.append(args)
+            result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False,
+                timeout=30, cwd=previous.kubeconfig.parent, env=environment)
+            state.processes.append(result)
+            if result.returncode:
+                raise ValueError('private-transport-marker')
+            return json.loads(result.stdout)
+        if args[:2] == ['get', 'namespace'] and args[2] == namespace and namespace != target.namespace:
+            participant = next(row for row in migration.registration.spec.participants if row.participant_id == target.participant_id)
+            return {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace,
+                'uid': str(participant.execution_namespace.uid)}}
+        if args[:2] == ['get', 'secret'] and args[2] == reference['name'] and args[4] == namespace:
+            return copy.deepcopy(secret)
+        if args[:2] == ['get', 'deployment']:
+            assert args[2:5] == [name, '-n', namespace]
+            return copy.deepcopy(controller)
+        if args[:2] == ['get', 'replicaset']:
+            assert args[2:5] == [replica['metadata']['name'], '-n', namespace]
+            return copy.deepcopy(replica)
+        if args[:2] == ['get', '--raw'] and '/pods?' in args[2] and 'loom-postgres' not in args[2]:
+            current = copy.deepcopy(pod)
+            if state.commands and state.runtime_after_drift:
+                current['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'}, 'items': [current]}
+        return database_run(args)
+
+    monkeypatch.setattr(api, '_run', run)
+    return api, state
+
+
+def qualify_workload(api, state):
+    return api.qualify_runtime_database(state.target, original=state.original,
+        credential_uid=state.credential[0], credential_resource_version=state.credential[1])
+
+
+def test_each_running_database_consumer_is_qualified_without_sql_or_credential_output(workload_database):
+    api, state = workload_database
+    assert qualify_workload(api, state) is None
+    assert qualify_workload(api, state) is None
+    assert len(state.commands) == 2 and state.commands[0][-2:] != state.commands[1][-2:]
+    assert all('private-runtime-marker' not in arg for command in state.commands for arg in command)
+    assert all(result.returncode == 0 and result.stdout == b'{"status": "qualified"}\n' and not result.stderr
+        for result in state.processes)
+
+
+@pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
+    'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target', 'service_account'])
+def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    selector = api.request.registration.spec.node_selector
+    state.runtime_pod['spec']['nodeName'] = 'platform-node'
+    def node(name, labels):
+        return {'apiVersion': 'v1', 'kind': 'Node', 'metadata': {'name': name,
+            'uid': str(uuid4()), 'resourceVersion': '1', 'labels': labels},
+            'status': {'addresses': [{'type': 'InternalIP', 'address': '10.20.0.2'}]}}
+    nodes = [node('platform-node', {}), node('pool-node', selector), node('foreign-node', {'foreign': 'true'})]
+    if damage == 'scale_zero':
+        nodes.pop(1)
+    elif damage == 'missing_host':
+        nodes.pop(0)
+    elif damage == 'duplicate':
+        nodes.append(copy.deepcopy(nodes[1]))
+    elif damage == 'deleted':
+        nodes[1]['metadata']['deletionTimestamp'] = '2026-10-01T00:00:00Z'
+    elif damage == 'late_pod':
+        state.runtime_after_drift = True
+    elif damage == 'unknown_target':
+        for row in state.original['spec']['template']['spec']['containers'][0].get('env', []):
+            if row['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID':
+                row['value'] = 'foreign'
+    elif damage == 'service_account':
+        for document in (state.original, state.controller, state.replica):
+            document['spec']['template']['spec']['serviceAccountName'] = 'foreign-admin'
+        state.runtime_pod['spec']['serviceAccountName'] = 'foreign-admin'
+    previous, commands = api._run, []
+
+    def run(args):
+        if args[:2] == ['get', '--raw'] and args[2].startswith('/api/v1/nodes?'):
+            items = copy.deepcopy(nodes)
+            if damage == 'late_node' and commands:
+                items[1]['metadata']['uid'] = str(uuid4())
+            return {'apiVersion': 'v1', 'kind': 'NodeList',
+                'metadata': {'resourceVersion': '9', **({'continue': 'same'} if damage == 'partial' else {})}, 'items': items}
+        if args[:1] == ['exec']:
+            assert args[:7] == ['exec', '-n', state.original['metadata']['namespace'],
+                'pod/' + state.runtime_pod['metadata']['name'], '-c', 'actuator', '--']
+            assert args[7:9] == ['python', '-c']
+            assert len(args) == 14
+            assert args[10] == state.original['metadata']['namespace']
+            assert args[11] == next(row['value'] for row in state.original['spec']['template']['spec']['containers'][0]['env']
+                if row['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID')
+            commands.append(args)
+            state.commands.append(args)
+            if damage == 'denied':
+                raise ValueError('private-telemetry-marker')
+            return {'status': 'qualified', 'node_name': args[12],
+                'node_uid': str(uuid4()) if damage == 'wrong_report' else args[13]}
+        return previous(args)
+
+    monkeypatch.setattr(api, '_run', run)
+    actuator = state.original['spec']['template']['spec']['containers'][0]['name'] == 'actuator'
+    if not actuator or damage not in {None, 'scale_zero'}:
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_runtime_telemetry(state.target, original=state.original)
+        assert 'private-' not in str(error.value)
+    else:
+        api.qualify_runtime_telemetry(state.target, original=state.original)
+        assert [command[12] for command in commands] == (['platform-node'] if damage == 'scale_zero' else ['platform-node', 'pool-node'])
+        for command in commands:
+            assert command[13] == next(row['metadata']['uid'] for row in nodes if row['metadata']['name'] == command[12])
+    if not actuator or damage in {'missing_host', 'partial', 'duplicate', 'deleted', 'unknown_target', 'service_account'}:
+        assert not commands
+
+
+@pytest.mark.parametrize('damage', [None, 'namespace', 'target', 'remote', 'node_uid', 'denied',
+    'missing_counter', 'boolean_counter', 'negative_counter', 'old_image'])
+def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, damage):
+    import json
+    import os
+    import ssl
+    import sys
+
+    import httpx
+    from kubernetes import client, config
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_TELEMETRY_COMMAND
+    from urllib3.response import HTTPResponse
+
+    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+
+    uid = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+    settings = {'DB_URL': 'private-no-sql-marker', 'CONTROLLER_ID': 'observer-1',
+        'NAMESPACE': 'telemetry', 'TARGET_ID': 'nebius-dev'}
+    if damage in {'namespace', 'target'}:
+        settings['NAMESPACE' if damage == 'namespace' else 'TARGET_ID'] = 'foreign'
+    if damage == 'remote':
+        settings.update(KUBERNETES_ENDPOINT='https://remote.example.com', KUBERNETES_CA_FILE='/remote/ca',
+            KUBERNETES_NEBIUS_CREDENTIALS_FILE='/remote/key')
+    for key in os.environ:
+        if key.startswith('LOOM_EXECUTION_ACTUATOR_'):
+            monkeypatch.delenv(key)
+    for key, value in settings.items():
+        monkeypatch.setenv('LOOM_EXECUTION_ACTUATOR_' + key, value)
+    monkeypatch.setattr(sys, 'argv', ['-c', 'telemetry', 'nebius-dev', 'node-1', uid])
+    configuration = client.Configuration()
+    configuration.host = 'https://kubernetes.default.svc'
+    configuration.ssl_ca_cert = '/mounted/ca.crt'
+    configuration.api_key['authorization'] = 'bearer private-runtime-token'
+    monkeypatch.setattr(client.Configuration, '_default', None)
+    monkeypatch.setattr(config, 'load_incluster_config', lambda: client.Configuration.set_default(configuration))
+    requests, closed = [], []
+    def node_read(_self, method, url, *args, **kwargs):
+        assert (method, url) == ('GET', 'https://kubernetes.default.svc/api/v1/nodes/node-1')
+        return HTTPResponse(body=json.dumps({'apiVersion': 'v1', 'kind': 'Node',
+            'metadata': {'name': 'node-1', 'uid': str(uuid4()) if damage == 'node_uid' else uid},
+            'status': {'addresses': [{'type': 'InternalIP', 'address': '10.20.0.2'}]}}).encode(), status=200)
+    def summary(_self, url, **kwargs):
+        assert url == 'https://10.20.0.2:10250/stats/summary'
+        assert kwargs['headers'] == {'Authorization': 'bearer private-runtime-token'}
+        requests.append(url)
+        node = {'nodeName': 'node-1', 'cpu': {'usageCoreNanoSeconds': 1000},
+            'memory': {'workingSetBytes': 2000}, 'fs': {'usedBytes': 3000}}
+        if damage == 'missing_counter':
+            del node['cpu']
+        elif damage == 'boolean_counter':
+            node['memory']['workingSetBytes'] = True
+        elif damage == 'negative_counter':
+            node['fs']['usedBytes'] = -1
+        return httpx.Response(403 if damage == 'denied' else 200,
+            json={'node': node, 'pods': [{'private-foreign-workload-marker': 'never emitted'}]}, request=httpx.Request('GET', url))
+    actual_close = InClusterKubernetesJobApi.close
+    async def close(self):
+        closed.append(True)
+        await actual_close(self)
+    async def legacy_summary(self, *, node_name):
+        pytest.fail('legacy unpinned reader executed')
+    monkeypatch.setattr(client.ApiClient, 'request', node_read)
+    monkeypatch.setattr(httpx.Client, 'get', summary)
+    monkeypatch.setattr(ssl, 'create_default_context', lambda **_: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setattr(InClusterKubernetesJobApi, 'close', close)
+    if damage == 'old_image':
+        monkeypatch.setattr(InClusterKubernetesJobApi, 'resource_summary', legacy_summary)
+    if damage:
+        with pytest.raises(SystemExit) as error:
+            exec(_BOUND_TELEMETRY_COMMAND, {})
+        assert error.value.code == 1
+    else:
+        exec(_BOUND_TELEMETRY_COMMAND, {})
+    output = capsys.readouterr()
+    assert 'private-' not in output.out + output.err
+    if damage:
+        assert not output.out
+    else:
+        assert json.loads(output.out) == {'status': 'qualified', 'node_name': 'node-1', 'node_uid': uid}
+        assert not output.err
+    if damage in {'namespace', 'target', 'remote'}:
+        assert not requests and not closed
+    else:
+        assert closed == [True]
+
+
+@pytest.mark.parametrize('damage', ['loaded_url', 'secret_identity', 'secret_version', 'foreign_database',
+    'pod_owner', 'pod_template', 'not_ready', 'after_drift'])
+def test_runtime_database_qualification_rejects_drift_in_every_consumer(workload_database, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    if damage == 'loaded_url':
+        state.runtime_environment[state.variable] += '?application_name=private-override'
+    elif damage == 'secret_identity':
+        state.runtime_secret['metadata']['uid'] = str(uuid4())
+    elif damage == 'secret_version':
+        state.runtime_secret['metadata']['resourceVersion'] = '12'
+    elif damage == 'foreign_database':
+        for key in state.runtime_secret['data']:
+            raw = base64.b64decode(state.runtime_secret['data'][key]).decode().replace('loom-postgres.', 'foreign.')
+            state.runtime_secret['data'][key] = base64.b64encode(raw.encode()).decode()
+        state.runtime_environment[state.variable] = state.runtime_environment[state.variable].replace('loom-postgres.', 'foreign.')
+    elif damage == 'pod_owner':
+        state.runtime_pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'pod_template':
+        state.runtime_pod['spec']['containers'][0]['image'] = 'foreign:latest'
+    elif damage == 'not_ready':
+        state.runtime_pod['status']['containerStatuses'][0]['ready'] = False
+    else:
+        state.runtime_after_drift = True
+    with pytest.raises(PoolMigrationError) as error:
+        qualify_workload(api, state)
+    assert 'private-' not in str(error.value)
+    assert len(state.commands) == (1 if damage in {'loaded_url', 'after_drift'} else 0)
+    assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
+
+
+@pytest.mark.parametrize('workload_database', ['service'], indirect=True)
+@pytest.mark.parametrize('source', ['pooled', 'dotenv'])
+def test_service_probe_checks_effective_settings_including_pooled_and_image_local_overrides(workload_database, source):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    alternate = state.runtime_environment[state.variable] + '?application_name=private-override'
+    if source == 'pooled':
+        state.runtime_environment['LOOM_SVC_DB_URL_POOL'] = alternate
+    else:
+        (api.kubeconfig.parent / '.env').write_text('LOOM_SVC_DB_URL_POOL=' + alternate + '\n')
+    with pytest.raises(PoolMigrationError):
+        qualify_workload(api, state)
+    assert len(state.commands) == 1
+    assert all(b'private-' not in result.stdout + result.stderr for result in state.processes)
+
+
+@pytest.mark.parametrize('workload_database', ['actuator'], indirect=True)
+@pytest.mark.parametrize('damage', [None, 'audience', 'ca', 'writable_mount', 'foreign_mount'])
+def test_runtime_recognizes_only_standard_kubernetes_automounted_authority(workload_database, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = workload_database
+    assert state.original['spec']['template']['spec']['automountServiceAccountToken'] is True
+    pod = state.runtime_pod['spec']
+    token = {'name': 'kube-api-access-abcde', 'projected': {'defaultMode': 420, 'sources': [
+        {'serviceAccountToken': {'expirationSeconds': 3607, 'path': 'token'}},
+        {'configMap': {'name': 'kube-root-ca.crt', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}},
+        {'downwardAPI': {'items': [{'path': 'namespace', 'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}]}},
+    ]}}
+    mount = {'name': token['name'], 'readOnly': True, 'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount'}
+    pod.setdefault('volumes', []).append(token)
+    pod['containers'][0].setdefault('volumeMounts', []).append(mount)
+    if damage == 'audience':
+        token['projected']['sources'][0]['serviceAccountToken']['audience'] = 'foreign'
+    elif damage == 'ca':
+        token['projected']['sources'][1]['configMap']['name'] = 'foreign'
+    elif damage == 'writable_mount':
+        mount['readOnly'] = False
+    elif damage == 'foreign_mount':
+        mount['mountPath'] = '/var/run/other'
+    if damage:
+        with pytest.raises(PoolMigrationError):
+            qualify_workload(api, state)
+        assert not state.commands
+    else:
+        assert qualify_workload(api, state) is None
+        assert len(state.commands) == 1

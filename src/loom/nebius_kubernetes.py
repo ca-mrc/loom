@@ -2,16 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 import ssl
 import stat
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+_ReadResult = TypeVar("_ReadResult")
+
+
+async def read_sdk_before_close(read: Callable[[], _ReadResult]) -> _ReadResult:
+    """Retain a bounded SDK read through cancellation before its owner closes.
+
+    The caller supplies per-request SDK timeouts. This does not add retries or
+    make mutations cancellation-safe; only read-only operations use it.
+    """
+    reading = asyncio.create_task(asyncio.to_thread(read))
+    try:
+        return await asyncio.shield(reading)
+    except asyncio.CancelledError:
+        while not reading.done():
+            try:
+                await asyncio.shield(reading)
+            except (asyncio.CancelledError, Exception):
+                pass
+        if not reading.cancelled():
+            reading.exception()
+        raise
 
 
 class NebiusKubernetesConnection(BaseModel):

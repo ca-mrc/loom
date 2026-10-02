@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import re
+import ssl
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
+
+import httpx
 
 from loom.nebius_kubernetes import (
     NebiusKubernetesConnection,
     NebiusKubernetesCredentials,
     create_api_client,
+    read_sdk_before_close,
 )
 from loom.nebius_pool_contract import PoolNamespaceBindingV1
 from loom.nebius_pool_execution_runtime import PoolExecutionRuntimeV1
@@ -404,33 +410,54 @@ class InClusterKubernetesJobApi:
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
 
-    async def resource_summary(self, *, node_name: str) -> dict[str, Any]:
-        """Read kubelet summaries via the API server; never expose raw node data."""
+    async def resource_summary(self, *, node_name: str, expected_node_uid: str | None = None) -> dict[str, Any]:
+        """Read verified kubelet statistics with nodes/stats, never nodes/proxy.
+
+        The API's Node binds the fixed private endpoint; the same cluster trust
+        anchor verifies its serving certificate. No redirects, ambient proxy,
+        administrator certificate or broad node-proxy fallback is permitted.
+        """
 
         def read() -> dict[str, Any]:
-            import json
-
             try:
-                # This generated connect API declares response_type='str'. Its
-                # deserializer converts JSON objects into Python repr strings,
-                # so decode the raw JSON before that lossy coercion.
-                response = self._core.connect_get_node_proxy_with_path(
-                    name=node_name,
-                    path="stats/summary",
-                    _request_timeout=10,
-                    _preload_content=False,
-                )
-                try:
-                    result = json.loads(response.data)
-                    if not isinstance(result, dict):
-                        raise ValueError("kubelet summary is not a JSON object")
-                    return result
-                finally:
-                    response.release_conn()
+                if (not isinstance(node_name, str) or len(node_name) > 253
+                        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", node_name)):
+                    raise ValueError("unqualified kubelet node")
+                if expected_node_uid is not None and (not isinstance(expected_node_uid, str)
+                        or str(UUID(expected_node_uid)) != expected_node_uid or not UUID(expected_node_uid).int):
+                    raise ValueError("unqualified expected kubelet node identity")
+                node = self._core.read_node(name=node_name, _request_timeout=10)
+                if (node.metadata.name != node_name or not node.metadata.uid
+                        or node.metadata.deletion_timestamp is not None
+                        or (expected_node_uid is not None and node.metadata.uid != expected_node_uid)):
+                    raise ValueError("unqualified kubelet node identity")
+                address, = (row.address for row in node.status.addresses if row.type == "InternalIP")
+                endpoint = ipaddress.ip_address(address)
+                if (not endpoint.is_private or endpoint.is_loopback or endpoint.is_link_local
+                        or endpoint.is_unspecified or endpoint.is_multicast):
+                    raise ValueError("unqualified kubelet address")
+                configuration = self._core.api_client.configuration
+                authorization = configuration.auth_settings().get("BearerToken", {}).get("value")
+                if (configuration.verify_ssl is not True or not configuration.ssl_ca_cert
+                        or not isinstance(authorization, str) or authorization[:7].lower() != "bearer "
+                        or not authorization[7:] or any(character.isspace() for character in authorization[7:])):
+                    raise ValueError("unqualified kubelet TLS or bearer authority")
+                trust = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
+                host = "[" + str(endpoint) + "]" if endpoint.version == 6 else str(endpoint)
+                with httpx.Client(verify=trust, timeout=10, trust_env=False, follow_redirects=False) as http:
+                    response = http.get("https://" + host + ":10250/stats/summary",
+                        headers={"Authorization": authorization})
+                    response.raise_for_status()
+                    if len(response.content) > 16 * 1024**2:
+                        raise ValueError("kubelet summary exceeds its bound")
+                    result = response.json()
+                if not isinstance(result, dict) or result.get("node", {}).get("nodeName") != node_name:
+                    raise ValueError("kubelet summary node identity differs")
+                return result
             except Exception as exc:
                 raise self._translate(exc, "resource_summary") from exc
 
-        return await asyncio.to_thread(read)
+        return await read_sdk_before_close(read)
 
     async def close(self) -> None:
         try:
@@ -476,6 +503,7 @@ class InClusterKubernetesJobApi:
                     container=name,
                     tail_lines=100,
                     limit_bytes=4096,
+                    _request_timeout=20,
                 )
             except Exception:
                 continue
@@ -528,7 +556,7 @@ class InClusterKubernetesJobApi:
     async def probe_pool_namespace(self, namespace: PoolNamespaceBindingV1) -> None:
         namespace = PoolNamespaceBindingV1.model_validate_json(namespace.model_dump_json())
         try:
-            await asyncio.to_thread(self._pool_namespace, namespace)
+            await read_sdk_before_close(lambda: self._pool_namespace(namespace))
         except (ValueError, TypeError, AttributeError):
             raise KubernetesApiError("pool execution namespace identity conflict", status_code=409) from None
         except Exception as exc:
@@ -557,8 +585,23 @@ class InClusterKubernetesJobApi:
                         or not isinstance(listing.items, list) or listing.metadata._continue):
                     raise ValueError("pool_execution_partial_pod_list")
                 qualify_execution_observation(job, listing.items, runtime)
+                observed = _normalize(job, listing.items)
+                if observed.normalized_state == NormalizedJobState.FAILED and listing.items:
+                    pod = listing.items[0]
+
+                    def current_pod() -> None:
+                        current = self._core.read_namespaced_pod(pod.metadata.name, runtime.namespace.name,
+                            _request_timeout=20)
+                        qualify_execution_observation(job, [current], runtime)
+                        if current.metadata.uid != pod.metadata.uid:
+                            raise ValueError("pool_execution_log_pod_changed")
+
+                    current_pod()
+                    excerpts = self._log_excerpts(runtime.namespace.name, pod)
+                    current_pod()
+                    observed = observed.model_copy(update={"container_logs": excerpts})
                 self._pool_namespace(runtime.namespace)
-                return _normalize(job, listing.items)
+                return observed
             except KubernetesApiError:
                 raise
             except (ValueError, TypeError, AttributeError):
@@ -566,7 +609,7 @@ class InClusterKubernetesJobApi:
             except Exception as exc:
                 raise self._translate(exc, "observe_pool") from exc
 
-        return await asyncio.to_thread(read)
+        return await read_sdk_before_close(read)
 
     async def create_job(
         self, *, namespace: str, manifest: dict[str, Any]

@@ -122,6 +122,16 @@ username/password fixture ordering. New files do not reshuffle existing files.
 Docker integration remains a separate lane, and every required gate still waits
 for all selected shards. Required platform tests are retained.
 
+The cluster-contract lane also uses four complete, non-overlapping file shards,
+with its stable hash policy in the same manifest. Each shard owns an independent
+disposable Kubernetes runtime, preserves within-file fixture order, and retains
+the 35-minute job limit and existing per-test deadlines. Selector failure stops
+the shard even if it emitted partial paths; test failure remains a failed job.
+`cluster-smoke-gate` waits for the aggregate result of all selected shards, with
+fail-fast cancellation disabled. This replaces a serial run that exhausted its
+35-minute limit after completing only 61% of 77 tests; it removes no test paths
+or protected checks. Per-shard duration reporting supports later balance review.
+
 The successful PR #1973 head `69359261` ran its two integration shards in
 66 and 90 minutes. Timestamped progress for 518 modules accounts for about
 155 minutes of test work. Repartitioning that same work projects approximately

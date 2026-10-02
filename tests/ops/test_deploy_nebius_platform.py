@@ -144,6 +144,43 @@ def test_ingress_cutover_between_preflight_and_lock_cannot_be_reverted(rendered,
     assert any(command[0] == "exec" and "release" in command for command in kube.commands)
 
 
+@pytest.mark.parametrize("process,setting", [
+    ("loom-control-plane", "LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON"),
+    ("loom-execution-actuator", "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"),
+    ("loom-service", "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"),
+])
+def test_ordinary_rollout_cannot_strip_global_pool_binding_or_restore_local_writers(rendered, process, setting):
+    _, config, manifest, files = rendered
+    kube = FakeKubectl(config, files)
+    # Even malformed/incomplete global wiring must not be overwritten by the
+    # old standalone renderer. The protected successor owns its recovery.
+    kube.objects["deployment", process] = {"spec": {"template": {"spec": {
+        "containers": [{"env": [{"name": setting, "value": "incomplete-global-binding"}]}]}}}}
+    with pytest.raises(deploy.DeploymentError, match=r"pool.*protected"):
+        deploy.preflight(kube, manifest, config, files, config["cluster_id"])
+    assert not any(command[0] in {"apply", "patch", "delete", "exec", "create"} for command in kube.commands)
+
+
+def test_pool_cutover_between_preflight_and_idle_guard_cannot_restore_local_writer(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+
+    class InterleavedPoolCutover(FakeKubectl):
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if command[0] == "exec" and "acquire" in command:
+                self.objects["deployment", "loom-execution-actuator"] = {"spec": {"template": {"spec": {
+                    "containers": [{"env": [{"name": "LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL", "value": "retained-global-binding"}]}]}}}}
+            return result
+
+    kube = InterleavedPoolCutover(config, files, database=True)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match=r"pool.*protected"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "patch", "delete", "create"} for command in kube.commands)
+    assert any(command[0] == "exec" and "release" in command for command in kube.commands)
+
+
 def test_standalone_deployer_rejects_managed_child(request, tmp_path):
     from tests.unit.test_nebius_environment_render import rendered
 

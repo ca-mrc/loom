@@ -1424,6 +1424,26 @@ the same operation, candidate, parent journal and independent anchor. Do not cle
 those guards to make the operation appear idle, and do not treat
 `pool_registered_closed` as completed writer migration or a usable global pool.
 
+The internal connected cutover parent can additionally freeze the retained
+manager/shared APIs, qualify producer and database readiness, retire/fence old
+writers and stage dedicated material plus the disabled global runtimes. Its
+`pool_runtime_staged_closed` result is not activation or a completed migration.
+Preserve the cutover anchor, parent journal, writer child journals and each
+material/configuration/authority/workload stage. Recovery after runtime template
+replacement must use that parent: replaying the original retirement phase
+against changed templates is invalid. A restarted producer, effective extra
+writer grant, changed UID or missing evidence stops further mutation. Do not
+interpret an idle activity count as an empty future queue. The fixed database
+readiness pages also inspect delayed native work and batches awaiting fan-out,
+require schema `0172` and reject live application access even with no connected
+session. Preserve unknown queued origins: drain through the existing execution
+path before cutover instead of rewriting provenance or cancelling unrelated work.
+The protected parent still must qualify retained personal origin history in the
+management database; the database page alone cannot authorize it. Do not
+restore replicas, resume the collector, release guards or change pool mode
+manually. Protected entry, activation/rollback and successor-refresh qualification
+must be connected before this path is used on Nebius.
+
 **Verifying the deployed version (#2009):** confirm the rendered candidate SHA
 actually reached the cluster by comparing it against what the running app
 reports, not just this deployment's own logs. Open the target URL, click the

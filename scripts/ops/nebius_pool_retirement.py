@@ -114,14 +114,23 @@ def _closed(request: PoolMigrationRequest, state: Path, anchor: Path) -> str:
 
 def qualify_pool_drain(request: PoolRetirementRequest, *, key: str, current: dict[str, Any],
                        children: dict[str, Any], pods: dict[str, Any]) -> bool:
+    return qualify_closed_workload_drain(original=retirement_documents(request)[key],
+        desired=stopped_document(request, key), current=current, children=children, pods=pods)
+
+
+def qualify_closed_workload_drain(*, original: dict[str, Any], desired: dict[str, Any], current: dict[str, Any],
+                                  children: dict[str, Any], pods: dict[str, Any]) -> bool:
     """Complete namespace collections; terminating controller Pods still count.
 
 Completed collector history may remain for retention, but every container must
 be terminal. No observation here grants or restores any Kubernetes write role.
 """
     try:
-        original = retirement_documents(request)[key]
-        if not _matches(current, stopped_document(request, key), _uid(original)):
+        if (original["kind"] not in {"Deployment", "CronJob"}
+                or desired["kind"] != original["kind"]
+                or not _matches(current, desired, _uid(original))
+                or (desired["spec"].get("replicas") != 0 if original["kind"] == "Deployment"
+                    else desired["spec"].get("suspend") is not True)):
             raise ValueError
         deployment = original["kind"] == "Deployment"
         namespace = original["metadata"]["namespace"]

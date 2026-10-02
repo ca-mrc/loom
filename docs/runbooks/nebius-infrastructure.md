@@ -745,11 +745,21 @@ in `loom-nebius-staging`, not claims that those objects already exist.
     "source_store": [{"cidr": "192.0.2.3/32", "port": 9443}],
     "control_plane": [{"cidr": "192.0.2.4/32", "port": 8443}],
     "kubernetes_api": [{"cidr": "192.0.2.5/32", "port": 443}],
+    "kubelet": [{"cidr": "10.40.0.0/24", "port": 10250}],
     "provider_api": [{"cidr": "192.0.2.6/32", "port": 443}],
     "model_api": [{"cidr": "192.0.2.7/32", "port": 443}]
   }
 }
 ```
+
+The required `network.kubelet` destinations must cover the approved private
+worker-node subnet and the actuator's hosting Node, including when workers are at
+zero. Use the actual cluster's RFC1918 IPv4 or ULA IPv6 CIDRs, not the illustrative
+subnet above. Only TCP 10250 is accepted, and only the actuator receives this
+egress. Existing attachment inputs need this field before upgrading to the direct
+telemetry reader; there is no broad default route or node-proxy fallback. Rendering
+validates the route, but protected installed preflight must still prove CNI
+reachability, kubelet TLS and ServiceAccount authorization.
 
 Render into a new directory with a separately reviewed staging capacity policy:
 

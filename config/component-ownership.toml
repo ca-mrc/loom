@@ -138,6 +138,14 @@ pins = [
   { path = "tests/integration/test_username_password_schema.py", shard_index = 3 },
 ]
 
+[[test_sharding]]
+lane = "cluster-smoke"
+shard_count = 4
+strategy = "stable-hash"
+# PR2304 run36949210207 reached 61% of 77 tests before the serial 35m limit.
+# Keep whole files and their fixture ordering together on independent runners.
+salt = "cluster-smoke-v1-4"
+
 [[execution_policies]]
 id = "virtual-app-v1"
 language = "python"

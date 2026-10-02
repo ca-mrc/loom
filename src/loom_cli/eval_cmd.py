@@ -278,11 +278,64 @@ def _print_trial_progress(item: dict[str, Any], *, timeline: bool = False) -> No
             print(f"  {row.get('label', 'unknown')}: {duration}")
 
 
+def _network_policy_label(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "(unavailable)"
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        return "(unavailable)"
+    targets: list[str] = []
+    if kind == "web-allowlist":
+        for destination in value.get("destinations") or []:
+            if isinstance(destination, dict):
+                protocol, host = destination.get("protocol"), destination.get("host")
+                if isinstance(protocol, str) and isinstance(host, str):
+                    targets.append(f"{protocol}://{host}")
+    elif kind == "allowlist":
+        targets = [str(target) for field in ("domains", "cidrs") for target in value.get(field) or []]
+    return kind + (": " + ", ".join(targets) if targets else "")
+
+
+def _network_policy_groups_label(groups: Any) -> str:
+    labels: list[str] = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        count = len(group.get("task_ids") or [])
+        unit = "task" if count == 1 else "tasks"
+        labels.append(f"{_network_policy_label(group.get('policy'))} ({count} {unit})")
+    return "; ".join(labels) or "(unavailable)"
+
+
+def _print_network_policy(evidence: Any, *, batch: bool = False) -> None:
+    """Display service evidence without inferring a missing frozen policy."""
+    if not isinstance(evidence, dict):
+        return
+    print("task_network:")
+    if batch:
+        print(f"  task_defaults: {_network_policy_groups_label(evidence.get('authored_defaults'))}")
+    else:
+        print(f"  task_default: {_network_policy_label(evidence.get('task_default'))}")
+    override = evidence.get("requested_override")
+    override_label = "(none; task default)" if override is None else _network_policy_label(override)
+    print(f"  selected_override: {override_label}")
+    if batch:
+        print(f"  resolved_policy: {_network_policy_groups_label(evidence.get('resolved_effective'))}")
+        unavailable = evidence.get("unavailable_task_ids") or []
+        if unavailable:
+            print("  policy_unavailable: " + ", ".join(str(task_id) for task_id in unavailable))
+    else:
+        print(f"  frozen_policy: {_network_policy_label(evidence.get('effective'))}")
+
+
 def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> None:
     print(f"id:               {item.get('id') or item.get('trial_id')}")
     print(f"task_id:          {item.get('task_id', '(unknown)')}")
     print(f"state:            {item.get('state', '(unknown)')}")
     _print_trial_progress(item, timeline=timeline)
+    materialization = item.get("materialization")
+    if isinstance(materialization, dict):
+        _print_network_policy(materialization.get("network_policy"))
     if item.get("agent_name") is not None:
         print(f"agent:            {item['agent_name']}")
     if item.get("model") is not None:
@@ -525,6 +578,7 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"expected_trial_count:  {item.get('expected_trial_count', '?')}")
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
     print(f"backend:               {item.get('backend') or '(unknown)'}")
+    _print_network_policy(item.get("network_policy"), batch=True)
     required_worker_pools = item.get("required_worker_pools") or []
     if required_worker_pools:
         print(f"required_worker_pools: {', '.join(required_worker_pools)}")

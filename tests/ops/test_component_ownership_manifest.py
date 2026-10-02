@@ -1322,7 +1322,7 @@ def test_behavior_frontend_sources_are_excluded_from_coverage_gate() -> None:
     assert '"src/components/artifacts/useBoundedJson.ts"' in vite_config
 
 
-@pytest.mark.parametrize("lane", ["tests-root", "integration"])
+@pytest.mark.parametrize("lane", ["tests-root", "integration", "cluster-smoke"])
 def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy(lane)
@@ -1347,7 +1347,7 @@ def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
         for index in range(policy.shard_count)
     ]
 
-    assert shards[0].isdisjoint(shards[1])
+    assert all(shard.isdisjoint(other) for index, shard in enumerate(shards) for other in shards[index + 1:])
     assert set().union(*shards) == set(paths)
 
 

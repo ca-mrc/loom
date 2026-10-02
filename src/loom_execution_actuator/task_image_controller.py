@@ -23,7 +23,11 @@ from loom.db.schema import (
     TaskImageMaterialization,
     TaskImageMaterializationAttempt,
 )
-from loom.nebius_kubernetes import NebiusKubernetesConnection, create_api_client
+from loom.nebius_kubernetes import (
+    NebiusKubernetesConnection,
+    create_api_client,
+    read_sdk_before_close,
+)
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.security.redaction import redact_text
 from loom.task_image_build_plan import derive_task_image_build_components
@@ -244,7 +248,7 @@ class NativeBuildKubernetesApi:
                 current_pod()
             namespace()
             return job
-        return await asyncio.to_thread(run)
+        return await read_sdk_before_close(run)
 
     async def delete(self, namespace: str, name: str, uid: str | None, *, configmap: dict[str, Any]) -> bool:
         def run() -> bool:
