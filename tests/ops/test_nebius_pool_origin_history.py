@@ -213,7 +213,7 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
 
 @pytest.mark.parametrize('damage', [None, 'db_settings', 'machine_settings', 'epoch_settings', 'token',
     'original_running', 'unready', 'uid', 'pod', 'replica_owner', 'template', 'account', 'name',
-    'registration', 'db_reference', 'secret', 'backend', 'history', 'authority'])
+    'registration', 'db_reference', 'secret', 'backend', 'late_secret', 'late_backend', 'history', 'authority'])
 def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, monkeypatch, damage):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
@@ -235,7 +235,7 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
     token.chmod(0o600)
     machine['token_sha256'] = hashlib.sha256(token.read_bytes()).hexdigest()
     migration = replace(api.request, registration=replace(api.request.registration, spec=PoolInstallation.model_validate(spec)))
-    selected = type(api)(request=migration, target=state.target, kubeconfig=api.kubeconfig, executable=api.executable)
+    selected = type(api)(request=migration, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
     namespace, name = state.target.namespace, 'loom-pool-gateway'
     original, = render_gateway(migration.registration.spec, namespace=namespace,
         service_image=migration.registration.candidate['images']['service']['image_ref'],
@@ -310,6 +310,10 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
                 raise ValueError('private-probe-error')
             if damage == 'secret':
                 state.secret['metadata']['resourceVersion'] = 'changed'
+            if len(processes) == 2 and damage == 'late_secret':
+                state.secret['metadata']['resourceVersion'] = 'changed'
+            elif len(processes) == 2 and damage == 'late_backend':
+                state.database['metadata']['uid'] = str(uuid4())
             return json.loads(result.stdout)
         if args[:2] == ['get', 'deployment']:
             assert args[2:5] == [name, '-n', namespace]
