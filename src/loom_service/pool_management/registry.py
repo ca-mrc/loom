@@ -66,6 +66,7 @@ class PoolProfiles:
     execution: Mapping[UUID, PoolExecutionProfile] = field(default_factory=dict)
     task_images: Mapping[UUID, PoolTaskImageProfile] = field(default_factory=dict)
     application_images: Mapping[UUID, PoolApplicationImageProfile] = field(default_factory=dict)
+    catalog_sha256: str | None = None
 
 
 def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profiles: PoolProfiles,

@@ -231,12 +231,15 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     application = installation.applications
                     manager = ApplicationManager(ApplicationRegistry(session_factory), foundation=installation.foundation,
                         shared=application.shared, authority=application.authority, releases=application.releases)
-                    runtime = await resources.enter_async_context(ApplicationServiceRuntime.open(application, manager))
+                    runtime = await resources.enter_async_context(ApplicationServiceRuntime.open(application, manager,
+                        pool_profiles=pool_profiles, management_origin=str(settings.public_base_url)))
                     app.state.application_runtime = runtime
                     app.state.application_manager = manager
                     app.state.application_login = runtime.login
                     if runtime.source_uploader is not None:
                         app.state.application_source_uploader = runtime.source_uploader
+                    if runtime.build_worker is not None:
+                        app.state.application_build_registry = runtime.build_worker.journal.registry
             try:
                 yield
             finally:
@@ -250,6 +253,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     del app.state.application_login
                 if hasattr(app.state, "application_source_uploader"):
                     del app.state.application_source_uploader
+                if hasattr(app.state, "application_build_registry"):
+                    del app.state.application_build_registry
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:

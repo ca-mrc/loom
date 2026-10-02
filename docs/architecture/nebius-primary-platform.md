@@ -1017,6 +1017,27 @@ without the explicitly configured build registry and are absent from personal
 application services. This implementation does not itself configure management
 credentials, install the read-only role, or qualify a deployable release.
 
+Optional protected `applications.runtime.build` settings connect these controls
+and the automatic worker to the management service lifecycle. They bind the
+source/recipe/pool profile, management HTTPS origin, dedicated private bearer-token
+file, concurrency (default 4, range 1–16), polling interval (default 5 seconds,
+range 1–60), and pool HTTP timeout (default 30 seconds, range 1–60). The source
+uploader must also be configured. Startup checks shared installation/data/cluster,
+schema and source storage, matches the loaded profile catalog's digest against
+protected pool registration, and authenticates the dedicated builder machine in
+the real management database. The origin must match the management service's
+public origin. A registered closed pool permits startup, not resource admission;
+every common-pool operation still reauthorizes the machine and admission mode.
+
+The runtime owns both deployment and build workers. Readiness requires both to
+be healthy; shutdown drains both before closing their HTTP, Kubernetes and database
+dependencies. Build observation reuses the native Kubernetes reader with an
+explicit endpoint, CA and per-request projected-token refresh, never ambient
+kubeconfig or the cloud provisioning identity. Routes receive the build registry
+only after successful runtime creation. Omitted settings preserve historical
+installation fingerprints. These capabilities still require protected credential
+and read-only RBAC delivery; source support alone is not installed acceptance.
+
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected
 participant/profile binding and cancellation state under the pool transaction.
@@ -1029,8 +1050,8 @@ for both build kinds. The existing machine-only pool API transports this typed
 request. Gateway dispatch, retained native-runtime readback and the physical
 collector bind application Jobs to build ID/attempt and observed Job UID. Stop
 and output-drain use that same attempt; neither releases capacity without the
-existing gateway absence check. This support is not an installed management worker
-or an owner-facing build endpoint.
+existing gateway absence check. Pool adapter support alone does not install the
+management worker or enable owner-facing build endpoints.
 
 Participant machine identity also retains an immutable workload scope. Ordinary
 environment credentials can submit/control trials, verifiers and task builds;

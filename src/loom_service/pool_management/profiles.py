@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from loom.application_image_build import ApplicationImageRecipeV1
 from loom.execution_contract import ExecutionClassV1
 from loom.execution_image_admission import ImageAdmissionKeyring
+from loom.pipeline.keys import canonical_digest
 from loom.task_image_materialization import NativeCPUArch
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
@@ -120,7 +121,8 @@ class PoolProfileCatalog(_Strict):
         keyring = ImageAdmissionKeyring.from_json(json.dumps(self.image_admission_keyring))
         return PoolProfiles(MappingProxyType({row.profile_id: row.profile(keyring) for row in self.execution}),
             MappingProxyType({row.profile_id: row.profile() for row in self.task_images}),
-            MappingProxyType({row.profile_id: row.profile() for row in self.application_images}))
+            MappingProxyType({row.profile_id: row.profile() for row in self.application_images}),
+            canonical_digest(self.model_dump(mode="json")).removeprefix("sha256:"))
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
