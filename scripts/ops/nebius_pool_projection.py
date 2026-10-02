@@ -24,34 +24,58 @@ Result = TypeVar("Result")
 
 
 def _snapshot(value: Any) -> object:
-    """Keep types and ordering: Python equality aliases e.g. True and 1."""
-    kind = type(value)
-    if value is None or kind in (str, int, bool, bytes):
-        return kind, value
-    if kind is float:
-        return kind, value.hex()
-    if kind is datetime:
-        return kind, value.isoformat(), value.fold
-    if kind in (tuple, list):
-        return kind, tuple(_snapshot(item) for item in value)
-    if kind in (set, frozenset):
-        return kind, frozenset(_snapshot(item) for item in value)
-    if kind is dict:
-        return kind, tuple((_snapshot(key), _snapshot(item)) for key, item in value.items())
-    if kind is UUID:
-        return kind, value.int
-    if isinstance(value, PurePath):
-        return kind, str(value)
-    if isinstance(value, Enum):
-        return kind, value.name
-    if isinstance(value, BaseModel):
-        # model_dump may normalize invalid model_copy values or omit fields.
-        # Capture raw values instead so a prior qualification cannot hide drift.
-        return (kind, _snapshot(value.__dict__), _snapshot(value.__pydantic_extra__),
-            _snapshot(value.__pydantic_private__), _snapshot(value.__pydantic_fields_set__))
-    if not isinstance(value, type) and is_dataclass(value):
-        return kind, tuple((field.name, _snapshot(getattr(value, field.name))) for field in fields(value))
-    raise TypeError("pool projection input is not memoizable: " + kind.__name__)
+    """Fresh typed graph, not an exponentially expanded tree of shared inputs.
+
+    References are traversal-local indices, never persistent object identities.
+    Flat records also bound equality work: nested tuple snapshots would compare
+    shared subtrees repeatedly even if their construction used a local memo.
+    """
+    references: dict[int, int] = {}
+    retained: list[Any] = []  # Keep objects alive until this capture is complete.
+    records: list[object] = []
+
+    def visit(item: Any) -> object:
+        kind = type(item)
+        if item is None or kind in (str, int, bool, bytes):
+            return kind, item
+        if kind is float:
+            return kind, item.hex()
+        if kind is datetime:
+            return kind, item.isoformat(), item.fold
+        if kind is UUID:
+            return kind, item.int
+        if isinstance(item, PurePath):
+            return kind, str(item)
+        if isinstance(item, Enum):
+            return kind, item.name
+        identity = id(item)
+        if identity in references:
+            return references[identity]
+        index = len(records)
+        references[identity] = index
+        retained.append(item)
+        records.append(None)
+        record: object
+        if kind in (tuple, list):
+            record = kind, tuple(visit(child) for child in item)
+        elif kind in (set, frozenset):
+            record = kind, frozenset(visit(child) for child in item)
+        elif kind is dict:
+            record = kind, tuple((visit(key), visit(child)) for key, child in item.items())
+        elif isinstance(item, BaseModel):
+            # Raw values retain field-set/invalid model_copy drift; model_dump
+            # can normalize or omit it. No serialization hooks execute here.
+            record = (kind, visit(item.__dict__), visit(item.__pydantic_extra__),
+                visit(item.__pydantic_private__), visit(item.__pydantic_fields_set__))
+        elif not isinstance(item, type) and is_dataclass(item):
+            record = kind, tuple((field.name, visit(getattr(item, field.name))) for field in fields(item))
+        else:
+            raise TypeError("pool projection input is not memoizable: " + kind.__name__)
+        records[index] = record
+        return index
+
+    root = visit(value)
+    return root, tuple(records)
 
 
 def pure_projection(function: Callable[[Request], Result]) -> Callable[[Request], Result]:

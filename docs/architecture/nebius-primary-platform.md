@@ -2857,7 +2857,10 @@ and each exact stopped old or journaled new workload. It rechecks every frozen
 producer before further mutations, including partial replacement recovery.
 Pure input-derived migration contracts and manifests use bounded, single-entry
 reuse keyed by complete type-sensitive request snapshots. Nested input changes
-are requalified and returned documents are detached; this does not cache journal
+are requalified and returned documents are detached. Each call captures a fresh
+flat graph with local references, so shared subobjects are inspected once without
+expanding or comparing repeated subtrees; alias changes also invalidate reuse.
+This does not cache journal
 reads, cluster identities, effective permissions, database observations or write
 outcomes. Per-request transport scope checks compare the retained inputs and
 still read the live cluster and namespace identities on every check. Image
