@@ -30,7 +30,7 @@ from tests.ops.test_nebius_pool_cutover_entry import retirement_inputs as retire
 from tests.ops.test_nebius_pool_cutover_entry import runtime_inputs as runtime_inputs
 
 
-def finish_cutover(operation):
+def finish_cutover(operation, *, legacy=False):
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_completion import complete_pool_cutover
     from scripts.ops.nebius_pool_cutover import stage_pool_cutover
@@ -52,10 +52,58 @@ def finish_cutover(operation):
     startup = StartupAPI(context.request, closed, state)
     assert stage_pool_startup(request=context.request, api=startup, state_dir=state,
         anchor_dir=anchor)['status'] == 'pool_startup_staged_closed'
-    api = ActivationAPI((context.request, context.tokens, closed, startup, None, state.parent))
+    fixture = (context.request, context.tokens, closed, startup, None, state.parent)
+    api = ActivationAPI(fixture)
     api.state = state
     assert advance_pool_activation(request=context.request, api=api, state_dir=state,
         anchor_dir=anchor)['status'] == 'pool_activation_complete'
+    if legacy:
+        # Reuse the real recovery stages and their external-transport doubles.
+        # These doubles normally use fixture_root/cutover; private entry uses an
+        # operation-qualified state path, which is already held by StartupAPI.
+        from unittest.mock import patch
+
+        from scripts.ops.nebius_pool_gateway_retirement import retire_gateway_roles
+        from scripts.ops.nebius_pool_legacy_reopening import reopen_pool_legacy
+        from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
+        from scripts.ops.nebius_pool_machine_retirement import retire_pool_machines
+        from scripts.ops.nebius_pool_role_restoration import restore_pool_roles
+        from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+        from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+        from scripts.ops.nebius_pool_template_restoration import restore_pool_templates
+        from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI
+        from tests.ops.test_nebius_pool_legacy_reopening import ReopeningAPI
+        from tests.ops.test_nebius_pool_legacy_restart import RestartAPI
+        from tests.ops.test_nebius_pool_machine_retirement import MachineAPI
+        from tests.ops.test_nebius_pool_role_restoration import RoleAPI
+        from tests.ops.test_nebius_pool_template_restoration import TemplateAPI
+
+        initialize = ActivationAPI.__init__
+        def operation_init(self, selected):
+            initialize(self, selected)
+            self.state = selected[3].state
+        with patch.object(ActivationAPI, '__init__', operation_init):
+            machine = MachineAPI(fixture)
+            machine.mode, machine.guards = api.mode, api.guards.copy()
+            assert advance_pool_activation(request=context.request, api=machine, state_dir=state,
+                anchor_dir=anchor, cancel=True)['status'] == 'pool_activation_cancelled'
+            assert fence_pool_startup(request=context.request, api=machine, state_dir=state,
+                anchor_dir=anchor)['status'] == 'startup_writes_fenced'
+            assert stop_pool_successors(request=context.request, api=machine, state_dir=state,
+                anchor_dir=anchor)['status'] == 'pool_successors_stopped'
+            assert retire_pool_machines(request=context.request, api=machine, state_dir=state,
+                anchor_dir=anchor)['status'] == 'pool_machines_retired'
+            api = GatewayAPI(fixture, machine)
+            for successor, stage, status in (
+                (None, retire_gateway_roles, 'pool_gateway_roles_retired'),
+                (TemplateAPI, restore_pool_templates, 'pool_legacy_templates_restored_closed'),
+                (RoleAPI, restore_pool_roles, 'pool_legacy_roles_restored_closed'),
+                (RestartAPI, restart_pool_legacy, 'pool_legacy_restart_staged_closed'),
+                (ReopeningAPI, reopen_pool_legacy, 'pool_legacy_reopened'),
+            ):
+                if successor is not None:
+                    api = successor(fixture, api)
+                assert stage(request=context.request, api=api, state_dir=state, anchor_dir=anchor)['status'] == status
     result = complete_pool_cutover(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
     return context, result
 
@@ -404,3 +452,219 @@ def test_pool_refresh_readback_accepts_real_updated_manager_but_not_other_drift(
                 api.qualify_writer_bindings()
             row.clear()
             row.update(saved)
+
+
+def pool_refresh_http(bound):
+    """Real HTTP readers; only Kubernetes, database and cloud boundaries doubled."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
+    from scripts.ops.nebius_pool_role_fencing import role_fence_documents
+    from scripts.ops.nebius_pool_role_restoration import restored_role_options
+    from tests.ops.test_nebius_pool_cutover import cutover_binding_inventory
+
+    pool = bound.qualify()
+    context, operation = pool.context, pool.context.operation
+    request, tokens = context.request, context.tokens
+    migration = request.fencing.retirement.migration
+    binding = migration.registration.binding
+    state, anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
+    objects = {_key(row): copy.deepcopy(row) for rows in
+        cutover_binding_inventory.__wrapped__((request, tokens)).values() for row in rows}
+    objects.update({key: copy.deepcopy(rows[0]) for key, rows in bound.workload_options().items()})
+    roles = restored_role_options(request, state=state, anchor=anchor)
+    for original in request.fencing.originals:
+        key = _key(original)
+        row = copy.deepcopy(role_fence_documents(request.fencing)[key] if roles is None else roles[key][0])
+        row['metadata']['uid'] = original['metadata']['uid']
+        objects[key] = row
+    authority = gateway_retirement_options(request, state=state, anchor=anchor)
+    for phase in ('material', 'configuration', 'authority'):
+        for key, item in json.loads((state / phase / 'stage.json').read_bytes())['resources'].items():
+            row = copy.deepcopy(authority[key][0] if phase == 'authority' and authority is not None else item['observed'])
+            row['metadata']['uid'] = item['uid']
+            objects[key] = row
+    namespaces = {binding.namespace: binding.namespace_uid, 'kube-system': binding.kube_system_uid,
+        **{row.namespace: str(row.namespace_uid) for row in migration.guards},
+        **{ns.name: str(ns.uid) for row in migration.registration.spec.participants
+            for ns in (row.execution_namespace, row.build_namespace)}}
+    collections = {'Role': 'roles', 'ClusterRole': 'clusterroles', 'RoleBinding': 'rolebindings',
+        'ClusterRoleBinding': 'clusterrolebindings', 'Deployment': 'deployments', 'CronJob': 'cronjobs',
+        'ReplicaSet': 'replicasets', 'StatefulSet': 'statefulsets', 'DaemonSet': 'daemonsets',
+        'ReplicationController': 'replicationcontrollers', 'Job': 'jobs', 'Pod': 'pods',
+        'ConfigMap': 'configmaps', 'Secret': 'secrets', 'ServiceAccount': 'serviceaccounts'}
+    paths = {}
+    for key, row in objects.items():
+        row['metadata'].update(resourceVersion='7', generation=1)
+        if row['kind'] == 'Deployment':
+            row['status'] = {'observedGeneration': 1, 'replicas': row['spec']['replicas']}
+        metadata = row['metadata']
+        prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
+        paths[prefix + ('/namespaces/' + metadata['namespace'] if metadata.get('namespace') else '')
+            + '/' + collections[row['kind']] + '/' + metadata['name']] = key
+    external = SimpleNamespace(objects=objects, calls=[], failure=None, reviews=[], namespaces=namespaces)
+    gateway_user = f'system:serviceaccount:{binding.namespace}:loom-pool-gateway'
+
+    def respond(message):
+        external.calls.append(message)
+        path = message.url.path
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert message.method == 'POST'
+            user = message.headers['Impersonate-User']
+            account_namespace, account = user.split(':')[2:]
+            groups = message.headers.get_list('Impersonate-Group')
+            assert groups == ['system:serviceaccounts', 'system:serviceaccounts:' + account_namespace, 'system:authenticated']
+            namespace = json.loads(message.content)['spec']['namespace']
+            external.reviews.append((user, namespace))
+            rules, nonresource = [], []
+            for row in external.objects.values():
+                if row['kind'] not in {'RoleBinding', 'ClusterRoleBinding'}:
+                    continue
+                if row['kind'] == 'RoleBinding' and row['metadata']['namespace'] != namespace:
+                    continue
+                matches = any((subject['kind'] == 'ServiceAccount'
+                    and (subject['namespace'], subject['name']) == (account_namespace, account))
+                    or (subject['kind'] == 'User' and subject['name'] == user)
+                    or (subject['kind'] == 'Group' and subject['name'] in groups) for subject in row['subjects'])
+                if matches:
+                    ref = row['roleRef']
+                    role = external.objects[ref['kind'] + ':' + (row['metadata']['namespace'] if ref['kind'] == 'Role' else '-') + ':' + ref['name']]
+                    for rule in role['rules']:
+                        (nonresource if 'nonResourceURLs' in rule else rules).append(copy.deepcopy(rule))
+            if external.failure == 'gateway_rights' and user == gateway_user:
+                rules.append({'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get']})
+            if external.failure == 'legacy_rights' and user != gateway_user:
+                rules.append({'apiGroups': [''], 'resources': ['secrets'], 'verbs': ['get']})
+            if external.failure == 'late_guard' and user == gateway_user:
+                external.failure = 'guard'
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'spec': {}, 'status': {'incomplete': False, 'resourceRules': rules, 'nonResourceRules': nonresource}})
+        assert message.method == 'GET', 'refresh qualification must not persist a Kubernetes write'
+        if path in {'/api/v1/namespaces/' + name for name in namespaces}:
+            name = path.rsplit('/', 1)[-1]
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': name,
+                'uid': external.namespaces[name], 'labels': {'loom.nebius/management-installation': binding.installation_id,
+                    'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if path in paths:
+            return httpx.Response(200, json=external.objects[paths[path]])
+        resource = path.rsplit('/', 1)[-1]
+        kind, = (kind for kind, plural in collections.items() if plural == resource)
+        assert message.url.params['limit'] in {'100', '1000'}
+        rows = [row for row in external.objects.values() if row['kind'] == kind]
+        if '/namespaces/' in path:
+            namespace = path.split('/namespaces/')[1].split('/')[0]
+            rows = [row for row in rows if row['metadata']['namespace'] == namespace]
+        version = ('rbac.authorization.k8s.io/v1' if 'role' in resource else 'batch/v1' if resource in {'cronjobs', 'jobs'}
+            else 'v1' if resource in {'pods', 'replicationcontrollers'} else 'apps/v1')
+        return httpx.Response(200, json={'apiVersion': version, 'kind': kind + 'List',
+            'metadata': {'resourceVersion': '7'}, 'items': rows})
+
+    def qualify_binding(actual, manager):
+        assert actual == migration and manager == request.manager
+
+    def preflight(actual):
+        assert actual == request
+        if external.failure == 'provider':
+            raise ValueError('private-provider-marker')
+
+    def active():
+        assert pool.completion.outcome == 'global'
+        if external.failure in {'pool', 'credentials'}:
+            raise ValueError('private-database-marker')
+
+    def pool_state(action):
+        assert action == 'observe'
+        return 'closed' if external.failure == 'pool' else 'fenced' if pool.completion.outcome == 'legacy' else 'global'
+
+    def machines(action):
+        assert action == 'observe'
+        return 'active' if external.failure == 'credentials' else 'revoked'
+
+    def guard(target, action):
+        assert target in migration.guards and action == 'observe'
+        return 'fenced' if external.failure == 'guard' else 'open'
+
+    def runtime_role(target, action):
+        assert target in migration.guards and action == 'inspect'
+        return {'status': 'invalid' if external.failure == 'database_role' else 'qualified'}
+
+    def no_idle(*_args, **_kwargs):
+        pytest.fail('opened owners can work: no startup, idle, local-drain or closed-mode probe')
+
+    @contextmanager
+    def connect():
+        import ssl
+
+        from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+        from scripts.ops.nebius_pool_refresh_live import HTTPSPoolRefreshAPI
+
+        history = SimpleNamespace(qualify_binding=qualify_binding, qualify_active_pool=active,
+            activation_pool=pool_state, machine_retirement=machines,
+            recovery_pool_drained=lambda: external.failure != 'global_busy', qualify_closed_pool=no_idle)
+        guards = SimpleNamespace(request=migration, activation_guard=guard, runtime_role=runtime_role,
+            guard=no_idle, recovery_participant_drained=no_idle, cutover_readiness_page=no_idle)
+        with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=SimpleNamespace(), guards=guards,
+                checks=SimpleNamespace(preflight=preflight, qualify_quiescence=no_idle), history=history,
+                api_server='https://cluster.example', ssl_context=ssl.create_default_context(),
+                state_dir=state, anchor_dir=anchor, refresh=bound) as parent:
+            for adapter in (parent, parent.fencing, parent.retirement):
+                adapter.client.close()
+                adapter.client = httpx.Client(base_url=parent.api_server, transport=httpx.MockTransport(respond))
+            yield HTTPSPoolRefreshAPI(parent=parent), external
+    return connect
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize('legacy', [False, True], ids=['global', 'legacy'])
+def test_pool_refresh_live_preserves_open_work_and_rejects_authority_drift(private_cutover, legacy):
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_install import run
+    from tests.ops.test_nebius_management_refresh_predecessor import refresh_case
+
+    operation, _, root = private_cutover
+    context, result = finish_cutover(operation, legacy=legacy)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    assert pool.completion.outcome == ('legacy' if legacy else 'global')
+    case = refresh_case(root, pool, pool_baseline=selector.model_dump(mode='json'))
+    assert run(case)['status'] == 'management_refreshed'
+    bound = PoolManagerRefresh(root, pool, case[0], case[2])
+    before = {path: path.read_bytes() for path in (*pool.history, *case[2].rglob('*.json'))}
+    with pool_refresh_http(bound)() as (api, external):
+        api.qualify()
+        objects = copy.deepcopy(external.objects)
+        assert external.reviews
+        # Live DB and provider failures must propagate without leaking their
+        # payload. An open global pool is deliberately not required to be idle.
+        failures = ['pool', 'credentials', 'guard', 'late_guard', 'database_role',
+            'provider', 'gateway_rights', 'legacy_rights'] + (['global_busy'] if legacy else [])
+        for failure in failures:
+            external.failure = failure
+            with pytest.raises(ValueError, match=r'^pool_refresh_live_unqualified$'):
+                api.qualify()
+            external.failure = None
+        gateway = 'Deployment:' + context.request.fencing.retirement.migration.registration.binding.namespace + ':loom-pool-gateway'
+        manager, participant = _key(context.request.manager), _key(context.request.services[0])
+        material = next(key for key, row in objects.items() if row['kind'] == 'Secret')
+        for key in (manager, participant, gateway, material):
+            external.objects[key]['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ValueError, match=r'^pool_refresh_live_unqualified$'):
+                api.qualify()
+            external.objects = copy.deepcopy(objects)
+        if legacy:
+            external.objects[gateway]['status']['replicas'] = 1
+            with pytest.raises(ValueError, match=r'^pool_refresh_live_unqualified$'):
+                api.qualify()
+            external.objects = copy.deepcopy(objects)
+        else:
+            external.failure = 'global_busy'
+            api.qualify()  # The global ledger need not drain for an upgrade.
+            external.failure = None
+        api.qualify()
+        assert external.objects == objects
+        assert all(call.method == 'GET' or call.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+            for call in external.calls)
+    assert {path: path.read_bytes() for path in before} == before
