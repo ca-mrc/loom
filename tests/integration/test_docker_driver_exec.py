@@ -51,7 +51,7 @@ async def test_exec_truncates_large_stdout(docker_driver):  # type: ignore[no-un
     assert len(r.stdout) <= MAX_EXEC_STREAM_BYTES
 
 
-async def test_exec_caps_memory_while_draining_both_streams(docker_driver):  # type: ignore[no-untyped-def]
+async def test_exec_caps_memory_while_draining_both_streams(docker_driver, record_property):  # type: ignore[no-untyped-def]
     """Truncating after docker-py buffers the whole reply does not bound RAM."""
     tracemalloc.start()
     try:
@@ -62,6 +62,7 @@ async def test_exec_caps_memory_while_draining_both_streams(docker_driver):  # t
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
+    record_property("peak_traced_bytes", peak)
     assert result.return_code == 23
     assert len(result.stdout) == len(result.stderr) == MAX_EXEC_STREAM_BYTES
     assert result.truncated
@@ -79,3 +80,4 @@ async def test_exec_with_env_and_cwd(docker_driver):  # type: ignore[no-untyped-
 async def test_exec_with_timeout(docker_driver):  # type: ignore[no-untyped-def]
     with pytest.raises(asyncio.TimeoutError):
         await docker_driver.exec("sleep 5", timeout_sec=0.5)
+    assert (await docker_driver.exec("echo still-running")).stdout == b"still-running\n"

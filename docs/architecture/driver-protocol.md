@@ -93,10 +93,14 @@ claim historical x86-specific work.
 ## Output buffering
 
 - `exec()` is buffered and capped at `MAX_EXEC_STREAM_BYTES = 10 MB`.
-  Larger outputs truncate; `ExecResult.truncated == True`.
-- `exec_streaming()` is unbounded — chunks flow through async
-  iterators with no cap. Callers drain `stdout` + `stderr` in
-  parallel. Closing the iterators is implicit when `wait()` resolves.
+  Larger outputs truncate; `ExecResult.truncated == True`. Docker applies
+  each stream's cap while reading, then drains the remaining bytes without
+  retaining them so the command can finish and report its actual exit code.
+- `exec_streaming()` has no total-output cap. Callers drain `stdout` + `stderr`
+  in parallel. Docker retains at most 1 MiB of queued chunks per stream and
+  applies socket backpressure when a consumer falls behind; it also bounds
+  pending event-loop notifications. `wait()` closes the transport on completion
+  or cancellation, and consumers can drain already queued chunks to EOF.
 - Callers that cancel a long-running `exec_streaming()` operation before
   `wait()` resolves must call `ExecHandle.kill()` best-effort and clean
   up any stream-drain tasks. `SubprocessAgent` does this when an agent

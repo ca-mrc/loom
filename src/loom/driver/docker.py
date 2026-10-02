@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from queue import Empty, Full, Queue
 from typing import Any, cast
 
 import docker
@@ -55,6 +56,63 @@ for f in cpu.stat memory.current memory.peak memory.events pids.current pids.pea
   cat "/sys/fs/cgroup/$f" 2>/dev/null || true
 done
 """.strip()
+
+
+class _DockerOutputBuffer:
+    """At most 1 MiB per stream, with one pending event-loop notification.
+
+    Blocking the Docker reader applies socket backpressure; neither queued
+    bytes nor callbacks grow with the total output or a slow consumer.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._queue: Queue[bytes] = Queue(maxsize=16)
+        self._available = asyncio.Event()
+        self._finished = threading.Event()
+        self._notification_pending = threading.Event()
+
+    def _wake(self) -> None:
+        self._notification_pending.clear()
+        self._available.set()
+
+    def _notify(self) -> None:
+        if not self._notification_pending.is_set():
+            self._notification_pending.set()
+            with contextlib.suppress(RuntimeError):  # loop may be shutting down
+                self._loop.call_soon_threadsafe(self._wake)
+
+    def put(self, data: bytes, stopped: threading.Event) -> bool:
+        for offset in range(0, len(data), 64 * 1024):
+            chunk = data[offset:offset + 64 * 1024]
+            while not stopped.is_set():
+                try:
+                    self._queue.put(chunk, timeout=0.1)
+                except Full:
+                    continue
+                self._notify()
+                break
+            else:
+                return False
+        return True
+
+    def finish(self) -> None:
+        self._finished.set()
+        self._notify()
+
+    async def drain(self) -> AsyncIterator[bytes]:
+        while True:
+            await self._available.wait()
+            try:
+                chunk = self._queue.get_nowait()
+            except Empty:
+                self._available.clear()
+                # finish follows the last put; recheck the queue to retain a
+                # final chunk arriving between get_nowait and this check.
+                if self._finished.is_set() and self._queue.empty():
+                    return
+            else:
+                yield chunk
 
 
 def _default_caps() -> Capabilities:
@@ -657,9 +715,9 @@ class DockerDriver:
             demux=True,
         )
 
-        stdout_q: asyncio.Queue[bytes | None] = asyncio.Queue()
-        stderr_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        stdout_buffer = _DockerOutputBuffer(loop)
+        stderr_buffer = _DockerOutputBuffer(loop)
         # Signaled by the asyncio side (_wait race winner = poll path) to
         # tell the blocking drainer it can quit early; we still process
         # any chunks currently in flight before exiting.
@@ -671,22 +729,17 @@ class DockerDriver:
                     if stop_reader.is_set():
                         break
                     out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
-                    if out_chunk:
-                        loop.call_soon_threadsafe(stdout_q.put_nowait, out_chunk)
-                    if err_chunk:
-                        loop.call_soon_threadsafe(stderr_q.put_nowait, err_chunk)
+                    if out_chunk and not stdout_buffer.put(out_chunk, stop_reader):
+                        break
+                    if err_chunk and not stderr_buffer.put(err_chunk, stop_reader):
+                        break
             finally:
-                loop.call_soon_threadsafe(stdout_q.put_nowait, None)
-                loop.call_soon_threadsafe(stderr_q.put_nowait, None)
+                with contextlib.suppress(Exception):
+                    raw_stream.close()
+                stdout_buffer.finish()
+                stderr_buffer.finish()
 
         reader_task = asyncio.create_task(asyncio.to_thread(_drain_blocking))
-
-        async def _drain(q: asyncio.Queue[bytes | None]) -> AsyncIterator[bytes]:
-            while True:
-                chunk = await q.get()
-                if chunk is None:
-                    return
-                yield chunk
 
         async def _poll_exit() -> int:
             # Poll exec_inspect until Running becomes false. Used as a
@@ -705,21 +758,24 @@ class DockerDriver:
             # Stream-drain wins on normal exits; the poller wins after
             # SIGKILL when the iterator blocks indefinitely.
             poll_task = asyncio.create_task(_poll_exit())
-            done, pending = await asyncio.wait(
-                {reader_task, poll_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-            # If the poll path won, signal the blocking drainer so it
-            # doesn't outlive its useful life as an orphan thread holding
-            # docker's iterator.
-            stop_reader.set()
-            if poll_task in done:
-                return poll_task.result()
-            # Normal path: reader finished; fetch the exit code.
-            info = await asyncio.to_thread(api.exec_inspect, exec_id)
-            return int(info.get("ExitCode") or 0)
+            try:
+                done, _ = await asyncio.wait(
+                    {reader_task, poll_task}, return_when=asyncio.FIRST_COMPLETED,
+                )
+                if reader_task in done:
+                    reader_task.result()
+                if poll_task in done:
+                    return poll_task.result()
+                info = await asyncio.to_thread(api.exec_inspect, exec_id)
+                return int(info.get("ExitCode") or 0)
+            finally:
+                stop_reader.set()
+                with contextlib.suppress(Exception):
+                    raw_stream.close()
+                for task in (reader_task, poll_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(reader_task, poll_task, return_exceptions=True)
 
         async def _kill() -> None:
             # docker exec has no direct kill API; exec_inspect's Pid field
@@ -738,11 +794,15 @@ class DockerDriver:
                 await asyncio.to_thread(api.exec_start, killer["Id"], detach=True)
             except (APIError, NotFound):
                 pass
+            finally:
+                stop_reader.set()
+                with contextlib.suppress(Exception):
+                    raw_stream.close()
 
         return ExecHandle(
             pid=0,  # docker exec doesn't surface a host-side PID we trust
-            stdout=_drain(stdout_q),
-            stderr=_drain(stderr_q),
+            stdout=stdout_buffer.drain(),
+            stderr=stderr_buffer.drain(),
             _wait=_wait,
             _kill=_kill,
         )

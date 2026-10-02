@@ -94,7 +94,7 @@ async def test_docker_exec_streaming_no_10mb_cap() -> None:
         await driver.stop()
 
 
-async def test_docker_exec_streaming_bounds_slow_consumer_memory() -> None:
+async def test_docker_exec_streaming_bounds_slow_consumer_memory(record_property) -> None:
     """A delayed consumer must backpressure Docker without dropping either stream."""
     driver = DockerDriver(image="alpine:3.20")
     await driver.start()
@@ -119,10 +119,38 @@ async def test_docker_exec_streaming_bounds_slow_consumer_memory() -> None:
         )
         assert await asyncio.wait_for(handle.wait(), timeout=5) == 7
         _, peak = tracemalloc.get_traced_memory()
+        record_property("peak_traced_bytes", peak)
         assert sizes == [32 * 1024 * 1024, 32 * 1024 * 1024]
         assert peak < 16 * 1024 * 1024, f"slow consumers buffered {peak} bytes"
     finally:
         tracemalloc.stop()
+        await driver.stop()
+
+
+async def test_docker_exec_streaming_cancelled_wait_releases_blocked_reader() -> None:
+    driver = DockerDriver(image="alpine:3.20")
+    await driver.start()
+    try:
+        handle = await driver.exec_streaming(
+            ["sh", "-c", "head -c 67108864 /dev/zero; sleep 30"],
+            env_vars={}, cwd=PurePosixPath("/workspace"),
+        )
+        # With no consumer, the reader fills its bounded queue and blocks.
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(handle.wait(), timeout=0.2)
+
+        async def drain():
+            size = 0
+            async for chunk in handle.stdout:
+                size += len(chunk)
+            async for _ in handle.stderr:
+                pass
+            return size
+
+        size = await asyncio.wait_for(drain(), timeout=3)
+        assert size <= 2 * 1024 * 1024
+        assert (await driver.exec("echo still-running")).stdout == b"still-running\n"
+    finally:
         await driver.stop()
 
 
