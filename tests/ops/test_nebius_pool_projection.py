@@ -137,3 +137,90 @@ def test_input_snapshot_visits_shared_graph_once_per_call_without_hiding_mutatio
     assert len(reads) == 13 and set(reads.values()) == {1}
     leaf["replicas"] = 2
     assert _snapshot(root) != before
+
+
+def test_snapshot_never_invokes_untrusted_serialization_hooks():
+    from scripts.ops.nebius_pool_projection import _snapshot
+
+    calls = []
+
+    class Unknown:
+        def __reduce_ex__(self, protocol):
+            calls.append(protocol)
+            return dict, ()
+
+    class Model(BaseModel):
+        count: int = 1
+
+        def __getstate__(self):
+            calls.append('state')
+            raise AssertionError('snapshot must inspect raw model fields')
+
+    model = Model()
+    before = _snapshot(model)
+    model.count = 2
+    assert _snapshot(model) != before
+    with pytest.raises(TypeError):
+        _snapshot(Request(Unknown()))
+    assert calls == []
+
+
+def test_snapshot_preserves_cycles_and_local_type_identity():
+    from scripts.ops.nebius_pool_projection import _snapshot
+
+    @dataclass
+    class OtherRequest:
+        payload: object
+
+    values = []
+    first = Request(values)
+    values.append(first)
+    original = _snapshot(first)
+    assert _snapshot(first) == original
+    values.append(1)
+    assert _snapshot(first) != original
+    assert _snapshot(Request([1])) != _snapshot(OtherRequest([1]))
+
+
+@pytest.mark.parametrize('payload', [b'authority', bytearray(b'authority')])
+def test_protocol_buffer_cannot_reuse_a_qualified_builtin_payload(payload):
+    from pickle import PickleBuffer
+
+    @pure_projection
+    def render(request):
+        if type(request.payload) is not type(payload):
+            raise ValueError('payload type unqualified')
+        return {'qualified': True}
+
+    assert render(Request(payload)) == {'qualified': True}
+    with pytest.raises(ValueError, match='payload type unqualified'):
+        render(Request(PickleBuffer(payload)))
+
+
+def test_distinct_local_types_cannot_reuse_qualification_through_metaclass_equality():
+    class EqualMeta(type):
+        def __eq__(cls, other):
+            return True
+
+        __hash__ = type.__hash__
+
+    def make_type():
+        @dataclass
+        class Payload(metaclass=EqualMeta):
+            value: int
+
+        return Payload
+
+    first_type = make_type()
+    second_type = make_type()
+    assert first_type is not second_type
+
+    @pure_projection
+    def render(request):
+        if type(request.payload) is not first_type:
+            raise ValueError('payload type unqualified')
+        return {'qualified': True}
+
+    assert render(Request(first_type(1))) == {'qualified': True}
+    with pytest.raises(ValueError, match='payload type unqualified'):
+        render(Request(second_type(1)))
