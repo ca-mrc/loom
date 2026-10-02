@@ -868,6 +868,67 @@ def test_connected_binding_preflight_preserves_unrelated_native_and_operator_aut
             "roles", "clusterroles", "rolebindings", "clusterrolebindings"}
 
 
+@pytest.mark.parametrize("scope,verbs,named,rejected", [
+    ("execution", ["create"], False, True),
+    ("build", ["patch"], True, True),
+    ("cluster", ["update"], False, True),
+    ("execution", ["delete"], True, True),
+    ("execution", ["deletecollection"], False, True),
+    ("execution", ["*"], False, True),
+    ("execution", ["get", "list", "watch"], False, False),
+    ("foreign", ["create", "patch"], False, False),
+])
+def test_foreign_cronjob_permissions_cannot_bypass_the_pool_job_writer_boundary(
+        cutover_inputs, cutover_binding_inventory, scope, verbs, named, rejected):
+    request, tokens = cutover_inputs
+    participant = request.fencing.retirement.migration.registration.spec.participants[0]
+    namespace = {"execution": participant.execution_namespace.name,
+        "build": participant.build_namespace.name, "cluster": None, "foreign": "unrelated"}[scope]
+    role = {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+        "metadata": {"name": "foreign-cron-producer", "uid": str(uuid4()), "resourceVersion": "1"},
+        "rules": [{"apiGroups": ["batch"], "resources": ["cronjobs"], "verbs": verbs,
+            **({"resourceNames": ["retained-schedule"]} if named else {})}]}
+    binding = {"apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRoleBinding" if namespace is None else "RoleBinding",
+        "metadata": {"name": "foreign-cron-producer", "uid": str(uuid4()), "resourceVersion": "1",
+            **({"namespace": namespace} if namespace is not None else {})},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "foreign-cron-producer"},
+        "subjects": [{"kind": "ServiceAccount", "namespace": "unrelated", "name": "cron-producer"}]}
+    cutover_binding_inventory["clusterroles"].append(role)
+    cutover_binding_inventory["clusterrolebindings" if namespace is None else "rolebindings"].append(binding)
+    if rejected:
+        with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory)
+    else:
+        binding_preflight(request, tokens, cutover_binding_inventory)
+
+
+@pytest.mark.parametrize("scope,suspended,rejected", [
+    ("execution", False, True), ("execution", True, True),
+    ("build", False, True), ("build", True, True),
+    ("foreign", False, False), ("foreign", True, False),
+])
+def test_existing_foreign_cronjob_cannot_create_pool_jobs_through_native_controller(
+        cutover_inputs, cutover_binding_inventory, scope, suspended, rejected):
+    request, tokens = cutover_inputs
+    participant = request.fencing.retirement.migration.registration.spec.participants[0]
+    namespace = {"execution": participant.execution_namespace.name,
+        "build": participant.build_namespace.name, "foreign": "unrelated"}[scope]
+    inventories = writer_workload_inventory(request)
+    producer = copy.deepcopy(request.fencing.retirement.collectors[0])
+    producer["metadata"].update(name="unregistered-cron-producer", namespace=namespace, uid=str(uuid4()))
+    producer["spec"]["suspend"] = suspended
+    producer["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"] = "unregistered-account"
+    inventories["cronjobs"].append(producer)
+    before = copy.deepcopy(inventories)
+    if rejected:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=inventories)
+    else:
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=inventories)
+    assert inventories == before  # Never adopt, suspend or delete unknown producers.
+
+
 @pytest.mark.parametrize("boundary", ["foreign_owner", "management_producer"])
 def test_retained_binding_gate_does_not_adopt_or_reduce_unrelated_authority(
         cutover_inputs, cutover_binding_inventory, boundary):
