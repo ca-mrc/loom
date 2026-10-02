@@ -11,9 +11,9 @@ from uuid import uuid4
 
 import pytest
 
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_application_render import inputs as application_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
-from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,7 +74,8 @@ def test_absent_pool_binding_preserves_historical_serialized_inputs(management_i
 
     raw, _, _ = management_inputs
     original = ManagementDeployment.model_validate(raw)
-    explicit = ManagementDeployment.model_validate({**raw, 'pool_catalog_operation_id': None})
+    explicit = ManagementDeployment.model_validate({**raw, 'pool_catalog_operation_id': None,
+        'application_builder_machine_id': None})
     assert original.model_dump(mode='json') == explicit.model_dump(mode='json')
     assert 'pool_catalog_operation_id' not in original.model_dump(mode='json')
     assert json.loads(original.model_dump_json()) == original.model_dump(mode='json')
@@ -446,6 +447,19 @@ def test_source_runtime_has_private_bounded_spool_and_management_only_material(s
     command = initializer['command']
     directory = tmp_path / 'private-spool'
     subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)
+    directory.chmod(0o755)
+    rejected = subprocess.run([sys.executable, *command[1:-1], str(directory)], capture_output=True)
+    assert rejected.returncode != 0
+    directory.chmod(0o700)
+    linked = tmp_path / 'linked-spool'
+    linked.symlink_to(directory, target_is_directory=True)
+    rejected = subprocess.run([sys.executable, *command[1:-1], str(linked)], capture_output=True)
+    assert rejected.returncode != 0
+    without_source = copy.deepcopy(source_management_inputs)
+    without_source[0]['installation']['applications']['runtime'].pop('source_upload')
+    # Compare equal Recreate strategies: rolling management also reserves surge.
+    without_source[0]['pool_catalog_operation_id'] = str(uuid4())
+    assert result.platform_envelope.ephemeral_storage_mib == render(without_source).platform_envelope.ephemeral_storage_mib + 4096
     assert directory.stat().st_mode & 0o777 == 0o700
     # Restarting an init container must preserve the private directory safely.
     subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)

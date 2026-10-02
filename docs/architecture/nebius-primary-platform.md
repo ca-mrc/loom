@@ -1063,8 +1063,28 @@ dependencies. Build observation reuses the native Kubernetes reader with an
 explicit endpoint, CA and per-request projected-token refresh, never ambient
 kubeconfig or the cloud provisioning identity. Routes receive the build registry
 only after successful runtime creation. Omitted settings preserve historical
-installation fingerprints. These capabilities still require protected credential
-and read-only RBAC delivery; source support alone is not installed acceptance.
+installation fingerprints.
+
+The management renderer binds configured source uploads to a revision-named,
+source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
+initializer verifies the spool directory's ownership and mode on every Pod start.
+The spool is capped at 2 GiB per admitted concurrent upload (4 GiB at the default
+concurrency of two), included in the manager's ephemeral-storage request and limit,
+and disappears with the Pod; it creates no PVC or backup requirement. Archive
+verification streams regular files in 1 MiB chunks, retaining content hashes,
+strict headers/padding and link-last validation without allocating a whole source
+file in management memory. Filesystem-metadata-heavy trees remain subject to the
+spool limit. Source-enabled management uses `Recreate`, preventing a rolling surge
+from multiplying this local upload allowance.
+
+Configured builds additionally require a protected dedicated machine ID and pool
+catalog operation. The renderer reuses the private process-owned token mount and
+provides only Job reads and Pod reads/list/logs in the shared build namespace.
+It grants no Job writes, Secret reads or access to other build namespaces.
+The protected operation must still qualify the exact registered machine/profile,
+deliver the source material and stage these resources before activation. Historical
+image-only refresh remains narrow; rendering these prerequisites does not install
+them or establish multi-owner acceptance.
 
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected

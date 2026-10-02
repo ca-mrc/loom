@@ -113,6 +113,13 @@ an update notice without relabelling or automatically refreshing the current pag
 Compare these reports with the ready build's source digest; they are not a substitute
 for the management operation's deployment/readiness evidence.
 
+Operator installation must deliver the configured source-only Secret, private
+builder token and shared-build read permissions through the protected operation.
+The management renderer reserves 2 GiB of temporary disk per concurrent source
+upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
+Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+Do not hand-mount credentials or treat the renderer as installation authority.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash
