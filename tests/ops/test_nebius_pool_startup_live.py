@@ -241,6 +241,32 @@ def test_fixed_https_startup_uses_scalar_cas_and_never_retries_unknown_outcomes(
         assert all(state.objects[_key(row)] == before[_key(row)] for row in (dormant.actuator, dormant.collector))
 
 
+def test_live_scope_checks_exact_inputs_and_fresh_identity_without_rerendering(startup_http, closed_startup, monkeypatch):
+    from scripts.ops import nebius_pool_cutover_live as cutover
+
+    request, _, _, _, _, _ = closed_startup
+    with startup_http() as (api, state):
+        render = cutover.cutover_documents
+        calls = []
+
+        def counted(value):
+            calls.append(None)
+            return render(value)
+
+        monkeypatch.setattr(cutover, 'cutover_documents', counted)
+        state.calls.clear()
+        for _ in range(3):
+            api.parent._scope()
+        # Every scope check still reads the actual namespace identities.
+        identity_reads = [call for call in state.calls if call.url.path == '/api/v1/namespaces/kube-system']
+        assert len(identity_reads) == 3
+        assert calls == []
+        # Dataclass equality alone treats this invalid type as unchanged.
+        request.manager['spec']['replicas'] = True
+        with pytest.raises(ValueError, match='pool cutover inputs changed'):
+            api.parent._scope()
+
+
 @pytest.mark.parametrize('damage', ['closed', 'guard', 'material', 'role', 'unanchored_start'])
 def test_fixed_startup_refuses_live_authority_drift_and_out_of_journal_patch(startup_http, closed_startup, damage):
     from scripts.ops.nebius_ingress_stage import _snapshot
