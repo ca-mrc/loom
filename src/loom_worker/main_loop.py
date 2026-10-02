@@ -1938,6 +1938,11 @@ async def _materialize_task_dir(
             f"task materialization timed out after {timeout_sec:g}s "
             f"(source_scheme={_source_scheme_for_diagnostic(source)})",
         ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            "task materialization failed "
+            f"(source_scheme={_source_scheme_for_diagnostic(source)}): {exc}",
+        ) from exc
 
 
 def _source_scheme_for_diagnostic(source: object) -> str:
