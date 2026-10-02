@@ -904,9 +904,20 @@ Identical archives select one content-addressed key in the shared source bucket,
 while owners retain separate access records. A source receipt is not a build,
 release, CI approval or capacity reservation.
 
-The registry alone does not upload bytes. Authenticated streaming transport,
+`ApplicationSourceUploader` authenticates this intent before consuming its stream,
+spools bounded bytes privately, verifies both the transport hash and full source
+archive, then writes only verified content to the server-derived shared key. It
+reads back and hashes stored content before recording acceptance; an ETag or a
+successful PUT reply is insufficient, and an uncertain PUT is observed without
+an automatic resend. Database-clock expiry is rechecked after reception and before
+completion. Per-process in-flight limits and reception/storage deadlines bound the
+work. Cancellation retains the spool and admission until off-loop archive
+verification finishes, then cleans private temporary state.
+
+This internal verifier is not yet wired to management HTTP routes or protected
+storage credentials. HTTP framing/authenticated non-buffering routing, CLI upload,
 global application-build admission, image building, release qualification and
-installed source-to-deploy acceptance remain separate, unimplemented consumers.
+installed source-to-deploy acceptance remain unimplemented consumers.
 
 ### Stopped application completion
 

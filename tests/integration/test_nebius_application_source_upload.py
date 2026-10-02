@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -46,9 +47,8 @@ async def source_chunks(body):
 
 
 async def test_verified_upload_stores_exact_shared_bytes_for_separate_owners(environment_registry, source, tmp_path):
-    from loom_service.application_management.source_upload import ApplicationSourceUploader
-
     from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
 
     _, factory, (alice, bob), _ = environment_registry
     registry = upload_registry(factory)
@@ -77,9 +77,8 @@ async def test_verified_upload_stores_exact_shared_bytes_for_separate_owners(env
 
 @pytest.mark.parametrize("damage", ["truncated", "extra", "hash", "archive", "source_digest"])
 async def test_invalid_upload_never_writes_or_completes(environment_registry, source, tmp_path, damage):
-    from loom_service.application_management.source_upload import ApplicationSourceUploader
-
     from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
 
     _, factory, (alice, _), _ = environment_registry
     registry = upload_registry(factory)
@@ -103,9 +102,8 @@ async def test_invalid_upload_never_writes_or_completes(environment_registry, so
 
 
 async def test_foreign_owner_is_rejected_before_consuming_upload(environment_registry, tmp_path):
-    from loom_service.application_management.source_upload import ApplicationSourceUploader
-
     from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
 
     _, factory, (alice, bob), _ = environment_registry
     registry = upload_registry(factory)
@@ -174,13 +172,80 @@ async def test_stalled_upload_expires_without_storage_or_db_completion(environme
     assert await registry.status(receipt.upload_id, principal=alice) == receipt
 
 
+async def test_cancel_during_verification_retains_admission_and_spool_until_worker_finishes(
+    environment_registry, source, tmp_path, monkeypatch,
+):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management import source_upload
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model)
+    receipt = await registry.create(principal=alice, request=intent(source_digest=model.digest,
+        archive_sha256=hashlib.sha256(body).hexdigest(), archive_size_bytes=len(body)), idempotency_key="verify-cancel")
+    entered, release = threading.Event(), threading.Event()
+    original = source_upload.extract_application_source_archive
+    def held(stream, **kwargs):
+        result = original(stream, **kwargs)
+        entered.set()
+        assert release.wait(5), "verification was not released"
+        assert not stream.closed
+        return result
+    monkeypatch.setattr(source_upload, "extract_application_source_archive", held)
+    spool = tmp_path / "spool"
+    spool.mkdir(mode=0o700)
+    store = FakeObjectStore()
+    uploader = source_upload.ApplicationSourceUploader(registry, store, spool_directory=spool, max_inflight=1)
+    active = asyncio.create_task(uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        for _ in range(2):
+            active.cancel()
+            await asyncio.sleep(0)
+        assert not active.done()
+        with pytest.raises(ManagementError, match="application_source_capacity_exhausted"):
+            await uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body))
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+    assert not list(spool.iterdir()) and store.objects == {}
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+
+
+async def test_stalled_storage_readback_is_bounded_and_closed(environment_registry, source, tmp_path):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    class Store(FakeObjectStore):
+        closed = False
+        async def stream_object(self, **kwargs):
+            try:
+                yield b""
+                await asyncio.Event().wait()
+            finally:
+                self.closed = True
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model)
+    receipt = await registry.create(principal=alice, request=intent(source_digest=model.digest,
+        archive_sha256=hashlib.sha256(body).hexdigest(), archive_size_bytes=len(body)), idempotency_key="slow-store")
+    store = Store()
+    with pytest.raises(ManagementError, match="application_source_storage_unverified"):
+        await ApplicationSourceUploader(registry, store, spool_directory=tmp_path,
+            storage_timeout_seconds=0.01).upload(receipt.upload_id, principal=alice, body=source_chunks(body))
+    assert store.closed is True
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+
+
 @pytest.mark.parametrize("failure", ["before", "after", "corrupt"])
 async def test_storage_reply_is_not_proof_and_uncertain_write_is_only_observed(
     environment_registry, source, tmp_path, failure,
 ):
-    from loom_service.application_management.source_upload import ApplicationSourceUploader
-
     from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
 
     class Store(FakeObjectStore):
         writes = 0
