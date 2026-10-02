@@ -10,7 +10,6 @@ import subprocess
 import sys
 
 import pytest
-
 from tests.ops.test_nebius_pool_runtime import desired_profile, env
 from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
@@ -63,7 +62,7 @@ def settings_case(request, guest_runtime_inputs, tmp_path):
                 target_id=rows['LOOM_EXECUTION_ACTUATOR_TARGET_ID']['value'],
                 task_image_builder=None if builder is None else json.loads(builder['value']), kubernetes_connection=None)
     elif component == 'service':
-        expected.update(mode='application', submission_source={'kind': 'environment',
+        expected.update(mode='application', submission_source={'schema_version': 'loom.pool-submission-source.v1', 'kind': 'environment',
             'data_environment_id': str(participant.environment_id), 'application': None},
             runtime_profile=json.loads(rows['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value']))
     else:
