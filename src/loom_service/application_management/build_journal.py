@@ -238,6 +238,11 @@ class ApplicationBuildJournal:
                     or runtime.lease_epoch != request.build.attempt or runtime.deadline_at != request.deadline_at
                     or runtime.registry_repository != request.build.registry_repository):
                 raise ManagementError("application_build_runtime_conflict")
+            if state.settlement is not None:
+                retained = PoolNativeRuntimeV1.model_validate(state.settlement["runtime"])
+                if (runtime.namespace != retained.namespace or runtime.job_name != retained.job_name
+                        or (retained.job_effect_id is not None and runtime.job_effect_id != retained.job_effect_id)):
+                    raise ManagementError("application_build_runtime_conflict")
             if runtime.receipt.phase == "released":
                 saved.terminal_receipt_json = runtime.receipt.model_dump(mode="json")
                 saved.phase = ("cancelled" if row.desired_state == "cancelled" else
