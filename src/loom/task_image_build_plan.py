@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import re
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, Self
 from uuid import UUID
 
@@ -20,6 +19,8 @@ from pydantic import (
 )
 
 from loom.models.task import TaskConfig, TaskSidecarConfig
+from loom.native_image_build import NativeImageBuildComponentV1
+from loom.native_image_build import canonical_relative_path as _canonical_relative_path
 from loom.task_image_materialization import (
     declared_task_image_architectures,
     task_bundle_content_manifest_digest,
@@ -100,30 +101,6 @@ Digest = Annotated[
 ]
 
 
-def _canonical_relative_path(value: str, *, allow_root: bool, label: str) -> str:
-    if value == "." and allow_root:
-        return value
-    if (
-        not value
-        or "\x00" in value
-        or "\\" in value
-        or value.startswith("/")
-        or value == "."
-        or (value != "." and PurePosixPath(value).as_posix() != value)
-        or any(part in {"", ".", ".."} for part in value.split("/"))
-    ):
-        raise ValueError(f"{label} path is not canonical relative POSIX")
-    return value
-
-
-def _path_is_within_context(dockerfile: str, context: str) -> bool:
-    if context == ".":
-        return True
-    context_parts = PurePosixPath(context).parts
-    dockerfile_parts = PurePosixPath(dockerfile).parts
-    return dockerfile_parts[: len(context_parts)] == context_parts
-
-
 def _canonical_bundle_location(source: object) -> tuple[str, str]:
     if not isinstance(source, str) or not source.startswith("s3://"):
         raise ValueError("task-image bundle source must be canonical s3")
@@ -147,31 +124,10 @@ def _canonical_bundle_location(source: object) -> tuple[str, str]:
     return bucket, prefix
 
 
-class TaskImageBuildComponentV1(BaseModel):
+class TaskImageBuildComponentV1(NativeImageBuildComponentV1):
     """One Dockerfile-backed component in canonical execution order."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
     name: Annotated[str, Field(min_length=1, max_length=136, pattern=_COMPONENT_RE.pattern)]
-    dockerfile_path: Annotated[str, Field(min_length=1, max_length=4096)]
-    context_path: Annotated[str, Field(min_length=1, max_length=4096)]
-    oci_output_path: Annotated[
-        str,
-        Field(pattern=r"^oci/(?:0|[1-9][0-9]{0,2}){4}\.tar$"),
-    ]
-
-    @model_validator(mode="after")
-    def _paths_are_safe(self) -> TaskImageBuildComponentV1:
-        _canonical_relative_path(
-            self.dockerfile_path,
-            allow_root=False,
-            label="Dockerfile",
-        )
-        _canonical_relative_path(self.context_path, allow_root=True, label="context")
-        _canonical_relative_path(self.oci_output_path, allow_root=False, label="OCI output")
-        if not _path_is_within_context(self.dockerfile_path, self.context_path):
-            raise ValueError("Dockerfile path is outside its build context")
-        return self
 
 
 class _TaskImageBuildPlan(BaseModel):

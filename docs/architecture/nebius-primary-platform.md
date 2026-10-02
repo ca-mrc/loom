@@ -943,6 +943,17 @@ status and streaming-upload routes. It checks every returned source identity and
 upload ID, uses the same frozen archive on an explicit CSRF rejection, and never
 automatically retries an uncertain network write. This is the transport for the
 forthcoming build command, not a standalone deployment command or CI approval.
+The native application Job adapter shares the existing task-image
+prepare/rootless-build/publish rendering mechanism. Its protected claim binds
+owner, source upload, build attempt, installation/data/cluster and an immutable
+recipe; fixed service/web components use `deploy/Dockerfile.service` and
+`deploy/Dockerfile.web`. Recipe identity includes platform, tool images, component
+paths and output format. Application Jobs carry their own build identity, not
+synthetic Task or materialization fields. Credentials remain outside the
+untrusted build phase and publication sees the build volume read-only. Personal
+build arguments distinguish the source digest from its informational base commit
+and never label that commit as a CI-approved build. This renderer does not yet
+implement the trusted application runtime or admit/launch application builds.
 Protected delivery of the credential/mount, the user-facing build command, global
 application-build admission, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.

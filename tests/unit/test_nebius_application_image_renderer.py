@@ -41,7 +41,7 @@ def test_application_job_keeps_real_source_identity_and_sequential_credential_is
     claim, target, config = build_inputs
     before = claim.model_dump_json()
     cm, job = render_application_image_job(claim=claim, target=target, config=config)
-    assert job["metadata"]["name"] == f"loom-appimg-{claim.build_id.hex}-a2"
+    assert job["metadata"]["name"] == f"loom-app-{claim.build_id.hex}-a2"
     assert cm["metadata"] == job["metadata"] and cm["immutable"]
     labels = job["metadata"]["labels"]
     assert labels == {"app.kubernetes.io/component": "application-image-builder",
@@ -139,7 +139,6 @@ def test_application_job_name_fits_kubernetes_at_maximum_attempt(build_inputs):
 @pytest.mark.parametrize("path", ["/absolute", "../outside", "a/../b", "a//b", "a\\b", "a/./b"])
 def test_shared_component_paths_remain_bounded_and_task_names_remain_task_specific(path):
     from loom.native_image_build import NativeImageBuildComponentV1
-
     from loom.task_image_build_plan import TaskImageBuildComponentV1
 
     with pytest.raises(ValueError):
