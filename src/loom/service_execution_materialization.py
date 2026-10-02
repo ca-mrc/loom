@@ -4,13 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import re
 import stat
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
-from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -40,25 +38,19 @@ from loom.execution_runtime_contract import (
     ContainerResourcesV1,
     ExecutionResourceRequestsV1,
     ExecutionRuntimePlanV1,
-    GuestExecutionV1,
-    ProbeV1,
     ProcessPhaseV1,
     RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
     RuntimeTaskInputV1,
-    SidecarContainerV1,
     TaskExecutionResourceRequestsV1,
 )
 from loom.hosted_harness import (
     NATIVE_EXECUTION_AGENT_NAMES,
-    SANDBOX_CONTROLLER_MODULE,
-    HostedHarnessSpec,
     harnesses_supporting,
     hosted_harness,
     is_workspace_harness,
 )
 from loom.models.networking import (
-    NetworkPolicy,
     UnsupportedNetworkPolicyOverrideError,
     hosted_http_egress,
     resolve_effective_network_policy,
@@ -69,7 +61,13 @@ from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
-from loom.verifier_runtime import resolve_verifier_env_mode
+from loom.task_sandbox_planner import (
+    TaskSandboxPlanRequest,
+    compile_deferred_verifier_plan,
+    compile_task_sandbox_plan,
+    guest_capabilities,
+    plan_admissions,
+)
 
 
 def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
@@ -107,13 +105,6 @@ _GLOB_MAGIC = re.compile(r"[*?[]")
 MAX_INPUT_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_INPUT_FILES = 10_000
 MAX_INPUT_BYTES = 10 * 1024**3
-
-
-def _sandbox_phase_argv(mode: str, module: str = SANDBOX_CONTROLLER_MODULE) -> tuple[str, ...]:
-    return (
-        "python", "-I", "-m", module,
-        mode, "--workspace", "/workspace",
-    )
 
 
 class _Strict(BaseModel):
@@ -436,7 +427,7 @@ def automatic_service_execution_rejections(
     reasons.extend(item.code for item in execution_requirement_diagnostics(
         env.execution_requirements, supported_capabilities=supported_capabilities,
     ))
-    if _guest_capabilities(task):
+    if guest_capabilities(task):
         if not controller:
             reasons.append("guest_private_sandboxes_required")
         if env.sidecars:
@@ -669,16 +660,17 @@ def compile_service_execution_plan(
         }
     )
     if spec.workspace:
-        return _compile_terminus_plan(
-            spec=spec, task=task, trial=trial, task_revision_sha256=task_revision_sha256,
-            profile=profile, binding=binding, command_identity=command_identity,
-            output_paths=output_paths,
-            effective_network_policy=effective_network_policy,
-            resource_requests=resource_requests,
+        assert selected_agent_image is not None  # runtime_profile_rejections checked it
+        return compile_task_sandbox_plan(TaskSandboxPlanRequest(
+            spec=spec, task=task, trial=trial, profile=profile, binding=binding,
+            task_revision_sha256=task_revision_sha256, command_identity=command_identity,
+            output_paths=tuple(output_paths), effective_network_policy=effective_network_policy,
+            controller_image=selected_agent_image,
             task_image_materialization_id=(
                 task_image_grant.materialization_id if task_image_grant else None
             ),
-        )
+            resource_requests=resource_requests,
+        ))
     assert trial.agent_model is not None
     # The in-Pod runner targets Loom's attributed chat route.  It revalidates
     # the service-execution lease and supports both a JWT-bound provider
@@ -760,7 +752,7 @@ def compile_service_execution_plan(
         task_image_ref=profile.task_image_ref,
         runtime_image_ref=profile.runtime_image_ref,
         runtime_binary_sha256=profile.runtime_binary_sha256,
-        image_admission=_plan_admissions(profile, {profile.task_image_ref, profile.runtime_image_ref}),
+        image_admission=plan_admissions(profile, {profile.task_image_ref, profile.runtime_image_ref}),
         run_as_user=profile.run_as_user,
         run_as_group=profile.run_as_group,
         fs_group=profile.fs_group,
@@ -869,11 +861,6 @@ def _requires_task_identity(task: TaskConfig) -> bool:
             or task.verifier.user is not None)
 
 
-def _guest_capabilities(task: TaskConfig) -> frozenset[GuestExecutionCapability]:
-    declared = task.environment.execution_requirements
-    return ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
-
-
 def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
     *, allow_task_image_preparation: bool = False,
@@ -887,7 +874,7 @@ def runtime_profile_rejections(
         )
     except UnsupportedNetworkPolicyOverrideError:
         return ("network_policy_override_not_supported",)
-    if _guest_capabilities(task):
+    if guest_capabilities(task):
         if profile.guest_runtime is None:
             return ("guest_runtime_unavailable",)
         if (profile.guest_runtime_volume_mib or profile.runtime_volume_mib) < 1024:
@@ -922,195 +909,7 @@ def runtime_profile_rejections(
     return ()
 
 
-def _plan_admissions(
-    profile: ServiceExecutionRuntimeProfileV1, refs: set[str | None],
-) -> ExecutionImageAdmissionBundleV1:
-    return ExecutionImageAdmissionBundleV1(schema_version=profile.image_admission.schema_version,
-                                         admissions=tuple(
-        item for item in profile.image_admission.admissions if item.statement.image_ref in refs
-    ))
-
-
-def _compile_terminus_plan(
-    *, spec: HostedHarnessSpec, task: TaskConfig, trial: TrialConfig, task_revision_sha256: str,
-    profile: ServiceExecutionRuntimeProfileV1, binding: ServiceExecutionInputBindingV1,
-    command_identity: str, output_paths: list[str], effective_network_policy: NetworkPolicy,
-    task_image_materialization_id: UUID | None = None,
-    resource_requests: ExecutionResourceRequestsV1 | None = None,
-) -> ExecutionRuntimePlanV1:
-    """The private-sandbox compiler shared by every workspace harness.
-
-    The harness spec supplies its controller binding and native outputs; the
-    remaining sandbox, verifier and output construction is extracted into a
-    harness-neutral planner by #2296.
-    """
-    env = task.environment
-    agent_image = controller_image_for_trial(profile, trial)
-    assert agent_image is not None
-    assert env.docker_image and env.cpus and env.memory_mb and env.storage_mb
-    resources = ContainerResourcesV1(
-        cpu_millis=round(env.cpus * 1000), memory_mib=env.memory_mb,
-        ephemeral_storage_mib=env.storage_mb,
-    )
-    binary = "/loom/bin/loom-sandbox-runtime"
-    agent_timeout = (trial.override_agent_timeout_sec or task.agent.timeout_sec) * trial.agent_timeout_multiplier
-    verifier_timeout = ((trial.override_verifier_timeout_sec or task.verifier.timeout_sec)
-                        * trial.verifier_timeout_multiplier)
-    exec_limit = str(math.ceil(max(900, agent_timeout, verifier_timeout)))
-    from loom.task_fixtures import fixture_sidecars
-
-    sidecars = list(fixture_sidecars(task))
-    shared = resolve_verifier_env_mode(task, trial) == "shared"
-    guest_capabilities = _guest_capabilities(task)
-    guest_execution = GuestExecutionV1(capabilities=tuple(sorted(guest_capabilities))) if guest_capabilities else None
-    runtime_volume_mib = (profile.guest_runtime_volume_mib or profile.runtime_volume_mib
-                          if guest_execution is not None else profile.runtime_volume_mib)
-    max_artifact_bytes = (profile.guest_max_artifact_bytes or profile.max_artifact_bytes
-                          if guest_execution is not None else profile.max_artifact_bytes)
-    # Guest launch keeps both sandboxes in this pod. Retained services cannot
-    # survive the agent pod, so their verifier also grades beside them.
-    # Separate grading otherwise defers the verifier until the agent pod is gone.
-    colocated_verifier = shared or guest_execution is not None or env.service_lifecycle is not None
-    sandbox_roles = (("task-sandbox", "verifier-sandbox")
-                     if guest_execution is not None or (colocated_verifier and not shared)
-                     else ("task-sandbox",))
-    for role in sandbox_roles:
-        socket = f"/loom/sandboxes/{role}/sandbox.sock"
-        probe = ProbeV1(kind="exec", argv=(binary, "--check-socket", socket))
-        # Guest disk preparation (30s) and boot (90s) need room to complete
-        # before Kubernetes treats a healthy slow sandbox as failed.
-        startup_probe = (probe.model_copy(update={"failure_threshold": 75})
-                         if guest_execution is not None else probe)
-        user = (task.verifier.user if role == "verifier-sandbox" and task.verifier.user is not None
-                else env.user)
-        identity = resolve_sandbox_identity(
-            user, env.environment.get("HOME"),
-            default_uid=profile.run_as_user, default_gid=profile.run_as_group,
-        )
-        sidecars.append(SidecarContainerV1(
-            role_name=role, image_ref=env.docker_image,
-            argv=(binary, "--socket", socket, "--exec-timeout-seconds", exec_limit), resources=resources,
-            startup_probe=startup_probe, readiness_probe=probe, private_sandbox=True,
-            identity=identity,
-            guest_execution=guest_execution,
-        ))
-    phase_env = {
-        "LOOM_TASK_TRIAL_JSON": trial.model_dump_json(exclude_defaults=True),
-        "LOOM_TASK_ARTIFACTS_JSON": json.dumps(output_paths),
-        "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": json.dumps(
-            effective_network_policy.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    }
-    def phase(role: Literal["agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
-        return ProcessPhaseV1(
-            role=role,
-            # Keep Python imports and dependency configuration discovery outside
-            # user-controlled task inputs, including dependencies that inspect cwd.
-            argv=_sandbox_phase_argv(mode, spec.controller_module),
-            working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
-        )
-    outputs = [RuntimeOutputDeclarationV1(
-        source_path=f".loom/collected/{path}", relative_path=f"artifacts/{path}",
-        kind="task_artifact", required=path in task.steps[0].required_artifacts,
-    ) for path in output_paths]
-    harness_outputs = tuple(
-        (item.source_path, item.relative_path, item.kind, item.required) for item in spec.native_outputs
-    )
-    for source, target, kind, required in (
-        ("agent/trajectory.jsonl", "trajectory/events.jsonl", "trajectory", True),
-        ("agent/usage.json", "accounting/usage.json", "usage", True),
-        ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
-        ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
-        *harness_outputs,
-        ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
-        ("verifier/output.json", "verifier/output.json", "verifier",
-         shared or (colocated_verifier and guest_execution is None)),
-        ("verifier/ctrf.json", "artifacts/verifier/ctrf.json", "task_artifact", False),
-    ):
-        outputs.append(RuntimeOutputDeclarationV1(
-            source_path=f".loom/{source}", relative_path=target, kind=kind, required=required,
-        ))
-    published_refs: set[str | None] = {agent_image, profile.runtime_image_ref}
-    if env.service_lifecycle is not None:
-        outputs.append(RuntimeOutputDeclarationV1(
-            source_path=".loom/service-startup.json", relative_path="diagnostics/service-startup.json",
-            kind="task_artifact", required=bool(env.service_lifecycle.startup_command),
-        ))
-    if env.workspace_reference_files:
-        outputs.append(RuntimeOutputDeclarationV1(
-            source_path=".loom/workspace-references.json",
-            relative_path="artifacts/workspace-references.json", kind="task_artifact", required=True,
-        ))
-    if env.mutable_paths:
-        for name in ("manifest.json", *(f"{index}.tar" for index in range(len(env.mutable_paths)))):
-            outputs.append(RuntimeOutputDeclarationV1(
-                source_path=f".loom/mutable-paths/{name}",
-                relative_path=f"artifacts/mutable-paths/{name}", kind="task_artifact", required=True,
-            ))
-    if task_image_materialization_id is None:
-        published_refs.add(env.docker_image)
-    if hosted_http_egress(effective_network_policy) is not None:
-        outputs.insert(0, TASK_EGRESS_OUTPUT)
-    controller_resources = (ContainerResourcesV1(
-        cpu_millis=profile.controller_resources.cpu_millis,
-        memory_mib=profile.controller_resources.memory_mib,
-        ephemeral_storage_mib=env.storage_mb,
-    ) if profile.controller_resources is not None else None)
-    if guest_execution is not None:
-        # The shared runtime payload occupies Pod ephemeral storage in addition
-        # to both guest disks. Reserve it exactly once, in the controller envelope,
-        # so rendering, finance and node-share placement use the same total.
-        controller_resources = ContainerResourcesV1.model_validate({
-            **(controller_resources or resources).model_dump(),
-            "ephemeral_storage_mib": env.storage_mb + runtime_volume_mib,
-        })
-        if resource_requests is not None and resource_requests.controller is not None:
-            resource_requests = resource_requests.model_copy(update={
-                "controller": resource_requests.controller.model_copy(update={
-                    "ephemeral_storage_mib": (resource_requests.controller.ephemeral_storage_mib
-                                              + runtime_volume_mib),
-                }),
-            })
-    return ExecutionRuntimePlanV1(
-        effective_network_policy=effective_network_policy,
-        task_egress=hosted_http_egress(effective_network_policy),
-        candidate_sha=profile.candidate_sha, task_revision_sha256=task_revision_sha256,
-        command_identity_sha256=command_identity, execution_class_id=(nebius_guest_execution_class(
-            supports_task_web_egress=profile.supports_task_web_egress,
-            supports_emulated_pkcs11="emulated_pkcs11_authentication" in guest_capabilities,
-        ).class_id if guest_execution is not None else profile.execution_class_id),
-        composition="init_payload", task_image_ref=env.docker_image,
-        task_image_materialization_id=task_image_materialization_id,
-        agent_image_ref=agent_image, runtime_image_ref=profile.runtime_image_ref,
-        runtime_binary_sha256=profile.runtime_binary_sha256,
-        image_admission=_plan_admissions(profile, published_refs),
-        run_as_user=profile.run_as_user, run_as_group=profile.run_as_group, fs_group=profile.fs_group,
-        task_resources=resources,
-        resource_requests=resource_requests,
-        controller_resources=controller_resources,
-        workspace_mib=env.storage_mb,
-        runtime_volume_mib=runtime_volume_mib,
-        termination_grace_seconds=profile.termination_grace_seconds,
-        task_input=RuntimeTaskInputV1(
-            manifest_sha256=binding.manifest_sha256, file_count=binding.file_count,
-            total_bytes=binding.total_bytes,
-        ), output_declarations=tuple(outputs), sidecars=tuple(sidecars),
-        main=phase("agent", spec.controller_phase, agent_timeout),
-        verifier_execution="in_attempt" if colocated_verifier else "separate_execution",
-        verifier_after_agent_timeout=shared and guest_execution is None,
-        in_place_verifier=shared and guest_execution is None,
-        verifier=phase("verifier", "verify-sandbox", verifier_timeout) if colocated_verifier else None,
-        max_log_bytes_per_stream=profile.max_log_bytes_per_stream,
-        max_artifact_bytes=max_artifact_bytes,
-    )
-
-
 _HANDOFF_ARCHIVE = ".loom/workspace.tar"
-_VERIFIER_OWNED_OUTPUTS = frozenset({
-    "diagnostics/verifier-exception.json", "verifier/output.json", "artifacts/verifier/ctrf.json",
-})
 
 
 def verifier_handoff_path(committed_path: str) -> str | None:
@@ -1151,66 +950,6 @@ def verifier_handoff_input(manifest: ServiceExecutionInputManifestV1) -> Runtime
         file_count=len(manifest.files),
         total_bytes=sum(item.size_bytes for item in manifest.files),
     )
-
-
-def compile_deferred_verifier_plan(
-    agent_plan: ExecutionRuntimePlanV1, task: TaskConfig, *, verifier_timeout_seconds: int,
-    handoff_input: RuntimeHandoffInputV1,
-) -> ExecutionRuntimePlanV1:
-    """Verifier pod that grades a committed workspace after the agent pod is gone.
-
-    It keeps the attempt's prepared image, route and node share, so the freed
-    agent capacity is admitted again for the verifier rather than enlarged.
-    """
-    if agent_plan.execution_role != "attempt" or agent_plan.verifier_execution != "separate_execution":
-        raise ValueError("only a separate-execution attempt defers its verifier")
-    task_sandbox = next(
-        sidecar for sidecar in agent_plan.sidecars if sidecar.role_name == "task-sandbox"
-    )
-    user = task.verifier.user if task.verifier.user is not None else task.environment.user
-    identity = resolve_sandbox_identity(
-        user, task.environment.environment.get("HOME"),
-        default_uid=agent_plan.run_as_user, default_gid=agent_plan.run_as_group,
-    )
-    verifier_sandbox = task_sandbox.model_copy(update={
-        "role_name": "verifier-sandbox", "identity": identity,
-    })
-    outputs = [
-        item if item == TASK_EGRESS_OUTPUT
-        else item.model_copy(update={"required": item.relative_path == "verifier/output.json"})
-        for item in agent_plan.output_declarations
-        if item.relative_path in _VERIFIER_OWNED_OUTPUTS or item == TASK_EGRESS_OUTPUT
-    ]
-    requests = agent_plan.resource_requests
-    if requests is not None:
-        requests = (ExecutionResourceRequestsV1(
-            controller=requests.controller, verifier_sandbox=requests.task_sandbox,
-        ) if requests.controller is not None or requests.task_sandbox is not None else None)
-    argv = agent_plan.main.argv
-    module = argv[3] if argv[:3] == ("python", "-I", "-m") and len(argv) > 3 else SANDBOX_CONTROLLER_MODULE
-    deferred = agent_plan.model_copy(update={
-        "execution_role": "verifier",
-        "verifier_execution": "skipped",
-        "verifier": None,
-        "verifier_after_agent_timeout": False,
-        "in_place_verifier": False,
-        "sidecars": (
-            *(
-                sidecar for sidecar in agent_plan.sidecars
-                if not sidecar.private_sandbox and not sidecar.task_fixture
-            ),
-            verifier_sandbox,
-        ),
-        "main": agent_plan.main.model_copy(update={
-            "role": "verifier",
-            "argv": _sandbox_phase_argv("verify-sandbox", module),
-            "timeout_seconds": verifier_timeout_seconds,
-        }),
-        "output_declarations": tuple(outputs),
-        "resource_requests": requests,
-        "handoff_input": handoff_input,
-    })
-    return ExecutionRuntimePlanV1.model_validate(deferred.canonical_payload())
 
 
 __all__ = [
