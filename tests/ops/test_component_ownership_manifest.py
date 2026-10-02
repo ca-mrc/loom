@@ -1385,6 +1385,8 @@ def test_manifest_root_shard_salt_is_bound_to_measured_collection_balance() -> N
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
         ("tests/ops/test_ci_secret_isolation.py", 0),
         ("tests/ops/test_component_ownership_manifest.py", 1),
+        ("tests/ops/test_nebius_pool_role_restoration_live.py", 4),
+        ("tests/ops/test_nebius_pool_template_restoration_live.py", 5),
     }
 
 

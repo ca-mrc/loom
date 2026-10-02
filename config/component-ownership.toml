@@ -113,15 +113,20 @@ attestation_owners = [
 
 [[test_sharding]]
 lane = "tests-root"
-shard_count = 2
+shard_count = 8
 strategy = "stable-hash"
-# 2026-09-02 collection snapshot: 15,260 tests split 7,630 / 7,630.
-# Keep salt changes measurement-backed because existing path assignments are stable.
+# PR2305 run37027112403: both two-shard jobs exhausted 40m at 35-36%.
+# Retain the salt and complete files; eight runners divide the expanded lane.
+# This is a capacity correction, not a measured claim about the new balance.
 salt = "tests-root-v2-8275"
 pins = [
   # Pair measured hotspots across shards; see #1680 and PR #1731 telemetry.
   { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
   { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
+  # Gateway retirement has a 1,200s deadline. Keep the two 600s restoration
+  # cases on separate runners, not one 40m job with no remaining headroom.
+  { path = "tests/ops/test_nebius_pool_role_restoration_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 5 },
 ]
 
 [[test_sharding]]
