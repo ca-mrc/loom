@@ -621,6 +621,56 @@ def test_successor_pool_settings_use_retained_pod_and_registered_material(worklo
     assert all(b'private-' not in process.stdout + process.stderr for process in state.processes)
 
 
+@pytest.mark.parametrize('damage', [None, 'settings', 'global', 'scope', 'template', 'late_pod', 'not_ready', 'private_inputs'])
+def test_legacy_settings_require_original_template_and_same_ready_pod(workload_database, monkeypatch, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    previous, state = workload_database
+    original = state.original
+    container, = original['spec']['template']['spec']['containers']
+    rows = {row['name']: row for row in container['env']}
+    if 'LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON' in rows:
+        rows['LOOM_CP_EXECUTION_IMAGE_ADMISSION_PUBLIC_KEYS_JSON']['value'] = '{"schema_version":1,"keys":[]}'
+    api = type(previous)(request=previous.request, kubeconfig=previous.kubeconfig, executable=Path('/usr/bin/kubectl'))
+    monkeypatch.setattr(api, '_run', previous._run)
+    expected = copy.deepcopy(original)
+    expected['metadata'].setdefault('annotations', {})['loom.nebius/pool-cutover'] = 'fixture'
+    state.runtime_environment.update({name: row['value'] for name, row in rows.items() if 'value' in row})
+    if damage == 'scope':
+        expected['metadata']['uid'] = str(uuid4())
+    elif damage == 'template':
+        expected['spec']['template']['spec']['containers'][0]['image'] = 'registry.example.com/changed@sha256:' + 'e' * 64
+    elif damage == 'late_pod':
+        state.runtime_after_drift = True
+    elif damage == 'not_ready':
+        state.runtime_pod['status']['containerStatuses'][0]['ready'] = False
+    elif damage == 'private_inputs':
+        api.kubeconfig.write_text('private-changed-authority-marker')
+    elif damage in {'settings', 'global'}:
+        if container['name'] == 'loom-control-plane':
+            name, value = ('LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED', 'false') if damage == 'settings' else (
+                'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', '{}')
+        elif container['name'] == 'loom-service':
+            name, value = ('LOOM_SVC_SERVICE_MODE', 'api_only') if damage == 'settings' else ('LOOM_SVC_POOL_PROFILES_FILE', '/private-global.json')
+        else:
+            name, value = ('LOOM_EXECUTION_ACTUATOR_TARGET_ID', 'foreign-target') if damage == 'settings' else ('LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL', '{}')
+        state.runtime_environment[name] = value
+    state.controller.update(copy.deepcopy(expected))
+    state.replica['spec']['template'] = copy.deepcopy(expected['spec']['template'])
+    state.runtime_pod['spec'] = copy.deepcopy(expected['spec']['template']['spec'])
+    if damage:
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_runtime_legacy_settings(state.target, original=original, expected=expected)
+        assert error.value.stage == 'runtime_legacy_settings'
+        if damage in {'scope', 'template', 'not_ready', 'private_inputs'}:
+            assert not state.commands
+    else:
+        assert api.qualify_runtime_legacy_settings(state.target, original=original, expected=expected) is None
+        assert len(state.processes) == 1 and state.processes[0].stdout == b'{"status": "qualified"}\n'
+    assert all('private-' not in arg for command in state.commands for arg in command)
+    assert all(b'private-' not in process.stdout + process.stderr for process in state.processes)
+
+
 def test_each_running_database_consumer_is_qualified_without_sql_or_credential_output(workload_database):
     api, state = workload_database
     assert qualify_workload(api, state) is None

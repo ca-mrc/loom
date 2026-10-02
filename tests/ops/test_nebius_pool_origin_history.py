@@ -121,7 +121,7 @@ def test_startup_registration_observer_uses_exact_management_backend(management_
 
 
 @pytest.mark.parametrize('damage', [None, 'settings', 'pooled_settings', 'pod', 'secret', 'history', 'backend'])
-@pytest.mark.parametrize('successor', [False, True])
+@pytest.mark.parametrize('successor', [False, True, 'legacy'])
 def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage, successor):
     """A template Secret alone cannot qualify the manager's effective settings."""
     import json
@@ -131,10 +131,13 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
 
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
+    legacy, successor = successor == 'legacy', successor is True
     api, state = management_history
     manager = copy.deepcopy(state.target.controller)
     manager['spec']['selector'] = {'matchLabels': {'app': 'loom-service'}}
     manager['spec']['template']['metadata']['labels'] = {'app': 'loom-service'}
+    if legacy:
+        manager['spec']['template']['spec']['containers'][0]['env'].append({'name': 'LOOM_SVC_SERVICE_MODE', 'value': 'management'})
     state.target = replace(state.target, controller=copy.deepcopy(manager))
     # Reconstruct the real reader so its immutable history hash binds this input.
     selected = type(api)(request=api.request, target=state.target, kubeconfig=api.kubeconfig, executable=Path('/usr/bin/kubectl'))
@@ -165,6 +168,8 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         LOOM_SVC_MINIO_ACCESS_KEY='fixture', LOOM_SVC_MINIO_SECRET_KEY='fixture')
     if successor:
         environment.update(LOOM_SVC_SERVICE_MODE='management', LOOM_SVC_POOL_PROFILES_FILE=str(catalog))
+    elif legacy:
+        environment['LOOM_SVC_SERVICE_MODE'] = 'management'
     if damage in {'settings', 'pooled_settings'}:
         environment['LOOM_SVC_DB_URL_POOL' if damage == 'pooled_settings' else 'LOOM_SVC_DB_URL'] = (
             'postgresql+psycopg://foreign:private-marker@loom-postgres.foreign.svc:5432/loom')
@@ -208,6 +213,13 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
         if successor:
             selected.qualify_manager_pool_settings(expected=options['expected'])
             assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
+        elif legacy:
+            selected.qualify_manager_legacy_settings(expected=manager)
+            assert len(processes) == 2 and json.loads(processes[-1].stdout) == {'status': 'qualified'}
+            environment['LOOM_SVC_POOL_PROFILES_FILE'] = '/private-successor-catalog.json'
+            with pytest.raises(PoolMigrationError) as error:
+                selected.qualify_manager_legacy_settings(expected=manager)
+            assert error.value.stage == 'management_legacy_settings'
     assert all('private-marker' not in (row.stdout + row.stderr).decode() for row in processes)
     assert not state.executed  # No SQL query or write is part of this probe.
 
