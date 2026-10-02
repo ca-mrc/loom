@@ -44,6 +44,7 @@ from scripts.ops.nebius_pool_cutover import (
     retained_cutover_workloads,
 )
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+from scripts.ops.nebius_pool_dormant import DormantPoolConsumer
 from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
@@ -94,6 +95,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     guards: tuple[PoolGuardTarget, ...]
     actuators: tuple[dict[str, Any], ...]
     collectors: tuple[dict[str, Any], ...]
+    dormant_consumers: tuple[DormantPoolConsumer, ...] = ()
     roles: tuple[dict[str, Any], ...]
     services: tuple[dict[str, Any], ...]
     collector_config: dict[str, Any]
@@ -180,7 +182,7 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
             raise ValueError
         migration = PoolMigrationRequest(PoolRegistrationRequest(spec, binding, inputs.candidate), inputs.guards)
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
-            inputs.actuators, inputs.collectors), inputs.roles), predecessor.active, inputs.services,
+            inputs.actuators, inputs.collectors, inputs.dormant_consumers), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
             "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority)
         cutover_documents(request)

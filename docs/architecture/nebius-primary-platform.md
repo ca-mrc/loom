@@ -2217,8 +2217,10 @@ loop. Guest Pods must drain before retirement qualifies; replay checks them agai
 These checks do not replace installed database or effective writer qualification.
 
 The retirement contract separately accepts an explicit dormant remote-consumer
-roster. Each entry binds an already-zero actuator and suspended collector in an
-existing participant's execution namespace. The actuator must retain that
+roster through the optional `dormant_consumers` private cutover input; an omitted
+roster does not authorize adopting undeclared consumers. Each entry binds an
+already-zero actuator and suspended collector in an existing participant's
+execution namespace. The actuator must retain that
 participant's database Secret reference, use a distinct fixed ServiceAccount and
 target a namespace outside this operation. A registered target cannot be
 reclassified as dormant. Both retained UIDs and templates join the ordinary
