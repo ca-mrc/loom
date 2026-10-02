@@ -8,11 +8,16 @@ import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from loom.db.nebius_application_build_schema import NebiusApplicationBuild, NebiusApplicationBuildAttempt
+from loom.db.nebius_application_build_schema import (
+    NebiusApplicationBuild,
+    NebiusApplicationBuildAttempt,
+)
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_build_registry import build_registry, verified
 from tests.integration.test_nebius_application_source_upload import upload_registry
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 

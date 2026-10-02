@@ -982,6 +982,14 @@ checks the retained claim against the original source and binding before returni
 it. Creating this intent performs no network operation, resource admission or
 release qualification; its queued state does not mean a builder has been launched.
 
+`ApplicationBuildDispatch` commits the exact pool request and absolute deadline
+on that same retained attempt before a caller can perform network I/O. Concurrent
+selection and restart return the same request, including its original recipe and
+deadline. SQL prevents rewriting or erasing it. A cancelled build cannot create
+new demand, but its existing request remains readable for cancellation and
+uncertain-reply reconciliation. Reading that record is not activation consent;
+the automatic worker and its activation/completion evidence are separate consumers.
+
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected
 participant/profile binding and cancellation state under the pool transaction.

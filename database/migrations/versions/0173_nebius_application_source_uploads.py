@@ -90,11 +90,16 @@ CREATE INDEX nebius_application_build_owner_idx ON nebius_application_builds(own
 CREATE TABLE nebius_application_build_attempts (
     build_id uuid NOT NULL REFERENCES nebius_application_builds(build_id) ON DELETE RESTRICT,
     attempt bigint NOT NULL, claim_json jsonb NOT NULL, claim_sha256 text NOT NULL, phase text NOT NULL,
+    pool_request_json jsonb, pool_request_sha256 text,
     created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(build_id,attempt),
     CONSTRAINT nebius_application_build_attempt_state_check CHECK (attempt > 0 AND phase = 'queued'),
     CONSTRAINT nebius_application_build_attempt_input_check CHECK (
         claim_sha256 ~ '^[0-9a-f]{64}$' AND jsonb_typeof(claim_json) = 'object' AND
-        COALESCE(claim_json->>'build_id' = build_id::text AND (claim_json->>'attempt')::bigint = attempt, false))
+        COALESCE(claim_json->>'build_id' = build_id::text AND (claim_json->>'attempt')::bigint = attempt, false)),
+    CONSTRAINT nebius_application_build_pool_request_check CHECK (
+        (pool_request_json IS NULL AND pool_request_sha256 IS NULL) OR
+        (pool_request_json IS NOT NULL AND pool_request_sha256 IS NOT NULL AND
+         jsonb_typeof(pool_request_json) = 'object' AND pool_request_sha256 ~ '^[0-9a-f]{64}$'))
 );
 CREATE FUNCTION retain_nebius_application_build() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -123,7 +128,7 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'application build attempt history is retained' USING ERRCODE='23514';
     ELSIF TG_OP = 'INSERT' THEN
-        IF NEW.phase <> 'queued' OR NOT EXISTS (
+        IF NEW.phase <> 'queued' OR NEW.pool_request_json IS NOT NULL OR NEW.pool_request_sha256 IS NOT NULL OR NOT EXISTS (
             SELECT 1 FROM nebius_application_builds b
             JOIN nebius_application_source_uploads s ON s.upload_id=b.upload_id
             WHERE b.build_id=NEW.build_id AND b.current_attempt=NEW.attempt
@@ -138,8 +143,32 @@ BEGIN
             AND NEW.claim_json->'recipe'=b.binding_json->'recipe') THEN
             RAISE EXCEPTION 'application build attempt requires retained identity' USING ERRCODE='23514';
         END IF;
-    ELSIF (to_jsonb(OLD)-'phase') IS DISTINCT FROM (to_jsonb(NEW)-'phase') THEN
-        RAISE EXCEPTION 'application build attempt inputs are immutable' USING ERRCODE='23514';
+    ELSE
+        IF (to_jsonb(OLD)-ARRAY['phase','pool_request_json','pool_request_sha256']) IS DISTINCT FROM
+           (to_jsonb(NEW)-ARRAY['phase','pool_request_json','pool_request_sha256']) OR
+           (OLD.pool_request_json IS NOT NULL AND ROW(OLD.pool_request_json,OLD.pool_request_sha256)
+                IS DISTINCT FROM ROW(NEW.pool_request_json,NEW.pool_request_sha256)) THEN
+            RAISE EXCEPTION 'application build attempt inputs are immutable' USING ERRCODE='23514';
+        END IF;
+        IF OLD.pool_request_json IS NULL AND NEW.pool_request_json IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM nebius_application_builds b
+            WHERE b.build_id=NEW.build_id AND b.current_attempt=NEW.attempt AND b.desired_state='running'
+            AND NEW.pool_request_json->'build'=NEW.claim_json
+            AND NEW.pool_request_json->>'schema_version'='loom.pool-application-image-prepare.v1'
+            AND NEW.pool_request_json->'key'->>'local_work_id'=NEW.build_id::text
+            AND NEW.pool_request_json->'key'->>'generation'=NEW.attempt::text
+            AND NEW.pool_request_json->'key'->>'workload_kind'='application_image_build'
+            AND NEW.pool_request_json->'key'->>'participant_id'=b.binding_json->>'participant_id'
+            AND NEW.pool_request_json->>'pool_id'=b.binding_json->>'pool_id'
+            AND NEW.pool_request_json->>'target_id'=b.binding_json->>'target_id'
+            AND NEW.pool_request_json->>'admission_epoch'=b.binding_json->>'admission_epoch'
+            AND NEW.pool_request_json->>'participant_revision'=b.binding_json->>'participant_revision'
+            AND NEW.pool_request_json->'origin'->>'kind'='personal_build'
+            AND NEW.pool_request_json->'origin'->>'submission_id'=NEW.build_id::text
+            AND NEW.pool_request_json->'origin'->>'data_environment_id'=b.data_environment_id::text
+            AND NEW.pool_request_json->'origin'->'application'='null'::jsonb) THEN
+            RAISE EXCEPTION 'application pool request differs from retained build' USING ERRCODE='23514';
+        END IF;
     END IF;
     RETURN NEW;
 END $$;
