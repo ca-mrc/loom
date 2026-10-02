@@ -9,7 +9,9 @@ from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_activation_stage import ActivationAPI, advance
 from tests.ops.test_nebius_pool_startup import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_startup import collector_inputs as collector_inputs
-from tests.ops.test_nebius_pool_startup import cutover_binding_inventory as cutover_binding_inventory
+from tests.ops.test_nebius_pool_startup import (
+    cutover_binding_inventory as cutover_binding_inventory,
+)
 from tests.ops.test_nebius_pool_startup import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_startup import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_startup import management_inputs as management_inputs

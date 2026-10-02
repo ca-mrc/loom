@@ -135,6 +135,28 @@ def startup_http(closed_startup, cutover_binding_inventory):
             before = state.objects[key]
             field = 'suspend' if before['kind'] == 'CronJob' else 'replicas'
             patches = json.loads(message.content)
+            if patches[-1]['path'] == '/metadata/annotations':
+                assert patches == [
+                    {'op': 'test', 'path': '/metadata/uid', 'value': before['metadata']['uid']},
+                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': before['metadata']['resourceVersion']},
+                    {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                    {'op': 'test', 'path': '/spec', 'value': before['spec']},
+                    {'op': 'add', 'path': '/metadata/annotations', 'value': {
+                        **before['metadata'].get('annotations', {}), 'loom.nebius/pool-startup-fence': str(migration.registration.spec.operation_id)}}]
+                desired = copy.deepcopy(before)
+                desired['metadata']['annotations'] = patches[-1]['value']
+                if message.url.params:
+                    assert dict(message.url.params) == {'dryRun': 'All'}
+                    return httpx.Response(200, json=desired)
+                assert json.loads((root / 'cutover/startup-fence.json').read_bytes())['workloads'][key] == {'phase': 'intent', 'expected': None}
+                state.writes.append(key)
+                if state.failure == 'before':
+                    raise httpx.ReadTimeout('private-marker')
+                desired['metadata']['resourceVersion'] = str(int(before['metadata']['resourceVersion']) + 1)
+                state.objects[key] = desired
+                if state.failure == 'after':
+                    raise httpx.ReadTimeout('private-marker')
+                return httpx.Response(200, json=desired)
             assert patches == [
                 {'op': 'test', 'path': '/metadata/uid', 'value': before['metadata']['uid']},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': before['metadata']['resourceVersion']},
