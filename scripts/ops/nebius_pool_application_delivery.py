@@ -49,6 +49,14 @@ class ApplicationSourceCredentialPin(BaseModel):
         return self
 
 
+@dataclass(frozen=True, repr=False)
+class ApplicationBuildDeliveryRequest:
+    before: ManagementDeployment
+    profile: dict[str, Any]
+    repo_root: Path
+    source_credential: ApplicationSourceCredentialPin
+
+
 def source_material_json(material: dict[str, str], pin: ApplicationSourceCredentialPin) -> str:
     """Same bounded source-only payload for live qualification and fixed delivery."""
     try:

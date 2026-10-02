@@ -38,6 +38,10 @@ from scripts.ops.nebius_management_refresh_predecessor import (
 )
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+from scripts.ops.nebius_pool_application_delivery import (
+    ApplicationBuildDeliveryRequest,
+    ApplicationSourceCredentialPin,
+)
 from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     cutover_documents,
@@ -106,6 +110,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     services: tuple[dict[str, Any], ...]
     collector_config: dict[str, Any]
     collector_credential: PoolCollectorCredential
+    application_source_credential: ApplicationSourceCredentialPin | None = None
     platform_authority: PoolPlatformAuthority
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     machine_token_files: dict[UUID, Path]
@@ -187,10 +192,16 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
                     or target.database.actuator_credential_resource_version is None for target in inputs.guards)):
             raise ValueError
         migration = PoolMigrationRequest(PoolRegistrationRequest(spec, binding, inputs.candidate), inputs.guards)
+        application_delivery = None
+        if bool(spec.profiles.application_images) != (inputs.application_source_credential is not None):
+            raise ValueError
+        if inputs.application_source_credential is not None:
+            application_delivery = ApplicationBuildDeliveryRequest(predecessor.deployment, inputs.profile,
+                original.upgrade.setup.repo_root, inputs.application_source_credential)
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
             inputs.actuators, inputs.collectors, inputs.dormant_consumers), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
-            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority)
+            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority, application_delivery)
         cutover_documents(request)
         names = {row.machine_id for row in spec.machines}
         paths = set(inputs.machine_token_files.values())

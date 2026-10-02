@@ -13,22 +13,56 @@ from tests.integration.test_nebius_pool_installation import add_application_buil
 from tests.ops.test_nebius_pool_cutover import CutoverAPI
 from tests.ops.test_nebius_pool_cutover_entry import (
     application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     application_material as application_material,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     checks as checks,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     cloud as cloud,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     collector_inputs as collector_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     completed_upgrade as completed_upgrade,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     cutover_inputs as cutover_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     database_guard as database_guard,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     entry_inputs as entry_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     fencing_inputs as fencing_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     installation as installation,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     material as material,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     private_cutover as private_cutover,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     private_upgrade as private_upgrade,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     retirement_inputs as retirement_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     runtime_inputs as runtime_inputs,
+)
+from tests.ops.test_nebius_pool_cutover_entry import (
     save_private,
 )
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
@@ -54,6 +88,10 @@ def builder_cutover_inputs(private_cutover, build_inputs):
     development['environment_id'] = str(shared.data_environment_id)
     recipe = build_inputs[0].recipe.model_copy(update={'schema_revision': shared.schema_revision})
     spec, machine, token = add_application_builder(spec, recipe)
+    # Legacy task fixtures use artifacts; personal source uses the retained
+    # shared source bucket, as the actual installation requires.
+    spec['profiles']['application_images'][0]['settings']['source_bucket'] = (
+        before.installation.foundation.platform_config['buckets']['source'])
     payload['installation'] = spec
     path = Path(operation['inputs_path']).parent / 'application-builder-token'
     path.write_text(token)
