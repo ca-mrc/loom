@@ -168,6 +168,7 @@ async def test_real_lifespan_starts_builder_for_closed_registered_pool_and_super
         runtime = app.state.application_runtime
         registry = app.state.application_build_registry
         assert registry is runtime.build_worker.journal.registry
+        assert registry is app.state.application_manager.builds
         assert registry.session_factory is app.state.session_factory
         assert registry.binding.source == runtime.source_uploader.registry.binding
         async with asyncio.timeout(5):

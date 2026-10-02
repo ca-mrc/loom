@@ -42,7 +42,7 @@ async def setup_application_pool(environment_registry, build_inputs, **kwargs):
     claim = build_inputs[0]
     sources = ApplicationSourceRegistry(factory, binding=ApplicationSourceUploadBindingV1(
         installation_id=participant.installation_id, data_environment_id=participant.environment_id,
-        cluster_id="cluster-1", source_bucket=claim.source_bucket))
+        cluster_id=kwargs.get("cluster_id", "cluster-1"), source_bucket=claim.source_bucket))
     registry = build_registry(factory, sources, claim, pool_id=participant.pool_id,
         participant_id=participant.participant_id, profile_id=participant.targets[0].profile_id,
         target_id=participant.targets[0].target_id, admission_epoch=participant.admission_epoch,
