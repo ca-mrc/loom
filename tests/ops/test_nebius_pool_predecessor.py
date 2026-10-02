@@ -127,6 +127,7 @@ def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private
     from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
     from scripts.ops.nebius_management_stage import ManagementStageError
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
     from tests.ops.test_nebius_management_refresh_entry import context, private_refresh
     from tests.ops.test_nebius_management_refresh_predecessor import (
         complete_refresh,
@@ -152,6 +153,8 @@ def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private
         inherited = context(metadata)
         assert inherited.predecessor == completed
         assert inherited.request.pool_baseline == selector.model_dump(mode='json')
+        projected = PoolManagerRefresh(root, completed, inherited.request, Path(metadata['state_dir'])).workload_options()
+        assert projected[_key(pool.context.request.manager)] == (completed.active,)
         assert completed.deployment.pool_catalog_operation_id == pool.deployment.pool_catalog_operation_id
         assert completed.active['metadata']['uid'] == pool.active['metadata']['uid']
         assert all(completed.history.get(path) == checksum for path, checksum in pool.history.items())
@@ -199,3 +202,108 @@ def test_predecessor_recursion_is_bounded_and_failure_does_not_poison_next_load(
             stack.enter_context(_predecessor_scope('pool-cutover', str(uuid4())))
     with _predecessor_scope('refresh', operation):
         pass  # Both duplicate and depth-limit failures release their scope.
+
+
+@pytest.mark.timeout(420)
+def test_refresh_projects_only_manager_from_anchored_steps_and_uncertain_writes(private_cutover):
+    from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+    from scripts.ops.nebius_management_refresh_switch import refresh_target
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_install import run
+    from tests.ops.test_nebius_management_refresh_predecessor import refresh_case
+
+    operation, _, root = private_cutover
+    _, result = finish_cutover(operation)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    case = refresh_case(root, pool, pool_baseline=selector.model_dump(mode='json'))
+    request, api, state, _ = case
+    bound = PoolManagerRefresh(root, pool, request, state)
+    manager = _key(pool.context.request.manager)
+
+    def check(*allowed):
+        before = {path: path.read_bytes() for path in (*pool.history, *state.rglob('*.json'))}
+        options = bound.workload_options()
+        assert set(options) == set(pool.completion.workloads)
+        assert tuple(_snapshot(row) for row in options[manager]) == tuple(_snapshot(row) for row in allowed)
+        assert all(_uid(row) == _uid(pool.active) for row in options[manager])
+        assert {key: value for key, value in options.items() if key != manager} == {
+            key: (value,) for key, value in pool.completion.workloads.items() if key != manager}
+        assert {path: path.read_bytes() for path in before} == before
+
+    check(pool.active)
+    api.pending = 'config'
+    assert run(case)['phase'] == 'config'
+    check(pool.active)
+    api.pending, api.switch.failure = None, 'before'
+    with pytest.raises(ManagementRefreshInstallError):
+        run(case)
+    stopped = refresh_target(request.resources.switch, 'retire')
+    check(pool.active, stopped)
+    # Simulate readback of the previously uncertain CAS, not a new write.
+    api.switch.document = api.switch.desired('retire')
+    api.switch.failure, api.pending = None, 'manager-probe'
+    assert run(case)['phase'] == 'manager-probe'
+    check(stopped)
+    assert api.switch.calls == ['retire']
+    api.pending, api.switch.failure = None, 'before'
+    with pytest.raises(ManagementRefreshInstallError):
+        run(case)
+    active = json.loads((state / 'switch/cutover.json').read_bytes())['active']
+    check(stopped, active)
+    api.switch.document = api.switch.desired('activate')
+    api.switch.failure = None
+    assert run(case)['status'] == 'management_refreshed'
+    check(active)
+    assert api.switch.calls == ['retire', 'activate']
+
+
+@pytest.mark.timeout(420)
+def test_refresh_projection_rejects_unbound_history_and_tampered_journals(private_cutover):
+    from dataclasses import replace
+
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_install import run
+    from tests.ops.test_nebius_management_refresh_predecessor import refresh_case
+
+    operation, _, root = private_cutover
+    _, result = finish_cutover(operation)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    case = refresh_case(root, pool, pool_baseline=selector.model_dump(mode='json'))
+    request, _, state, anchor = case
+    bound = PoolManagerRefresh(root, pool, request, state)
+    assert run(case)['status'] == 'management_refreshed'
+    expected = bound.workload_options()
+    for altered in (replace(bound, state_dir=state.parent / 'foreign'),
+            replace(bound, request=replace(request, pool_baseline=None)),
+            replace(bound, request=replace(request, history={}))):
+        with pytest.raises(ValueError, match='pool_refresh_projection_unqualified'):
+            altered.workload_options()
+    stopped = copy.deepcopy(pool.active)
+    stopped['spec']['replicas'] = 0
+    stopped['metadata'].setdefault('annotations', {})['loom.nebius/management-refresh-id'] = str(uuid4())
+    unqualified = replace(request, resources=replace(request.resources,
+        switch=replace(request.resources.switch, initial_stopped=stopped)))
+    with pytest.raises(ValueError, match='pool_refresh_projection_unqualified'):
+        replace(bound, request=unqualified).workload_options()
+    parent_path, switch_path = state / 'refresh.json', state / 'switch/cutover.json'
+    paths = (parent_path, switch_path, anchor / (str(request.resources.switch.operation_id) + '.json'),
+        state / 'post-migration-probe/stage.json', Path(operation['state_dir']) / 'completion.json')
+    saved = {path: path.read_bytes() for path in paths}
+    for path in paths:
+        path.write_bytes(b'{}')
+        with pytest.raises(ValueError, match='pool_refresh_projection_unqualified'):
+            bound.workload_options()
+        path.write_bytes(saved[path])
+    # A valid-looking target is not permission to activate before parent proofs.
+    parent = json.loads(saved[parent_path])
+    parent['activation_started'] = False
+    parent_path.write_text(json.dumps(parent))
+    with pytest.raises(ValueError, match='pool_refresh_projection_unqualified'):
+        bound.workload_options()
+    parent_path.write_bytes(saved[parent_path])
+    assert bound.workload_options() == expected
