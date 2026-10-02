@@ -235,7 +235,7 @@ def test_cli_create_plain_candidate_and_check_shape(
             str(output),
             *(["--supports-task-web-egress", "--service-lifecycle-ready", "--supports-task-identity"] if enabled else []),
             *(["--guest-runtime", "qemu-tcg-v1", "--guest-runtime-volume-mib", "1024",
-               "--guest-max-artifact-bytes", "6442450944"] if enabled else []),
+               "--guest-max-artifact-bytes", "6442450944", "--supports-emulated-pkcs11"] if enabled else []),
         ],
         capture_output=True,
         text=True,
@@ -246,6 +246,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     assert profile.get("guest_runtime") == ("qemu-tcg-v1" if enabled else None)
     assert profile.get("guest_runtime_volume_mib") == (1024 if enabled else None)
     assert profile.get("guest_max_artifact_bytes") == (6 * 1024**3 if enabled else None)
+    assert profile.get("supports_emulated_pkcs11", False) is enabled
     assert profile["runtime_volume_mib"] == 32
     assert profile["max_artifact_bytes"] == 1024**3
     assert profile["execution_class_id"] == (
@@ -271,6 +272,7 @@ def test_cli_create_plain_candidate_and_check_shape(
     config, _, _ = request.getfixturevalue("platform_inputs")
     if enabled:
         config["guest_execution_target"] = {"target_id": "nebius-guest-fixture"}
+        config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
         config["task_egress"] = {"protected_cidrs": ["198.51.100.0/24"]}
         config["task_identity_policy"] = {
             "mode": "private-root-v1", "target_id": config["target_id"],
