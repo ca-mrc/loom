@@ -36,6 +36,10 @@ from scripts.ops.nebius_pool_migration import (
 )
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
 from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
+from scripts.ops.nebius_pool_startup_capacity import (
+    BOUND_POOL_CAPACITY_COMMAND,
+    expected_startup_capacity,
+)
 from scripts.ops.nebius_pool_startup_database import (
     pool_startup_closed_sql,
     qualify_startup_closed_report,
@@ -300,7 +304,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
 
         The startup parent supplies the retained child identity, not an operator
         manifest. This proves DB correspondence, machine material and actual
-        projected Kubernetes access; effective RBAC remains a separate barrier.
+        projected Kubernetes access plus current accepted capacity evidence;
+        effective RBAC remains a separate barrier.
         """
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
@@ -339,6 +344,13 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             response = hmac.new(bytes.fromhex(nonce), json.dumps(projection, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
             report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'gateway', '--',
                 'python', '-c', BOUND_GATEWAY_KUBERNETES_COMMAND, json.dumps(sorted(namespaces)), nonce, response])
+            if report != {'status': 'qualified'}:
+                raise ValueError
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce),
+                json.dumps(expected_startup_capacity(spec), sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'gateway', '--',
+                'python', '-c', BOUND_POOL_CAPACITY_COMMAND, nonce, response])
             if report != {'status': 'qualified'}:
                 raise ValueError
             if (_uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)

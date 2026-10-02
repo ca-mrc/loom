@@ -2514,6 +2514,18 @@ Pod, database, credential and parent closure checks still surround the proof.
 Disposable Kubernetes coverage exercises the real service-account permissions,
 TLS/credential files and namespace UID matching, but not an installed gateway Pod
 or concurrent-owner task execution.
+The same bound gateway also authenticates its current dedicated machine credential
+to management and runs the existing connected-capacity admission reader. That
+reader requires a fresh accepted observation, exact current registration/capture
+digest, physical node-group and provider-quota identities. The challenge separately
+binds those current registration values to the protected installation, active
+participant roster and gateway credential. It neither publishes a new observation
+nor substitutes operator-supplied capacity. These fixed SQL reads use the existing
+management mutation lock and row locks in a bounded `READ COMMITTED` transaction,
+which is always rolled back; this is non-mutating qualification, not a SQL
+`READ ONLY` transaction. Pod/backend/credential identity and closed authority are
+rechecked afterward. The result is not a saved capacity grant: admission opening
+must requalify current evidence under its own locked transition.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,
