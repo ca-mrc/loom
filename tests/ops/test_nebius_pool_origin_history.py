@@ -88,6 +88,37 @@ def test_history_observer_binds_management_namespace_and_replays_only_reads(mana
     assert all(state.request.guards[0].namespace not in row for row in state.calls)
 
 
+@pytest.mark.parametrize('damage', [None, 'report', 'backend', 'credential', 'authority'])
+def test_startup_registration_observer_uses_exact_management_backend(management_history, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    from loom_service.pool_management.capacity import digest
+
+    api, state = management_history
+    spec = state.request.registration.spec
+    state.report = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+        'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}
+    if damage == 'report':
+        state.report['qualified'] = False
+    elif damage == 'backend':
+        state.after_drift = True
+    elif damage == 'credential':
+        state.secret['metadata']['resourceVersion'] = 'changed'
+    elif damage == 'authority':
+        api.kubeconfig.write_bytes(b'changed')
+    if damage:
+        with pytest.raises(PoolMigrationError) as error:
+            api.qualify_closed_pool()
+        assert error.value.stage == 'startup_closed_registration'
+    else:
+        assert api.qualify_closed_pool() is None
+        assert api.qualify_closed_pool() is None
+        commands = [row for row in state.calls if row[0] == 'exec']
+        assert len(commands) == 2
+        assert all(row[:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--'] for row in commands)
+        assert all(state.request.guards[0].namespace not in row for row in state.calls)
+
+
 @pytest.mark.parametrize('damage', [None, 'settings', 'pooled_settings', 'pod', 'secret', 'history', 'backend'])
 def test_manager_runtime_uses_the_retained_management_database(management_history, monkeypatch, damage):
     """A template Secret alone cannot qualify the manager's effective settings."""
