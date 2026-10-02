@@ -971,6 +971,17 @@ cache keys include a separate application domain, source digest and recipe
 (including platform); the existing bounded blob store and GC are shared without
 fabricating Tasks. Source/registry credentials never enter the build context.
 These runtime helpers do not yet admit or launch application builds.
+
+`ApplicationBuildRegistry` records owner/team/install/data/cluster-bound build
+intent from a verified source upload. Concurrent requests with the same replay
+key retain one build and one queued attempt. Each attempt freezes its source and
+protected recipe/storage/pool binding; replay after a management restart uses
+those retained inputs even if the active recipe catalog changes. SQL prevents
+deleting build history or rewriting source, owner or attempt inputs. Status
+checks the retained claim against the original source and binding before returning
+it. Creating this intent performs no network operation, resource admission or
+release qualification; its queued state does not mean a builder has been launched.
+
 Protected delivery of the credential/mount, the user-facing build command, global
 application-build admission, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.

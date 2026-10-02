@@ -1,12 +1,14 @@
 """Personal source/recipe identities for the protected native application builder."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from loom.application_source_upload import (
+    ApplicationSourceUploadBindingV1,
     ApplicationSourceUploadRequestV1,
     application_source_object_key,
 )
@@ -114,3 +116,45 @@ class ApplicationImagePublicationV1(BaseModel):
                 or any(len(ref) > 280 or re.fullmatch(_IMAGE, ref) is None for ref in self.registry_images.values())):
             raise ValueError("application publication is incomplete or invalid")
         return self
+
+
+class ApplicationImageBuildBindingV1(BaseModel):
+    """Protected management build configuration, never owner request fields."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    source: ApplicationSourceUploadBindingV1
+    recipe: ApplicationImageRecipeV1
+    storage_endpoint: str
+    storage_region: str = Field(pattern=r"^[a-z0-9-]{1,63}$")
+    cache_bucket: str | None = Field(default=None, pattern=_BUCKET)
+    registry_repository: str = Field(max_length=200, pattern=r"^cr\.[a-z0-9-]+\.nebius\.cloud/[a-z0-9]+/[a-z0-9][a-z0-9/._-]*$")
+    pool_id: UUID
+    participant_id: UUID
+    profile_id: UUID
+    target_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,79}$")
+    admission_epoch: int = Field(gt=0, le=2**63 - 1, strict=True)
+    participant_revision: int = Field(gt=0, le=2**63 - 1, strict=True)
+
+    @model_validator(mode="after")
+    def _bindings(self) -> Self:
+        if (not all(value.int for value in (self.pool_id, self.participant_id, self.profile_id))
+                or self.storage_endpoint != f"https://storage.{self.storage_region}.nebius.cloud"
+                or self.cache_bucket == self.source.source_bucket
+                or any(part in {"", ".", ".."} for part in self.registry_repository.split("/"))):
+            raise ValueError("invalid application builder installation binding")
+        return self
+
+
+class ApplicationImageBuildStatusV1(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    schema_version: Literal["loom.application-image-build-status.v1"] = "loom.application-image-build-status.v1"
+    build_id: UUID
+    upload_id: UUID
+    attempt: int = Field(gt=0, le=2**63 - 1, strict=True)
+    phase: Literal["queued", "running", "settling", "ready", "failed", "cancelled"]
+    desired_state: Literal["running", "cancelled"]
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    recipe_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    created_at: datetime

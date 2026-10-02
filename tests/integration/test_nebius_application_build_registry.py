@@ -11,7 +11,9 @@ from sqlalchemy.exc import IntegrityError
 
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_source_upload import intent, upload_registry
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -37,7 +39,10 @@ async def verified(sources, owner, key="source"):
 
 
 async def test_concurrent_build_intents_freeze_one_attempt_and_replay_after_restart(environment_registry, build_inputs):
-    from loom.db.nebius_application_build_schema import NebiusApplicationBuild, NebiusApplicationBuildAttempt
+    from loom.db.nebius_application_build_schema import (
+        NebiusApplicationBuild,
+        NebiusApplicationBuildAttempt,
+    )
     from loom_service.application_management.build_registry import ApplicationBuildRegistry
 
     _, factory, (alice, _), _ = environment_registry
