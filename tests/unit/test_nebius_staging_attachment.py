@@ -169,9 +169,75 @@ def test_staging_attachment_separates_spool_without_second_control_plane(tmp_pat
     for role_binding in (row for row in roles if row["kind"] == "ClusterRoleBinding"):
         assert role_binding["roleRef"]["name"] == role_binding["metadata"]["name"]
         assert all(
-            subject["namespace"] == "loom-nebius-staging"
-            for subject in role_binding["subjects"]
+            subject["namespace"] == "loom-nebius-staging" for subject in role_binding["subjects"]
         )
+
+
+def test_staging_actuator_can_reach_only_configured_private_kubelet_destinations(
+    tmp_path: Path,
+) -> None:
+    payload = binding()
+    payload["network"]["kubelet"] = [
+        {"cidr": "10.40.0.0/24", "port": 10250},
+        {"cidr": "fd00:40::/64", "port": 10250},
+    ]
+    _, docs = render(tmp_path, payload)
+    policies = {row["metadata"]["name"]: row for row in docs if row["kind"] == "NetworkPolicy"}
+    routes = [
+        row
+        for row in policies["loom-attachment-actuator"]["spec"]["egress"]
+        if row.get("ports") == [{"protocol": "TCP", "port": 10250}]
+    ]
+    assert routes == [
+        {
+            "to": [{"ipBlock": {"cidr": "10.40.0.0/24"}}],
+            "ports": [{"protocol": "TCP", "port": 10250}],
+        },
+        {
+            "to": [{"ipBlock": {"cidr": "fd00:40::/64"}}],
+            "ports": [{"protocol": "TCP", "port": 10250}],
+        },
+    ]
+    for name in ("loom-attachment-gateway", "loom-attachment-collector"):
+        assert all(
+            port["port"] != 10250
+            for rule in policies[name]["spec"]["egress"]
+            for port in rule["ports"]
+        )
+
+
+def test_staging_attachment_requires_explicit_kubelet_route_before_rendering(
+    tmp_path: Path,
+) -> None:
+    payload = binding()
+    payload["network"].pop("kubelet", None)
+    with pytest.raises(NebiusRuntimeRenderError, match="kubelet"):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
+
+
+@pytest.mark.parametrize(
+    "destinations",
+    [
+        [],
+        [{"cidr": "0.0.0.0/0", "port": 10250}],
+        [{"cidr": "8.8.8.8/32", "port": 10250}],
+        [{"cidr": "127.0.0.1/32", "port": 10250}],
+        [{"cidr": "169.254.0.0/16", "port": 10250}],
+        [{"cidr": "::/0", "port": 10250}],
+        [{"cidr": "fe80::/64", "port": 10250}],
+        [{"cidr": "10.40.0.0/24", "port": 443}],
+        [{"cidr": "10.40.0.0/24", "port": True}],
+    ],
+)
+def test_staging_kubelet_route_cannot_widen_to_public_or_non_kubelet_endpoints(
+    tmp_path: Path, destinations
+) -> None:
+    payload = binding()
+    payload["network"]["kubelet"] = destinations
+    with pytest.raises(NebiusRuntimeRenderError):
+        render(tmp_path, payload)
+    assert not (tmp_path / "rendered").exists()
 
 
 @pytest.mark.parametrize("database", ["loom", "loom_staging"])
