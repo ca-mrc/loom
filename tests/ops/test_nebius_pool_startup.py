@@ -10,6 +10,7 @@ import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_cutover import CutoverAPI, run
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
+from tests.ops.test_nebius_pool_cutover import cutover_binding_inventory as cutover_binding_inventory
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_cutover import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_cutover import retirement_inputs as retirement_inputs
@@ -204,3 +205,30 @@ def test_closed_stage_cannot_replay_after_startup_intent_even_if_nothing_started
         run(request, tokens, closed, root)
     assert closed.events == prior_events
     assert (root / 'cutover/cutover.json').read_bytes() == evidence
+
+
+@pytest.mark.parametrize('outcome', ['before', 'after'])
+def test_https_inventory_qualifies_both_sides_of_pending_start_without_writes(cutover_inputs, cutover_binding_inventory, tmp_path, outcome):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+    from scripts.ops.nebius_pool_startup import stage_pool_startup
+    from tests.ops.test_nebius_pool_cutover import binding_preflight, writer_workload_inventory
+
+    request, tokens = cutover_inputs
+    closed = CutoverAPI(request)
+    assert run(request, tokens, closed, tmp_path)['status'] == 'pool_runtime_staged_closed'
+    api = StartupAPI(request, closed, tmp_path / 'cutover')
+    api.fail_key, api.failure = _key(request.manager), 'before'
+    assert stage_pool_startup(request=request, api=api, state_dir=tmp_path / 'cutover',
+        anchor_dir=tmp_path / 'cutover-anchor')['status'] == 'pending_startup_outcome'
+    if outcome == 'after':
+        api.documents[api.fail_key]['spec']['replicas'] = 1
+        api.documents[api.fail_key]['metadata']['resourceVersion'] = '100'
+    rows = cutover_binding_inventory
+    rows['roles'] = list(copy.deepcopy(closed.fencing.roles).values())
+    resources = {'Role': 'roles', 'RoleBinding': 'rolebindings', 'ClusterRole': 'clusterroles', 'ClusterRoleBinding': 'clusterrolebindings'}
+    for document in cutover_documents(request)['authority']:
+        rows[resources[document['kind']]].append(copy.deepcopy(closed.resources.resources[_key(document)]))
+    calls = binding_preflight(request, tokens, rows, journal=(tmp_path / 'cutover', tmp_path / 'cutover-anchor'),
+        workloads=writer_workload_inventory(request, originals=api.documents.values()))
+    assert calls and all(call.method == 'GET' for call in calls)
+    assert api.requests == [api.fail_key]
