@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_stage import _validate_record
+from scripts.ops.nebius_management_stage import _qualified_defaulted, _validate_record
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
@@ -67,7 +67,8 @@ def closed_startup_documents(request: PoolCutoverRequest, *, state_dir: Path,
             "binding": asdict(request.fencing.retirement.migration.registration.binding),
             "revision": digest(targets), "phase": "pool-cutover-" + phase}, targets)
         for key, item in child["resources"].items():
-            if item["status"] != "created":
+            if (item["status"] != "created"
+                    or _qualified_defaulted(item["desired"], item["observed"]) != item["expected"]):
                 raise ValueError
             if phase == "workload":
                 value = copy.deepcopy(item["observed"])

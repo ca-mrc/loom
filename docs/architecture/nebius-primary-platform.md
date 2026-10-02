@@ -2434,6 +2434,25 @@ durable successor refresh remain required for an operational global cutover.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 
+The internal successor-startup stage binds a separate journal to the exact bytes
+of the completed closed parent and its retained workload identities. It starts
+only the manager, fixed gateway, participant adapters and selected pool collector;
+other collectors and explicitly dormant foreign-target roots remain stopped.
+Startup changes only replicas or suspension, preserving the retained Pod templates.
+Every write records its original resourceVersion before one compare-and-swap
+request. A lost reply permits exact readback only, never a retry; seeing the old
+replica count does not prove that a delayed request cannot still commit.
+
+After startup intent exists, the old closed-stage mutation path refuses replay.
+Read-only writer inventory and database readers accept only the recorded before
+or after template for an uncertain start. They retain namespace, workload UID,
+database and credential checks without depending on an unready successor Pod.
+This keeps recovery available; it is not runtime acceptance. The startup stage
+does not open admission or claim a working execution pool, and is not exposed as
+an independent deployment command. Connected live startup qualification,
+runtime/collector acceptance, admission opening, uncertain-write rollback and
+durable refresh remain required before protected operational activation.
+
 Once runtime replacement starts, recovery must not replay the original retirement
 or fencing installer against the changed templates. The parent instead qualifies
 the anchored child hashes, held guards, restricted roles, current effective rules

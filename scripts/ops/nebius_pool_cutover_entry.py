@@ -68,6 +68,7 @@ from scripts.ops.nebius_pool_registration import (
 from scripts.ops.nebius_pool_retirement import PoolRetirementRequest
 from scripts.ops.nebius_pool_role_fencing import PoolRoleFenceRequest
 from scripts.ops.nebius_pool_runtime import PoolCollectorCredential
+from scripts.ops.nebius_pool_startup import startup_workload_options
 
 from loom.execution_image_admission import ImageAdmissionKeyring
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
@@ -280,20 +281,28 @@ class _ConnectedPoolMigration:
         return self.registration.registration_report(state_dir)
 
 
+def _runtime_workload_options(context: PoolCutoverContext) -> tuple[dict[str, tuple[dict[str, Any], ...]], bool]:
+    state, anchor = Path(context.operation["state_dir"]), Path(context.operation["anchor_dir"])
+    successors = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
+    if successors is not None:
+        return successors, True
+    return {key: (row,) for key, row in retained_cutover_workloads(context.request,
+        state_dir=state, anchor_dir=anchor).items()}, False
+
+
 def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
     """Bind retained consumers to their database and running actuator telemetry.
 
     Fresh operations require original running Pods. Recovery instead selects
-    exact journaled stopped/rewired templates and checks their retained database
-    references; the cutover parent still owns drain and later startup acceptance.
-    No state file is created and no stopped workload is restarted by this read.
+    exact journaled templates and checks their retained database references.
+    Anchored startup recovery accepts either side of an uncertain CAS without
+    requiring successor readiness; runtime acceptance is a separate later gate.
     """
     try:
         migration = context.request.fencing.retirement.migration
         if guards.request != migration or load_pool_cutover_inputs(context.operation) != context:
             raise ValueError
-        state, anchor = Path(context.operation["state_dir"]), Path(context.operation["anchor_dir"])
-        expected = retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor)
+        expected, startup = _runtime_workload_options(context)
         for target in migration.guards:
             database = target.database
             if database is None or database.actuator_credential_uid is None or database.actuator_credential_resource_version is None:
@@ -304,20 +313,18 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                 if row["metadata"]["namespace"] == participant.execution_namespace.name)
             for original in (target.controller, service, *actuators):
                 namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
-                desired = expected[_key(original)]
                 current = guards._get("deployment", name, namespace)
-                if not _matches(current, desired, _uid(original)):
-                    raise ValueError
+                desired, = (row for row in expected[_key(original)] if _matches(current, row, _uid(original)))
                 actuator = namespace != target.namespace
                 uid = database.actuator_credential_uid if actuator else database.credential_uid
                 version = database.actuator_credential_resource_version if actuator else database.credential_resource_version
-                if desired["spec"]["replicas"] == 1:
+                if desired["spec"]["replicas"] == 1 and not startup:
                     guards.qualify_runtime_database(target, original=original,
                         credential_uid=uid, credential_resource_version=version)
                     if actuator:
                         guards.qualify_runtime_telemetry(target, original=original)
                 else:
-                    if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] != 0:
+                    if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] not in ({0, 1} if startup else {0}):
                         raise ValueError
                     backend = guards._database(target)
                     variable = "LOOM_EXECUTION_ACTUATOR_DB_URL" if actuator else "LOOM_CP_DB_URL" if name == "loom-control-plane" else "LOOM_SVC_DB_URL"
@@ -329,7 +336,7 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                                 credential_uid=uid, credential_resource_version=version) != url
                             or not _matches(guards._get("deployment", name, namespace), desired, _uid(original))):
                         raise ValueError
-        if (retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor) != expected
+        if (_runtime_workload_options(context) != (expected, startup)
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except PoolMigrationError as error:
@@ -345,17 +352,14 @@ def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlP
         history.qualify_binding(context.request.fencing.retirement.migration, context.request.manager)
         if load_pool_cutover_inputs(context.operation) != context:
             raise ValueError
-        state, anchor = Path(context.operation["state_dir"]), Path(context.operation["anchor_dir"])
-        expected = retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor)
+        expected, startup = _runtime_workload_options(context)
         original, target = context.request.manager, history.target
-        desired = expected[_key(original)]
         current = history._get("deployment", "loom-service", target.namespace)
-        if not _matches(current, desired, _uid(original)):
-            raise ValueError
-        if desired["spec"]["replicas"] == 1:
+        desired, = (row for row in expected[_key(original)] if _matches(current, row, _uid(original)))
+        if desired["spec"]["replicas"] == 1 and not startup:
             history.qualify_manager_database()
         else:
-            if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] != 0:
+            if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] not in ({0, 1} if startup else {0}):
                 raise ValueError
             backend = history._database(target, url_variable="LOOM_SVC_DB_URL")
             binding = target.database
@@ -367,7 +371,7 @@ def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlP
                         credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version) != url
                     or not _matches(history._get("deployment", "loom-service", target.namespace), desired, _uid(original))):
                 raise ValueError
-        if (retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor) != expected
+        if (_runtime_workload_options(context) != (expected, startup)
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except Exception:

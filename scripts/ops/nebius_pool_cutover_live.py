@@ -268,14 +268,16 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         except Exception:
             raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
         try:
-            expected = (self.originals if self.state_dir is None or self.anchor_dir is None else
-                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir))
             workloads = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
                 for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+            observed = {_key(row): row for resource in ("deployments", "cronjobs") for row in workloads[resource]}
+            expected = (self.originals if self.state_dir is None or self.anchor_dir is None else
+                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir, observed=observed))
             qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected,
                 platform_subjects=platform_controller_subjects(self.request.platform_authority))
             if (self.state_dir is not None and self.anchor_dir is not None
-                    and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir) != expected):
+                    and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir,
+                        observed=observed) != expected):
                 raise ValueError
         except Exception:
             raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None
