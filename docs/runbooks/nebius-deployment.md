@@ -979,6 +979,12 @@ Roles and RoleBindings in the configured shared/execution/build namespaces,
 their namespace identities and complete ClusterRole/ClusterRoleBinding lists.
 Only identity/version pins for fixed database Secrets and an identity/version/
 SHA256 pin for the fixed collector credential are recorded, not their contents.
+The fixed shared `loom-platform-storage` Secret also supplies an
+`application_source_credential` UID/version pin and SHA256 of canonical JSON
+containing only its source access/secret keys. No source credential bytes are
+exported. The capture rejects malformed material or a changed Secret generation;
+the protected builder cutover independently rereads and qualifies the same pin
+against the actual shared control-plane source consumer before delivery.
 Collection count/size limits and missing pages fail closed. Typed list entries
 inherit omitted Kubernetes kind/version fields from their collection; conflicting
 types are rejected. The private resource snapshot is not atomic and grants no
