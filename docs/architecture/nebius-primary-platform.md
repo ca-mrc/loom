@@ -970,7 +970,7 @@ schema and cannot qualify a release; unknown publication is not retried. Native
 cache keys include a separate application domain, source digest and recipe
 (including platform); the existing bounded blob store and GC are shared without
 fabricating Tasks. Source/registry credentials never enter the build context.
-These runtime helpers do not yet admit or launch application builds.
+These runtime helpers do not themselves admit or launch application builds.
 
 `ApplicationBuildRegistry` records owner/team/install/data/cluster-bound build
 intent from a verified source upload. Concurrent requests with the same replay
@@ -982,8 +982,18 @@ checks the retained claim against the original source and binding before returni
 it. Creating this intent performs no network operation, resource admission or
 release qualification; its queued state does not mean a builder has been launched.
 
+The common pool registry has an application-build adapter. New admission and
+activation check the retained current build attempt, verified source, protected
+participant/profile binding and cancellation state under the pool transaction.
+The owner cannot replace the frozen claim. Personal builds receive priority 3
+and share the existing build-concurrency/resource accounting with task builds and
+execution. Cancelled or obsolete waiting builds no longer protect capacity from
+other work. The native Job wrapper retains the same reservation-specific name,
+absolute phase deadlines, credential isolation and rendered-Pod resource charge
+for both build kinds. This registry support is not an installed management worker.
+
 Protected delivery of the credential/mount, the user-facing build command, global
-application-build admission, image building, release qualification and installed
+application-build dispatch/observation, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.
 
 ### Stopped application completion

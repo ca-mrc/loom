@@ -40,6 +40,28 @@ def _claim(build_id: UUID, attempt: int, source: NebiusApplicationSourceUpload,
         source_bucket=source.source_bucket, cache_bucket=binding.cache_bucket, registry_repository=binding.registry_repository)
 
 
+def retained_build_claim(row: NebiusApplicationBuild, attempt: NebiusApplicationBuildAttempt | None,
+                         source: NebiusApplicationSourceUpload | None) -> tuple[
+    ApplicationImageBuildBindingV1, ApplicationImageBuildClaimV1,
+]:
+    """One consistency check for owner status and shared-pool admission."""
+    if attempt is None or source is None or source.phase != "source_verified":
+        raise ValueError("application_build_history_conflict")
+    binding = ApplicationImageBuildBindingV1.model_validate(row.binding_json)
+    claim = ApplicationImageBuildClaimV1.model_validate(attempt.claim_json)
+    if (canonical_digest(attempt.claim_json).removeprefix("sha256:") != attempt.claim_sha256
+            or (attempt.build_id, attempt.attempt) != (row.build_id, row.current_attempt)
+            or claim != _claim(row.build_id, row.current_attempt, source, binding)
+            or (row.upload_id, row.owner_user_id, row.owner_team_id, row.installation_id, row.data_environment_id, row.cluster_id) != (
+                source.upload_id, source.owner_user_id, source.owner_team_id, source.installation_id,
+                source.data_environment_id, source.cluster_id)
+            or (source.installation_id, source.data_environment_id, source.cluster_id, source.source_bucket) != (
+                binding.source.installation_id, binding.source.data_environment_id,
+                binding.source.cluster_id, binding.source.source_bucket)):
+        raise ValueError("application_build_history_conflict")
+    return binding, claim
+
+
 class ApplicationBuildRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, binding: ApplicationImageBuildBindingV1):
         self.session_factory = session_factory
@@ -50,18 +72,8 @@ class ApplicationBuildRegistry:
         attempt = await session.get(NebiusApplicationBuildAttempt, (row.build_id, row.current_attempt))
         source = await session.get(NebiusApplicationSourceUpload, row.upload_id)
         try:
-            if attempt is None or source is None or source.phase != "source_verified":
-                raise ValueError
-            binding = ApplicationImageBuildBindingV1.model_validate(row.binding_json)
-            claim = ApplicationImageBuildClaimV1.model_validate(attempt.claim_json)
-            if (canonical_digest(attempt.claim_json).removeprefix("sha256:") != attempt.claim_sha256
-                    or claim != _claim(row.build_id, row.current_attempt, source, binding)
-                    or (row.owner_user_id, row.owner_team_id, row.installation_id, row.data_environment_id, row.cluster_id) != (
-                        source.owner_user_id, source.owner_team_id, source.installation_id, source.data_environment_id, source.cluster_id)
-                    or (source.installation_id, source.data_environment_id, source.cluster_id, source.source_bucket) != (
-                        binding.source.installation_id, binding.source.data_environment_id,
-                        binding.source.cluster_id, binding.source.source_bucket)):
-                raise ValueError
+            _, claim = retained_build_claim(row, attempt, source)
+            assert attempt is not None
             return ApplicationImageBuildStatusV1.model_validate({
                 "build_id": row.build_id, "upload_id": row.upload_id, "attempt": row.current_attempt,
                 "phase": attempt.phase, "desired_state": row.desired_state,

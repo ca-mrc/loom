@@ -23,12 +23,16 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolParticipantV1, PoolReceiptV1, PoolRequestActionV1
 from loom.nebius_pool_contract import PoolWaitingV1 as PoolWaitingV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_control_plane.execution_placement import PlacementUnavailableError
-from loom_service.pool_management.application_images import PoolApplicationImageProfile
+from loom_service.pool_management.application_images import (
+    PoolApplicationImageProfile,
+    prepare_pool_application_image,
+)
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import (
     CHARGED_PHASES,
@@ -39,7 +43,7 @@ from loom_service.pool_management.capacity import (
 )
 from loom_service.pool_management.early_cancellation import read_early_cancellation
 from loom_service.pool_management.locks import acquire_pool_mutation_lock
-from loom_service.pool_management.origin import qualify_pool_origin
+from loom_service.pool_management.origin import qualify_pool_origin, qualify_retained_pool_origin
 from loom_service.pool_management.render import (
     PoolExecutionProfile,
     PreparedPoolExecution,
@@ -51,7 +55,7 @@ from loom_service.pool_management.task_images import (
     prepare_pool_task_image,
 )
 
-PoolPrepareWorkload = PoolExecutionPrepareV1 | PoolTaskImagePrepareV1
+PoolPrepareWorkload = PoolExecutionPrepareV1 | PoolTaskImagePrepareV1 | PoolApplicationImagePrepareV1
 _WORKLOAD: TypeAdapter[PoolPrepareWorkload] = TypeAdapter(Annotated[PoolPrepareWorkload, Field(discriminator="schema_version")])
 
 
@@ -70,6 +74,9 @@ def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profil
     if isinstance(request, PoolExecutionPrepareV1):
         return prepare_pool_execution(request, participant=participant, profile=profiles.execution[profile_id],
                                       reservation_id=reservation_id, now=now)
+    if isinstance(request, PoolApplicationImagePrepareV1):
+        return prepare_pool_application_image(request, participant=participant, profile=profiles.application_images[profile_id],
+                                               reservation_id=reservation_id, now=now)
     return prepare_pool_task_image(request, participant=participant, profile=profiles.task_images[profile_id],
                                    reservation_id=reservation_id, now=now)
 
@@ -99,6 +106,13 @@ async def prepare_execution(session: AsyncSession, principal: PoolPrincipal, req
 async def prepare_task_image(session: AsyncSession, principal: PoolPrincipal, request: PoolTaskImagePrepareV1, *,
                              profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
     if not isinstance(request, PoolTaskImagePrepareV1):
+        raise PoolAdmissionError
+    return await _prepare(session, principal, request, profiles)
+
+
+async def prepare_application_image(session: AsyncSession, principal: PoolPrincipal, request: PoolApplicationImagePrepareV1, *,
+                                    profiles: PoolProfiles) -> PoolReceiptV1 | PoolWaitingV1:
+    if not isinstance(request, PoolApplicationImagePrepareV1):
         raise PoolAdmissionError
     return await _prepare(session, principal, request, profiles)
 
@@ -155,7 +169,8 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
     if pool is None or pool.mode != "global":
         raise PoolAdmissionError
     priority = await qualify_pool_origin(session, principal, request.origin,
-        target_id=request.target_id, workload_kind=request.key.workload_kind)
+        target_id=request.target_id, workload_kind=request.key.workload_kind,
+        application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None)
     now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
     capacities = await read_connected_capacity(session, pool.pool_id, now)
     participant = next(value for value in capacities[pool.pool_id].participants
@@ -207,6 +222,10 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
                 if candidate.participant_id not in active_participants or capacities[candidate.pool_id].pool.mode != "global":
                     continue
                 prior = _WORKLOAD.validate_python(candidate.request_json)
+                if isinstance(prior, PoolApplicationImagePrepareV1):
+                    await qualify_retained_pool_origin(session, prior.origin, participant=binding,
+                        cluster_id=capacities[candidate.pool_id].pool.cluster_id,
+                        workload_kind=prior.key.workload_kind, lock_history=True, application_build=prior)
                 measured = _render(prior, binding, profiles, candidate.request_id, now)
                 if measured.request_sha256 != candidate.request_sha256 or measured.resources != resources(candidate):
                     continue
