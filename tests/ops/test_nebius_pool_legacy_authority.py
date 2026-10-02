@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import copy
+import json
 
+import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_pool_role_fencing import role_fence_documents
@@ -120,3 +122,43 @@ def test_retained_subject_reviews_discover_relevant_foreign_namespaces(fencing_i
     assert ('outside-pool' in observed) is relevant
     assert {request.registration.binding.namespace, *(row.namespace for row in request.guards),
         *(ns.name for row in request.registration.spec.participants for ns in (row.execution_namespace, row.build_namespace))} <= set(observed)
+
+
+@pytest.mark.parametrize('failure', [None, 'transport', 'oversize', 'encoding', 'incomplete', 'wrong_subject'])
+def test_restored_authority_reviews_use_fixed_groups_bounded_response_and_no_retry(fencing_inputs, failure):
+    from scripts.ops.nebius_pool_legacy_authority import review_legacy_rules
+
+    request = fencing_inputs
+    own = request.retirement.migration.registration.spec.participants[0]
+    subject = (own.execution_namespace.name, 'loom-execution-actuator')
+    calls = []
+
+    def respond(message):
+        calls.append(message)
+        assert message.method == 'POST' and message.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+        assert message.headers['Impersonate-User'] == f'system:serviceaccount:{subject[0]}:{subject[1]}'
+        assert message.headers.get_list('Impersonate-Group') == [
+            'system:serviceaccounts', 'system:serviceaccounts:' + subject[0], 'system:authenticated']
+        assert json.loads(message.content) == {'apiVersion': 'authorization.k8s.io/v1',
+            'kind': 'SelfSubjectRulesReview', 'spec': {'namespace': 'foreign-team'}}
+        if failure == 'transport':
+            raise httpx.ReadTimeout('private-marker')
+        if failure == 'oversize':
+            return httpx.Response(201, content=b' ' * (4 * 1024**2 + 1))
+        if failure == 'encoding':
+            return httpx.Response(201, headers={'content-encoding': 'unsupported'})
+        result = review([{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'],
+            'resourceNames': [own.execution_namespace.name, own.build_namespace.name]}])
+        result['status']['incomplete'] = failure == 'incomplete'
+        return httpx.Response(201, json=result)
+
+    with httpx.Client(base_url='https://cluster.example', transport=httpx.MockTransport(respond)) as client:
+        if failure:
+            with pytest.raises(ValueError) as error:
+                review_legacy_rules(client, request=request, roles=role_fence_documents(request),
+                    subject=(subject[0], 'unretained') if failure == 'wrong_subject' else subject, namespace='foreign-team')
+            assert 'private-' not in str(error.value)
+        else:
+            review_legacy_rules(client, request=request, roles=role_fence_documents(request), subject=subject, namespace='foreign-team')
+        assert len(calls) == (0 if failure == 'wrong_subject' else 1)
+        assert 'Impersonate-User' not in client.headers and 'Impersonate-Group' not in client.headers
