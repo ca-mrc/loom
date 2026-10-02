@@ -2810,6 +2810,10 @@ recovery contract. Bootstrap evidence stays bound to the original installation,
 while current candidate/provider prerequisites are bound to the qualified refresh;
 a later pool catalog does not rewrite or relax the bootstrap contract. This is
 source-level upgrade support, not installed pool or multi-owner acceptance.
+The fixed protected tooling bundle includes the pool readers and their recovery
+dependencies. Refresh tooling qualification imports that dependency chain before
+declaring the bundle usable, without reading private installation inputs or
+opening cluster/provider connections; checkout imports cannot satisfy that proof.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

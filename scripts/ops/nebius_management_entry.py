@@ -236,6 +236,12 @@ def main(operation_path: str, action: str) -> int:
         operation = _json(_private(Path(operation_path), 16384))
         validate_operation(operation)
         if action == "qualify":
+            if operation['schema'] == 'loom.nebius-management-refresh-operation.v1':
+                # Refresh has deferred pool/rollback readers. Qualify the real
+                # dependency closure before marking this tooling installation
+                # complete, without opening private inputs or any transport.
+                from scripts.ops.nebius_management_refresh_entry import load_refresh_inputs
+
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
