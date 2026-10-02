@@ -64,7 +64,8 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
 
         async def install(document, *, replace_existing=False):
             value = _snapshot(document)
-            resource = {'Deployment': 'deployments', 'CronJob': 'cronjobs', 'Role': 'roles', 'ConfigMap': 'configmaps'}[value['kind']]
+            resource = {'Deployment': 'deployments', 'CronJob': 'cronjobs', 'Role': 'roles',
+                'RoleBinding': 'rolebindings', 'ConfigMap': 'configmaps'}[value['kind']]
             path = ('/api/v1' if value['apiVersion'] == 'v1' else '/apis/' + value['apiVersion'])
             path += '/namespaces/' + value['metadata']['namespace'] + '/' + resource
             if replace_existing:
@@ -190,5 +191,19 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
             responses.clear()
             assert await asyncio.to_thread(stage_pool_startup, request=request, api=api, state_dir=state, anchor_dir=anchor) == result
             assert responses == []
+            # Actual API-server resolution of the fixed gateway identity. No
+            # token issuance, workload-health claim or grant through this proof.
+            await asyncio.to_thread(api.qualify_gateway_authority)
+            await asyncio.to_thread(core.create_namespace, {'apiVersion': 'v1', 'kind': 'Namespace',
+                'metadata': {'name': 'outside-pool'}})
+            await install({'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+                'metadata': {'name': 'extra-gateway', 'namespace': 'outside-pool'},
+                'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['patch'], 'resourceNames': ['hidden-job']}]})
+            await install({'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+                'metadata': {'name': 'extra-gateway', 'namespace': 'outside-pool'},
+                'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'extra-gateway'},
+                'subjects': [{'kind': 'ServiceAccount', 'name': 'loom-pool-gateway', 'namespace': binding.namespace}]})
+            with pytest.raises(ValueError, match='pool_startup_gateway_authority_unqualified'):
+                await asyncio.to_thread(api.qualify_gateway_authority)
     finally:
         await asyncio.to_thread(container.stop)

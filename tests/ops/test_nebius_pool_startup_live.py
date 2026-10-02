@@ -54,6 +54,7 @@ def cutover_inputs(unbound_cutover_inputs, platform_inputs):
 
 @pytest.fixture
 def startup_http(closed_startup, cutover_binding_inventory):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 
     request, tokens, closed, external, _, root = closed_startup
@@ -79,7 +80,9 @@ def startup_http(closed_startup, cutover_binding_inventory):
         paths[prefix + ('/namespaces/' + row['metadata']['namespace'] if row['metadata'].get('namespace') else '')
             + '/' + resource + '/' + row['metadata']['name']] = key
     state = SimpleNamespace(objects=objects, writes=[], calls=[], failure=None, fail_key=_key(request.manager),
-        closed_reads=0, fail_closed=False, fail_guard=False, previews=[])
+        closed_reads=0, fail_closed=False, fail_guard=False, previews=[], inventories=inventories,
+        gateway_reviews=[], gateway_review_damage=None, gateway_extra_rules={})
+    gateway_authority = cutover_documents(request)['authority']
 
     def closed_database():
         state.closed_reads += 1
@@ -103,6 +106,21 @@ def startup_http(closed_startup, cutover_binding_inventory):
     def respond(message):
         state.calls.append(message)
         path = message.url.path
+        if path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews':
+            assert message.method == 'POST'
+            assert message.headers['Impersonate-User'] == f'system:serviceaccount:{binding.namespace}:loom-pool-gateway'
+            assert message.headers.get_list('Impersonate-Group') == [
+                'system:serviceaccounts', 'system:serviceaccounts:' + binding.namespace, 'system:authenticated']
+            namespace = json.loads(message.content)['spec']['namespace']
+            state.gateway_reviews.append(namespace)
+            rules = [copy.deepcopy(rule) for row in gateway_authority if row['kind'] == 'ClusterRole'
+                or (row['kind'] == 'Role' and row['metadata']['namespace'] == namespace) for rule in row['rules']]
+            rules.extend(state.gateway_extra_rules.get(namespace, []))
+            if state.gateway_review_damage == 'late_guard':
+                state.fail_guard = True
+            return httpx.Response(201, json={'apiVersion': 'authorization.k8s.io/v1', 'kind': 'SelfSubjectRulesReview',
+                'spec': {}, 'status': {'incomplete': state.gateway_review_damage == 'incomplete',
+                    'resourceRules': rules, 'nonResourceRules': []}})
         if path in {'/api/v1/namespaces/' + name for name in namespaces}:
             assert message.method == 'GET'
             name = path.rsplit('/', 1)[1]
@@ -320,3 +338,41 @@ def test_started_database_proof_derives_exact_successors_and_rechecks_closure(st
                 *(('telemetry', _key(row)) for row in request.fencing.retirement.actuators)}
             assert len(probes) == 2 + 2 * len(originals) + len(request.fencing.retirement.actuators)
         assert not state.writes and all(call.method == 'GET' for call in state.calls)
+
+
+@pytest.mark.parametrize('damage', [None, 'unstarted', 'incomplete', 'extra_named', 'foreign_named', 'late_guard'])
+def test_started_gateway_authority_is_effective_and_cannot_ignore_foreign_grants(startup_http, closed_startup, damage):
+    from scripts.ops.nebius_pool_startup import stage_pool_startup
+
+    request, _, _, external, _, root = closed_startup
+    if damage != 'unstarted':
+        assert stage_pool_startup(request=request, api=external, state_dir=root / 'cutover',
+            anchor_dir=root / 'cutover-anchor')['status'] == 'pool_startup_staged_closed'
+    with startup_http() as (api, state):
+        state.objects.update(copy.deepcopy(external.documents))
+        migration = request.fencing.retirement.migration
+        state.gateway_review_damage = damage
+        if damage in {'extra_named', 'foreign_named'}:
+            namespace = 'foreign-team' if damage == 'foreign_named' else migration.registration.binding.namespace
+            rule = {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['patch'], 'resourceNames': ['hidden-job']}
+            state.gateway_extra_rules[namespace] = [rule]
+            if damage == 'foreign_named':
+                state.inventories['roles'].append({'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'Role',
+                    'metadata': {'namespace': namespace, 'name': 'foreign-role', 'uid': str(uuid4()), 'resourceVersion': '1'}, 'rules': [rule]})
+                state.inventories['rolebindings'].append({'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'RoleBinding',
+                    'metadata': {'namespace': namespace, 'name': 'foreign-binding', 'uid': str(uuid4()), 'resourceVersion': '1'},
+                    'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'Role', 'name': 'foreign-role'},
+                    'subjects': [{'kind': 'ServiceAccount', 'name': 'loom-pool-gateway', 'namespace': migration.registration.binding.namespace}]})
+        if damage:
+            with pytest.raises(ValueError, match='pool_startup_gateway_authority_unqualified'):
+                api.qualify_gateway_authority()
+            if damage == 'foreign_named':
+                assert 'foreign-team' in state.gateway_reviews
+        else:
+            api.qualify_gateway_authority()
+            expected = {migration.registration.binding.namespace, *(guard.namespace for guard in migration.guards),
+                *(ns.name for participant in migration.registration.spec.participants for ns in (participant.execution_namespace, participant.build_namespace))}
+            assert set(state.gateway_reviews) == expected
+        assert not state.writes
+        assert all(call.method == 'GET' or call.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews' for call in state.calls)
+        assert all('Impersonate-User' not in call.headers for call in state.calls if call.method == 'GET')
