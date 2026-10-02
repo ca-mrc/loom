@@ -132,3 +132,25 @@ func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
 		})
 	}
 }
+
+func TestEmulatedAuthenticationRequiresExactGuestClass(t *testing.T) {
+	for _, tc := range []struct{ class, capability string; allowed bool }{
+		{"linux-amd64-cpu-guest-auth-v1", "emulated_pkcs11_authentication", true},
+		{"linux-amd64-cpu-guest-auth-web-v1", "emulated_pkcs11_authentication", true},
+		{"linux-amd64-cpu-guest-v1", "emulated_pkcs11_authentication", false},
+		{"linux-amd64-cpu-guest-web-v1", "emulated_pkcs11_authentication", false},
+		{"linux-amd64-cpu-guest-auth-v1", "pkcs11_authentication", false},
+		{"linux-amd64-cpu-guest-auth-v1", "nested_docker", false},
+	} {
+		t.Run(tc.class+"/"+tc.capability, func(t *testing.T) {
+			p := guestPlanPayload(t)
+			p["execution_class_id"] = tc.class
+			for _, sidecar := range p["sidecars"].([]any) {
+				sidecar.(map[string]any)["guest_execution"].(map[string]any)["capabilities"] = []any{tc.capability}
+			}
+			raw, _ := json.Marshal(p)
+			_, err := decodePlan(raw)
+			if (err == nil) != tc.allowed { t.Fatalf("allowed=%v, error=%v", tc.allowed, err) }
+		})
+	}
+}
