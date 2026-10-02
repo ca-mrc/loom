@@ -72,7 +72,10 @@ def archive_bytes(model, *, damage=None):
 
 
 def test_roundtrip_preserves_current_bytes_modes_and_links_with_deterministic_archive(source, tmp_path):
-    from loom.application_source_archive import extract_application_source_archive, write_application_source_archive
+    from loom.application_source_archive import (
+        extract_application_source_archive,
+        write_application_source_archive,
+    )
 
     root, model = source
     output, repeated = io.BytesIO(), io.BytesIO()
