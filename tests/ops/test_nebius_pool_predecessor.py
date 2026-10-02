@@ -610,7 +610,7 @@ def pool_refresh_http(bound):
             guard=no_idle, recovery_participant_drained=no_idle, cutover_readiness_page=no_idle)
         with HTTPSPoolCutoverAPI(request=request, tokens=tokens, migration=SimpleNamespace(), guards=guards,
                 checks=SimpleNamespace(preflight=preflight, qualify_quiescence=no_idle), history=history,
-                api_server='https://cluster.example', ssl_context=ssl.create_default_context(),
+                api_server=bound.original.original_inputs.operator_connection.endpoint, ssl_context=ssl.create_default_context(),
                 state_dir=state, anchor_dir=anchor, refresh=bound) as parent:
             for adapter in (parent, parent.fencing, parent.retirement):
                 adapter.client.close()
@@ -718,3 +718,53 @@ def test_connected_pool_refresh_completes_without_restoring_other_writers(privat
             with pytest.raises(ManagementRefreshInstallError):
                 api.verify_public(request, directory)
             assert writes(state) == mutations
+
+
+def test_protected_refresh_entry_binds_and_closes_separate_pool_reader(private_cutover, monkeypatch):
+    import ssl
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_management_refresh_entry as entry
+    from scripts.ops import nebius_pool_cutover_entry as cutover
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_entry import context, private_refresh
+
+    operation, _, root = private_cutover
+    _, result = finish_cutover(operation)
+    pool = load_completed_pool(PoolPredecessorV1(operation=operation,
+        completion_sha256=result['completion_sha256']), original=root)
+    metadata, _, _ = private_refresh(root, pool)
+    selected = context(metadata)
+    connections = []
+
+    @contextmanager
+    def checks(inputs, ingress, *, foundation_candidate):
+        assert inputs == root.original_inputs and ingress == root.ingress
+        assert foundation_candidate == selected.inputs.foundation_candidate
+        yield SimpleNamespace(), ssl.create_default_context(), 'operator-test-token'
+
+    @contextmanager
+    def reader(actual, *, refresh):
+        assert actual == pool.context
+        assert refresh == PoolManagerRefresh(root, pool, selected.request, Path(metadata['state_dir']))
+        with pool_refresh_http(refresh)() as (verifier, external):
+            connections.append(verifier.parent)
+            yield verifier.parent
+            assert all(call.method == 'GET' or call.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
+                for call in external.calls)
+
+    monkeypatch.setattr(entry, 'connected_checks', checks)
+    monkeypatch.setattr(cutover, 'connected_pool_api', reader)
+    with entry.connected_refresh_api(selected, metadata) as api:
+        api.pool.qualify()
+        assert api.pool.refresh.request == selected.request
+        assert not api.pool.parent.client.is_closed
+    assert api.client.is_closed and len(connections) == 1
+    assert all(client.is_closed for client in (connections[0].client,
+        connections[0].fencing.client, connections[0].retirement.client))
+    with pytest.raises(RuntimeError, match='caller-failure'):
+        with entry.connected_refresh_api(selected, metadata):
+            raise RuntimeError('caller-failure')
+    assert len(connections) == 2 and connections[1].client.is_closed
