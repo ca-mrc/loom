@@ -259,11 +259,12 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
                             "nonResourceRules": [rule for rule in rules if "nonResourceURLs" in rule],
                             "evaluationError": ""}}, namespace=namespace)
                 elif binding_key not in platform and (resource == "clusterrolebindings" or namespace in writer_namespaces):
-                    # A separate subject with explicit Job writes in operation
-                    # scope is not authorized merely because our old SAs differ.
+                    # CronJob mutations can create Jobs indirectly through the
+                    # trusted native controller, without any Job grant to the
+                    # caller. Named grants and suspended schedules count too.
                     for rule in role.get("rules", []):
                         if (set(rule.get("apiGroups", [])) & {"batch", "*"}
-                                and set(rule.get("resources", [])) & {"jobs", "*"}
+                                and set(rule.get("resources", [])) & {"jobs", "cronjobs", "*"}
                                 and set(rule.get("verbs", [])) & {"*", "create", "update", "patch", "delete", "deletecollection"}):
                             raise ValueError
         if found != set(originals):
@@ -287,6 +288,8 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
     try:
         retired = retirement_documents(request.retirement)
         subjects, _ = role_fence_review_scope(request)
+        writer_namespaces = {namespace.name for participant in request.retirement.migration.registration.spec.participants
+            for namespace in (participant.execution_namespace, participant.build_namespace)}
         if (set(inventory) != {resource for _api, resource, _kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
                 or set(expected) != set(originals)
                 or any(originals.get(key) != row for key, row in retired.items())):
@@ -334,6 +337,12 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
             roots.add(uid)
 
         for uid, identity in identities.items():
+            if (documents[uid]["kind"] == "CronJob" and identity[0] in writer_namespaces
+                    and uid not in roots):
+                # Existing schedules need no remaining creator credential to
+                # emit Jobs. Require a retained, phase-bound original even for
+                # another ServiceAccount or a currently suspended schedule.
+                raise ValueError
             if identity not in subjects:
                 continue
             # The supported ancestry has at most two edges. No replica/phase

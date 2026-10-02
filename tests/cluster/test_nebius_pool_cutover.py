@@ -191,6 +191,44 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             await asyncio.to_thread(rbac.delete_cluster_role_binding, "unregistered-cluster-writer")
             methods.clear()
 
+            # CronJob authority is an indirect Job writer even when this
+            # foreign account has no Job permission of its own.
+            await asyncio.to_thread(rbac.create_namespaced_role, role_namespace, {
+                "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
+                "metadata": {"name": "unregistered-cron-writer"},
+                "rules": [{"apiGroups": ["batch"], "resources": ["cronjobs"], "verbs": ["create", "patch"]}]})
+            await asyncio.to_thread(rbac.create_namespaced_role_binding, role_namespace, {
+                "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+                "metadata": {"name": "unregistered-cron-writer"},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "unregistered-cron-writer"},
+                "subjects": [{"kind": "ServiceAccount", "name": "unregistered-account", "namespace": role_namespace}]})
+            with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+                await asyncio.to_thread(api.preflight, request)
+            assert methods and all(method == "GET" for method, _path, _query in methods)
+            assert not (tmp_path / "cutover").exists()
+            await asyncio.to_thread(rbac.delete_namespaced_role_binding, "unregistered-cron-writer", role_namespace)
+            await asyncio.to_thread(rbac.delete_namespaced_role, "unregistered-cron-writer", role_namespace)
+            methods.clear()
+
+            # Revoking the creator's grant does not remove a retained schedule.
+            # Keep it suspended to avoid creating unrelated fixture Jobs; this
+            # still must be rejected, not adopted or silently deleted.
+            schedule = copy.deepcopy(request.fencing.retirement.collectors[0])
+            schedule_namespace = schedule["metadata"]["namespace"]
+            schedule["metadata"] = {"name": "unregistered-cron-producer", "namespace": schedule_namespace}
+            schedule["spec"]["suspend"] = True
+            schedule["spec"]["jobTemplate"]["spec"]["template"]["spec"]["serviceAccountName"] = "unregistered-account"
+            installed_schedule = await asyncio.to_thread(batch.create_namespaced_cron_job, schedule_namespace, schedule)
+            with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+                await asyncio.to_thread(api.preflight, request)
+            assert methods and all(method == "GET" for method, _path, _query in methods)
+            assert not (tmp_path / "cutover").exists()
+            retained_schedule = await asyncio.to_thread(batch.read_namespaced_cron_job, "unregistered-cron-producer", schedule_namespace)
+            assert retained_schedule.metadata.uid == installed_schedule.metadata.uid
+            await asyncio.to_thread(batch.delete_namespaced_cron_job, "unregistered-cron-producer", schedule_namespace,
+                body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=installed_schedule.metadata.uid)))
+            methods.clear()
+
             # A second consumer still has the retained identity even when its
             # desired replicas are zero. Detect it before stopping any producer.
             foreign = copy.deepcopy(request.fencing.retirement.actuators[0])
