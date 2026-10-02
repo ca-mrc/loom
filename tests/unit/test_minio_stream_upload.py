@@ -92,6 +92,23 @@ async def chunks(*values):
         yield value
 
 
+@pytest.mark.parametrize("size", [7, 9 * 1024**2], ids=["small", "multipart"])
+@pytest.mark.parametrize("version", [None, "", " padded ", 3, False, {}])
+async def test_stream_write_rejects_malformed_version_evidence(monkeypatch, size, version):
+    class MalformedVersionS3(StreamS3):
+        def put_object(self, **kwargs):
+            super().put_object(**kwargs)
+            return {"VersionId": version}
+
+        def complete_multipart_upload(self, **kwargs):
+            super().complete_multipart_upload(**kwargs)
+            return {"VersionId": version}
+
+    store = make_store(monkeypatch, MalformedVersionS3())
+    with pytest.raises(ValueError, match="malformed VersionId"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * size))
+
+
 @pytest.mark.parametrize("payload", [b"complete payload", b"x" * (9 * 1024**2)], ids=["small", "multipart"])
 async def test_stream_retry_preserves_bytes_after_partial_read(monkeypatch, payload):
     client = StreamS3(fail_first=True)
