@@ -137,3 +137,6 @@ def test_root_workflow_runs_eight_complete_disjoint_fail_fast_shards(tmp_path: P
         assert all(paths.isdisjoint(previous) for previous in shards)
         shards.append(paths)
     assert set().union(*shards) == set(complete)
+    gateway = next(shard for shard in shards if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard)
+    assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
+                               "tests/ops/test_nebius_pool_template_restoration_live.py"})
