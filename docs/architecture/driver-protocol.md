@@ -93,10 +93,21 @@ claim historical x86-specific work.
 ## Output buffering
 
 - `exec()` is buffered and capped at `MAX_EXEC_STREAM_BYTES = 10 MB`.
-  Larger outputs truncate; `ExecResult.truncated == True`.
-- `exec_streaming()` is unbounded — chunks flow through async
-  iterators with no cap. Callers drain `stdout` + `stderr` in
-  parallel. Closing the iterators is implicit when `wait()` resolves.
+  Larger outputs truncate; `ExecResult.truncated == True`. Docker applies
+  each stream's cap while reading, then drains the remaining bytes without
+  retaining them so the command can finish and report its actual exit code.
+- `exec_streaming()` has no total-output cap. Callers drain `stdout` + `stderr`
+  in parallel. Docker retains at most 1 MiB of queued chunks per stream and
+  applies socket backpressure when a consumer falls behind; it also bounds
+  pending event-loop notifications. Normal `wait()` preserves unread output
+  through transport EOF before returning the exit code; concurrent and repeated
+  waits are supported. Stop, kill and wait cancellation close the transport,
+  release blocked producers and signal EOF even if the reader has not started.
+  Consumers may drain the already queued prefix after these explicit aborts.
+- File-tail and HTTP-poll launcher capture drain and discard unused console
+  stdout while reading their event source. The worker retains responsibility
+  for stderr diagnostics; each capture helper joins its own background tasks
+  on completion or cancellation.
 - Callers that cancel a long-running `exec_streaming()` operation before
   `wait()` resolves must call `ExecHandle.kill()` best-effort and clean
   up any stream-drain tasks. `SubprocessAgent` does this when an agent

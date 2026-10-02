@@ -58,6 +58,8 @@ class ExecHandle:
     file-tail / http-poll capture mechanisms can reach inside the sandbox
     without importing Loom's Driver Protocol.
     `sandbox` is None when the adapter only needs stdout streaming.
+    Capture owns stdout consumption, including discarding it when events come
+    from a side channel. The worker separately drains stderr for diagnostics.
     """
 
     pid: int
