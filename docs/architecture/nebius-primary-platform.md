@@ -2438,8 +2438,25 @@ sampled memory and filesystem counters without retaining foreign Pod data.
 It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
 summaries, with no broad `nodes/proxy` fallback. The effective reader review
 accepts only GET on `nodes/stats`, not node proxy or execution authority.
-The connected protected preflight must prove installed kubelet reachability,
-certificate trust and summary authorization before controller retirement.
+The connected protected preflight checks kubelet reachability, certificate trust
+and summary authorization **inside each retained ordinary and guest actuator Pod**
+before controller retirement. It qualifies the Deployment/ReplicaSet/Pod lineage,
+fixed ServiceAccount, loaded namespace/target settings and complete Node inventory,
+then calls the production direct reader with each selected Node's exact UID.
+Operator credentials never enter the Pod. Only nonnegative CPU, memory and
+filesystem counter availability qualifies; foreign Pod statistics and credentials
+are not returned. Changed Pod or Node identities and incomplete inventories reject
+the check. Existing images without the UID-aware reader require an ordinary
+protected rollout followed by refreshed inputs; there is no node-proxy fallback.
+
+The check covers all current physical-pool Nodes plus the actuator's hosting Node.
+At scale zero, the hosting Node still tests runtime authority/TLS/network without
+requesting a worker or creating an idle reservation. This does not prove reachability
+of future workers; collector/startup and real-task acceptance must qualify those
+when they appear. Recovery skips execution in a stopped Pod only when the same
+anchored parent already qualifies its exact stopped or rewired template; it never
+restarts a retired controller just to run a probe. Successor startup remains a
+separate barrier before admission can reopen.
 
 The standalone platform rollout checks for existing global participant settings
 and retained pool-retirement markers before any mutation and again under its idle

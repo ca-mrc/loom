@@ -45,7 +45,11 @@ from scripts.ops.nebius_pool_cutover import (
 )
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_material import machine_documents
-from scripts.ops.nebius_pool_migration import PoolGuardTarget, PoolMigrationRequest
+from scripts.ops.nebius_pool_migration import (
+    PoolGuardTarget,
+    PoolMigrationError,
+    PoolMigrationRequest,
+)
 from scripts.ops.nebius_pool_migration_guard import (
     KubectlPoolGuardAPI,
     qualify_database_destination,
@@ -275,7 +279,7 @@ class _ConnectedPoolMigration:
 
 
 def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlPoolGuardAPI) -> None:
-    """Match every retained participant consumer to its actual database.
+    """Bind retained consumers to their database and running actuator telemetry.
 
     Fresh operations require original running Pods. Recovery instead selects
     exact journaled stopped/rewired templates and checks their retained database
@@ -308,6 +312,8 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                 if desired["spec"]["replicas"] == 1:
                     guards.qualify_runtime_database(target, original=original,
                         credential_uid=uid, credential_resource_version=version)
+                    if actuator:
+                        guards.qualify_runtime_telemetry(target, original=original)
                 else:
                     if type(desired["spec"]["replicas"]) is not int or desired["spec"]["replicas"] != 0:
                         raise ValueError
@@ -324,6 +330,9 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
         if (retained_cutover_workloads(context.request, state_dir=state, anchor_dir=anchor) != expected
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
+    except PoolMigrationError as error:
+        surface = "telemetry" if error.stage == "runtime_telemetry" else "databases"
+        raise EntryError("pool cutover runtime " + surface + " unqualified") from None
     except Exception:
         raise EntryError("pool cutover runtime databases unqualified") from None
 

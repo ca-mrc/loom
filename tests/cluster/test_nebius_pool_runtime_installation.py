@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import ssl
+import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -21,6 +25,102 @@ from tests.unit.test_nebius_platform_render import platform_inputs as platform_i
 
 pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
     reason="requires explicitly disposable Kubernetes")
+
+
+@pytest.mark.timeout(600)
+def test_fixed_preflight_reads_kubelet_inside_production_actuator_image_without_operator_credentials(runtime_inputs, tmp_path, monkeypatch):
+    from kubernetes import client
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+
+    from loom_service.pool_management.installation import PoolInstallation
+    from tests.cluster.test_nebius_shared_ingress import _run
+    from tests.integration.test_execution_actuator_k3s import (
+        _build_image,
+        _docker_platform,
+        _import_image,
+    )
+
+    request, _, _, _ = runtime_inputs
+    target = request.guards[0]
+    participant = next(row for row in request.registration.spec.participants if row.participant_id == target.participant_id)
+    namespace = participant.execution_namespace.name
+    target_id = participant.targets[0].target_id
+    tag = 'cr.eu-north1.nebius.cloud/test/actuator:pool-telemetry-' + uuid4().hex
+    cluster = None
+    try:
+        _build_image(tag=tag, dockerfile='deploy/Dockerfile.execution-actuator', platform=_docker_platform())
+        cluster = _start_k3s(node_name='telemetry-node', ephemeral_storage_floor='1Gi')
+        _, core, _ = _load_client(cluster)
+        apps, rbac = client.AppsV1Api(core.api_client), client.RbacAuthorizationV1Api(core.api_client)
+        namespaces = {name: core.create_namespace({'metadata': {'name': name,
+            'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}}).metadata.uid
+            for name in (target.namespace, namespace)}
+        image = _import_image(cluster, tag=tag, root=tmp_path, ordinal=0)
+        core.create_namespaced_service_account(namespace, {'metadata': {'name': 'loom-execution-actuator'}})
+        # No Job writer, Secret reader, token minting, proxy or exec privilege is
+        # delivered to this Pod. First prove denial with only Node identity GET.
+        role = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
+            'metadata': {'name': 'pool-telemetry-reader'},
+            'rules': [{'apiGroups': [''], 'resources': ['nodes'], 'verbs': ['get']}]}
+        rbac.create_cluster_role(role)
+        rbac.create_cluster_role_binding({'metadata': {'name': 'pool-telemetry-reader'},
+            'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': 'pool-telemetry-reader'},
+            'subjects': [{'kind': 'ServiceAccount', 'name': 'loom-execution-actuator', 'namespace': namespace}]})
+        original = {'apiVersion': 'apps/v1', 'kind': 'Deployment',
+            'metadata': {'name': 'loom-execution-actuator', 'namespace': namespace},
+            'spec': {'replicas': 1, 'selector': {'matchLabels': {'app.kubernetes.io/name': 'loom-execution-actuator'}},
+                'template': {'metadata': {'labels': {'app.kubernetes.io/name': 'loom-execution-actuator'}},
+                    'spec': {'serviceAccountName': 'loom-execution-actuator', 'automountServiceAccountToken': True,
+                        'securityContext': {'runAsNonRoot': True, 'runAsUser': 65532, 'seccompProfile': {'type': 'RuntimeDefault'}},
+                        'containers': [{'name': 'actuator', 'image': image, 'command': ['sleep', '600'],
+                            'securityContext': {'allowPrivilegeEscalation': False, 'capabilities': {'drop': ['ALL']}},
+                            'env': [{'name': 'LOOM_EXECUTION_ACTUATOR_' + key, 'value': value} for key, value in {
+                                'DB_URL': 'unused-no-sql', 'CONTROLLER_ID': 'telemetry-check', 'NAMESPACE': namespace,
+                                'TARGET_ID': target_id}.items()]}]}}}}
+        apps.create_namespaced_deployment(namespace, original)
+        _run(cluster, 'kubectl', 'rollout', 'status', 'deployment/loom-execution-actuator', '-n', namespace, '--timeout=60s')
+        original = core.api_client.sanitize_for_serialization(apps.read_namespaced_deployment('loom-execution-actuator', namespace))
+        spec = request.registration.spec.model_dump(mode='json')
+        spec['participants'][0]['execution_namespace']['uid'] = namespaces[namespace]
+        target = replace(target, namespace_uid=UUID(namespaces[target.namespace]))
+        request = replace(request, guards=(target, *request.guards[1:]), registration=replace(request.registration,
+            spec=PoolInstallation.model_validate(spec),
+            binding=replace(request.registration.binding, kube_system_uid=core.read_namespace('kube-system').metadata.uid)))
+        kubeconfig = tmp_path / 'telemetry-kubeconfig'
+        kubeconfig.write_text('disposable-operator-transport-never-mounted')
+        kubeconfig.chmod(0o600)
+        api = KubectlPoolGuardAPI(request=request, kubeconfig=kubeconfig, executable=Path('/usr/bin/kubectl'))
+        commands = []
+        def transport(args):
+            if args[0] == 'exec':
+                commands.append(args)
+            return json.loads(_run(cluster, 'kubectl', *args))
+        monkeypatch.setattr(api, '_run', transport)
+        api._runtime(target, original=original)  # Real Pod lineage and token defaults qualify.
+        with pytest.raises(PoolMigrationError) as denied:
+            api.qualify_runtime_telemetry(target, original=original)
+        assert denied.value.stage == 'runtime_telemetry' and len(commands) == 1
+        role['rules'].append({'apiGroups': [''], 'resources': ['nodes/stats'], 'verbs': ['get']})
+        rbac.patch_cluster_role('pool-telemetry-reader', role)
+        # Kubelet caches webhook authorization denials. Repeated fixed reads,
+        # not repeated mutations or weaker credentials, observe propagation.
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                api.qualify_runtime_telemetry(target, original=original)
+                break
+            except PoolMigrationError:
+                assert time.monotonic() < deadline, 'in-Pod nodes/stats authorization did not become usable'
+                time.sleep(1)
+        assert all(row[12] == 'telemetry-node' and row[13] == core.read_node('telemetry-node').metadata.uid for row in commands)
+        assert all('disposable-operator-transport' not in argument for row in commands for argument in row)
+        # The production image/settings and projected authority ran; the
+        # sleeping fixture is not acceptance of the actual controller loop.
+    finally:
+        if cluster is not None:
+            cluster.stop()
+        subprocess.run(['docker', 'image', 'rm', tag], capture_output=True, check=False)
 
 
 @pytest.mark.timeout(180)

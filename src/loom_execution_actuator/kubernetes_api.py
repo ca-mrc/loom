@@ -7,6 +7,7 @@ import re
 import ssl
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 import httpx
 
@@ -409,7 +410,7 @@ class InClusterKubernetesJobApi:
             self._batch = client.BatchV1Api()
             self._core = client.CoreV1Api()
 
-    async def resource_summary(self, *, node_name: str) -> dict[str, Any]:
+    async def resource_summary(self, *, node_name: str, expected_node_uid: str | None = None) -> dict[str, Any]:
         """Read verified kubelet statistics with nodes/stats, never nodes/proxy.
 
         The API's Node binds the fixed private endpoint; the same cluster trust
@@ -422,9 +423,13 @@ class InClusterKubernetesJobApi:
                 if (not isinstance(node_name, str) or len(node_name) > 253
                         or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", node_name)):
                     raise ValueError("unqualified kubelet node")
+                if expected_node_uid is not None and (not isinstance(expected_node_uid, str)
+                        or str(UUID(expected_node_uid)) != expected_node_uid or not UUID(expected_node_uid).int):
+                    raise ValueError("unqualified expected kubelet node identity")
                 node = self._core.read_node(name=node_name, _request_timeout=10)
                 if (node.metadata.name != node_name or not node.metadata.uid
-                        or node.metadata.deletion_timestamp is not None):
+                        or node.metadata.deletion_timestamp is not None
+                        or (expected_node_uid is not None and node.metadata.uid != expected_node_uid)):
                     raise ValueError("unqualified kubelet node identity")
                 address, = (row.address for row in node.status.addresses if row.type == "InternalIP")
                 endpoint = ipaddress.ip_address(address)

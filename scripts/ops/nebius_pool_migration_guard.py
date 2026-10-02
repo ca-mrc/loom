@@ -25,6 +25,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
+from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -96,6 +97,39 @@ try:
     print(json.dumps({"status": "qualified"}))
 except Exception:
     print("Pool runtime database unqualified", file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+
+# The optional UID-aware production reader is an ordinary-rollout prerequisite.
+# Old images fail here before downtime; never fall back to nodes/proxy, operator
+# credentials or another endpoint to make a retained actuator appear ready.
+_BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
+
+async def run():
+    from loom_execution_actuator.config import ExecutionActuatorSettings
+    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+    if len(sys.argv) != 5:
+        raise ValueError()
+    settings = ExecutionActuatorSettings()
+    if (settings.namespace != sys.argv[1] or settings.target_id != sys.argv[2]
+            or settings.kubernetes_connection is not None):
+        raise ValueError()
+    api = InClusterKubernetesJobApi()
+    try:
+        summary = await api.resource_summary(node_name=sys.argv[3], expected_node_uid=sys.argv[4])
+        for field, counter in (("cpu", "usageCoreNanoSeconds"), ("memory", "workingSetBytes"), ("fs", "usedBytes")):
+            value = summary["node"][field][counter]
+            if type(value) is not int or value < 0:
+                raise ValueError()
+        return {"status": "qualified", "node_name": sys.argv[3], "node_uid": sys.argv[4]}
+    finally:
+        await api.close()
+
+try:
+    print(json.dumps(asyncio.run(run())))
+except Exception:
+    print("Pool runtime telemetry unqualified", file=sys.stderr)
     raise SystemExit(1)
 """
 
@@ -573,6 +607,71 @@ class KubectlPoolGuardAPI:
                 credential_uid=credential_uid, credential_resource_version=credential_resource_version)
         except Exception:
             raise PoolMigrationError("runtime_database") from None
+
+    def _telemetry_nodes(self, host: str) -> dict[str, str]:
+        """Complete pool roster plus the actuator host, including scale-zero.
+
+        The host supplies an in-cluster TLS/authority/network check even when no
+        execution nodes exist. This is not proof of a future worker's reachability;
+        newly created workers still require startup and task acceptance.
+        """
+        nodes = inventory_resources(lambda method, path: self._run(["get", "--raw", path]), "v1", "nodes", "Node")
+        selector = self.request.registration.spec.node_selector
+        if (not selector or len({row["metadata"]["name"] for row in nodes}) != len(nodes)
+                or len({_uid(row) for row in nodes}) != len(nodes)
+                or host not in {row["metadata"]["name"] for row in nodes}):
+            raise ValueError
+        selected = {}
+        for node in nodes:
+            meta = node["metadata"]
+            name = meta["name"]
+            if name != host and any(meta.get("labels", {}).get(key) != value for key, value in selector.items()):
+                continue
+            if (not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", name)
+                    or meta.get("deletionTimestamp") is not None):
+                raise ValueError
+            selected[name] = _uid(node)
+        return dict(sorted(selected.items()))
+
+    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any]) -> None:
+        """Read direct statistics inside the exact retained actuator Pod.
+
+        No token issuance, permission changes, database connection, arbitrary
+        command or operator-credential forwarding. Recheck Pod and Node identity
+        after all reads; a stale success cannot approve a replacement runtime.
+        """
+        try:
+            if (target not in self.request.guards
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
+            container, = original["spec"]["template"]["spec"]["containers"]
+            settings = {row["name"]: row for row in container.get("env", [])}
+            target_id = settings["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
+            participant.target(target_id, "trial")
+            if (namespace != participant.execution_namespace.name or container["name"] != "actuator"
+                    or name not in {"loom-execution-actuator", target_id + "-actuator"}
+                    or original["spec"]["template"]["spec"].get("serviceAccountName") != "loom-execution-actuator"
+                    or len(settings) != len(container["env"])
+                    or settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != namespace):
+                raise ValueError
+            before = self._runtime(target, original=original)
+            host = before["spec"]["nodeName"]
+            nodes = self._telemetry_nodes(host)
+            for node_name, uid in nodes.items():
+                report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", "actuator", "--",
+                    "python", "-c", _BOUND_TELEMETRY_COMMAND, namespace, target_id, node_name, uid])
+                if report != {"status": "qualified", "node_name": node_name, "node_uid": uid}:
+                    raise ValueError
+            after = self._runtime(target, original=original)
+            if (_uid(after) != _uid(before) or after["spec"]["nodeName"] != host or self._telemetry_nodes(host) != nodes
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError("runtime_telemetry") from None
 
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,
