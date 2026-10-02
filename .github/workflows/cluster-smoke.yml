@@ -194,15 +194,27 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
   cluster-contract:
-    name: cluster contract (render live k3s topology)
+    name: cluster contract (${{ matrix.shard }}, live k3s topology)
     needs: [plan]
     if: >-
       needs.plan.outputs.gate_mode == 'full' &&
       needs.plan.outputs.required == 'true'
     runs-on: ubuntu-24.04
-    # Serial qualification measured 24m41s before setup/cleanup. Leave bounded
-    # hosted-runner headroom while retaining every per-test deadline.
+    # The expanded serial suite reached only 61% before its 35-minute limit.
+    # Independent runners retain complete coverage and every per-test deadline.
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1-of-4
+            shard_index: 0
+          - shard: 2-of-4
+            shard_index: 1
+          - shard: 3-of-4
+            shard_index: 2
+          - shard: 4-of-4
+            shard_index: 3
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
@@ -237,14 +249,17 @@ jobs:
       - name: Verify manifest-owned k3s and rollout candidate contracts
         env:
           LOOM_RUN_DISPOSABLE_K3S: "1"
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: 4
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t test_paths < <(
-            uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke --test-scope "${CI_TEST_SCOPE:-all}"
-          )
+          manifest_paths_file="${RUNNER_TEMP}/cluster-manifest.txt"
+          uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke --test-scope "${CI_TEST_SCOPE:-all}" \
+            --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" > "${manifest_paths_file}"
+          mapfile -t test_paths < "${manifest_paths_file}"
           [[ ${#test_paths[@]} -gt 0 ]]
-          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}"
+          uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" --durations=15
 
   cluster-smoke-gate:
     name: >-

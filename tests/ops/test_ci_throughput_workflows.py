@@ -889,8 +889,10 @@ def test_optional_gate_scripts_fail_closed_for_invalid_required(
 
 
 @pytest.mark.parametrize(
-    ("required", "heavy_result"),
-    [("true", "success"), ("false", "skipped"), ("false", "success")],
+    ("required", "heavy_result", "accepted"),
+    [("true", "success", True), ("false", "skipped", True), ("false", "success", True),
+     ("true", "failure", False), ("true", "cancelled", False), ("true", "skipped", False),
+     ("false", "failure", False)],
 )
 @pytest.mark.parametrize(
     ("workflow_path", "gate_id", "result_names"),
@@ -913,6 +915,7 @@ def test_optional_gate_scripts_preserve_result_semantics(
     result_names: list[str],
     required: str,
     heavy_result: str,
+    accepted: bool,
 ) -> None:
     result = subprocess.run(
         ["bash"],
@@ -928,7 +931,7 @@ def test_optional_gate_scripts_preserve_result_semantics(
         check=False,
     )
 
-    assert result.returncode == 0, (workflow_path, required, result.stderr)
+    assert (result.returncode == 0) is accepted, (workflow_path, required, heavy_result, result.stderr)
 
 
 @pytest.mark.parametrize(
