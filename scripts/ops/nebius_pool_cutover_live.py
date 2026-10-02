@@ -32,10 +32,10 @@ from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     _contract,
     cutover_documents,
+    cutover_material_documents,
     qualify_cutover_image_admission,
     retained_cutover_workloads,
 )
-from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
     PoolMigrationAPI,
@@ -114,7 +114,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                  guards: PoolCutoverGuards, checks: PoolCutoverChecks, history: PoolCutoverHistory, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
                  state_dir: Path | None = None, anchor_dir: Path | None = None,
-                 refresh: PoolManagerRefresh | None = None):
+                 refresh: PoolManagerRefresh | None = None,
+                 source_credentials: dict[str, str] | None = None):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
@@ -145,7 +146,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         self.catalog = cutover_documents(request)
         self.contract_sha256 = digest(_contract(request, self.catalog))
         self.originals = {**retirement_documents(request.fencing.retirement), **self.catalog["producers"]}
-        self.documents = {**machine_documents(request.fencing.retirement.migration, tokens),
+        self._source_credentials = copy.deepcopy(source_credentials)
+        self.documents = {**cutover_material_documents(request, tokens, self._source_credentials),
             **{_key(row): row for phase in ("configuration", "authority", "workload") for row in self.catalog[phase]}}
         self.namespaces = {row.namespace: str(row.namespace_uid) for row in guards.request.guards}
         self.namespaces.update({ns.name: str(ns.uid) for row in registration.spec.participants
