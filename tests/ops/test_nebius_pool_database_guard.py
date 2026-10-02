@@ -491,7 +491,7 @@ def test_each_running_database_consumer_is_qualified_without_sql_or_credential_o
 
 
 @pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
-    'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target'])
+    'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target', 'service_account'])
 def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
@@ -517,6 +517,10 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
         for row in state.original['spec']['template']['spec']['containers'][0].get('env', []):
             if row['name'] == 'LOOM_EXECUTION_ACTUATOR_TARGET_ID':
                 row['value'] = 'foreign'
+    elif damage == 'service_account':
+        for document in (state.original, state.controller, state.replica):
+            document['spec']['template']['spec']['serviceAccountName'] = 'foreign-admin'
+        state.runtime_pod['spec']['serviceAccountName'] = 'foreign-admin'
     previous, commands = api._run, []
 
     def run(args):
@@ -553,7 +557,7 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
         assert [command[12] for command in commands] == (['platform-node'] if damage == 'scale_zero' else ['platform-node', 'pool-node'])
         for command in commands:
             assert command[13] == next(row['metadata']['uid'] for row in nodes if row['metadata']['name'] == command[12])
-    if not actuator or damage in {'missing_host', 'partial', 'duplicate', 'deleted', 'unknown_target'}:
+    if not actuator or damage in {'missing_host', 'partial', 'duplicate', 'deleted', 'unknown_target', 'service_account'}:
         assert not commands
 
 
