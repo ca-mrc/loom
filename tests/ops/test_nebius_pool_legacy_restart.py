@@ -1,0 +1,147 @@
+"""Exact predecessor restart remains behind recovery admission fences."""
+from __future__ import annotations
+
+import copy
+import json
+
+import pytest
+from scripts.ops.nebius_ingress_stage import _key
+from scripts.ops.nebius_management_switch import _stable
+from tests.ops.test_nebius_pool_role_restoration import RoleAPI, restore_roles, templates_restored
+from tests.ops.test_nebius_pool_role_restoration import closed_startup as closed_startup
+from tests.ops.test_nebius_pool_role_restoration import collector_inputs as collector_inputs
+from tests.ops.test_nebius_pool_role_restoration import (
+    cutover_binding_inventory as cutover_binding_inventory,
+)
+from tests.ops.test_nebius_pool_role_restoration import cutover_inputs as cutover_inputs
+from tests.ops.test_nebius_pool_role_restoration import fencing_inputs as fencing_inputs
+from tests.ops.test_nebius_pool_role_restoration import management_inputs as management_inputs
+from tests.ops.test_nebius_pool_role_restoration import platform_inputs as platform_inputs
+from tests.ops.test_nebius_pool_role_restoration import retirement_inputs as retirement_inputs
+from tests.ops.test_nebius_pool_role_restoration import runtime_inputs as runtime_inputs
+
+
+class RestartAPI(RoleAPI):
+    def __init__(self, fixture, prior):
+        super().__init__(fixture, prior)
+        self.legacy_roles = copy.deepcopy(prior.legacy_roles)
+        self.restart_calls, self.restart_failure = [], None
+
+    def qualify_gateway_readonly(self):
+        if not self.effective_readonly:
+            raise ValueError('private-marker')
+
+    def preview_legacy_restart(self, key, before, desired):
+        assert before == self.startup.documents[key]
+        return copy.deepcopy(desired)
+
+    def restart_legacy_workload(self, key, before, desired):
+        assert json.loads((self.state / 'legacy-restart.json').read_bytes())['workloads'][key] == {
+            'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
+        assert self.machine_phase == 'revoked' and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}
+        self.restart_calls.append(key)
+        if self.restart_failure == 'before':
+            raise OSError('private-marker')
+        if self.restart_failure == 'conflict':
+            return False
+        current = copy.deepcopy(before)
+        field = 'suspend' if current['kind'] == 'CronJob' else 'replicas'
+        current['spec'][field] = desired['spec'][field]
+        current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+        self.startup.documents[key] = current
+        if self.restart_failure == 'after':
+            raise OSError('private-marker')
+        return True
+
+
+def roles_restored(fixture):
+    prior = templates_restored(fixture)
+    assert restore_roles(prior)['status'] == 'pool_legacy_roles_restored_closed'
+    return RestartAPI(fixture, prior)
+
+
+def restart(api):
+    from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
+
+    return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
+
+
+@pytest.mark.timeout(300)
+def test_legacy_restart_restores_exact_original_scalars_and_keeps_gateway_dormant_and_guards_closed(closed_startup):
+    from scripts.ops.nebius_pool_retirement import retirement_documents
+
+    api = roles_restored(closed_startup)
+    before, roles = copy.deepcopy(api.startup.documents), copy.deepcopy(api.legacy_roles)
+    originals = {**retirement_documents(api.request.fencing.retirement),
+        **{_key(row): row for row in (api.request.manager, *api.request.services)}}
+    result = restart(api)
+    assert result['status'] == 'pool_legacy_restart_staged_closed'
+    assert result['legacy_restore_allowed'] is False and result['runtime_verified'] is False
+    expected_calls = set()
+    for key, row in api.startup.documents.items():
+        expected = copy.deepcopy(before[key])
+        if key in originals:
+            field = 'suspend' if row['kind'] == 'CronJob' else 'replicas'
+            expected['spec'][field] = originals[key]['spec'][field]
+            assert row['spec'] == originals[key]['spec']
+        if _stable(expected) != _stable(before[key]):
+            expected_calls.add(key)
+            expected['metadata']['resourceVersion'] = str(int(before[key]['metadata']['resourceVersion']) + 1)
+        assert row == expected
+    assert set(api.restart_calls) == expected_calls and len(api.restart_calls) == len(expected_calls)
+    assert api.legacy_roles == roles and set(api.guards.values()) == {'fenced'} and api.mode == 'fenced'
+    assert restart(api) == result and len(api.restart_calls) == len(expected_calls)
+
+
+@pytest.mark.parametrize('failure', ['before', 'after', 'conflict'])
+@pytest.mark.timeout(300)
+def test_legacy_restart_unknown_replies_observe_without_repeating_the_update(closed_startup, failure):
+    from scripts.ops.nebius_pool_startup import startup_workload_options
+
+    api = roles_restored(closed_startup)
+    api.restart_failure = failure
+    result = restart(api)
+    api.restart_failure = None
+    if failure == 'before':
+        assert result['status'] == 'pending_legacy_restart_outcome'
+        assert restart(api) == result and len(api.restart_calls) == 1
+        key, = api.restart_calls
+        choices = startup_workload_options(api.request, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
+        assert len(choices[key]) == 2
+        actual = api.startup.documents[key]
+        actual['spec'] = copy.deepcopy(choices[key][1]['spec'])
+        with pytest.raises(ValueError):
+            restart(api)  # No new version: not an observed restart CAS.
+        actual['metadata']['resourceVersion'] = str(int(actual['metadata']['resourceVersion']) + 1)
+    elif failure == 'conflict':
+        assert result['status'] == 'pending_legacy_restart_update'
+    assert restart(api)['status'] == 'pool_legacy_restart_staged_closed'
+    assert len(api.restart_calls) == len(set(api.restart_calls)) + int(failure == 'conflict')
+
+
+@pytest.mark.timeout(300)
+def test_legacy_restart_rejects_changed_or_incomplete_authority_before_any_write(closed_startup):
+    api = roles_restored(closed_startup)
+    role_journal = api.state / 'role-restoration.json'
+    saved = role_journal.read_bytes()
+    role_journal.write_text('{}')
+    with pytest.raises(ValueError):
+        restart(api)
+    role_journal.write_bytes(saved)
+    for attribute, bad in [('machine_phase', 'active'), ('mode', 'global'), ('effective_readonly', False), ('effective_legacy', False)]:
+        prior = getattr(api, attribute)
+        setattr(api, attribute, bad)
+        with pytest.raises(ValueError):
+            restart(api)
+        setattr(api, attribute, prior)
+    participant = next(iter(api.guards))
+    api.guards[participant] = 'open'
+    with pytest.raises(ValueError):
+        restart(api)
+    api.guards[participant] = 'fenced'
+    api.cleanup_drained = False
+    assert restart(api)['status'] == 'pending_pool_cleanup'
+    api.cleanup_drained = True
+    api.processes_drained = False
+    assert restart(api)['status'] == 'pending_successor_drain'
+    assert not api.restart_calls
