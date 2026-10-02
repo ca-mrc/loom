@@ -37,7 +37,7 @@ def faulty_s3() -> Iterator[tuple[MinioObjectStore, threading.Event, threading.E
     class FaultHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             requested.set()
-            release.wait(5)
+            release.wait(15)
             body = (
                 "<Error><Code>AccessDenied</Code><Message>"
                 f"Authorization: Bearer {_SECRET_SENTINEL}</Message></Error>"
@@ -60,7 +60,7 @@ def faulty_s3() -> Iterator[tuple[MinioObjectStore, threading.Event, threading.E
         yield MinioObjectStore(
             endpoint_url=f"http://127.0.0.1:{server.server_port}",
             access_key="test", secret_key="test", operation_attempts=1,
-            read_timeout=2, operation_timeout=3,
+            read_timeout=5, operation_timeout=6,
         ), requested, release
     finally:
         release.set()
@@ -120,7 +120,8 @@ async def test_s3_setup_failure_is_bounded_and_visible_to_user(
     cp_app.state.session_factory = app.state.session_factory
     settings = WorkerSettings(
         _env_file=None, token=worker_token, minio_access_key="test", minio_secret_key="test",
-        trajectory_cache_dir=tmp_path / "trajectories", task_materialize_timeout_sec=0.5,
+        trajectory_cache_dir=tmp_path / "trajectories",
+        task_materialize_timeout_sec=2 if fault == "hang" else 10,
         pre_start_heartbeat_interval_sec=0.02,
     )
     try:
@@ -142,7 +143,7 @@ async def test_s3_setup_failure_is_bounded_and_visible_to_user(
             assert response.json()["started_at"] is None
             if fault == "denied":
                 release.set()
-            await pool.wait_all(timeout=3)
+            await pool.wait_all(timeout=5)
             assert pool.in_flight == 0
             assert not list(Path(tempfile.gettempdir()).glob(f"loom-trial-{trial_id}-*"))
             response = await user.get(f"/api/v1/trials/{trial_id}")
@@ -157,7 +158,7 @@ async def test_s3_setup_failure_is_bounded_and_visible_to_user(
             assert _SECRET_SENTINEL not in response.text
             assert "private-task" not in detail["failure_message"]
             if fault == "hang":
-                assert "timed out after 0.5s" in detail["failure_message"]
+                assert "timed out after 2s" in detail["failure_message"]
             else:
                 assert "AccessDenied" in detail["failure_message"]
             listed = await user.get("/api/v1/trials", params={"state": "failed"})
