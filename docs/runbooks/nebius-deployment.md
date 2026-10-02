@@ -1503,8 +1503,9 @@ path before cutover instead of rewriting provenance or cancelling unrelated work
 The protected parent still must qualify retained personal origin history in the
 management database; the database page alone cannot authorize it. Do not
 restore replicas, resume the collector, release guards or change pool mode
-manually. Protected entry, activation/rollback and successor-refresh qualification
-must be connected before this path is used on Nebius.
+manually. Use the complete protected pool operation for activation or rollback;
+subsequent manager refresh qualifies its completed pool baseline. These source
+connections do not replace successful protected installation and live acceptance.
 
 **Verifying the deployed version (#2009):** confirm the rendered candidate SHA
 actually reached the cluster by comparing it against what the running app

@@ -1732,9 +1732,9 @@ profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
 attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
 not its separate selection generation. Admission HTTP and the native outbox are
-connected locally. Execution outbox integration, installed gateway startup and
-protected writer migration are still required. Application-image builds remain a
-later consumer of the same ledger.
+connected in source, including the execution outbox. Installed gateway startup
+and protected writer migration still require live qualification. Application-image
+builds remain a later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
@@ -1976,7 +1976,8 @@ the retained canonical specification and must pass source admission/pinning in
 the final outbox transaction. Generations advance from retained outbox history,
 independently of build lease epochs. A configured native controller selects one
 new candidate after reconciliation, then uses the same driver/runtime path.
-The installed startup and protected no-dual-writer transition are not yet connected.
+The protected pool operation connects startup and the no-dual-writer transition;
+its successful source tests do not establish installation on a live cluster.
 
 The service scheduler separates workload compilation from reservation. Compilation
 retains the existing image-readiness and configuration handling, but does not claim
@@ -2203,7 +2204,8 @@ or invalid-request rejection permits another attempt. Complete namespace
 ReplicaSet/Job/Pod observations must prove drain, including terminating Pods and
 all collector container states. Replay rechecks earlier stopped workloads without
 writing. This stage neither changes RBAC nor activates a replacement writer;
-effective authority fencing and the connected protected installer remain required.
+the subsequent authority-fencing and runtime stages belong to the complete
+protected pool operation, not to retirement alone.
 
 An installed execution-only guest actuator belongs to its ordinary data
 participant, not another database, collector or builder. Retirement and runtime
@@ -2842,11 +2844,11 @@ This primitive does not establish restored runtime health or authorize reopening
 by itself. The anchored rollback parent must supply those barriers and durable
 intent before using it; no standalone deployment command exposes it.
 
-The startup stage
-does not open admission or claim a working execution pool, and is not exposed as
-an independent deployment command. Installed runtime/collector acceptance,
-uncertain-start rollback, charged-effect cleanup and
-durable refresh remain required before protected operational activation.
+The startup stage does not open admission or claim a working execution pool,
+and is not exposed as an independent deployment command. The complete protected
+operation connects activation, uncertain-start rollback and charged-effect
+cleanup; subsequent manager refresh qualifies the completed pool baseline.
+Installed runtime/collector acceptance still requires live verification.
 
 Once runtime replacement starts, recovery must not replay the original retirement
 or fencing installer against the changed templates. The parent instead qualifies
@@ -2902,9 +2904,9 @@ The standalone platform rollout checks for existing global participant settings
 and retained pool-retirement markers before any mutation and again under its idle
 guard. It refuses to overwrite these with legacy controller configuration or
 direct-writer roles, including a cutover that completes between those checks.
-This fail-closed boundary does not implement the protected successor refresh:
-durable runtime/catalog/token bindings and staged database permissions still must
-be preserved and qualified by that connected path before global activation.
+This fail-closed boundary does not authorize a participant software refresh or
+reset its pool bindings. Ordinary manager refresh uses the separate pool-aware
+reader described above; participant changes need their own protected lifecycle.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
@@ -2912,8 +2914,9 @@ absence/output-drain and settled-create evidence before recording cleanup.
 The registry authenticates dedicated machine identities and must
 validate all workload kinds and serialize physical-pool admission. The current
 single-environment controllers do not switch writers merely because these tables
-exist; connected admission, installation of the production pool collector, durable local handoff
-and protected no-dual-writer migration remain required before activation.
+exist. The protected operation installs and qualifies the production pool
+collector, connected admission and durable local handoff before opening intake;
+an installed acceptance claim still requires live evidence.
 
 ## Native task-image capacity fairness
 
