@@ -130,7 +130,7 @@ def test_projected_gateway_probe_reads_only_registered_namespace_identities(proj
 
 
 @pytest.mark.parametrize('damage', ['uid', 'name', 'deleting', 'kind', 'oversized', 'invalid_json',
-    'redirect', 'unauthorized', 'unavailable', 'encoding', 'ca', 'token_missing', 'token_permissions',
+    'redirect', 'unauthorized', 'unavailable', 'encoding', 'ca', 'untrusted_ca', 'hostname', 'token_missing', 'token_permissions',
     'token_invalid', 'connection', 'machine', 'challenge'])
 def test_projected_gateway_probe_rejects_wrong_scope_tls_credentials_or_response(projected_gateway, tmp_path, damage):
     state, expected, environment, token, ca = projected_gateway
@@ -138,6 +138,12 @@ def test_projected_gateway_probe_rejects_wrong_scope_tls_credentials_or_response
     state['damage'] = damage
     if damage == 'ca':
         ca.write_text('private-invalid-ca')
+    elif damage == 'untrusted_ca':
+        _, _, foreign_roots = certificates.material(names=('foreign.localhost',))
+        ca.write_bytes(foreign_roots[0].public_bytes(serialization.Encoding.PEM))
+    elif damage == 'hostname':
+        wanted['kubernetes']['endpoint'] = wanted['kubernetes']['endpoint'].replace('localhost', '127.0.0.1')
+        environment['LOOM_POOL_GATEWAY_KUBERNETES'] = json.dumps(wanted['kubernetes'])
     elif damage == 'token_missing':
         token.unlink()
     elif damage == 'token_permissions':

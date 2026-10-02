@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import hmac
 import json
+import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_upgrade,
 )
 from scripts.ops.nebius_management_stage import _comparison_snapshot
+from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -296,8 +299,8 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         """Bind the journal's closed gateway child to its actual running settings.
 
         The startup parent supplies the retained child identity, not an operator
-        manifest. This proves DB correspondence and machine material, not projected
-        Kubernetes connectivity or effective RBAC; those are separate barriers.
+        manifest. This proves DB correspondence, machine material and actual
+        projected Kubernetes access; effective RBAC remains a separate barrier.
         """
         try:
             if (digest(migration_contract(self.request)) != self.contract_sha256
@@ -328,6 +331,16 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 url_variable='LOOM_POOL_GATEWAY_DB_URL', database_variable='LOOM_SVC_DB_URL',
                 credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version)
             self._qualify_runtime_settings(self.target, original=original, expected=expected, component='gateway', wanted=wanted)
+            namespaces = {ns.name: str(ns.uid) for participant in spec.participants
+                for ns in (participant.execution_namespace, participant.build_namespace)}
+            projection = {key: wanted[key] for key in ('pool_id', 'installation_id', 'machine_id', 'admission_epoch', 'kubernetes')}
+            projection['namespaces'] = namespaces
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce), json.dumps(projection, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'gateway', '--',
+                'python', '-c', BOUND_GATEWAY_KUBERNETES_COMMAND, json.dumps(sorted(namespaces)), nonce, response])
+            if report != {'status': 'qualified'}:
+                raise ValueError
             if (_uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)
                     or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(before_database)
                     or digest(migration_contract(self.request)) != self.contract_sha256

@@ -2487,7 +2487,7 @@ resolve through the same retained management `service-url` Secret reference and
 qualified backend; participant credentials cannot substitute for that binding.
 Only the role and fresh challenge enter exec arguments, and
 only a bounded qualification result leaves the Pod. Import, configuration and
-file errors emit no configuration or token values. These checks make no SQL or
+file errors emit no configuration or token values. These settings checks make no SQL or
 network request, issue no credential and open no admission.
 Closure and all workload roots
 are rechecked afterward. An unhealthy successor does not prevent constructing
@@ -2500,9 +2500,20 @@ namespace naming the account, equivalent user or its groups. Required permission
 must match the fixed renderer; extra named-resource grants, wildcards, Secret
 access and unresolved rules are rejected. Ordinary self-inspection/discovery is
 allowed. No bearer is minted, no grant is changed, and no impersonation persists
-on the parent client. This proves effective authority, not that the running
-gateway's projected credentials can reach Kubernetes; that runtime connection
-still needs its own proof.
+on the parent client. This proves effective authority, not runtime connectivity.
+The bound gateway runtime barrier separately uses its actual projected token and
+CA with the normal credential reader and origin-restricted HTTP authentication.
+It reads only the registered execution/build namespace names and requires their
+exact UIDs. Its challenge binds the loaded pool/installation/machine/epoch and
+Kubernetes connection as well as every returned namespace identity. Each request
+reopens the projected token for rotation; neither ambient kubeconfig nor proxy
+credentials are used. Reads have per-request and total deadlines, bounded
+uncompressed responses, verified TLS and no redirects or retries. This probe
+issues no credential, changes no resource and returns no token or API error body.
+Pod, database, credential and parent closure checks still surround the proof.
+Disposable Kubernetes coverage exercises the real service-account permissions,
+TLS/credential files and namespace UID matching, but not an installed gateway Pod
+or concurrent-owner task execution.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,
