@@ -2557,6 +2557,13 @@ the original release already committed. Foreign ownership is never adopted.
 An original-owner release already waiting on the row cannot delete the recovery
 owner. Active work is retained; fencing does not assert idle state or completed
 cleanup. Every stage result explicitly withholds legacy-restoration authority.
+The fixed activation transports use the retained management or participant
+PostgreSQL Pod and qualified Service backend, with private operator scope and
+identity-bound reports checked around each dispatch. Recovery needs neither a
+running application/gateway nor its runtime token. A separate read-only runtime
+ACL inspection accepts active work and absent/recovery guards while preserving
+the same schema and least-privilege checks; the initial role stage/observation
+still requires the original idle guard. Inspection never repairs grants or work.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,

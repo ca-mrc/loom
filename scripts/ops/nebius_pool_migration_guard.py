@@ -1,8 +1,9 @@
-"""Fixed idle-guard commands bound to retained controller and database Pods.
+"""Fixed guard commands bound to retained controller and database Pods.
 
 Callable only by the protected migration, not an operator CLI. The parent owns
-publication/predecessor qualification. This adapter neither releases intake nor
-changes controller or Kubernetes authority. Ambiguous exec outcomes only read back.
+publication/predecessor qualification and durable write intents. Activation can
+release or fence only the exact operation's intake; it cannot change controller
+or Kubernetes authority. Ambiguous exec outcomes only read back.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
@@ -316,13 +318,15 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
 def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
     """Fixed participant ACL transition, never a general SQL or bootstrap flag.
 
-    Both actions require the exact durable idle guard. Staging adds only the
+    Stage and observe require the exact durable idle guard. Staging adds only the
     actuator's local journals and source-lock columns; it cannot open intake or
     grant access to management capacity/credential state. Unknown exec results
-    are recovered with observation, not an automatic repeated write.
+    are recovered with observation, not an automatic repeated write. Inspect is
+    read-only ACL/schema qualification for active or fenced recovery; it cannot
+    establish initial closure or stage missing grants.
     """
     if (str(UUID(owner)) != owner or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
-            or action not in {"stage", "observe"}):
+            or action not in {"stage", "observe", "inspect"}):
         raise ValueError("pool_runtime_role_scope_unqualified")
     grants = """
         GRANT SELECT, INSERT, UPDATE ON nebius_pool_execution_outbox, nebius_pool_build_outbox TO loom_actuator;
@@ -338,19 +342,24 @@ def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
     # its registration timestamp is the only non-content lock column. Registered
     # source rows are immutable (including created_at); source refs may be pinned,
     # never published, retired or unpinned by this execution/build login.
-    return f"""BEGIN {'READ ONLY' if action == 'observe' else ''};
-SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
-DO $pool_runtime_role$
-DECLARE item RECORD;
-BEGIN
+    closure = f"""
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR NOT EXISTS (
         SELECT 1 FROM nebius_rollout_guard WHERE id=1 AND owner='{owner}' AND candidate_sha='{candidate}'
     ) THEN RAISE EXCEPTION 'pool runtime role guard unqualified'; END IF;
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0172' OR EXISTS (
+    IF EXISTS (
         SELECT 1 FROM ({ACTIVITY_SQL}) activity
         WHERE trials<>0 OR executions<>0 OR builds<>0 OR build_cleanup<>0
     ) OR EXISTS (SELECT 1 FROM nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released'))
       OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released'))
+    THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
+    """ if action != "inspect" else ""
+    return f"""BEGIN {'READ ONLY' if action != 'stage' else ''};
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
+DO $pool_runtime_role$
+DECLARE item RECORD;
+BEGIN
+    {closure}
+    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0172'
     THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
         AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
@@ -967,9 +976,9 @@ class KubectlPoolGuardAPI:
             raise PoolMigrationError("guard_" + action if action in {"observe", "acquire"} else "guard_scope") from None
 
     def runtime_role(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
-        """Stage/qualify one exact participant DB; leave its intake closed."""
+        """Stage/qualify one exact participant DB without changing intake."""
         try:
-            if (action not in {"stage", "observe"} or target not in self.request.guards or target.database is None
+            if (action not in {"stage", "observe", "inspect"} or target not in self.request.guards or target.database is None
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
@@ -983,7 +992,34 @@ class KubectlPoolGuardAPI:
                 raise ValueError
             return report
         except Exception:
-            raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe"} else "runtime_role_scope") from None
+            raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe", "inspect"} else "runtime_role_scope") from None
+
+    def activation_guard(self, target: PoolGuardTarget, action: Literal["observe", "release", "fence"]) -> str:
+        """One bound DB dispatch; the anchored parent owns intent and recovery."""
+        try:
+            if (action not in {"observe", "release", "fence"} or target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            operation = self.request.registration.spec.operation_id
+            query = pool_guard_activation_sql(operation, target.participant_id,
+                self.request.registration.candidate["candidate_sha"], action=action)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            status = report.get("status")
+            allowed = {"observe": {"held", "open", "fenced", "foreign"}, "release": {"open"}, "fence": {"fenced"}}
+            if (not isinstance(status, str) or status not in allowed[action]
+                    or report != {"schema": "loom.pool-local-guard.v1", "operation_id": str(operation),
+                        "participant_id": str(target.participant_id), "status": status}
+                    or _uid(self._database(target)) != _uid(before)
+                    or target not in self.request.guards
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return status
+        except Exception:
+            raise PoolMigrationError("activation_guard") from None
 
     def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]:
         """Read frozen schema/access/backlog through the exact retained DB Pod.

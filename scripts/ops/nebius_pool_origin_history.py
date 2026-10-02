@@ -1,6 +1,7 @@
-"""Fixed management-history readback for the protected closed pool cutover.
+"""Fixed management history and activation for the protected pool cutover.
 
-No CLI, probe Job, general SQL, writes, credential delivery or admission opening.
+No CLI, probe Job, general SQL or credential delivery. The anchored parent owns
+every activation write intent and read-only recovery of an ambiguous result.
 The entry supplies the completed predecessor's distinct management DB binding.
 Every pending-origin page is qualified against original registration/source history.
 """
@@ -13,7 +14,7 @@ import json
 import secrets
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
@@ -26,6 +27,11 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_upgrade,
 )
 from scripts.ops.nebius_management_stage import _comparison_snapshot
+from scripts.ops.nebius_pool_activation_database import (
+    fence_pool_activation_sql,
+    pool_activation_state_sql,
+    qualify_pool_activation_report,
+)
 from scripts.ops.nebius_pool_gateway_probe import BOUND_GATEWAY_KUBERNETES_COMMAND
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
@@ -280,6 +286,30 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 expected=expected)
         except Exception:
             raise PoolMigrationError("management_runtime_database") from None
+
+    def activation_pool(self, action: Literal["observe", "fence"]) -> str:
+        """Observe/fence the retained installation without a healthy gateway."""
+        try:
+            if (action not in {"observe", "fence"}
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            spec = self.request.registration.spec
+            query = pool_activation_state_sql(spec) if action == "observe" else fence_pool_activation_sql(spec)
+            before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
+            report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            status = qualify_pool_activation_report(spec, report)
+            if ((action == "fence" and status != "fenced")
+                    or _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return status
+        except Exception:
+            raise PoolMigrationError("activation_pool") from None
 
     def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None:
         """The exact manager catalog must be readable by its real runtime loader."""
