@@ -127,6 +127,11 @@ pins = [
   # cases on separate runners, not one 40m job with no remaining headroom.
   { path = "tests/ops/test_nebius_pool_role_restoration_live.py", shard_index = 4 },
   { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 5 },
+  # Run37047482162: the old predecessor module, legacy restart and machine
+  # retirement exhausted root1's 40m limit at38%. Preserve all cases, but run
+  # live refresh and connected refresh separately on the shorter root8/root4.
+  { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 3 },
 ]
 
 [[test_sharding]]
