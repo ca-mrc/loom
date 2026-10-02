@@ -43,6 +43,10 @@ def finish_cutover(operation):
     context = load_pool_cutover_inputs(operation)
     state, anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
     closed = CutoverAPI(context.request)
+    # Completed history omits volatile metadata. A real Kubernetes GET supplies
+    # a current version; the external-I/O double must do the same for CAS.
+    for document in closed.documents.values():
+        document['metadata'].setdefault('resourceVersion', '1')
     assert stage_pool_cutover(request=context.request, tokens=context.tokens, api=closed,
         state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
     startup = StartupAPI(context.request, closed, state)

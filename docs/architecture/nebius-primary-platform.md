@@ -2760,6 +2760,13 @@ loading does not contact the cluster or replay any operation. This is terminal
 phase/identity evidence, not fresh runtime or installed multi-owner acceptance;
 the result explicitly withholds that claim. Protected entry and refresh consumers
 must still qualify the baseline before using it for live operations.
+The private predecessor reader binds that receipt to its original completed
+management upgrade and exact cutover input hash. It derives the manager's pool
+catalog operation from global completion (or retains the non-pool configuration
+after legacy restoration), preserving the original workload UID and credentials.
+The existing strict refresh renderer validates the derived configuration against
+the recorded manager. No caller-supplied post-cutover manager is accepted, and
+reading this baseline neither replays installation nor authorizes a live refresh.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
