@@ -389,6 +389,14 @@ async def get_trial_execution(
         ).scalar_one_or_none()
         if lease is None:
             return {"trial_id": str(trial_id), "execution": None}
+        verifier = (
+            await session.execute(
+                select(ServiceExecutionLease).where(
+                    ServiceExecutionLease.parent_lease_id == lease.id,
+                    ServiceExecutionLease.execution_role == "verifier",
+                )
+            )
+        ).scalar_one_or_none()
         commands = (
             (
                 await session.execute(
@@ -430,6 +438,9 @@ async def get_trial_execution(
     return {
         "trial_id": str(trial_id),
         "execution": execution_lease_projection(lease),
+        "verifier_execution": (
+            execution_lease_projection(verifier) if verifier is not None else None
+        ),
         "commands": [
             {
                 "command_id": str(command.id),
