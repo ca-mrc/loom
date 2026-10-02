@@ -182,6 +182,26 @@ class _SlowPutClient:
         self.closed = True
 
 
+async def test_owned_store_close_is_idempotent_and_prevents_reopening_or_new_io(monkeypatch):
+    store = MinioObjectStore(endpoint_url="http://127.0.0.1:9000", access_key="test", secret_key="test")
+    client = store._client
+    closed = []
+    close = client.close
+
+    def close_client():
+        closed.append(client)
+        close()
+
+    monkeypatch.setattr(client, "close", close_client)
+    store.close()
+    store.close()
+    assert closed == [client]
+    with pytest.raises(RuntimeError, match="closed"):
+        await store.put_object(bucket="source", key="x", body=b"x")
+    store._replace_client(client)
+    assert store._client is client and closed == [client]
+
+
 class _FastPutClient:
     def __init__(self) -> None:
         self.put_calls = 0
