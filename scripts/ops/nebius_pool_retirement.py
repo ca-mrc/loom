@@ -93,11 +93,22 @@ def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, 
         raise ValueError("pool_retirement_inputs_unqualified") from None
 
 
-def stopped_document(request: PoolRetirementRequest, key: str) -> dict[str, Any]:
-    desired = _snapshot(retirement_documents(request)[key])
-    desired["metadata"].setdefault("annotations", {})[MARKER] = str(request.migration.registration.spec.operation_id)
+def _stopped_document(original: dict[str, Any], operation: str) -> dict[str, Any]:
+    desired = _snapshot(original)
+    desired["metadata"].setdefault("annotations", {})[MARKER] = operation
     desired["spec"]["suspend" if desired["kind"] == "CronJob" else "replicas"] = True if desired["kind"] == "CronJob" else 0
     return desired
+
+
+def stopped_documents(request: PoolRetirementRequest) -> dict[str, dict[str, Any]]:
+    """Project one qualified roster without rescanning it for every workload."""
+    originals = retirement_documents(request)
+    operation = str(request.migration.registration.spec.operation_id)
+    return {key: _stopped_document(original, operation) for key, original in originals.items()}
+
+
+def stopped_document(request: PoolRetirementRequest, key: str) -> dict[str, Any]:
+    return _stopped_document(retirement_documents(request)[key], str(request.migration.registration.spec.operation_id))
 
 
 def _closed(request: PoolMigrationRequest, state: Path, anchor: Path) -> str:

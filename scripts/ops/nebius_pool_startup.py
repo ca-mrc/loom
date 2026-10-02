@@ -22,7 +22,7 @@ from scripts.ops.nebius_pool_cutover import (
     cutover_documents,
 )
 from scripts.ops.nebius_pool_migration import _hash
-from scripts.ops.nebius_pool_retirement import retirement_documents, stopped_document
+from scripts.ops.nebius_pool_retirement import retirement_documents, stopped_documents
 
 from loom.nebius_platform_render import digest
 
@@ -59,8 +59,7 @@ def closed_startup_documents(request: PoolCutoverRequest, *, state_dir: Path,
             or any(checksum is None for checksum in record["phases"].values())):
         raise ValueError
     originals = {**retirement_documents(request.fencing.retirement), **documents["producers"]}
-    closed = {key: stopped_document(request.fencing.retirement, key)
-        for key in retirement_documents(request.fencing.retirement)}
+    closed = stopped_documents(request.fencing.retirement)
     closed.update({key: copy.deepcopy(item["expected"]) for key, item in record["runtime"].items()})
     for key, document in closed.items():
         document["metadata"]["uid"] = _uid(originals[key])

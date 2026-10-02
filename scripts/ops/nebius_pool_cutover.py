@@ -33,7 +33,7 @@ from scripts.ops.nebius_pool_migration import (
 )
 from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
 from scripts.ops.nebius_pool_retirement import MARKER as RETIREMENT_MARKER
-from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_document
+from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_documents
 from scripts.ops.nebius_pool_role_fencing import (
     PoolRoleFenceAPI,
     PoolRoleFenceRequest,
@@ -245,9 +245,10 @@ def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, 
                     or set(child["workloads"]) != set(originals)
                     or any(value not in {"prepared", "intent", "stopped"} for value in child["workloads"].values())):
                 raise ValueError
+            stopped = stopped_documents(request.fencing.retirement)
             for key, phase in child["workloads"].items():
                 if phase != "prepared":
-                    expected[key] = stopped_document(request.fencing.retirement, key)
+                    expected[key] = stopped[key]
         elif path.exists() or path.is_symlink() or record["fenced"] is not None:
             raise ValueError
         for key, item in record["runtime"].items():
@@ -388,10 +389,11 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
                         raise ValueError
                 # Before each stage, all retained writers must be stopped in
                 # precisely the old or journaled new template, never a third one.
+                stopped = stopped_documents(request.fencing.retirement)
                 for key, original in retirement_documents(request.fencing.retirement).items():
                     item = record["runtime"].get(key)
                     desired = (item["expected"] if item is not None and item["phase"] != "prepared"
-                        else stopped_document(request.fencing.retirement, key))
+                        else stopped[key])
                     if not _matches(api.read_workload(key), desired, _uid(original)) or api.drained_workload(key, desired) is not True:
                         raise ValueError
 
@@ -424,8 +426,9 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
                     raise ValueError
                 record["phases"][phase] = checksum
                 save()
+            stopped = stopped_documents(request.fencing.retirement)
             previous = {key: (documents["stopped"][key] if key in documents["stopped"]
-                else stopped_document(request.fencing.retirement, key)) for key in documents["runtime"]}
+                else stopped[key]) for key in documents["runtime"]}
             retained = {**retirement_documents(request.fencing.retirement), **documents["producers"]}
             previous = copy.deepcopy(previous)
             for key, document in previous.items():
