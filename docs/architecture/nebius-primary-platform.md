@@ -2772,10 +2772,11 @@ Their cumulative configuration and runtime checks are rooted in that baseline,
 not a caller-provided `before` snapshot, and still preserve the original manager
 UID. Repeated ordinary refreshes retain bounded root/pool/immediate evidence;
 cross-kind pool/refresh loading rejects cycles and excessive ancestry. Historical
-non-pool contracts remain byte-compatible. The manager-only connected installer
-currently refuses pool-backed refreshes, even if a request omits the inherited
-baseline: the pool-aware live authority verifier must be connected before those
-refreshes are exposed operationally.
+non-pool contracts remain byte-compatible. A pool-backed refresh requires the
+exact bound pool authority verifier, even if a request omits the inherited
+baseline. The protected refresh entry acquires that separately scoped reader for
+the operation and closes its credentials and transports on success or failure;
+the retained manager-only resource reader does not gain pool-namespace scope.
 The separate read-only active-pool database proof requires exact global mode,
 installation, epoch, participant and machine registrations, and current unrevoked
 credentials. It permits waiting, reserved and active requests without changing
@@ -2801,6 +2802,14 @@ rollback instead retains the fenced and drained global ledger, revoked machine
 credentials and a stopped, process-drained read-only gateway; reopened legacy
 owners may keep working. Fresh full workload and authority readbacks bracket
 each qualification. The result is not a persisted or reusable write permit.
+The refresh installer requalifies it in preflight, immediately before actual
+resource creation and manager patches, around activation qualification and
+before public completion. It does not require child journals during earlier
+identity or dry-run calls. Unknown writes retain their existing observation-only
+recovery contract. Bootstrap evidence stays bound to the original installation,
+while current candidate/provider prerequisites are bound to the qualified refresh;
+a later pool catalog does not rewrite or relax the bootstrap contract. This is
+source-level upgrade support, not installed pool or multi-owner acceptance.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

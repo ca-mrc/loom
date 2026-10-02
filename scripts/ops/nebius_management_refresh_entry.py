@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -151,15 +151,31 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
 @contextmanager
 def connected_refresh_api(context: RefreshContext, operation: dict[str, Any]) -> Iterator[HTTPSManagementRefreshInstaller]:
     original = context.original
-    with connected_checks(original.original_inputs, original.ingress,
-            foundation_candidate=context.inputs.foundation_candidate) as (base, trust, token):
+    with ExitStack() as stack:
+        base, trust, token = stack.enter_context(connected_checks(original.original_inputs, original.ingress,
+            foundation_candidate=context.inputs.foundation_candidate))
         connection = original.original_inputs.operator_connection
         checks = ApplicationUpgradePrerequisites(base=base, settings=context.inputs.prerequisites)
-        with HTTPSManagementRefreshInstaller(request=context.request, original=original, predecessor=context.predecessor,
-            superseded=context.superseded,
+        pool = None
+        if (context.request.pool_baseline is not None or isinstance(context.predecessor, CompletedPoolCutover)
+                or (isinstance(context.predecessor, CompletedRefresh) and context.predecessor.pool_baseline is not None)):
+            from scripts.ops.nebius_pool_cutover_entry import connected_pool_api
+            from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+            from scripts.ops.nebius_pool_refresh_live import HTTPSPoolRefreshAPI
+
+            if not isinstance(context.predecessor, (CompletedPoolCutover, CompletedRefresh)):
+                raise EntryError('pool refresh predecessor differs')
+            projection = PoolManagerRefresh(original, context.predecessor, context.request,
+                Path(operation['state_dir']), context.superseded)
+            # Pool authority keeps its own fixed reader/credential lifetime; do
+            # not widen the retained manager reader into execution namespaces.
+            parent = stack.enter_context(connected_pool_api(projection.qualify().context, refresh=projection))
+            pool = HTTPSPoolRefreshAPI(parent=parent)
+        api = stack.enter_context(HTTPSManagementRefreshInstaller(request=context.request, original=original,
+            predecessor=context.predecessor, superseded=context.superseded, pool=pool,
             state_dir=Path(operation['state_dir']), api_server=connection.endpoint, ssl_context=trust, token=token,
-            runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks) as api:
-            yield api
+            runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks))
+        yield api
 
 
 def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: str) -> dict[str, Any]:

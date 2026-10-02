@@ -66,7 +66,7 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "refresh_manager", "refresh_recovery", "refresh_prerequisites", "refresh_config", "refresh_retire",
     "refresh_manager_probe", "refresh_shared_probe", "refresh_backup", "refresh_migration",
     "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
-    "refresh_public_authentication", "refresh_completion", "refresh_supersession",
+    "refresh_public_authentication", "refresh_completion", "refresh_supersession", "refresh_pool_authority",
     *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES)})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
