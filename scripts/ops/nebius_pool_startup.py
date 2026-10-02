@@ -151,18 +151,22 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     """
     operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
     paths = (state_dir / "startup.json", anchor_dir / (operation + "-startup.json"))
-    if not any(path.exists() or path.is_symlink() for path in paths):
+    from scripts.ops.nebius_pool_startup_fence import fenced_startup_options, startup_fence_exists
+
+    started = any(path.exists() or path.is_symlink() for path in paths)
+    if not started and not startup_fence_exists(request, state=state_dir, anchor=anchor_dir):
         return None
     closed, targets = closed_startup_documents(request, state_dir=state_dir, anchor_dir=anchor_dir)
     _, record = _startup_record(request, state=state_dir, anchor=anchor_dir, closed=closed, targets=targets)
-    if record is None:
+    if record is None and started:
         raise ValueError
     choices: dict[str, tuple[dict[str, Any], ...]] = {}
     for key, original in closed.items():
-        phase = record["workloads"].get(key, {"phase": "prepared"})["phase"]
+        phase = ({} if record is None else record["workloads"]).get(key, {"phase": "prepared"})["phase"]
         choices[key] = ((original,) if phase == "prepared" else (targets[key],) if phase == "started"
             else (original, targets[key]))
-    return choices
+    return fenced_startup_options(request, state=state_dir, anchor=anchor_dir,
+        closed=closed, targets=targets, startup=record, choices=choices)
 
 
 def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,

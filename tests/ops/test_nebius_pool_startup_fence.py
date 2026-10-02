@@ -133,7 +133,8 @@ def test_no_uncertain_startup_needs_no_mutation(closed_startup, start_first):
     assert not api.fence_calls
 
 
-@pytest.mark.parametrize('damage', ['uid', 'spec', 'foreign_marker', 'pool', 'guard', 'retained', 'activation', 'startup', 'missing_anchor'])
+@pytest.mark.parametrize('damage', ['uid', 'spec', 'foreign_marker', 'pool', 'guard', 'retained', 'activation', 'startup',
+    'missing_anchor', 'stale_version', 'changed_settled'])
 def test_fence_rejects_unqualified_scope_and_recovery_evidence(closed_startup, damage):
     api, key = pending_cancelled(closed_startup)
     if damage == 'uid':
@@ -151,9 +152,15 @@ def test_fence_rejects_unqualified_scope_and_recovery_evidence(closed_startup, d
     elif damage in {'activation', 'startup'}:
         (api.state / (damage + '.json')).write_bytes(b'{}')
     else:
+        original_version = api.startup.documents[key]['metadata']['resourceVersion']
         fence(closed_startup, api)
         _, _, _, _, _, root = closed_startup
-        next((root / 'cutover-anchor').glob('*-startup-fence.json')).unlink()
+        if damage == 'missing_anchor':
+            next((root / 'cutover-anchor').glob('*-startup-fence.json')).unlink()
+        elif damage == 'stale_version':
+            api.startup.documents[key]['metadata']['resourceVersion'] = original_version
+        else:
+            api.startup.documents[key]['spec']['replicas'] = 1
         api.fence_calls.clear()
     with pytest.raises(ValueError) as error:
         fence(closed_startup, api)

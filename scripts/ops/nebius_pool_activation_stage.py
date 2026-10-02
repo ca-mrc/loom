@@ -14,7 +14,6 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_startup import (
-    _observe_workloads,
     _startup_record,
     closed_startup_documents,
 )
@@ -113,10 +112,12 @@ def advance_pool_activation(*, request: PoolCutoverRequest, api: PoolActivationA
                         for row in request.fencing.retirement.migration.guards}}
 
             def observe() -> tuple[str, dict[str, str]]:
+                from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
+
                 if _hash(state / 'cutover.json') != identity['closure_sha256'] or _startup_hash(state) != identity['startup_sha256']:
                     raise ValueError
                 api.verify_retained()
-                _observe_workloads(api, closed, targets, startup or {'workloads': {}})
+                observe_recovery_workloads(request, api, state=state, anchor=anchor)
                 mode = api.pool_state()
                 guard_states = {key: api.guard_state(key) for key in record['guards']}
                 if mode not in _pool_choices(record) or any(

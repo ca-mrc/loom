@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import os
+import threading
 from uuid import uuid4
 
 import pytest
@@ -24,13 +25,17 @@ async def test_real_startup_fence_blocks_delayed_patch_and_preserves_templates()
         namespace = 'startup-fence'
         await asyncio.to_thread(core.create_namespace, {'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {'name': namespace}})
 
-        async def call(path, method, body=None):
-            return await asyncio.to_thread(core.api_client.call_api, path, method,
-                body=body, response_type='object', auth_settings=['BearerToken'], _return_http_data_only=True,
-                header_params={'Content-Type': 'application/json-patch+json' if method == 'PATCH' else 'application/json'})
+        async def call(path, method, body=None, *, ready=None):
+            def execute():
+                if ready is not None:
+                    ready.wait(timeout=10)
+                return core.api_client.call_api(path, method,
+                    body=body, response_type='object', auth_settings=['BearerToken'], _return_http_data_only=True,
+                    header_params={'Content-Type': 'application/json-patch+json' if method == 'PATCH' else 'application/json'})
+            return await asyncio.to_thread(execute)
 
         for kind in ('Deployment', 'CronJob'):
-            for winner in ('fence', 'start'):
+            for winner in ('fence', 'start', 'concurrent'):
                 name = kind.lower() + '-' + winner
                 template = {'metadata': {'labels': {'app': name}}, 'spec': {
                     'containers': [{'name': 'test', 'image': 'busybox:1.36', 'command': ['sleep', '600']}],
@@ -53,6 +58,21 @@ async def test_real_startup_fence_blocks_delayed_patch_and_preserves_templates()
                         {'op': 'test', 'path': '/spec', 'value': copy.deepcopy(before['spec'])},
                         {'op': 'replace', 'path': '/spec/' + field, 'value': 1 if kind == 'Deployment' else False}]
                     barrier = startup_fence_patches(original, before, operation)
+                    actual_winner = winner
+                    if winner == 'concurrent':
+                        ready = threading.Barrier(2)
+                        replies = await asyncio.gather(call(path, 'PATCH', barrier, ready=ready),
+                            call(path, 'PATCH', pending, ready=ready), return_exceptions=True)
+                        successes = [(label, reply) for label, reply in zip(('fence', 'start'), replies, strict=True)
+                            if not isinstance(reply, BaseException)]
+                        assert all(not isinstance(reply, BaseException) or
+                            (isinstance(reply, ApiException) and reply.status in (409, 422)) for reply in replies)
+                        assert len(successes) <= 1, 'both original-version CAS requests committed'
+                        if successes:
+                            actual_winner, settled = successes[0]
+                            break
+                        assert attempt < 9
+                        continue
                     try:
                         settled = await call(path, 'PATCH', barrier if winner == 'fence' else pending)
                         break
@@ -61,12 +81,12 @@ async def test_real_startup_fence_blocks_delayed_patch_and_preserves_templates()
                 assert settled['metadata']['uid'] == before['metadata']['uid']
                 assert settled['metadata']['resourceVersion'] != before['metadata']['resourceVersion']
                 with pytest.raises(ApiException) as error:
-                    await call(path, 'PATCH', pending if winner == 'fence' else barrier)
+                    await call(path, 'PATCH', pending if actual_winner == 'fence' else barrier)
                 assert error.value.status in (409, 422)
                 current = await call(path, 'GET')
                 assert current['spec'] == settled['spec']
                 assert current['metadata']['annotations']['fixture'] == 'preserved'
-                if winner == 'fence':
+                if actual_winner == 'fence':
                     assert current['metadata']['annotations']['loom.nebius/pool-startup-fence'] == str(operation)
                     assert current['spec'] == before['spec']
                 else:

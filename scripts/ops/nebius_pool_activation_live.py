@@ -5,14 +5,20 @@ The anchored activation journal owns ordering and all uncertain outcomes.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
+from scripts.ops.nebius_ingress_stage import _uid
+from scripts.ops.nebius_management_switch import _stable
 from scripts.ops.nebius_pool_activation_stage import activation_record
 from scripts.ops.nebius_pool_migration import PoolGuardTarget
-from scripts.ops.nebius_pool_startup import (
-    _observe_workloads,
-    _startup_record,
-    closed_startup_documents,
+from scripts.ops.nebius_pool_retirement_live import _patch_result
+from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
+from scripts.ops.nebius_pool_startup_fence import (
+    _fence_record,
+    marked_startup_document,
+    observe_recovery_workloads,
+    startup_fence_patches,
 )
 from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
 
@@ -38,9 +44,7 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             for guard in migration.guards:
                 if parent.guards.runtime_role(guard, 'inspect') != {'status': 'qualified'}:
                     raise ValueError
-            _, startup = _startup_record(self.request, state=self.state, anchor=self.anchor,
-                closed=self.closed, targets=self.targets)
-            _observe_workloads(self, self.closed, self.targets, startup or {'workloads': {}})
+            observe_recovery_workloads(self.request, self, state=self.state, anchor=self.anchor)
             parent.qualify_writer_bindings()
             self._scope()
         except Exception:
@@ -111,3 +115,35 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         if self.parent.guards.activation_guard(target, 'fence') != 'fenced':
             raise ValueError('pool_activation_guard_fence_unconfirmed')
         self._post_write(record)
+
+    def _startup_fence_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            _, startup = _startup_record(self.request, state=self.state, anchor=self.anchor,
+                closed=self.closed, targets=self.targets)
+            _, record = _fence_record(self.request, state=self.state, anchor=self.anchor,
+                closed=self.closed, targets=self.targets, startup=startup)
+            if (startup is None or record is None or key not in record['workloads']
+                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent', 'expected': None}
+                    or startup['workloads'][key]['phase'] != 'intent'
+                    or before['metadata']['resourceVersion'] != startup['workloads'][key]['before_resource_version']):
+                raise ValueError
+            operation = self.request.fencing.retirement.migration.registration.spec.operation_id
+            if _stable(desired) != _stable(marked_startup_document(self.closed[key], operation)):
+                raise ValueError
+            patches = startup_fence_patches(self.closed[key], before, operation)
+            self.verify_retained()
+            if self.pool_state() != 'fenced' or any(self.guard_state(str(row.participant_id)) != 'fenced'
+                    for row in self.request.fencing.retirement.migration.guards):
+                raise ValueError
+            with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(self.closed[key]))
+        except Exception:
+            raise ValueError('pool_startup_fence_update_unconfirmed') from None
+
+    def preview_startup_fence(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._startup_fence_patch(key, before, desired, preview=True) else None
+
+    def fence_startup(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._startup_fence_patch(key, before, desired, preview=False)

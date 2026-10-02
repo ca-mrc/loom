@@ -2576,6 +2576,23 @@ checks. Opening separately requires the full fresh startup runtime and gateway
 authority barriers. A guard release requires the same global pool; recovery guard
 fencing requires the confirmed terminal pool fence. Neither connection construction
 nor recovery restores or restarts workloads.
+After global and local cancellation are complete, a separate anchored startup
+fence resolves any still-uncertain original startup PATCH. A different current
+resourceVersion on the same qualified workload UID already invalidates that
+original compare-and-swap. If the version is unchanged, the operation persists
+intent and adds only the fixed top-level `loom.nebius/pool-startup-fence`
+annotation, containing its operation UUID. UID, version, complete metadata and
+spec tests protect that write. The real metadata change advances the version;
+an unchanged replica count or a no-op PATCH is not cancellation evidence.
+If the original startup wins first, the fence loses its version test; if the
+fence wins, the original startup loses. Unknown replies are observed without
+redispatch. Only an explicit API rejection permits another prepared attempt.
+The child journal freezes the activation/startup hashes and each settled exact
+template; entry, writer inventory and activation recovery share that projection.
+Foreign markers and unanchored changes are rejected. Settled or never-dispatched
+startup rows require no metadata write. This barrier leaves Pod templates and
+running cleanup processes unchanged, does not prove process drain, and still
+withholds permission to restore legacy writers.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,
