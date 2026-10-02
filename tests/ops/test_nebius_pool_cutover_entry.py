@@ -397,7 +397,8 @@ def test_concrete_cutover_checks_requalify_the_bound_readers(connected_cutover_e
     assert all(transport.client.is_closed for transport in (api, api.retirement, api.fencing, api.migration.registration))
 
 
-def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(connected_cutover_entry):
+@pytest.mark.parametrize('stage', ['startup', 'activation'])
+def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(connected_cutover_entry, stage):
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_pool_cutover import stage_pool_cutover
     from tests.ops.test_nebius_pool_cutover import CutoverAPI
@@ -410,12 +411,14 @@ def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(c
     assert stage_pool_cutover(request=context.request, tokens=context.tokens, api=closed,
         state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
     before = {path: path.read_bytes() for path in state.rglob('*.json')}
-    with entry.connected_pool_startup_api(context) as startup:
+    connect = entry.connected_pool_startup_api if stage == 'startup' else entry.connected_pool_activation_api
+    with connect(context) as startup:
         parent = startup.parent
         assert startup.request == context.request and startup.state == state and startup.anchor == anchor
         assert parent.guards is readers.guards and parent.history is readers.history
         assert not observed['closed']
         assert not (state / 'startup.json').exists()
+        assert not (state / 'activation.json').exists()
         assert {path: path.read_bytes() for path in state.rglob('*.json')} == before
     assert observed['closed'] and all(transport.client.is_closed for transport in (
         parent, parent.retirement, parent.fencing, parent.migration.registration))
