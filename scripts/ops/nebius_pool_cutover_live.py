@@ -195,6 +195,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         Parent anchor, retained closed/fenced receipts and authority-stage intent
         must correspond. No journal update, CREATE retry or resource adoption.
         """
+        from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
+
         state, anchor = self.state_dir, self.anchor_dir
         if state is None or anchor is None:
             return {}
@@ -235,6 +237,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         stage = json.loads(private_state._private_read(path, limit=4 * 1024**2))
         _validate_record(stage, {"schema": "loom.nebius-management-stage.v1", "binding": asdict(self.binding),
             "revision": digest(documents), "phase": "pool-cutover-authority"}, documents)
+        options = gateway_retirement_options(self.request, state=state, anchor=anchor)
         live = {_key(row): row for rows in inventory.values() for row in rows}
         approved = {}
         for key, item in stage["resources"].items():
@@ -253,7 +256,11 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             # stage's contains-oriented dry-run record cannot approve it.
             if "aggregationRule" in actual:
                 raise ValueError
-            if (_comparison_snapshot(actual) != item["expected"]
+            if options is not None:
+                if (checksum is None or item['status'] != 'created' or _uid(actual) != item['uid']
+                        or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options[key])):
+                    raise ValueError
+            elif (_comparison_snapshot(actual) != item["expected"]
                     or (item["status"] == "created" and (
                         _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]))):
                 raise ValueError

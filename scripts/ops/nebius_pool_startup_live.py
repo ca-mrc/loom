@@ -63,21 +63,26 @@ class HTTPSPoolStartupAPI:
 
     def _qualify_retained_resources(self) -> None:
         """Mode-independent identity/permission proof shared with recovery."""
+        from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
+
         parent = self.parent
         roles = role_fence_documents(self.request.fencing)
         for original in self.request.fencing.originals:
             if not _matches(parent.fencing.read_role(_key(original)), roles[_key(original)], _uid(original)):
                 raise ValueError
         parent.fencing.verify_readonly()
-        # Gateway replicas may change. Every other staged resource remains
-        # exactly its installed child receipt; this never repairs drift.
+        # Only an anchored gateway retirement can reduce installed authority.
+        # All other resources retain their exact child receipt.
+        authority_options = gateway_retirement_options(self.request, state=self.state, anchor=self.anchor)
         for phase in ("material", "configuration", "authority"):
             child = json.loads(private_state._private_read(self.state / phase / "stage.json", limit=4 * 1024**2))
-            for item in child["resources"].values():
+            for key, item in child["resources"].items():
                 if item["status"] != "created":
                     raise ValueError
                 actual = parent.resources.get_resource(item["desired"])
-                if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                options = (item['observed'],) if phase != 'authority' or authority_options is None else authority_options[key]
+                if (actual is None or _uid(actual) != item["uid"]
+                        or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options)):
                     raise ValueError
 
     def _started_workloads(self) -> dict[str, dict[str, Any]]:

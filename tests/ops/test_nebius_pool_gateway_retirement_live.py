@@ -21,8 +21,14 @@ from tests.ops.test_nebius_pool_activation_live import platform_inputs as platfo
 from tests.ops.test_nebius_pool_activation_live import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_activation_live import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_activation_live import startup_http as startup_http
-from tests.ops.test_nebius_pool_activation_live import unbound_cutover_inputs as unbound_cutover_inputs
-from tests.ops.test_nebius_pool_gateway_retirement import READER_RULES, gateway_retire, machine_retired
+from tests.ops.test_nebius_pool_activation_live import (
+    unbound_cutover_inputs as unbound_cutover_inputs,
+)
+from tests.ops.test_nebius_pool_gateway_retirement import (
+    READER_RULES,
+    gateway_retire,
+    machine_retired,
+)
 
 
 @pytest.fixture
@@ -105,7 +111,9 @@ def retirement_http(activation_http, closed_startup):
     return connect
 
 
-@pytest.mark.timeout(900)
+# Six namespace Roles plus repeated recovery traverse every retained-scope
+# barrier. The complete run measured 899.94s; retain assertions with CI headroom.
+@pytest.mark.timeout(1200)
 def test_connected_role_retirement_preserves_cas_intent_and_effective_authority(retirement_http, closed_startup):
     with retirement_http() as (api, state, apply_role):
         key = next(key for key in state.objects if key.startswith('Role:'))

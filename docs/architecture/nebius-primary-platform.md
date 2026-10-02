@@ -2649,6 +2649,23 @@ it does not require a running gateway or its token. This stage still grants no
 legacy-restoration authority: gateway Kubernetes-role retirement and safe
 workload/role restoration remain separate prerequisites.
 
+Gateway-role retirement then removes only `create` and `delete` from the exact
+installed gateway namespace Roles. Their UIDs, read rules, bindings and the
+namespace-reader ClusterRole are retained. Its child journal is anchored to the
+completed machine revocation and original authority receipt; each update tests
+the UID, resourceVersion, complete metadata and original rules. Intent is durable
+before dispatch. Unknown replies are observation-only, and a definite rejection
+alone permits another prepared attempt. Both retained-resource and writer-inventory
+readers accept the same anchored original/reduced projections during partial
+retirement, without accepting arbitrary drift or unanchored permission changes.
+The connected transport requires fresh process/journal drain, closed admission
+and revoked machine authority before every update. Completion also requires
+effective gateway permission reviews across registered namespaces and all foreign
+RoleBinding namespaces naming its identity or groups; an extra named grant or
+incomplete review blocks completion even if every fixed Role is read-only.
+No binding is deleted, no unrelated resource is changed, and legacy-restoration
+permission remains withheld until the separate workload/role restoration path.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

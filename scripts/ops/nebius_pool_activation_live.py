@@ -8,9 +8,18 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from scripts.ops.nebius_ingress_stage import _uid
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import activation_record
+from scripts.ops.nebius_pool_gateway_authority import (
+    gateway_review_namespaces,
+    review_gateway_rules,
+)
+from scripts.ops.nebius_pool_gateway_retirement import (
+    _gateway_record,
+    qualify_gateway_retirement_drain,
+)
 from scripts.ops.nebius_pool_machine_database import MachineRetirementState
 from scripts.ops.nebius_pool_machine_retirement import (
     _machine_record,
@@ -178,6 +187,76 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 raise ValueError
         except Exception:
             raise ValueError('pool_machine_retirement_update_unconfirmed') from None
+
+    def read_gateway_authority(self, key: str) -> dict[str, Any]:
+        try:
+            self._scope()
+            originals, _, _, _ = _gateway_record(self.request, state=self.state, anchor=self.anchor)
+            original = originals[key]
+            actual = self.parent.resources.get_resource(self.parent.documents[key])
+            if (actual is None or _key(actual) != key or _uid(actual) != _uid(original)
+                    or any(actual.get(field) != original[field] for field in ('apiVersion', 'kind'))
+                    or not isinstance(actual['metadata'].get('resourceVersion'), str)
+                    or not 0 < len(actual['metadata']['resourceVersion']) <= 128):
+                raise ValueError
+            _snapshot(actual)
+            return actual
+        except Exception:
+            raise ValueError('pool_gateway_authority_read_unqualified') from None
+
+    def _gateway_role_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            originals, targets, _, record = _gateway_record(self.request, state=self.state, anchor=self.anchor)
+            version = before['metadata']['resourceVersion']
+            if (record is None or key not in targets or not _matches(before, originals[key], _uid(originals[key]))
+                    or _stable(desired) != _stable(targets[key])
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
+                        'before_resource_version': None if preview else version}):
+                raise ValueError
+            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            if _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(originals[key])},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/rules', 'value': before['rules']},
+                {'op': 'replace', 'path': '/rules', 'value': targets[key]['rules']}]
+            path = self.parent._approved(self.parent.documents[key]) + '/' + originals[key]['metadata']['name']
+            with self.parent.client.stream('PATCH', path + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(originals[key]))
+        except Exception:
+            raise ValueError('pool_gateway_role_update_unconfirmed') from None
+
+    def preview_gateway_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._gateway_role_patch(key, before, desired, preview=True) else None
+
+    def restrict_gateway_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._gateway_role_patch(key, before, desired, preview=False)
+
+    def qualify_gateway_retired(self) -> None:
+        """Prove effective read-only rights, not just the fixed Role manifests."""
+        try:
+            originals, targets, _, record = _gateway_record(self.request, state=self.state, anchor=self.anchor)
+            if record is None or any(row['phase'] != 'restricted' for row in record['roles'].values()):
+                raise ValueError
+            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            bindings = [row for resource, kind in (('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))
+                for row in inventory_resources(self.parent._request, 'rbac.authorization.k8s.io/v1', resource, kind)]
+            migration = self.request.fencing.retirement.migration
+            authority = list({**originals, **targets}.values())
+            for namespace in gateway_review_namespaces(migration, bindings):
+                review_gateway_rules(self.parent.client, manager_namespace=migration.registration.binding.namespace,
+                    namespace=namespace, authority=authority)
+            if (qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None
+                    or _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record):
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_gateway_retired_authority_unconfirmed') from None
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
