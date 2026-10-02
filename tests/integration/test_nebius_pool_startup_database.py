@@ -8,6 +8,7 @@ import psycopg
 import pytest
 from sqlalchemy import insert, select, update
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ProgrammingError
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
@@ -55,7 +56,11 @@ def observe(url, spec, *, mode='closed'):
 
 async def test_dedicated_builder_scope_survives_startup_and_qualified_retirement(sessions, build_inputs):
     from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
-    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql, qualify_machine_retirement_report
+    from scripts.ops.nebius_pool_machine_database import (
+        pool_machine_retirement_sql,
+        qualify_machine_retirement_report,
+    )
+
     from tests.integration.test_nebius_pool_activation_fence import read_sql
 
     config, _ = installation()
@@ -70,18 +75,17 @@ async def test_dedicated_builder_scope_survives_startup_and_qualified_retirement
         async with sessions.begin() as session:
             await session.execute(update(NebiusPoolMachine).where(NebiusPoolMachine.machine_id == builder).values(workload_scope=value))
 
-    await scope('environment')
-    with pytest.raises(ValueError, match='pool_startup_closed_registration_unqualified'):
-        observe(url, spec)
-    await scope('application_builder')
+    # The actual schema rejects scope replacement before a reader can see it.
+    # Preserve that trigger rather than manufacturing a weaker database fixture.
+    with pytest.raises(ProgrammingError, match='global pool machine identity is immutable'):
+        await scope('environment')
+    assert observe(url, spec)['qualified'] is True
     read_sql(url, fence_pool_activation_sql(spec))
     assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='observe'))) == 'active'
-    await scope('environment')
-    with pytest.raises(psycopg.errors.RaiseException, match='retirement scope unqualified'):
-        read_sql(url, pool_machine_retirement_sql(spec, action='revoke'))
+    with pytest.raises(ProgrammingError, match='global pool machine identity is immutable'):
+        await scope('environment')
     async with sessions() as session:
         assert set(await session.scalars(select(NebiusPoolMachine.phase))) == {'active'}
-    await scope('application_builder')
     assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='revoke'))) == 'revoked'
     async with sessions() as session:
         rows = list(await session.scalars(select(NebiusPoolMachine)))
