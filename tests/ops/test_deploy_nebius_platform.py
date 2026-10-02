@@ -535,16 +535,17 @@ def test_retirement_cannot_name_the_destination_or_fresh_install(rendered, monke
     assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
 
 
+@pytest.mark.parametrize("guest_field", ["guest_execution_target", "emulated_auth_execution_target"])
 @pytest.mark.parametrize("change", ["remove-guest", "rename-guest", "replace-owner"])
-def test_guest_target_replacement_requires_separate_retirement_protocol(rendered, change):
+def test_guest_target_replacement_requires_separate_retirement_protocol(rendered, change, guest_field):
     _, config, _, _ = rendered
-    previous = {**config, "guest_execution_target": {"target_id": "guest-original"}}
+    previous = {**config, guest_field: {"target_id": "guest-original"}}
     proposed = {**previous}
     retire = None
     if change == "remove-guest":
-        proposed.pop("guest_execution_target")
+        proposed.pop(guest_field)
     elif change == "rename-guest":
-        proposed["guest_execution_target"] = {"target_id": "guest-replacement"}
+        proposed[guest_field] = {"target_id": "guest-replacement"}
     else:
         proposed["target_id"] = "owner-replacement"
         retire = previous["target_id"]

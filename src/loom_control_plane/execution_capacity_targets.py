@@ -15,16 +15,17 @@ from loom.db.schema import ServiceExecutionTarget
 from loom.execution_contract import (
     ExecutionTargetV1,
     nebius_cpu_execution_class,
-    nebius_guest_execution_class,
+    nebius_guest_class_by_id,
 )
 from loom_execution_capacity_collector.contracts import CapacityTargetScopeV1
 
 
 def validate_capacity_owner(alias: ExecutionTargetV1, owner: ExecutionTargetV1) -> None:
     """Only an exact guest sibling may consume the ordinary target's capacity."""
-    web = alias.execution_class_id == nebius_guest_execution_class(supports_task_web_egress=True).class_id
+    guest_class = nebius_guest_class_by_id(alias.execution_class_id)
+    web = guest_class.supports_task_web_egress if guest_class is not None else False
     if (alias.capacity_owner_target_id != owner.target_id or owner.capacity_owner_target_id is not None
-            or alias.execution_class_id != nebius_guest_execution_class(supports_task_web_egress=web).class_id
+            or guest_class is None
             or owner.execution_class_id != nebius_cpu_execution_class(supports_task_web_egress=web).class_id
             or alias.cluster_scope_id is None
             or any(getattr(alias, key) != getattr(owner, key) for key in (

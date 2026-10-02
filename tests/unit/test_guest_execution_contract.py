@@ -116,6 +116,31 @@ def test_plain_workload_projection_and_class_selection_stay_shared_kernel() -> N
     assert {reason.code for reason in guest.reasons} == {"isolation_level_unsupported"}
 
 
+@pytest.mark.parametrize("web,digest", [
+    (False, "b922d1a3acfba319abb3fbd5bf671574e46e4d4710fe23f97417b9cd6562b292"),
+    (True, "06296647d4903ae1ab6f008e3dff9055e45f6913d11e829ecae568713755aaf9"),
+])
+def test_emulated_auth_requires_new_class_and_preserves_installed_guest_bytes(web, digest):
+    historical = contract.nebius_guest_execution_class(supports_task_web_egress=web)
+    assert hashlib.sha256(historical.model_dump_json().encode()).hexdigest() == digest
+    task = _task("emulated_pkcs11_authentication")
+    requirements = contract.workload_requirements_from_task(task)
+    assert requirements.isolation_level == "dedicated_guest_kernel"
+    rejected = contract.evaluate_execution_admission(requirements, historical)
+    assert {reason.code for reason in rejected.reasons} == {"emulated_pkcs11_authentication_unqualified"}
+    qualified = contract.nebius_guest_execution_class(
+        supports_task_web_egress=web, supports_emulated_pkcs11=True,
+    )
+    assert qualified.class_id == (
+        "linux-amd64-cpu-guest-auth-web-v1" if web else "linux-amd64-cpu-guest-auth-v1"
+    )
+    assert contract.evaluate_execution_admission(requirements, qualified).compatible
+    physical = contract.workload_requirements_from_task(_task("emulated_pkcs11_authentication", "pkcs11_authentication"))
+    assert {reason.code for reason in contract.evaluate_execution_admission(physical, qualified).reasons} == {
+        "pkcs11_authentication_unqualified",
+    }
+
+
 @pytest.mark.parametrize(
     "flag",
     [
