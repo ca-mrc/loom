@@ -5,7 +5,10 @@ import copy
 import json
 import ssl
 from contextlib import contextmanager
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -15,12 +18,36 @@ from tests.ops.test_nebius_pool_startup import collector_inputs as collector_inp
 from tests.ops.test_nebius_pool_startup import (
     cutover_binding_inventory as cutover_binding_inventory,
 )
-from tests.ops.test_nebius_pool_startup import cutover_inputs as cutover_inputs
+from tests.ops.test_nebius_pool_startup import cutover_inputs as unbound_cutover_inputs
 from tests.ops.test_nebius_pool_startup import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_startup import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_startup import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_startup import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_startup import runtime_inputs as runtime_inputs
+
+
+@pytest.fixture
+def cutover_inputs(unbound_cutover_inputs, platform_inputs):
+    from scripts.ops.nebius_pool_migration import PoolGuardDatabase
+
+    from loom.nebius_platform_render import build_platform
+
+    request, tokens = unbound_cutover_inputs
+    migration = request.fencing.retirement.migration
+    guards = []
+    for guard in migration.guards:
+        config, candidate, profile = copy.deepcopy(platform_inputs)
+        config['namespace'] = guard.namespace
+        documents = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+        database, = [row for row in documents['20-database.yaml'] if row['kind'] == 'StatefulSet']
+        service, = [row for row in documents['20-database.yaml'] if row['kind'] == 'Service']
+        for document in (database, service):
+            document['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+        guards.append(replace(guard, database=PoolGuardDatabase(statefulset=database, service=service,
+            credential_uid=uuid4(), credential_resource_version='7',
+            actuator_credential_uid=uuid4(), actuator_credential_resource_version='11')))
+    return replace(request, fencing=replace(request.fencing,
+        retirement=replace(request.fencing.retirement, migration=replace(migration, guards=tuple(guards))))), tokens
 
 
 @pytest.fixture
@@ -199,3 +226,78 @@ def test_fixed_startup_refuses_live_authority_drift_and_out_of_journal_patch(sta
                 stage_pool_startup(request=request, api=api, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
             assert 'private-marker' not in str(error.value)
         assert state.writes == []
+
+
+@pytest.mark.parametrize('damage', [None, 'incomplete', 'unanchored', 'uid', 'manager', 'database', 'telemetry', 'late_guard', 'late_runtime'])
+def test_started_database_proof_derives_exact_successors_and_rechecks_closure(startup_http, closed_startup, damage):
+    from scripts.ops.nebius_ingress_stage import _uid
+    from scripts.ops.nebius_management_switch import _stable
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_startup import stage_pool_startup
+
+    request, _, _, external, dormant, root = closed_startup
+    if damage == 'incomplete':
+        external.fail_key, external.failure = _key(request.manager), 'before'
+    result = stage_pool_startup(request=request, api=external, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
+    assert result['status'] == ('pending_startup_outcome' if damage == 'incomplete' else 'pool_startup_staged_closed')
+    with startup_http() as (api, state):
+        state.objects.update(copy.deepcopy(external.documents))
+        if damage == 'unanchored':
+            (root / 'cutover-anchor' / (str(request.fencing.retirement.migration.registration.spec.operation_id) + '-startup.json')).unlink()
+        elif damage == 'uid':
+            state.objects[_key(request.manager)]['metadata']['uid'] = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
+        probes = []
+
+        def expected_runtime(original, expected):
+            assert _stable(expected) == _stable(state.objects[_key(original)])
+            assert _uid(expected) == _uid(original)
+            assert expected['spec']['replicas'] == 1
+            assert original not in (dormant.actuator, dormant.collector)
+
+        def manager(*, expected):
+            expected_runtime(request.manager, expected)
+            probes.append(('manager', _key(request.manager)))
+            if damage == 'manager':
+                raise PoolMigrationError('management_runtime_database')
+
+        def database(target, *, original, expected, credential_uid, credential_resource_version):
+            expected_runtime(original, expected)
+            binding = target.database
+            actuator = original['metadata']['namespace'] != target.namespace
+            assert (credential_uid, credential_resource_version) == (
+                (binding.actuator_credential_uid, binding.actuator_credential_resource_version) if actuator
+                else (binding.credential_uid, binding.credential_resource_version))
+            probes.append(('database', _key(original)))
+            if damage == 'database':
+                raise PoolMigrationError('runtime_database')
+
+        def telemetry(target, *, original, expected):
+            expected_runtime(original, expected)
+            assert original in request.fencing.retirement.actuators
+            probes.append(('telemetry', _key(original)))
+            if damage == 'telemetry':
+                raise PoolMigrationError('runtime_telemetry')
+            if damage == 'late_guard':
+                state.fail_guard = True
+            elif damage == 'late_runtime':
+                state.objects[_key(request.manager)]['spec']['replicas'] = 0
+
+        # Remote probe transport is doubled here; the owning probe tests run
+        # real settings and reject unrelated lineage, credentials and backends.
+        api.parent.history.qualify_manager_database = manager
+        api.parent.guards.qualify_runtime_database = database
+        api.parent.guards.qualify_runtime_telemetry = telemetry
+        if damage:
+            with pytest.raises(ValueError, match='pool_startup_database_runtimes_unqualified'):
+                api.qualify_database_runtimes()
+            if damage in {'incomplete', 'unanchored', 'uid'}:
+                assert not probes
+        else:
+            assert api.qualify_database_runtimes() is None
+            originals = [*(guard.controller for guard in request.fencing.retirement.migration.guards),
+                *request.services, *request.fencing.retirement.actuators]
+            assert set(probes) == {('manager', _key(request.manager)),
+                *(('database', _key(row)) for row in originals),
+                *(('telemetry', _key(row)) for row in request.fencing.retirement.actuators)}
+            assert len(probes) == 1 + len(originals) + len(request.fencing.retirement.actuators)
+        assert not state.writes and all(call.method == 'GET' for call in state.calls)
