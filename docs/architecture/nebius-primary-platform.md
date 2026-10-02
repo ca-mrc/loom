@@ -1015,7 +1015,23 @@ attempt number is the replay key, so a repeated retry cannot create two successo
 The successor keeps the original source and recipe. These endpoints return 503
 without the explicitly configured build registry and are absent from personal
 application services. This implementation does not itself configure management
-credentials, install the read-only role, or qualify a deployable release.
+credentials or install the read-only role.
+
+Ready build status includes a deployable `ApplicationReleaseV1`: its release ID
+is the build ID, and its source/schema and immutable service/web image digests
+come from the retained qualified publisher receipt. Resolution is scoped to the
+authenticated owner/team and installed management/data/cluster binding. A published
+but still-settling build is not a release; the retained released pool receipt must
+match the original request, reservation, plan and Job. SQL makes ready attempts
+immutable and prohibits retrying them, so the same release ID cannot later target
+different images. Changing the current recipe catalog does not change old releases.
+
+`ApplicationManager` accepts these completed owner builds alongside the protected
+pinned release catalog. Create/update/resume use the same build registry as the
+automatic worker and owner status routes. They still enforce exact shared-schema
+compatibility and freeze the selected release and rendered images in the operation.
+Already-frozen operation replay does not need the current catalog or a running
+builder. Resume resolves the application's recorded release, never a newer build.
 
 Optional protected `applications.runtime.build` settings connect these controls
 and the automatic worker to the management service lifecycle. They bind the

@@ -1,7 +1,7 @@
 """Owner build intent and exact replay, before shared-pool dispatch.
 
-Only verified source can create a queued intent. This registry performs no
-network call, capacity reservation, Kubernetes write or release qualification.
+Only verified source can create a queued intent; only completed, cleanup-qualified
+attempts yield releases. No network call, capacity reservation or Kubernetes write.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from loom.application_image_build import (
     ApplicationImageBuildBindingV1,
     ApplicationImageBuildClaimV1,
     ApplicationImageBuildStatusV1,
+    ApplicationImagePublicationV1,
 )
 from loom.application_source_upload import ApplicationSourceUploadRequestV1
 from loom.auth import AuthContext
@@ -24,7 +25,12 @@ from loom.db.nebius_application_build_schema import (
     NebiusApplicationBuildAttempt,
 )
 from loom.db.nebius_application_source_schema import NebiusApplicationSourceUpload
+from loom.nebius_application_contract import ApplicationReleaseV1
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
+from loom.nebius_pool_contract import PoolReceiptV1
+from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom.pipeline.keys import canonical_digest
+from loom_service.application_management.build_publication import qualify_publication
 from loom_service.application_management.source_registry import ApplicationSourceRegistry
 from loom_service.environment_management.registry import ManagementError, owner_identity
 
@@ -62,6 +68,31 @@ def retained_build_claim(row: NebiusApplicationBuild, attempt: NebiusApplication
     return binding, claim
 
 
+def _ready_release(row: NebiusApplicationBuild, attempt: NebiusApplicationBuildAttempt,
+                   claim: ApplicationImageBuildClaimV1) -> ApplicationReleaseV1:
+    """Read immutable journal evidence; never turn Job completion alone into a release."""
+    settlement = attempt.settlement_json
+    if (attempt.phase != "ready" or row.desired_state != "running" or attempt.lease_token is not None
+            or settlement is None or settlement.get("outcome") != "ready" or settlement.get("cause") != "completed"):
+        raise ValueError("application_build_history_conflict")
+    request = PoolApplicationImagePrepareV1.model_validate(attempt.pool_request_json)
+    receipt = PoolReceiptV1.model_validate(attempt.terminal_receipt_json)
+    observed = PoolNativeRuntimeV1.model_validate(settlement["runtime"]).receipt
+    if (request.build != claim or canonical_digest(attempt.pool_request_json).removeprefix("sha256:") != attempt.pool_request_sha256
+            or receipt.phase != "released" or receipt.pool_id != request.pool_id or receipt.request_key != request.key
+            or receipt.admission_epoch != request.admission_epoch or receipt.request_sha256 != attempt.pool_request_sha256
+            or any(getattr(receipt, field) != getattr(observed, field) for field in (
+                "reservation_id", "pool_id", "request_key", "admission_epoch", "request_sha256", "plan_sha256", "job_uid"))):
+        raise ValueError("application_build_history_conflict")
+    publication = ApplicationImagePublicationV1.model_validate(settlement["publication"])
+    qualify_publication(claim, publication)
+    # Ready attempts are terminal and cannot be retried, so this identity cannot
+    # later refer to different images. No parallel release table/catalog needed.
+    return ApplicationReleaseV1(release_id=row.build_id, source_digest=publication.source_digest,
+        schema_revision=publication.schema_revision, service_image_ref=publication.registry_images["service"],
+        web_image_ref=publication.registry_images["web"])
+
+
 class ApplicationBuildRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, binding: ApplicationImageBuildBindingV1):
         self.session_factory = session_factory
@@ -78,8 +109,9 @@ class ApplicationBuildRegistry:
                 "build_id": row.build_id, "upload_id": row.upload_id, "attempt": row.current_attempt,
                 "phase": attempt.phase, "desired_state": row.desired_state,
                 "source_digest": claim.source.source_digest, "recipe_digest": claim.recipe.digest,
-                "created_at": row.created_at})
-        except (ValueError, TypeError):
+                "created_at": row.created_at,
+                "release": _ready_release(row, attempt, claim) if attempt.phase == "ready" else None})
+        except (ValueError, TypeError, KeyError):
             raise ManagementError("application_build_history_conflict") from None
 
     def _scope(self, principal: AuthContext, *, mutation: bool = False) -> tuple[UUID, UUID]:
@@ -140,6 +172,12 @@ class ApplicationBuildRegistry:
     async def status(self, build_id: UUID, *, principal: AuthContext) -> ApplicationImageBuildStatusV1:
         async with self.session_factory() as session:
             return await self._view(session, await self._owned(session, build_id, principal))
+
+    async def release(self, build_id: UUID, *, principal: AuthContext) -> ApplicationReleaseV1:
+        status = await self.status(build_id, principal=principal)
+        if status.release is None:
+            raise ManagementError("application_build_not_ready")
+        return status.release
 
     @staticmethod
     def _attempt(value: int) -> None:

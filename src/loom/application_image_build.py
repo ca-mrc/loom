@@ -13,6 +13,7 @@ from loom.application_source_upload import (
     application_source_object_key,
 )
 from loom.native_image_build import NativeImageBuildComponentV1
+from loom.nebius_application_contract import ApplicationReleaseV1
 from loom.pipeline.keys import canonical_digest
 
 _IMAGE = r"^[a-z0-9][a-z0-9.:-]*/[a-z0-9][a-z0-9/._-]*@sha256:[0-9a-f]{64}$"
@@ -176,3 +177,4 @@ class ApplicationImageBuildStatusV1(BaseModel):
     source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     recipe_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     created_at: datetime
+    release: ApplicationReleaseV1 | None = None

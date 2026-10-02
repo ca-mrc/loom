@@ -3,10 +3,22 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from loom.application_image_build import ApplicationImagePublicationV1
+from loom.application_image_build import ApplicationImageBuildClaimV1, ApplicationImagePublicationV1
 from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_native_runtime import PoolNativeRuntimeV1
 from loom_execution_actuator.pool_native_observation import qualify_native_observation
+
+
+def qualify_publication(claim: ApplicationImageBuildClaimV1, publication: ApplicationImagePublicationV1) -> None:
+    """Bind trusted publisher output to the retained attempt, including on replay."""
+    for field in ("build_id", "attempt", "upload_id", "installation_id", "owner_user_id", "owner_team_id",
+                  "data_environment_id", "cluster_id"):
+        if getattr(publication, field) != getattr(claim, field):
+            raise ValueError("application_build_publication_conflict")
+    if ((publication.source_digest, publication.recipe_digest, publication.schema_revision, publication.cpu_arch) != (
+            claim.source.source_digest, claim.recipe.digest, claim.recipe.schema_revision, claim.recipe.cpu_arch)
+            or any(ref.split("@", 1)[0] != claim.registry_repository for ref in publication.registry_images.values())):
+        raise ValueError("application_build_publication_conflict")
 
 
 def observed_publication(request: PoolApplicationImagePrepareV1, runtime: PoolNativeRuntimeV1,
@@ -45,15 +57,7 @@ def observed_publication(request: PoolApplicationImagePrepareV1, runtime: PoolNa
         if not isinstance(message, str) or len(message.encode()) > 4096:
             raise ValueError
         publication = ApplicationImagePublicationV1.model_validate_json(message)
-        claim = request.build
-        for field in ("build_id", "attempt", "upload_id", "installation_id", "owner_user_id", "owner_team_id",
-                      "data_environment_id", "cluster_id"):
-            if getattr(publication, field) != getattr(claim, field):
-                raise ValueError
-        if ((publication.source_digest, publication.recipe_digest, publication.schema_revision, publication.cpu_arch) != (
-                claim.source.source_digest, claim.recipe.digest, claim.recipe.schema_revision, claim.recipe.cpu_arch)
-                or any(ref.split("@", 1)[0] != claim.registry_repository for ref in publication.registry_images.values())):
-            raise ValueError
+        qualify_publication(request.build, publication)
         return "ready", publication
     except (ValueError, KeyError, TypeError, AttributeError):
         return "failed", None

@@ -9,7 +9,6 @@ from loom_execution_actuator.pool_client import PoolClient
 from loom_execution_actuator.task_image_controller import NativeBuildKubernetesApi
 from loom_execution_capacity_collector.control_plane import read_owner_only_secret
 from loom_service.application_management.build_journal import ApplicationBuildJournal
-from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.build_worker import ApplicationBuildWorker
 from loom_service.application_management.installation import ApplicationInstallation
 from loom_service.application_management.manager import ApplicationManager
@@ -84,7 +83,9 @@ async def open_build_worker(installation: ApplicationInstallation, manager: Appl
             resources.push_async_callback(credentials.close)
             resources.push_async_callback(kubernetes.close)
             await credentials.get_token()
-            registry = ApplicationBuildRegistry(manager.registry.session_factory, binding=settings.binding)
+            registry = manager.builds
+            if registry is None or registry.binding != settings.binding:
+                raise ValueError("unbound application release resolver")
             worker = ApplicationBuildWorker(ApplicationBuildJournal(registry), management, kubernetes)
         except Exception:
             # Authentication/SDK errors must not expose token bytes or config.

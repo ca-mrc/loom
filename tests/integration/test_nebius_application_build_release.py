@@ -1,6 +1,7 @@
 """Only cleanup-qualified owner builds become immutable deployment releases."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from uuid import uuid4
 
@@ -9,7 +10,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
-from loom.nebius_application_contract import ApplicationCreateRequestV1
+from loom.nebius_application_contract import (
+    ApplicationCreateRequestV1,
+    ApplicationOperationRequestV1,
+    SharedDevelopmentBindingV1,
+)
 from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.registry import ApplicationRegistry
@@ -20,6 +25,14 @@ from tests.integration.test_nebius_application_build_worker import (
     observed_build,
     setup_worker,
 )
+from tests.integration.test_nebius_application_completion import evidence
+from tests.integration.test_nebius_application_completion import stopped_context as stopped_context
+from tests.integration.test_nebius_application_credentials import database_access as database_access
+from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
+from tests.integration.test_nebius_application_material import management_key as management_key
+from tests.integration.test_nebius_application_operations import applications as applications
+from tests.integration.test_nebius_application_preparation import preparation as preparation
+from tests.integration.test_nebius_application_ready import ready_context as ready_context
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
@@ -141,3 +154,63 @@ async def test_manager_rejects_builder_for_another_installation(environment_regi
         with pytest.raises(ValueError, match="application builder differs from shared authority"):
             ApplicationManager(ApplicationRegistry(factory), foundation=foundation, shared=shared, authority=authority,
                 releases=(), builds=foreign)
+
+
+@asynccontextmanager
+async def ready_build(environment_registry, build_inputs, tmp_path, shared, authority):
+    claim = build_inputs[0]
+    claim = claim.model_copy(update={"recipe": claim.recipe.model_copy(update={"schema_revision": shared.schema_revision})})
+    async with setup_worker(environment_registry, (claim, *build_inputs[1:]), tmp_path,
+            data_environment_id=shared.data_environment_id, cluster_id=shared.cluster_id,
+            installation_id=authority.installation_id) as (factory, builds, requests, _, worker, reader):
+        request = requests[0]
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        reader.job = await observed_build(factory, request)
+        finish(reader.job, request)
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        await cleanup(factory, request)
+        await worker.reconcile_once(request.build.build_id, attempt=1)
+        yield builds, request.build.build_id
+
+
+async def test_ready_application_updates_to_built_release_and_replays_frozen_operation(
+        ready_context, environment_registry, build_inputs, platform_inputs, tmp_path):
+    coordinator, registry, _, alice, lease, *_ = ready_context
+    old_plan = await registry.frozen_plan(lease)
+    shared = SharedDevelopmentBindingV1.model_validate(old_plan["shared"])
+    _, _, _, foundation = inputs(platform_inputs)
+    authority = coordinator.runtime.authority
+    await coordinator.start(lease)
+    async with ready_build(environment_registry, build_inputs, tmp_path, shared, authority) as (builds, identity):
+        manager = ApplicationManager(registry, foundation=foundation, shared=shared, authority=authority, releases=(), builds=builds)
+        request = ApplicationOperationRequestV1(action="update", expected_generation=1, release_id=identity)
+        operation = await manager.transition(alice, lease.application_id, request, idempotency_key="build-update")
+        current = await registry.claim(operation.operation_id)
+        plan = await registry.frozen_plan(current)
+        assert plan["release"]["release_id"] == str(identity)
+        assert plan["release"]["service_image_ref"] == builds.binding.registry_repository + "@sha256:" + "a" * 64
+        assert plan["registration"]["incarnation"] == old_plan["registration"]["incarnation"]
+        restarted = ApplicationManager(registry, foundation=foundation, shared=shared, authority=authority, releases=())
+        replay = await restarted.transition(alice, lease.application_id, request, idempotency_key="build-update")
+        assert replay.operation_id == operation.operation_id
+
+
+async def test_resume_never_substitutes_another_build_for_the_original_release(
+        stopped_context, environment_registry, build_inputs, platform_inputs, tmp_path):
+    registry, _, alice, lease, runtime, *_ = stopped_context
+    plan = await registry.frozen_plan(lease)
+    shared = SharedDevelopmentBindingV1.model_validate(plan["shared"])
+    _, _, _, foundation = inputs(platform_inputs)
+    await registry.complete_stopped(lease, await evidence(stopped_context))
+    async with ready_build(environment_registry, build_inputs, tmp_path, shared, runtime.authority) as (builds, identity):
+        manager = ApplicationManager(registry, foundation=foundation, shared=shared, authority=runtime.authority,
+            releases=(), builds=builds)
+        # Resume must resolve the application's original release, not the latest
+        # available build. The original pinned release is deliberately unavailable.
+        with pytest.raises(ManagementError, match="application_build_forbidden"):
+            await manager.transition(alice, lease.application_id,
+                ApplicationOperationRequestV1(action="resume", expected_generation=2), idempotency_key="build-resume")
+        current = await registry.status(lease.application_id, principal=alice)
+        assert current.registration.deployment_generation == 2
+        assert current.registration.desired_state == "suspended"
+        assert current.registration.release_id != identity

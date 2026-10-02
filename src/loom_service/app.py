@@ -39,6 +39,7 @@ from loom.startup_retry import retry_startup_dependency
 from loom.system_identities import assert_pipeline_controller_identity
 from loom.taskset.transform_sandbox import TransformSandboxConfig
 from loom.workload_trust import WorkloadTrustContract
+from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.registry import ApplicationRegistry
 from loom_service.application_management.service_runtime import ApplicationServiceRuntime
@@ -230,7 +231,9 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                 if installation.applications is not None:
                     application = installation.applications
                     manager = ApplicationManager(ApplicationRegistry(session_factory), foundation=installation.foundation,
-                        shared=application.shared, authority=application.authority, releases=application.releases)
+                        shared=application.shared, authority=application.authority, releases=application.releases,
+                        builds=ApplicationBuildRegistry(session_factory, binding=application.runtime.build.binding)
+                            if application.runtime.build is not None else None)
                     runtime = await resources.enter_async_context(ApplicationServiceRuntime.open(application, manager,
                         pool_profiles=pool_profiles, management_origin=str(settings.public_base_url)))
                     app.state.application_runtime = runtime

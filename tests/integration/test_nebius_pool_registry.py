@@ -62,6 +62,7 @@ async def machine(sessions, pool_id, participant_id=None, *, role=None, workload
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
                 pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1", namespace_uids=None,
+                installation_id=None,
                 workload_kinds=("trial", "verifier", "task_image_build")):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
@@ -72,6 +73,8 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
         placement = placement.model_copy(update={"quota_resources": {
             key: quota for key, quota in placement.quota_resources.items() if key != "memory"}})
     first, body = inputs()
+    if installation_id is not None:
+        first = first.model_copy(update={"installation_id": installation_id})
     policy = {"observation_max_age_seconds": 60, "max_create_per_minute": 10,
               "max_pending_jobs": 10, "max_unschedulable_jobs": 0,
               "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2}
