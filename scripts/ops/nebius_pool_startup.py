@@ -27,7 +27,11 @@ from scripts.ops.nebius_pool_retirement import retirement_documents, stopped_doc
 from loom.nebius_platform_render import digest
 
 
-class PoolStartupAPI(Protocol):
+class PoolWorkloadReader(Protocol):
+    def read_workload(self, key: str) -> dict[str, Any]: ...
+
+
+class PoolStartupAPI(PoolWorkloadReader, Protocol):
     def qualify_closed(self) -> None:
         """Observe exact closed epoch, guards, credentials and retired authority."""
         ...
@@ -123,7 +127,7 @@ def _startup_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     return identity, record
 
 
-def _observe_workloads(api: PoolStartupAPI, closed: dict[str, dict[str, Any]],
+def _observe_workloads(api: PoolWorkloadReader, closed: dict[str, dict[str, Any]],
                        targets: dict[str, dict[str, Any]], record: dict[str, Any]) -> dict[str, dict[str, Any]]:
     observed = {}
     for key, original in closed.items():
@@ -167,6 +171,10 @@ def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,
     try:
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         with private_state._locked_state(anchor):
+            operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+            if any(path.exists() or path.is_symlink() for path in (
+                    state / 'activation.json', anchor / (operation + '-activation.json'))):
+                raise ValueError
             closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
             identity, record = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
             if record is None:

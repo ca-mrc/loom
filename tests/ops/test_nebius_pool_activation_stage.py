@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_startup import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_startup import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_startup import (
@@ -129,7 +130,8 @@ def test_uncertain_opening_and_guard_release_are_observed_without_repeating(clos
     assert all(api.calls.count(('release', key)) == 1 for key in api.guards)
 
 
-@pytest.mark.parametrize('damage', ['partial_startup', 'runtime', 'pool', 'guard', 'retained', 'anchor', 'startup_hash'])
+@pytest.mark.parametrize('damage', ['partial_startup', 'runtime', 'pool', 'guard', 'retained', 'anchor', 'startup_hash',
+    'guard_roster', 'guard_phase', 'cancellation_phase'])
 def test_unqualified_opening_never_dispatches_or_releases(closed_startup, damage):
     if damage != 'partial_startup':
         start(closed_startup)
@@ -142,26 +144,37 @@ def test_unqualified_opening_never_dispatches_or_releases(closed_startup, damage
         api.guards[next(iter(api.guards))] = 'open'
     elif damage == 'retained':
         api.retained = False
-    elif damage in {'anchor', 'startup_hash'}:
+    elif damage in {'anchor', 'startup_hash', 'guard_roster', 'guard_phase', 'cancellation_phase'}:
         api.failure = ('open', 'before')
         advance(closed_startup, api)
         api.calls.clear()
         if damage == 'anchor':
             next((api.root / 'cutover-anchor').glob('*-activation.json')).unlink()
-        else:
+        elif damage == 'startup_hash':
             path = api.state / 'startup.json'
             path.write_bytes(path.read_bytes() + b'\n')
+        else:
+            path = api.state / 'activation.json'
+            record = json.loads(path.read_bytes())
+            key = next(iter(record['guards']))
+            if damage == 'guard_roster':
+                del record['guards'][key]
+            elif damage == 'guard_phase':
+                record['guards'][key]['release'] = 'released'
+            else:
+                record['guards'][key]['fence'] = 'intent'
+            path.write_text(json.dumps(record))
     with pytest.raises(ValueError, match='pool_activation_unconfirmed') as error:
         advance(closed_startup, api)
     assert 'private-' not in str(error.value) and not api.calls
 
 
-@pytest.mark.parametrize('initial', ['no_startup', 'partial_startup', 'opening_pending', 'opened'])
+@pytest.mark.parametrize('initial', ['no_startup', 'partial_startup', 'opening_pending', 'release_partial', 'opened'])
 def test_cancellation_fences_global_then_local_authority_without_runtime_health(closed_startup, initial):
     if initial == 'partial_startup':
         startup = closed_startup[3]
         startup.failure = 'before'
-        startup.fail_key = next(iter(startup.documents))
+        startup.fail_key = _key(closed_startup[0].manager)
         start(closed_startup)
     elif initial != 'no_startup':
         start(closed_startup)
@@ -169,6 +182,11 @@ def test_cancellation_fences_global_then_local_authority_without_runtime_health(
     if initial in {'opening_pending', 'opened'}:
         api.failure = ('open', 'before') if initial == 'opening_pending' else None
         advance(closed_startup, api)
+    elif initial == 'release_partial':
+        api.failure = ('release', 'before')
+        advance(closed_startup, api)
+        api.guards[next(iter(api.guards))] = 'open'
+        assert advance(closed_startup, api)['status'] == 'pending_guard_release'
     api.failure, api.ready = None, False
     before = len(api.calls)
     result = advance(closed_startup, api, cancel=True)

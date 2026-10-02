@@ -110,3 +110,54 @@ async def test_recovery_fence_does_not_need_idle_work_or_release_existing_claims
     async with sessions.begin() as session:
         assert not await admission_open(session)
         assert await session.scalar(text("SELECT count(*) FROM trials WHERE state='claimed'")) == 1
+
+
+async def test_original_release_already_waiting_on_row_cannot_delete_recovery_owner(sessions):
+    from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+
+    owner, participant, candidate = uuid4(), uuid4(), 'a' * 40
+    url = sessions.kw['bind'].url.render_as_string(hide_password=False)
+    fence_name, pause_key = 'fence-' + uuid4().hex, 191500731
+    async with sessions.begin() as session:
+        await acquire(session, owner=str(owner), candidate=candidate)
+        await session.execute(text(f"""CREATE FUNCTION pause_recovery_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_advisory_xact_lock({pause_key}); RETURN NEW; END $$"""))
+        await session.execute(text('''CREATE TRIGGER pause_recovery_guard BEFORE UPDATE ON nebius_rollout_guard
+            FOR EACH ROW EXECUTE FUNCTION pause_recovery_guard()'''))
+    release_pid = asyncio.get_running_loop().create_future()
+
+    async def old_release():
+        async with sessions.begin() as session:
+            release_pid.set_result(await session.scalar(text('SELECT pg_backend_pid()')))
+            return await release(session, owner=str(owner), candidate=candidate)
+
+    async def wait_for(statement, parameters):
+        async with asyncio.timeout(5):
+            while True:
+                async with sessions() as inspect:
+                    value = await inspect.scalar(text(statement), parameters)
+                if value:
+                    return value
+                await asyncio.sleep(0.01)
+
+    tasks = []
+    try:
+        async with sessions.begin() as holder:
+            await holder.execute(text('SELECT pg_advisory_xact_lock(:key)'), {'key': pause_key})
+            fence = asyncio.create_task(asyncio.to_thread(read_sql, url,
+                pool_guard_activation_sql(owner, participant, candidate, action='fence'), application_name=fence_name))
+            tasks.append(fence)
+            # The real fence now holds the row and is paused in its UPDATE.
+            fence_pid = await wait_for('''SELECT a.pid FROM pg_stat_activity a JOIN pg_locks l ON a.pid=l.pid
+                WHERE a.application_name=:name AND a.datname=current_database()
+                AND l.locktype='advisory' AND NOT l.granted''', {'name': fence_name})
+            pending = asyncio.create_task(old_release())
+            tasks.append(pending)
+            pid = await release_pid
+            await wait_for('SELECT :fence = ANY(pg_blocking_pids(:release))', {'fence': fence_pid, 'release': pid})
+        assert (await fence)['status'] == 'fenced'
+        with pytest.raises(ValueError, match='owner'):
+            await pending
+        assert read_sql(url, pool_guard_activation_sql(owner, participant, candidate, action='observe'))['status'] == 'fenced'
+    finally:
+        await asyncio.gather(*tasks, return_exceptions=True)

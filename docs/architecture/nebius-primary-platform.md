@@ -2541,10 +2541,26 @@ configuration; an unrelated revision or configuration is rejected. Neither
 cancellation nor readback releases charged requests, clears effects, releases
 local guards or restores legacy writers. A failed transport response is ambiguous
 and requires readback, not a repeated opening or fencing dispatch.
+The internal activation stage anchors a child journal to the closed-stage and
+startup-journal bytes. Opening requires all startup writes settled and fresh
+runtime proof. Each opening, local-guard release and cancellation write has a
+persisted intent before its one dispatch. Recovery accepts only the before/after
+states permitted by that intent; an unchanged state or lost response never
+authorizes a retry. Guard dispatch order follows the protected participant roster,
+including after sorted JSON journals are reloaded. Once activation evidence
+exists, the startup mutation entry refuses replay.
+Cancellation also works before startup completes and does not require healthy
+successor processes. It first confirms the global revision fence, then fences
+each local intake guard under its existing admission lock. The same guard row is
+transferred to `pool-recovery:<operation UUID>`, or inserted with that owner if
+the original release already committed. Foreign ownership is never adopted.
+An original-owner release already waiting on the row cannot delete the recovery
+owner. Active work is retained; fencing does not assert idle state or completed
+cleanup. Every stage result explicitly withholds legacy-restoration authority.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,
-anchored opening/guard-release orchestration, uncertain-write rollback and
+connected activation/recovery transports, uncertain-start rollback and
 durable refresh remain required before protected operational activation.
 
 Once runtime replacement starts, recovery must not replay the original retirement
