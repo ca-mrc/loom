@@ -1,7 +1,9 @@
 """Derive first-cutover builder delivery from the exact protected pool catalog."""
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 from uuid import uuid4
 
@@ -163,3 +165,75 @@ def test_first_cutover_rejects_unqualified_original_manager(delivery_inputs, app
     with pytest.raises(ValueError, match='pool_application_delivery_unqualified'):
         render_application_build_delivery(before=before, pool=pool, active=active,
             candidate=candidate, profile=profile, repo_root=ROOT)
+
+
+@pytest.fixture
+def source_material_inputs(delivery_inputs, platform_inputs):
+    from loom.nebius_platform_render import build_platform
+
+    before, _, _ = delivery_inputs
+    config, candidate, profile = copy.deepcopy(platform_inputs)
+    documents = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    service = next(row for row in documents['40-services.yaml'] if row['kind'] == 'Deployment'
+        and row['metadata']['name'] == 'loom-service')
+    service['metadata'].update(uid=str(uuid4()), resourceVersion='21')
+    material = {'access-key': 'source-only-access', 'secret-key': 'source-only-secret'}
+    secret = {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+        'metadata': {'namespace': before.installation.applications.shared.platform_namespace,
+            'name': 'loom-platform-storage', 'uid': str(uuid4()), 'resourceVersion': '25'},
+        'data': {**{'source-' + key: base64.b64encode(value.encode()).decode() for key, value in material.items()},
+            'access-key': base64.b64encode(b'data-access-must-not-copy').decode(),
+            'secret-key': base64.b64encode(b'data-secret-must-not-copy').decode()}}
+    pin = {'uid': secret['metadata']['uid'], 'resource_version': '25',
+        'sha256': hashlib.sha256(json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+    return before, service, secret, pin, material
+
+
+def test_source_material_copies_only_exact_retained_source_identity(source_material_inputs):
+    from scripts.ops.nebius_pool_application_delivery import (
+        ApplicationSourceCredentialPin,
+        qualify_application_source_material,
+    )
+
+    before, service, secret, pin, expected = source_material_inputs
+    snapshot = copy.deepcopy((service, secret))
+    result = qualify_application_source_material(before=before, service=service,
+        secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin))
+    assert result == expected
+    assert (service, secret) == snapshot
+    result['access-key'] = 'detached-result'
+    assert qualify_application_source_material(before=before, service=service,
+        secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin)) == expected
+
+
+@pytest.mark.parametrize('damage', ['uid', 'version', 'hash', 'namespace', 'name', 'deleting',
+    'service_namespace', 'source_reference', 'endpoint', 'bucket', 'duplicate_env', 'payload', 'whitespace'])
+def test_source_material_rejects_drift_and_never_returns_other_shared_credentials(source_material_inputs, damage):
+    from scripts.ops.nebius_pool_application_delivery import (
+        ApplicationSourceCredentialPin,
+        qualify_application_source_material,
+    )
+
+    before, service, secret, pin, _ = source_material_inputs
+    env = service['spec']['template']['spec']['containers'][0]['env']
+    if damage in {'uid', 'namespace', 'name'}:
+        secret['metadata'][damage] = str(uuid4()) if damage == 'uid' else 'foreign'
+    elif damage == 'version':
+        secret['metadata']['resourceVersion'] = '26'
+    elif damage == 'hash':
+        pin['sha256'] = '0' * 64
+    elif damage == 'deleting':
+        secret['metadata']['deletionTimestamp'] = '2026-10-02T00:00:00Z'
+    elif damage == 'service_namespace':
+        service['metadata']['namespace'] = 'foreign'
+    elif damage == 'source_reference':
+        next(row for row in env if row['name'] == 'LOOM_SVC_SERVICE_EXECUTION_SOURCE_ACCESS_KEY')['valueFrom']['secretKeyRef']['key'] = 'access-key'
+    elif damage in {'endpoint', 'bucket'}:
+        next(row for row in env if row['name'] == 'LOOM_SVC_SERVICE_EXECUTION_SOURCE_' + damage.upper())['value'] = 'foreign'
+    elif damage == 'duplicate_env':
+        env.append(copy.deepcopy(env[0]))
+    else:
+        secret['data']['source-secret-key'] = 'not-base64' if damage == 'payload' else base64.b64encode(b'secret with space').decode()
+    with pytest.raises(ValueError, match='pool_application_source_unqualified'):
+        qualify_application_source_material(before=before, service=service,
+            secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin))
