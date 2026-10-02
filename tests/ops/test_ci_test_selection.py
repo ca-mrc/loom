@@ -140,3 +140,7 @@ def test_root_workflow_runs_eight_complete_disjoint_fail_fast_shards(tmp_path: P
     gateway = next(shard for shard in shards if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard)
     assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
                                "tests/ops/test_nebius_pool_template_restoration_live.py"})
+    predecessor_groups = [next(index for index, shard in enumerate(shards) if path in shard) for path in (
+        "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
+        "tests/ops/test_nebius_pool_refresh_connected.py")]
+    assert len(set(predecessor_groups)) == 3
