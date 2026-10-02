@@ -304,3 +304,103 @@ def test_refresh_projection_rejects_unbound_history_and_tampered_journals(privat
         bound.workload_options()
     parent_path.write_bytes(saved[parent_path])
     assert bound.workload_options() == expected
+
+
+@pytest.mark.timeout(420)
+def test_pool_refresh_readback_accepts_real_updated_manager_but_not_other_drift(private_cutover):
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_pool_cutover_entry import qualify_pool_manager_database
+    from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+    from scripts.ops.nebius_pool_origin_history import derive_management_history_target
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from scripts.ops.nebius_pool_role_fencing import role_fence_documents
+    from tests.ops.test_nebius_management_refresh_install import run
+    from tests.ops.test_nebius_management_refresh_predecessor import (
+        history_credential,
+        refresh_case,
+    )
+    from tests.ops.test_nebius_pool_cutover import (
+        cutover_binding_inventory,
+        writer_workload_inventory,
+    )
+
+    operation, _, root = private_cutover
+    context, result = finish_cutover(operation)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    case = refresh_case(root, pool, pool_baseline=selector.model_dump(mode='json'))
+    assert run(case)['status'] == 'management_refreshed'
+    bound = PoolManagerRefresh(root, pool, case[0], case[2])
+    request, migration = context.request, context.request.fencing.retirement.migration
+    current = {key: rows[0] for key, rows in bound.workload_options().items()}
+    manager = _key(request.manager)
+    inventories = cutover_binding_inventory.__wrapped__((request, context.tokens)) | writer_workload_inventory(request)
+    replacements = {**current, **role_fence_documents(request.fencing)}
+    for rows in inventories.values():
+        for index, row in enumerate(rows):
+            desired = replacements.get(_key(row))
+            if desired is not None:
+                rows[index] = copy.deepcopy(desired)
+                rows[index]['metadata']['uid'] = row['metadata']['uid']
+    authority = json.loads((Path(operation['state_dir']) / 'authority/stage.json').read_bytes())
+    collections = {'Role': 'roles', 'ClusterRole': 'clusterroles', 'RoleBinding': 'rolebindings', 'ClusterRoleBinding': 'clusterrolebindings'}
+    for item in authority['resources'].values():
+        row = copy.deepcopy(item['observed'])
+        row['metadata']['uid'] = item['uid']
+        inventories[collections[row['kind']]].append(row)
+    for rows in inventories.values():
+        for row in rows:
+            row['metadata'].setdefault('resourceVersion', '7')
+    reads = []
+
+    def respond(message):
+        assert message.method == 'GET'
+        resource = message.url.path.rsplit('/', 1)[-1]
+        version = ('rbac.authorization.k8s.io/v1' if 'role' in resource else 'batch/v1' if resource in {'cronjobs', 'jobs'}
+            else 'v1' if resource in {'pods', 'replicationcontrollers'} else 'apps/v1')
+        kind = {'roles': 'Role', 'clusterroles': 'ClusterRole', 'rolebindings': 'RoleBinding', 'clusterrolebindings': 'ClusterRoleBinding',
+            'deployments': 'Deployment', 'replicasets': 'ReplicaSet', 'statefulsets': 'StatefulSet', 'daemonsets': 'DaemonSet',
+            'replicationcontrollers': 'ReplicationController', 'cronjobs': 'CronJob', 'jobs': 'Job', 'pods': 'Pod'}[resource]
+        assert dict(message.url.params) == ({'limit': '100'} if not reads else
+            {'limit': '100', 'resourceVersion': '7', 'resourceVersionMatch': 'Exact'})
+        reads.append(resource)
+        return httpx.Response(200, json={'apiVersion': version, 'kind': kind + 'List',
+            'metadata': {'resourceVersion': '7'}, 'items': inventories[resource]})
+
+    def binding(actual, original):
+        assert actual == migration and original == request.manager
+
+    target = derive_management_history_target(original=root, predecessor=context.predecessor, credential=history_credential(root))
+    references = []
+    def credential(document, **kwargs):
+        assert document == current[manager]
+        assert kwargs == {'url_variable': 'LOOM_SVC_DB_URL', 'credential_uid': target.database.credential_uid,
+            'credential_resource_version': target.database.credential_resource_version}
+        references.append(True)
+        return 'postgresql+psycopg://fixture:private-marker@loom-postgres.' + target.namespace + '.svc:5432/loom'
+    history = SimpleNamespace(qualify_binding=binding, target=target, _get=lambda *_: copy.deepcopy(current[manager]),
+        _database=lambda *_args, **_kwargs: {'metadata': {'uid': target.database.statefulset['metadata']['uid']}},
+        _workload_database_url=credential,
+        qualify_manager_database=lambda: pytest.fail('projection must not require a ready manager during recovery'))
+    qualify_pool_manager_database(context, history, refresh=bound)
+    assert len(references) == 2
+    with HTTPSPoolCutoverAPI(request=request, tokens=context.tokens, migration=SimpleNamespace(),
+            guards=SimpleNamespace(request=migration), checks=SimpleNamespace(), history=history,
+            api_server='https://cluster.example', ssl_context=ssl.create_default_context(),
+            state_dir=Path(operation['state_dir']), anchor_dir=Path(operation['anchor_dir']), refresh=bound) as api:
+        api.client.close()
+        api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(respond))
+        api.qualify_writer_bindings()
+        for key in (manager, _key(request.services[0])):
+            row, = (value for value in inventories['deployments'] if _key(value) == key)
+            saved = copy.deepcopy(row)
+            row['spec']['replicas'] = 2
+            reads.clear()
+            with pytest.raises(ValueError, match='workload_inventory_unqualified'):
+                api.qualify_writer_bindings()
+            row.clear()
+            row.update(saved)
