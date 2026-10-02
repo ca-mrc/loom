@@ -127,6 +127,7 @@ def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private
     from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
     from scripts.ops.nebius_management_stage import ManagementStageError
     from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from tests.ops.test_nebius_management_refresh_entry import context, private_refresh
     from tests.ops.test_nebius_management_refresh_predecessor import (
         complete_refresh,
         load_refresh,
@@ -137,12 +138,20 @@ def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private
     _, result = finish_cutover(operation)
     selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
     pool = load_completed_pool(selector, original=root)
+    metadata, _, _ = private_refresh(root, pool)
+    bound = context(metadata)
+    assert bound.predecessor == pool
+    assert bound.request.pool_baseline == selector.model_dump(mode='json')
     prior = pool
     histories = []
     for _ in range(2):
         refreshed, case = complete_refresh(root, prior, pool_baseline=selector.model_dump(mode='json'))
         completed = load_refresh(refreshed, root)
         assert completed.pool_baseline == pool
+        metadata, _, _ = private_refresh(root, completed)
+        inherited = context(metadata)
+        assert inherited.predecessor == completed
+        assert inherited.request.pool_baseline == selector.model_dump(mode='json')
         assert completed.deployment.pool_catalog_operation_id == pool.deployment.pool_catalog_operation_id
         assert completed.active['metadata']['uid'] == pool.active['metadata']['uid']
         assert all(completed.history.get(path) == checksum for path, checksum in pool.history.items())
