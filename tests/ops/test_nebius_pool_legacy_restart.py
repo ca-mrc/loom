@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
@@ -164,3 +165,71 @@ def test_orphan_legacy_restart_evidence_cannot_fall_back_to_original_startup(cut
     path.chmod(0o600)
     with pytest.raises((ValueError, OSError)):
         startup_workload_options(request, state_dir=state, anchor_dir=anchor)
+
+
+@pytest.mark.timeout(600)
+def test_legacy_runtime_readiness_binds_completed_restart_and_rechecks_closed_authority(closed_startup):
+    from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+
+    qualify = HTTPSPoolActivationAPI.qualify_legacy_runtimes
+    api = roles_restored(closed_startup)
+    api.anchor = api.root / 'cutover-anchor'
+    assert restart(api)['status'] == 'pool_legacy_restart_staged_closed'
+    request, migration = api.request, api.request.fencing.retirement.migration
+    manager_key = _key(request.manager)
+    probes, failure = [], None
+    originals = [*(row.controller for row in migration.guards), *request.services, *request.fencing.retirement.actuators]
+    journal = api.state / 'legacy-restart.json'
+    receipt = journal.read_bytes()
+    workloads = copy.deepcopy(api.startup.documents)
+    calls = list(api.restart_calls)
+
+    def probe(kind, original, expected):
+        assert expected == api.startup.documents[_key(original)]
+        assert expected['metadata']['uid'] == original['metadata']['uid']
+        assert _stable(expected)['spec'] == _stable(original)['spec']
+        assert expected['spec']['replicas'] == 1
+        probes.append((kind, _key(original)))
+        if failure == kind:
+            raise ValueError('private-runtime-marker')
+        if kind == 'telemetry':
+            if failure == 'late_guard':
+                api.guards[str(migration.guards[0].participant_id)] = 'open'
+            elif failure == 'late_runtime':
+                api.startup.documents[manager_key]['spec']['replicas'] = 0
+
+    def database(target, *, original, expected, credential_uid, credential_resource_version):
+        binding = target.database
+        actuator = original['metadata']['namespace'] != target.namespace
+        assert (credential_uid, credential_resource_version) == (
+            (binding.actuator_credential_uid, binding.actuator_credential_resource_version) if actuator
+            else (binding.credential_uid, binding.credential_resource_version))
+        probe('database', original, expected)
+
+    api.parent = SimpleNamespace(history=SimpleNamespace(
+        qualify_binding=lambda actual, manager: (actual == migration and manager == request.manager) or pytest.fail('changed authority'),
+        qualify_manager_database=lambda *, expected: probe('manager', request.manager, expected),
+        qualify_manager_legacy_settings=lambda *, expected: probe('manager_settings', request.manager, expected)),
+        guards=SimpleNamespace(qualify_runtime_database=database,
+            qualify_runtime_legacy_settings=lambda target, *, original, expected: probe('settings', original, expected),
+            qualify_runtime_telemetry=lambda target, *, original, expected: probe('telemetry', original, expected)))
+    assert qualify(api) is None
+    expected_probes = {('manager', manager_key), ('manager_settings', manager_key),
+        *(('database', _key(row)) for row in originals), *(('settings', _key(row)) for row in originals),
+        *(('telemetry', _key(row)) for row in request.fencing.retirement.actuators)}
+    assert len(probes) == len(expected_probes) and set(probes) == expected_probes
+    for failure in ('manager', 'manager_settings', 'database', 'settings', 'telemetry', 'late_guard', 'late_runtime', 'journal'):
+        probes.clear()
+        if failure == 'journal':
+            broken = json.loads(receipt)
+            broken['workloads'][manager_key]['phase'] = 'intent'
+            journal.write_text(json.dumps(broken))
+        with pytest.raises(ValueError, match='pool_legacy_runtimes_unqualified'):
+            qualify(api)
+        if failure == 'journal':
+            assert not probes
+        api.guards = {str(row.participant_id): 'fenced' for row in migration.guards}
+        api.startup.documents = copy.deepcopy(workloads)
+        journal.write_bytes(receipt)
+    assert api.mode == 'fenced' and api.machine_phase == 'revoked'
+    assert api.restart_calls == calls and journal.read_bytes() == receipt
