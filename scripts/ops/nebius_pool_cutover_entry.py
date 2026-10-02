@@ -522,7 +522,9 @@ async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.Asyn
                     runtime.candidate_sha, runtime.runtime_image_ref, runtime.runtime_binary_sha256)
                 for row in inputs.installation.profiles.execution)
                 or any(row.settings.service_image != runtime.task_image_ref
-                    for row in inputs.installation.profiles.task_images)):
+                    for row in inputs.installation.profiles.task_images)
+                or any(row.settings.service_image != runtime.task_image_ref
+                    for row in inputs.installation.profiles.application_images)):
             raise ValueError
     except Exception:
         raise EntryError("pool cutover publication unqualified") from None
