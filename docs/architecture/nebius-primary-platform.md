@@ -997,6 +997,14 @@ and output-drain use that same attempt; neither releases capacity without the
 existing gateway absence check. This support is not an installed management worker
 or an owner-facing build endpoint.
 
+Participant machine identity also retains an immutable workload scope. Ordinary
+environment credentials can submit/control trials, verifiers and task builds;
+the separate management builder credential can submit/control only application
+builds in the same data participant. Prepare/replay, allocation and every retained
+request operation recheck that scope under the existing authority locks. Credential
+rotation cannot change it. Existing machines retain environment scope on upgrade;
+this does not install the dedicated builder credential or expand a pool catalog.
+
 Protected delivery of the credential/mount, the user-facing build command, the
 durable management worker, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.

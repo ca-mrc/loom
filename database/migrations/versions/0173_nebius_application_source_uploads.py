@@ -13,6 +13,10 @@ depends_on = None
 
 def upgrade() -> None:
     op.execute("""
+ALTER TABLE nebius_pool_machines ADD COLUMN workload_scope text NOT NULL DEFAULT 'environment';
+ALTER TABLE nebius_pool_machines ADD CONSTRAINT nebius_pool_machine_workload_scope_check CHECK (
+    workload_scope IN ('environment','application_builder') AND
+    (workload_scope = 'environment' OR role = 'participant'));
 CREATE TABLE nebius_application_source_uploads (
     upload_id uuid PRIMARY KEY,
     owner_user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -146,11 +150,12 @@ CREATE TRIGGER nebius_application_build_attempt_retain BEFORE INSERT OR UPDATE O
 
 def downgrade() -> None:
     op.execute("""
-LOCK TABLE nebius_application_source_uploads, nebius_application_builds, nebius_application_build_attempts
+LOCK TABLE nebius_application_source_uploads, nebius_application_builds, nebius_application_build_attempts, nebius_pool_machines
     IN ACCESS EXCLUSIVE MODE NOWAIT;
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM nebius_application_source_uploads) OR
-       EXISTS (SELECT 1 FROM nebius_application_builds) OR EXISTS (SELECT 1 FROM nebius_application_build_attempts) THEN
+       EXISTS (SELECT 1 FROM nebius_application_builds) OR EXISTS (SELECT 1 FROM nebius_application_build_attempts) OR
+       EXISTS (SELECT 1 FROM nebius_pool_machines WHERE workload_scope <> 'environment') THEN
         RAISE EXCEPTION 'cannot remove application source history';
     END IF;
 END $$;
@@ -160,4 +165,6 @@ DROP FUNCTION retain_nebius_application_build_attempt();
 DROP FUNCTION retain_nebius_application_build();
 DROP TABLE nebius_application_source_uploads;
 DROP FUNCTION retain_nebius_application_source_upload();
+ALTER TABLE nebius_pool_machines DROP CONSTRAINT nebius_pool_machine_workload_scope_check;
+ALTER TABLE nebius_pool_machines DROP COLUMN workload_scope;
 """)

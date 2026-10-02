@@ -146,7 +146,8 @@ async def _prepare_request(session: AsyncSession, principal: PoolPrincipal, requ
         NebiusPoolBinding.pool_id == principal.pool_id,
     ).with_for_update().execution_options(populate_existing=True))).one_or_none()
     await authorize_pool_machine(session, principal, role="participant",
-                                 pool_id=request.pool_id, participant_id=request.key.participant_id)
+                                 pool_id=request.pool_id, participant_id=request.key.participant_id,
+                                 workload_kind=request.key.workload_kind)
     request_json = request.model_dump(mode="json")
     request_sha = digest(request_json)
     cancelled = await read_early_cancellation(session, PoolRequestActionV1(pool_id=request.pool_id,

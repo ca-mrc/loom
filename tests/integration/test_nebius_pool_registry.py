@@ -42,14 +42,15 @@ from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 from tests.unit.test_nebius_pool_execution_render import inputs
 
 
-async def machine(sessions, pool_id, participant_id=None, *, role=None):
+async def machine(sessions, pool_id, participant_id=None, *, role=None, workload_scope="environment"):
     raw = "loom_pool_" + uuid4().hex + uuid4().hex
     token_hash = hashlib.sha256(raw.encode()).digest()
     machine_id = uuid4()
     async with sessions.begin() as session:
         await session.execute(insert(NebiusPoolMachine).values(
             machine_id=machine_id, pool_id=pool_id, participant_id=participant_id,
-            role=role or ("participant" if participant_id else "observer"), credential_epoch=1, phase="active"))
+            role=role or ("participant" if participant_id else "observer"), workload_scope=workload_scope,
+            credential_epoch=1, phase="active"))
         await session.execute(insert(Token).values(token_hash=token_hash, type="pool_machine", scopes=[],
             issued_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(hours=1)))
         await session.execute(insert(NebiusPoolMachineCredential).values(

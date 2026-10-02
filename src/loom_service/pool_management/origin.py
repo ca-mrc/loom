@@ -112,7 +112,7 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
             if principal.participant_id is None:
                 raise ValueError
             current = await authorize_pool_machine(session, principal, role="participant",
-                pool_id=principal.pool_id, participant_id=principal.participant_id)
+                pool_id=principal.pool_id, participant_id=principal.participant_id, workload_kind=workload_kind)
             if current.pool_mode != "global" or current.participant_phase != "active":
                 raise ValueError
             row = await session.get(NebiusPoolParticipant, current.participant_id)

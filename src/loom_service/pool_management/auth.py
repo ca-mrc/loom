@@ -26,6 +26,7 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
 )
 from loom.db.schema import Token
+from loom.nebius_pool_contract import PoolWorkloadKind
 
 PoolMachineRole = Literal["participant", "observer", "gateway"]
 _Row = TypeVar("_Row", bound=Base)
@@ -56,6 +57,7 @@ class PoolPrincipal:
     participant_revision: int | None
     participant_binding_sha256: str | None
     participant_phase: str | None
+    workload_scope: Literal["environment", "application_builder"]
 
 
 async def _row(session: AsyncSession, model: type[_Row], identity: UUID | bytes, *, locked: bool) -> _Row | None:
@@ -96,6 +98,8 @@ async def _resolve_hash(session: AsyncSession, token_hash: bytes, *, locked: boo
                 or token.expires_at <= now or token.issued_at > now
                 or machine.phase != "active" or machine.credential_epoch != credential.credential_epoch
                 or machine.role not in {"participant", "observer", "gateway"}
+                or machine.workload_scope not in {"environment", "application_builder"}
+                or (machine.workload_scope == "application_builder" and machine.role != "participant")
                 or machine.pool_id != pool.pool_id or credential.machine_id != machine.machine_id):
             return None
         if machine.role == "participant":
@@ -116,6 +120,7 @@ async def _resolve_hash(session: AsyncSession, token_hash: bytes, *, locked: boo
             participant_revision=participant.binding_revision if participant else None,
             participant_binding_sha256=participant.binding_sha256 if participant else None,
             participant_phase=participant.phase if participant else None,
+            workload_scope=cast(Literal["environment", "application_builder"], machine.workload_scope),
         )
 
 
@@ -132,7 +137,8 @@ async def resolve_pool_machine(session: AsyncSession, header_value: str | None) 
 
 async def authorize_pool_machine(session: AsyncSession, principal: PoolPrincipal, *,
                                  role: PoolMachineRole, pool_id: UUID,
-                                 participant_id: UUID | None = None) -> PoolPrincipal:
+                                 participant_id: UUID | None = None,
+                                 workload_kind: PoolWorkloadKind | None = None) -> PoolPrincipal:
     """Recheck current locked identity at the transaction's authority boundary.
 
     Caller must still qualify operation-specific mode, workload scope, immutable
@@ -142,5 +148,8 @@ async def authorize_pool_machine(session: AsyncSession, principal: PoolPrincipal
         raise PoolAuthenticationError
     current = await _resolve_hash(session, principal.token_hash, locked=True)
     if current is None or current != principal:
+        raise PoolAuthenticationError
+    if workload_kind is not None and (current.role != "participant" or
+            (workload_kind == "application_image_build") != (current.workload_scope == "application_builder")):
         raise PoolAuthenticationError
     return current

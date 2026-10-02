@@ -25,7 +25,7 @@ from tests.integration.test_nebius_environment_management import (
 )
 from tests.integration.test_nebius_pool_build_admission import mixed_setup, prepare_build
 from tests.integration.test_nebius_pool_control import action, operate
-from tests.integration.test_nebius_pool_registry import prepare, publish_placement
+from tests.integration.test_nebius_pool_registry import machine, prepare, publish_placement
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -37,6 +37,8 @@ async def setup_application_pool(environment_registry, build_inputs, **kwargs):
     participants, principals, executions, tasks, profiles, observer = await mixed_setup(factory,
         workload_kinds=("trial", "verifier", "task_image_build", "application_image_build"), **kwargs)
     participant = participants[0]
+    principals[0] = await machine(factory, participant.pool_id, participant.participant_id,
+        workload_scope="application_builder")
     claim = build_inputs[0]
     sources = ApplicationSourceRegistry(factory, binding=ApplicationSourceUploadBindingV1(
         installation_id=participant.installation_id, data_environment_id=participant.environment_id,

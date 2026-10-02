@@ -68,7 +68,8 @@ async def _locked_request(session: AsyncSession, principal: PoolPrincipal, actio
                 NebiusPoolBinding.pool_id == action.pool_id,
             ).with_for_update().execution_options(populate_existing=True))).one_or_none()
             await authorize_pool_machine(session, principal, role="participant", pool_id=action.pool_id,
-                                         participant_id=action.request_key.participant_id)
+                                         participant_id=action.request_key.participant_id,
+                                         workload_kind=action.request_key.workload_kind)
             key = action.request_key
             row = (await session.scalars(select(NebiusPoolRequest).where(
                 NebiusPoolRequest.participant_id == key.participant_id,
