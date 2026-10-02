@@ -8,7 +8,9 @@ import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_startup_live import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_startup_live import collector_inputs as collector_inputs
-from tests.ops.test_nebius_pool_startup_live import cutover_binding_inventory as cutover_binding_inventory
+from tests.ops.test_nebius_pool_startup_live import (
+    cutover_binding_inventory as cutover_binding_inventory,
+)
 from tests.ops.test_nebius_pool_startup_live import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_startup_live import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_startup_live import management_inputs as management_inputs
@@ -116,8 +118,11 @@ def activation_http(startup_http, closed_startup):
     return connect
 
 
+# These cases traverse several complete phases through the real retained-scope
+# and HTTP readers; keep their finite limit separate from one-step unit tests.
+@pytest.mark.timeout(300)
 def test_connected_open_release_and_cancel_preserve_authority_and_intent(activation_http):
-    with activation_http() as (api, state, advance):
+    with activation_http() as (_, state, advance):
         assert advance()['status'] == 'pool_activation_complete'
         assert state.activation_writes == [('open', None), *(('release', key) for key in state.guards)]
         assert {'manager-db', 'gateway', 'participant-db', 'telemetry'} <= set(state.runtime_checks)
@@ -142,6 +147,7 @@ def test_connected_cancel_without_started_or_healthy_successors(activation_http)
 
 
 @pytest.mark.parametrize('when', ['before', 'after'])
+@pytest.mark.timeout(180)
 def test_connected_opening_unknown_outcome_is_observed_not_resent(activation_http, when):
     with activation_http() as (_, state, advance):
         state.activation_failure = ('open', when)

@@ -38,6 +38,7 @@ from scripts.ops.nebius_management_refresh_predecessor import (
     load_completed_upgrade,
 )
 from scripts.ops.nebius_management_switch import _matches
+from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
 from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     cutover_documents,
@@ -612,3 +613,14 @@ def connected_pool_startup_api(context: PoolCutoverContext) -> Iterator[HTTPSPoo
     """
     with connected_pool_api(context) as parent:
         yield HTTPSPoolStartupAPI(parent=parent)
+
+
+@contextmanager
+def connected_pool_activation_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolActivationAPI]:
+    """Use the exact parent's credential lifetime for journaled activation/recovery.
+
+    Construction performs no mutation or runtime-health check. Only the anchored
+    stage may dispatch activation; no standalone operational command is exposed.
+    """
+    with connected_pool_api(context) as parent:
+        yield HTTPSPoolActivationAPI(parent=parent)

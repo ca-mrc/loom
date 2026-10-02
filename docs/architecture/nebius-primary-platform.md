@@ -2568,10 +2568,18 @@ Opening uses the exact gateway Pod from fresh settings, database, projected-API
 and capacity qualification. A separate fresh challenge invokes only the fixed
 opening command, once. Its result and the retained Pod/backend/operator scope are
 checked afterward; a lost reply or late drift is unconfirmed, never retried.
+The connected activation adapter shares the parent's temporary operator authority
+and validates anchored intent before each write. It retains private-input,
+provider/backend, complete writer-inventory, restricted-role and staged-resource
+checks during recovery, without rerunning initial idle/backlog or runtime-health
+checks. Opening separately requires the full fresh startup runtime and gateway
+authority barriers. A guard release requires the same global pool; recovery guard
+fencing requires the confirmed terminal pool fence. Neither connection construction
+nor recovery restores or restarts workloads.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
-an independent deployment command. Complete runtime/collector acceptance,
-connected activation/recovery transports, uncertain-start rollback and
+an independent deployment command. Installed runtime/collector acceptance,
+uncertain-start rollback, charged-effect cleanup and
 durable refresh remain required before protected operational activation.
 
 Once runtime replacement starts, recovery must not replay the original retirement

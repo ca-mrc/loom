@@ -55,25 +55,30 @@ class HTTPSPoolStartupAPI:
                 if parent.guards.guard(guard, "observe").get("status") != "held":
                     raise ValueError
                 parent.qualify_runtime_access(guard.participant_id, "observe")
-            roles = role_fence_documents(self.request.fencing)
-            for original in self.request.fencing.originals:
-                if not _matches(parent.fencing.read_role(_key(original)), roles[_key(original)], _uid(original)):
-                    raise ValueError
-            parent.fencing.verify_readonly()
-            # Gateway runtime may now be starting. Every other staged resource
-            # remains exactly the installed child receipt, never repaired here.
-            for phase in ("material", "configuration", "authority"):
-                child = json.loads(private_state._private_read(self.state / phase / "stage.json", limit=4 * 1024**2))
-                for item in child["resources"].values():
-                    if item["status"] != "created":
-                        raise ValueError
-                    actual = parent.resources.get_resource(item["desired"])
-                    if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
-                        raise ValueError
+            self._qualify_retained_resources()
             self._scope()
             parent.history.qualify_closed_pool()
         except Exception:
             raise ValueError("pool_startup_live_closure_unqualified") from None
+
+    def _qualify_retained_resources(self) -> None:
+        """Mode-independent identity/permission proof shared with recovery."""
+        parent = self.parent
+        roles = role_fence_documents(self.request.fencing)
+        for original in self.request.fencing.originals:
+            if not _matches(parent.fencing.read_role(_key(original)), roles[_key(original)], _uid(original)):
+                raise ValueError
+        parent.fencing.verify_readonly()
+        # Gateway replicas may change. Every other staged resource remains
+        # exactly its installed child receipt; this never repairs drift.
+        for phase in ("material", "configuration", "authority"):
+            child = json.loads(private_state._private_read(self.state / phase / "stage.json", limit=4 * 1024**2))
+            for item in child["resources"].values():
+                if item["status"] != "created":
+                    raise ValueError
+                actual = parent.resources.get_resource(item["desired"])
+                if actual is None or _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]:
+                    raise ValueError
 
     def _started_workloads(self) -> dict[str, dict[str, Any]]:
         self._scope()
