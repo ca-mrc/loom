@@ -938,9 +938,14 @@ runtime owns the storage client and closes it on shutdown or failed startup;
 omitting these settings preserves old installation fingerprints and disables
 upload. Configuration support is not evidence that the capability is installed.
 
-Protected delivery of that credential/mount, CLI upload, global application-build
-admission, image building, release qualification and installed source-to-deploy
-acceptance remain incomplete consumers.
+`ApplicationClient` connects packaged source to these authenticated intent,
+status and streaming-upload routes. It checks every returned source identity and
+upload ID, uses the same frozen archive on an explicit CSRF rejection, and never
+automatically retries an uncertain network write. This is the transport for the
+forthcoming build command, not a standalone deployment command or CI approval.
+Protected delivery of the credential/mount, the user-facing build command, global
+application-build admission, image building, release qualification and installed
+source-to-deploy acceptance remain incomplete consumers.
 
 ### Stopped application completion
 
