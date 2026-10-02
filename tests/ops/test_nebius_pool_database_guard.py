@@ -237,7 +237,7 @@ def test_acquire_checks_database_identity_before_writing(database_guard):
     assert not any(args[0] == 'exec' for args in state.calls)
 
 
-@pytest.mark.parametrize('action,status', [('stage', 'staged'), ('observe', 'qualified')])
+@pytest.mark.parametrize('action,status', [('stage', 'staged'), ('observe', 'qualified'), ('inspect', 'qualified')])
 def test_runtime_role_stage_binds_original_database_without_the_retired_controller(database_guard, action, status):
     api, state = database_guard
     state.status = status

@@ -104,7 +104,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
             assert reports == [({"status": "staged"},)]
             if kind == "execution":
                 db.execute("GRANT UPDATE(mode) ON nebius_pool_bindings TO loom_actuator")
-                for action in ("observe", "stage"):
+                for action in ("observe", "stage", "inspect"):
                     with pytest.raises(psycopg.errors.RaiseException, match="management authority unqualified"):
                         db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action=action), prepare=False)
                     db.rollback()
@@ -177,6 +177,27 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
         active = await journal.confirm_activation(key, receipt.model_copy(update={
             "phase": "create_intent", "plan_sha256": "d" * 64}))
         assert active.phase == "active"
+        assert await journal.get(key) == active
+        # Recovery inspects permissions with active work and no idle guard. It
+        # must neither restage grants nor mutate/clear the active local handoff.
+        with psycopg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False), autocommit=True) as db:
+            with db.cursor() as cursor:
+                cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="inspect"), prepare=False)
+                reports = []
+                while True:
+                    if cursor.description:
+                        reports.extend(cursor.fetchall())
+                    if not cursor.nextset():
+                        break
+            assert reports == [({"status": "qualified"},)]
+            assert db.execute("SELECT count(*) FROM nebius_rollout_guard").fetchone() == (0,)
+            with pytest.raises(psycopg.errors.RaiseException, match="guard unqualified"):
+                db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="observe"), prepare=False)
+            db.rollback()
+            query = migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="inspect")
+            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                db.execute(query.replace("COMMIT;", "INSERT INTO nebius_rollout_guard(id,owner,candidate_sha) VALUES(1,'test','test'); COMMIT;"), prepare=False)
+            db.rollback()
         assert await journal.get(key) == active
         # The runtime can lock its source but cannot alter task content, batch
         # identity/origin, credentials, global authority, or erase either journal.
