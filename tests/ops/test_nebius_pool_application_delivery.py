@@ -1,0 +1,112 @@
+"""Derive first-cutover builder delivery from the exact protected pool catalog."""
+from __future__ import annotations
+
+import copy
+from uuid import uuid4
+
+import pytest
+
+from tests.integration.test_nebius_pool_installation import add_application_builder, installation
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
+from tests.unit.test_nebius_management_render import application_management_inputs as application_management_inputs
+from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
+
+
+@pytest.fixture
+def delivery_inputs(application_management_inputs, build_inputs):
+    from loom_service.environment_management.deployment import ManagementDeployment
+    from loom_service.pool_management.installation import PoolInstallation
+
+    before = ManagementDeployment.model_validate(application_management_inputs[0])
+    application, config = before.installation.applications, before.installation.foundation.platform_config
+    spec, _ = installation(('development',))
+    spec.update(installation_id=str(before.installation_id), cluster_id=application.shared.cluster_id,
+        node_group_id=config['execution_node_group_id'])
+    participant, = spec['participants']
+    participant.update(installation_id=str(before.installation_id), environment_id=str(application.shared.data_environment_id))
+    participant['execution_namespace']['name'] = config['execution_namespace']
+    participant['build_namespace']['name'] = config['execution_namespace'] + '-build'
+    spec['node_selector']['nebius.com/node-group-id'] = spec['node_group_id']
+    for kind, key in [('execution', 'runtime'), ('task_images', 'target')]:
+        for row in spec['profiles'][kind]:
+            row[key]['namespace'] = participant['execution_namespace' if kind == 'execution' else 'build_namespace']['name']
+            row[key]['node_selector']['nebius.com/node-group-id'] = spec['node_group_id']
+            if kind == 'task_images':
+                row['settings'].update(namespace=row[key]['namespace'], storage_endpoint=config['storage_endpoint'],
+                    storage_region=config['region'], source_bucket=config['buckets']['source'],
+                    registry_repository=build_inputs[0].registry_repository)
+    recipe = build_inputs[0].recipe.model_copy(update={'schema_revision': application.shared.schema_revision})
+    spec, machine_id, _ = add_application_builder(spec, recipe)
+    spec['node_selector'] = dict(spec['profiles']['application_images'][0]['target']['node_selector'])
+    return before, PoolInstallation.model_validate(spec), machine_id
+
+
+def test_builder_delivery_is_derived_without_replacing_retained_manager_identity(delivery_inputs):
+    from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
+
+    before, spec, machine_id = delivery_inputs
+    snapshot = before.model_dump(mode='json')
+    result = derive_application_build_deployment(before, spec)
+    assert before.model_dump(mode='json') == snapshot
+    assert result.pool_catalog_operation_id == spec.operation_id
+    assert result.application_builder_machine_id == machine_id
+    runtime = result.installation.applications.runtime
+    binding = runtime.build.binding
+    participant, = spec.participants
+    profile, = spec.profiles.application_images
+    assert binding.source.source_bucket == before.installation.foundation.platform_config['buckets']['source']
+    assert binding.recipe == profile.recipe
+    assert (binding.pool_id, binding.participant_id, binding.profile_id, binding.target_id) == (
+        spec.pool_id, participant.participant_id, profile.profile_id, profile.target.target_id)
+    assert (binding.admission_epoch, binding.participant_revision) == (spec.admission_epoch, participant.binding_revision)
+    assert runtime.build.management_origin == 'https://' + before.public_host
+    assert runtime.source_upload.max_inflight == 2
+    assert runtime.build.binding.source.upload_ttl_seconds == runtime.source_upload.upload_ttl_seconds
+    # Every change is the explicit first-pool delivery, not a foundation rewrite.
+    actual = result.model_dump(mode='json')
+    actual.pop('pool_catalog_operation_id')
+    actual.pop('application_builder_machine_id')
+    for field in ('source_upload', 'build'):
+        actual['installation']['applications']['runtime'].pop(field)
+    assert actual == snapshot
+    with pytest.raises(ValueError, match='pool_application_delivery_unqualified'):
+        derive_application_build_deployment(result, spec)
+
+
+@pytest.mark.parametrize('damage', ['installation', 'cluster', 'data', 'namespace', 'schema', 'source', 'node-group', 'missing-builder'])
+def test_builder_delivery_rejects_pool_scope_drift_before_runtime_changes(delivery_inputs, damage):
+    from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    before, spec, _ = delivery_inputs
+    value = copy.deepcopy(spec.model_dump(mode='json'))
+    participant, = value['participants']
+    if damage == 'installation':
+        value['installation_id'] = participant['installation_id'] = str(uuid4())
+    elif damage == 'cluster':
+        value['cluster_id'] = 'foreign-cluster'
+    elif damage == 'data':
+        participant['environment_id'] = str(uuid4())
+    elif damage == 'namespace':
+        participant['build_namespace']['name'] = 'foreign-build'
+        for row in value['profiles']['task_images'] + value['profiles']['application_images']:
+            row['target']['namespace'] = row['settings']['namespace'] = 'foreign-build'
+    elif damage == 'schema':
+        value['profiles']['application_images'][0]['recipe']['schema_revision'] = '9999'
+    elif damage == 'source':
+        value['profiles']['application_images'][0]['settings']['source_bucket'] = 'foreign-source'
+    elif damage == 'node-group':
+        value['node_group_id'] = 'foreign-group'
+        value['node_selector']['nebius.com/node-group-id'] = 'foreign-group'
+        for kind, key in [('execution', 'runtime'), ('task_images', 'target'), ('application_images', 'target')]:
+            for row in value['profiles'][kind]:
+                row[key]['node_selector']['nebius.com/node-group-id'] = 'foreign-group'
+    else:
+        value['profiles'].pop('application_images')
+        participant['targets'] = [row for row in participant['targets'] if row['workload_kinds'] != ['application_image_build']]
+        value['machines'] = [row for row in value['machines'] if row.get('workload_scope') != 'application_builder']
+    changed = PoolInstallation.model_validate(value)
+    with pytest.raises(ValueError, match='pool_application_delivery_unqualified'):
+        derive_application_build_deployment(before, changed)
