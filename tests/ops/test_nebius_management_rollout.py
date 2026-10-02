@@ -81,6 +81,46 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     assert not Path(metadata['inputs_path']).exists()
 
 
+@pytest.mark.parametrize('missing', [None, 'nebius_management_refresh_connected', 'nebius_pool_cutover_entry'])
+def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, missing):
+    """A qualified bundle must include the entry's deferred pool dependencies."""
+    import os
+    import sys
+
+    from scripts.ops.nebius_management_gateway import command
+
+    uv, requirements, wheels = tmp_path / 'uv', tmp_path / 'requirements', tmp_path / 'wheels'
+    uv.write_bytes(b'fixture uv')
+    requirements.write_bytes(b'fixture requirements')
+    wheels.mkdir()
+    for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
+        (wheels / name).write_bytes(b'fixture wheel')
+    metadata = refresh_operation(tmp_path)
+    content = module().build_bundle(metadata, uv=uv, requirements=requirements, wheels=wheels)
+    release = tmp_path / 'isolated'
+    with zipfile.ZipFile(io.BytesIO(content)) as packed:
+        for name in packed.namelist():
+            path = release / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(packed.read(name))
+            path.chmod(0o600)
+    if missing is not None:
+        (release / 'scripts/ops' / (missing + '.py')).unlink(missing_ok=True)
+    args = command(release, 'qualify')
+    # Use the real fixed -I entry invocation. Only the interpreter is supplied by
+    # this test; installed-wheel qualification has its own cluster-lane test.
+    args[0] = sys.executable
+    result = subprocess.run(args, cwd=release, capture_output=True, text=True,
+        timeout=30, env={**os.environ, 'PYTHONPATH': '/must-not-use-ambient-imports'})
+    if missing is None:
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {'status': 'tooling_qualified'}
+    else:
+        assert result.returncode != 0, 'incomplete protected tooling was qualified'
+        assert 'tooling_qualified' not in result.stdout
+    assert not Path(metadata['inputs_path']).exists()
+
+
 @pytest.mark.parametrize("action,status", [("preflight", "preflight_qualified"), ("install", "pending"),
     ("install", "management_installed"), ("preflight", "blocked"), ("install", "blocked")])
 def test_exact_operation_transports_only_bundle_and_strips_private_reports(tmp_path, monkeypatch, action, status):
