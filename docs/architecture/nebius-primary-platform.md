@@ -880,6 +880,19 @@ unmerged indices and included-file/parent/inventory changes. Transfer bounds are
 25,000 files, 512 MiB aggregate and 8 MiB canonical manifest, not execution quotas.
 Consumers must use the verified manifest reader rather than reopen unchecked
 paths. The owned temporary snapshot is removed on exit, including errors.
+
+`package_application_source` composes that capture with the shared verified
+archive encoder, yielding an anonymous owner-only temporary upload stream, its
+byte length and archive SHA256. The archive checksum is distinct from the source
+manifest digest; neither turns the informational base commit into CI approval.
+The stream is rewound for upload and closed on caller exit or failure.
+`loom.application_source_archive` encodes deterministic uncompressed USTAR:
+one canonical manifest followed by fixed numbered regular byte records. Archive
+names never become extraction paths. The trusted reader bounds and validates
+headers, lengths, content hashes and final padding; it creates source files
+exclusively under a pinned empty private directory and installs safe links last.
+Failed extraction is not accepted context; the caller owns partial-file cleanup.
+
 Publication, global build-capacity admission, image building, release qualification
 and installed source-to-deploy acceptance remain separate, unimplemented consumers.
 
