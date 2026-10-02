@@ -275,10 +275,30 @@ def test_closed_projection_bounds_full_input_captures_and_detaches_results(close
         assert actual == expected
         actual[0].clear()
         actual[1].clear()
-    # One complete request qualification per read; repeated sibling renderers
-    # must not each traverse the entire retained installation again.
-    assert len(captures) <= 3
+    # Bracket each fresh journal read with at most two complete qualifications;
+    # sibling renderers must not each traverse the entire installation again.
+    assert len(captures) <= 6
     request.fencing.retirement.migration.guards[0].controller['spec']['replicas'] = True
+    with pytest.raises(ValueError):
+        closed_startup_documents(request, **arguments)
+
+
+def test_closed_projection_rejects_input_mutated_during_evidence_read(closed_startup, monkeypatch):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    request, _, _, _, _, root = closed_startup
+    arguments = {'state_dir': root / 'cutover', 'anchor_dir': root / 'cutover-anchor'}
+    closed_startup_documents(request, **arguments)
+    read = private_state._private_read
+
+    def mutate(path, **kwargs):
+        content = read(path, **kwargs)
+        if path == root / 'cutover/cutover.json':
+            request.fencing.retirement.migration.guards[0].controller['spec']['replicas'] = True
+        return content
+
+    monkeypatch.setattr(private_state, '_private_read', mutate)
     with pytest.raises(ValueError):
         closed_startup_documents(request, **arguments)
 
