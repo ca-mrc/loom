@@ -2447,6 +2447,11 @@ After startup intent exists, the old closed-stage mutation path refuses replay.
 Read-only writer inventory and database readers accept only the recorded before
 or after template for an uncertain start. They retain namespace, workload UID,
 database and credential checks without depending on an unready successor Pod.
+The retained management-database reader also exposes a fixed READ ONLY startup
+check for the exact closed pool epoch, participant and machine roster, binding
+digests and current dedicated credentials. It rejects changed/revoked/expired
+authority rather than replaying registration to reset it. Backend and operator
+identity are rechecked around that read; no raw bearer appears in its report.
 This keeps recovery available; it is not runtime acceptance. The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Connected live startup qualification,

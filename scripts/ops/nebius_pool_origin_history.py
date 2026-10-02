@@ -32,6 +32,10 @@ from scripts.ops.nebius_pool_migration import (
     migration_contract,
 )
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
+from scripts.ops.nebius_pool_startup_database import (
+    pool_startup_closed_sql,
+    qualify_startup_closed_report,
+)
 
 from loom.nebius_platform_render import digest
 from loom.nebius_pool_contract import PoolParticipantV1
@@ -235,6 +239,24 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
         """The cutover's retained producer must be this history source's manager."""
         if request != self.request or manager != self.target.controller:
             raise PoolMigrationError("management_history_binding")
+
+    def qualify_closed_pool(self) -> None:
+        """Observe current closed epoch and exact machine authority, without writes."""
+        try:
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            spec = self.request.registration.spec
+            query = pool_startup_closed_sql(spec)
+            before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
+            report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            qualify_startup_closed_report(spec, report)
+            if _uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError("startup_closed_registration") from None
 
     def qualify_manager_database(self) -> None:
         """Bind the running predecessor manager to its distinct retained backend."""
