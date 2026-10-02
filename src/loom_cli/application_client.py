@@ -12,6 +12,10 @@ from uuid import UUID
 import httpx
 from pydantic import TypeAdapter
 
+from loom.application_image_build import (
+    ApplicationImageBuildAttemptRequestV1,
+    ApplicationImageBuildStatusV1,
+)
 from loom.application_source_upload import (
     ApplicationSourceUploadRequestV1,
     ApplicationSourceUploadV1,
@@ -90,6 +94,51 @@ class ApplicationClient:
         if verified.upload_id != receipt.upload_id or verified.phase != "source_verified":
             raise ValueError("application source upload verification mismatch")
         return verified
+
+    @staticmethod
+    def _build_result(response: httpx.Response, *, build_id: UUID | None = None) -> ApplicationImageBuildStatusV1:
+        result = ApplicationImageBuildStatusV1.model_validate(assert_2xx(response, action="personal application build"))
+        release = result.release
+        if ((build_id is not None and result.build_id != build_id)
+                or (result.phase == "ready") != (release is not None)
+                or (release is not None and (release.release_id != result.build_id or release.source_digest != result.source_digest))):
+            raise ValueError("application build response mismatch")
+        return result
+
+    def create_build(self, source: ApplicationSourceUploadV1, *, idempotency_key: str) -> ApplicationImageBuildStatusV1:
+        if source.phase != "source_verified":
+            raise ValueError("application source is not verified")
+        result = self._build_result(self.http.post("/api/v1/application-builds", json={"upload_id": str(source.upload_id)},
+            headers={"Idempotency-Key": idempotency_key}))
+        if result.upload_id != source.upload_id or result.source_digest != source.source_digest:
+            raise ValueError("application build source mismatch")
+        return result
+
+    def build_status(self, build_id: UUID, *, timeout: float = 30) -> ApplicationImageBuildStatusV1:
+        return self._build_result(self.http.get(f"/api/v1/application-builds/{build_id}", timeout=timeout), build_id=build_id)
+
+    def change_build(self, build_id: UUID, *, action: str, attempt: int) -> ApplicationImageBuildStatusV1:
+        if action not in {"cancel", "retry"}:
+            raise ValueError("invalid application build action")
+        request = ApplicationImageBuildAttemptRequestV1(attempt=attempt)
+        result = self._build_result(self.http.post(f"/api/v1/application-builds/{build_id}/{action}",
+            json=request.model_dump(mode="json")), build_id=build_id)
+        if result.attempt != attempt + (action == "retry"):
+            raise ValueError("application build attempt mismatch")
+        return result
+
+    def wait_build(self, build_id: UUID, *, timeout: float) -> tuple[ApplicationImageBuildStatusV1, bool]:
+        if not 0 <= timeout <= 86400:
+            raise ValueError("wait timeout must be between zero and one day")
+        deadline = time.monotonic() + timeout
+        while True:
+            result = self.build_status(build_id, timeout=max(0.1, min(30, deadline - time.monotonic())))
+            if result.phase in {"ready", "failed", "cancelled"}:
+                return result, True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return result, False
+            time.sleep(min(2, remaining))
 
     def create(self, request: ApplicationCreateRequestV1, *, idempotency_key: str) -> ApplicationOperationV1:
         response = self.http.post("/api/v1/applications", json=request.model_dump(mode="json"),

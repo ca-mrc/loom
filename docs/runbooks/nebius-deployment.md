@@ -63,12 +63,48 @@ loom --context management-alice dev app login APPLICATION_UUID --browser
 ```
 
 Replace uppercase placeholders with verified installation values. `--release`
-selects an application release already qualified in the management installation;
-it is not a branch, candidate ID or local directory. This command does not build
-or publish arbitrary local source. Use the exact `loom --context app-...` command
+selects a protected pinned release or your own completed application build;
+it is not a branch, candidate ID or local directory. `create` itself does not build
+or publish source. Use the exact `loom --context app-...` command
 printed after login to talk to that personal API. The default and management
 contexts, model-provider settings and credentials are not copied or replaced.
 Omit `--browser` on a headless machine.
+
+After the protected source/build runtime is installed, build local feature code
+through that same management context:
+
+```bash
+loom --context management-alice dev app build --source /PATH/TO/CHECKOUT \
+  --idempotency-key alice-feature-1
+loom --context management-alice dev app build-status BUILD_UUID
+loom --context management-alice dev app build-wait BUILD_UUID --timeout 900
+loom --context management-alice dev app create alice --release BUILD_UUID \
+  --idempotency-key alice-create-1
+```
+
+The source capture includes committed, modified and non-ignored untracked files,
+with credential/owner-context exclusions. It is **not CI-approved source**. A build
+uses shared capacity at personal-development priority; it does not deploy anything.
+Only `ready` status, after publication and pool cleanup, includes the qualified
+release. That release ID is the build ID and can also be used with `app update`.
+An unconfigured management installation returns 503; these commands do not bypass
+protected installation or prove that an installation is ready.
+
+After an uncertain response, use the latest printed retry command with its original
+key and management context. Before upload completes the command binds the captured
+source digest; changed source is refused. After verification it uses `--upload-id`
+and no longer reads the checkout. `build-wait` exits 0 only for a ready build,
+1 for failure/cancellation/request errors, and 2 for a local timeout without cancelling
+the remote build. Explicit controls retain the expected attempt from build status:
+
+```bash
+loom --context management-alice dev app build-cancel BUILD_UUID --attempt ATTEMPT
+loom --context management-alice dev app build-retry BUILD_UUID --attempt ATTEMPT
+```
+
+Retry is available only after a failed/cancelled attempt has completed cleanup.
+It keeps the original source and recipe; use a new build key for different source.
+Ready builds cannot be retried or retargeted to different images.
 
 Subsequent lifecycle changes use the same management context:
 
