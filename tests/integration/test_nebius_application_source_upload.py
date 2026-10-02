@@ -122,6 +122,58 @@ async def test_foreign_owner_is_rejected_before_consuming_upload(environment_reg
     assert await registry.status(receipt.upload_id, principal=alice) == receipt
 
 
+async def test_upload_admission_and_cancel_release_private_spool(environment_registry, source, tmp_path):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model)
+    receipt = await registry.create(principal=alice, request=intent(source_digest=model.digest,
+        archive_sha256=hashlib.sha256(body).hexdigest(), archive_size_bytes=len(body)), idempotency_key="bounded")
+    entered = asyncio.Event()
+    async def stalled():
+        entered.set()
+        yield body[:100]
+        await asyncio.Event().wait()
+    spool = tmp_path / "spool"
+    spool.mkdir(mode=0o700)
+    store = FakeObjectStore()
+    uploader = ApplicationSourceUploader(registry, store, spool_directory=spool, max_inflight=1)
+    active = asyncio.create_task(uploader.upload(receipt.upload_id, principal=alice, body=stalled()))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        with pytest.raises(ManagementError, match="application_source_capacity_exhausted"):
+            await uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body))
+        assert store.objects == {}
+    finally:
+        active.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active
+    assert not list(spool.iterdir())
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+    assert (await uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body))).phase == "source_verified"
+
+
+async def test_stalled_upload_expires_without_storage_or_db_completion(environment_registry, tmp_path):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    receipt = await registry.create(principal=alice, request=intent(), idempotency_key="slow")
+    async def stalled():
+        yield b"part"
+        await asyncio.Event().wait()
+    store = FakeObjectStore()
+    with pytest.raises(ManagementError, match="application_source_reception_timeout"):
+        await ApplicationSourceUploader(registry, store, spool_directory=tmp_path,
+            receive_timeout_seconds=0.01).upload(receipt.upload_id, principal=alice, body=stalled())
+    assert store.objects == {}
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+
+
 @pytest.mark.parametrize("failure", ["before", "after", "corrupt"])
 async def test_storage_reply_is_not_proof_and_uncertain_write_is_only_observed(
     environment_registry, source, tmp_path, failure,
