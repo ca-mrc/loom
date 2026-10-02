@@ -120,6 +120,27 @@ def activation_http(startup_http, closed_startup):
 
 # These cases traverse several complete phases through the real retained-scope
 # and HTTP readers; keep their finite limit separate from one-step unit tests.
+@pytest.mark.timeout(420)
+def test_connected_completion_qualifies_open_pool_without_replaying_closed_runtime(activation_http):
+    from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
+
+    with activation_http() as (api, state, advance):
+        assert advance()['status'] == 'pool_activation_complete'
+        before = list(state.activation_writes)
+        state.runtime_checks.clear()
+        state.writes.clear()
+        result = complete_pool_cutover(request=api.request, api=api, state_dir=api.state, anchor_dir=api.anchor)
+        assert result['outcome'] == 'global' and result['acceptance_verified'] is False
+        completed = load_pool_completion(request=api.request, state_dir=api.state, anchor_dir=api.anchor,
+            completion_sha256=result['completion_sha256'])
+        assert completed.workloads[_key(api.request.manager)]['metadata']['uid'] == api.request.manager['metadata']['uid']
+        assert not state.runtime_checks and not state.writes and state.activation_writes == before
+        state.role_damage = True
+        with pytest.raises(ValueError, match='pool_completion_unqualified'):
+            complete_pool_cutover(request=api.request, api=api, state_dir=api.state, anchor_dir=api.anchor)
+        assert not state.writes and state.activation_writes == before
+
+
 @pytest.mark.timeout(300)
 def test_connected_open_release_and_cancel_preserve_authority_and_intent(activation_http):
     with activation_http() as (_, state, advance):

@@ -2745,6 +2745,22 @@ authority checks pass. It never opens global admission or rewrites the original
 activation/restart receipts. This remains an internal protected-operation phase,
 not a standalone rollback or release command.
 
+The internal terminal handoff derives its outcome from these anchored journals,
+never from a caller-selected mode. Global completion requires completed startup,
+pool opening and every local release, with no recovery evidence. Legacy completion
+requires the complete restoration/reopening chain. The receipt freezes the exact
+request digest, phase bytes and UID-bearing stable workload snapshots; it adds no
+live mutation. Repeated completion validates rather than rewrites the receipt or
+its ancestors. An interrupted local receipt write can finish only the identical
+anchor-bound bytes after fresh qualification. Current retained authority, workload
+identities, pool mode and open guards are rechecked; legacy completion additionally
+requires revoked machine credentials, a stopped read-only gateway and drained
+global effects, without draining legitimate reopened legacy work. Historical
+loading does not contact the cluster or replay any operation. This is terminal
+phase/identity evidence, not fresh runtime or installed multi-owner acceptance;
+the result explicitly withholds that claim. Protected entry and refresh consumers
+must still qualify the baseline before using it for live operations.
+
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
 candidate. It takes the admission lock and the guard row lock, then freshly
