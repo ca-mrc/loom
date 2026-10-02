@@ -10,6 +10,8 @@ import httpx
 import pytest
 
 from loom_cli.__main__ import main
+from loom_cli.config import LoomConfig, save_config
+from loom_cli.contexts import selected_context
 from tests.loom_cli.test_application_source import commit
 from tests.loom_cli.test_application_source import repo as repo
 from tests.loom_cli.test_application_source_client import UPLOAD
@@ -129,3 +131,40 @@ def test_status_rejects_wrong_build_or_unqualified_ready_response(source_http, c
     handlers["GET", f"/api/v1/application-builds/{BUILD}"] = lambda _: httpx.Response(200, json=status("ready", **damage))
     assert main(["dev", "app", "build-status", BUILD]) == 1
     assert not capsys.readouterr().out
+
+
+def test_upload_only_replay_preserves_selected_context_and_leading_hyphen_key(repo, source_http, capsys):
+    handlers, requests = source_http
+    saved = source_handlers(handlers, fail="build")
+    (repo / "app.py").write_text("feature")
+    with selected_context("feature-manager"):
+        save_config(LoomConfig(server_url="https://manage.example.com", auth_token="management-secret"))
+    args = ["--context", "feature-manager", "dev", "app", "build", "--source", str(repo), "--idempotency-key=-feature"]
+    assert main(args) == 1
+    retry = [shlex.split(line.removeprefix("Retry: "))[1:] for line in capsys.readouterr().err.splitlines()
+        if line.startswith("Retry: ")][-1]
+    assert retry[:2] == ["--context", "feature-manager"]
+    handlers["POST", "/api/v1/application-builds"] = lambda _: httpx.Response(201, json=status(source_digest=saved["source_digest"]))
+    requests.clear()
+    assert main(retry) == 0
+    assert requests[-1].headers["Idempotency-Key"] == "-feature"
+
+
+@pytest.mark.parametrize("damage", [{"upload_id": BUILD}, {"source_digest": "sha256:" + "f" * 64}])
+def test_build_response_cannot_substitute_verified_upload(repo, source_http, capsys, damage):
+    handlers, _ = source_http
+    saved = source_handlers(handlers)
+    handlers["POST", "/api/v1/application-builds"] = lambda _: httpx.Response(201,
+        json=status(source_digest=saved["source_digest"]) | damage)
+    (repo / "app.py").write_text("feature")
+    assert main(["dev", "app", "build", "--source", str(repo)]) == 1
+    assert not capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command,attempt", [("build-cancel", 2), ("build-retry", 1)])
+def test_generation_control_rejects_another_attempt(source_http, capsys, command, attempt):
+    handlers, requests = source_http
+    handlers["POST", f"/api/v1/application-builds/{BUILD}/{command.removeprefix('build-')}"] = lambda _: httpx.Response(202,
+        json=status(attempt=attempt))
+    assert main(["dev", "app", command, BUILD, "--attempt", "1"]) == 1
+    assert len(requests) == 1 and not capsys.readouterr().out
