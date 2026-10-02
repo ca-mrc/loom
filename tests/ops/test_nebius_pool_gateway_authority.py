@@ -4,7 +4,6 @@ from __future__ import annotations
 import copy
 
 import pytest
-
 from tests.ops.test_nebius_pool_startup import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_startup import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_startup import fencing_inputs as fencing_inputs
@@ -30,7 +29,7 @@ def test_gateway_review_requires_exact_fixed_rights_and_complete_resolution(cuto
     rules = [{'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get'], 'resourceNames': pool_names}]
     if destination == 'execution':
         rules.extend([
-            {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'create', 'delete', 'list', 'watch']},
+            {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get', 'create', 'delete']},
             {'apiGroups': [''], 'resources': ['configmaps'], 'verbs': ['get', 'create', 'delete']},
             {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list', 'delete']},
         ])

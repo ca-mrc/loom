@@ -11,8 +11,13 @@ from typing import Any
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
+from scripts.ops.nebius_pool_gateway_authority import (
+    gateway_review_namespaces,
+    review_gateway_rules,
+)
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement_live import _patch_result
 from scripts.ops.nebius_pool_role_fencing import role_fence_documents
@@ -114,6 +119,26 @@ class HTTPSPoolStartupAPI:
             self._started_workloads()
         except Exception:
             raise ValueError('pool_startup_database_runtimes_unqualified') from None
+
+    def qualify_gateway_authority(self) -> None:
+        """Resolve the exact started gateway's rights without minting a token.
+
+        Include all RoleBinding namespaces naming this account or its groups,
+        not only the registered pool destinations. This is not runtime health.
+        """
+        try:
+            self._started_workloads()
+            self.qualify_closed()
+            bindings = [row for resource, kind in (('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))
+                for row in inventory_resources(self.parent._request, 'rbac.authorization.k8s.io/v1', resource, kind)]
+            migration = self.request.fencing.retirement.migration
+            for namespace in gateway_review_namespaces(migration, bindings):
+                review_gateway_rules(self.parent.client, manager_namespace=migration.registration.binding.namespace,
+                    namespace=namespace, authority=self.parent.catalog['authority'])
+            self.qualify_closed()
+            self._started_workloads()
+        except Exception:
+            raise ValueError('pool_startup_gateway_authority_unqualified') from None
 
     def _path(self, key: str) -> str:
         original = self.closed[key]
