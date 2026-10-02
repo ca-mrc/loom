@@ -11,7 +11,7 @@ import json
 import ssl
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -60,6 +60,9 @@ from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 from loom.nebius_platform_render import digest
 from loom.nebius_pool_priority import PoolWorkOriginV1
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
 
 class PoolCutoverChecks(Protocol):
     def preflight(self, request: PoolCutoverRequest) -> None: ...
@@ -107,7 +110,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
     def __init__(self, *, request: PoolCutoverRequest, tokens: dict[UUID, str], migration: PoolMigrationAPI,
                  guards: PoolCutoverGuards, checks: PoolCutoverChecks, history: PoolCutoverHistory, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
-                 state_dir: Path | None = None, anchor_dir: Path | None = None):
+                 state_dir: Path | None = None, anchor_dir: Path | None = None,
+                 refresh: PoolManagerRefresh | None = None):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
@@ -118,6 +122,16 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                     or state_dir == anchor_dir or state_dir in anchor_dir.parents or anchor_dir in state_dir.parents))):
             raise ValueError("pool cutover journal binding differs")
         self.state_dir, self.anchor_dir = state_dir, anchor_dir
+        self.refresh = refresh
+        if refresh is not None:
+            from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
+            if type(refresh) is not PoolManagerRefresh:
+                raise ValueError("pool refresh projection type differs")
+            context = refresh.qualify().context
+            if (context.request != request or state_dir != Path(context.operation['state_dir'])
+                    or anchor_dir != Path(context.operation['anchor_dir'])):
+                raise ValueError("pool refresh projection scope differs")
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
         self.history = history
         self.binding = registration.binding
@@ -271,6 +285,21 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             approved[key] = actual
         return approved
 
+    def _retained_workload_projection(self, observed: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        if self.refresh is None:
+            return (self.originals if self.state_dir is None or self.anchor_dir is None else
+                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir, observed=observed))
+        context = self.refresh.qualify().context
+        if (context.request != self.request or self.state_dir != Path(context.operation['state_dir'])
+                or self.anchor_dir != Path(context.operation['anchor_dir'])):
+            raise ValueError("pool refresh projection scope changed")
+        options = self.refresh.workload_options()
+        expected = {}
+        for key, original in self.originals.items():
+            desired, = (row for row in options[key] if _matches(observed[key], row, _uid(original)))
+            expected[key] = desired
+        return expected
+
     def qualify_writer_bindings(self) -> None:
         """Discover retained grants and consumers at one API-server revision."""
         try:
@@ -301,13 +330,10 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             workloads = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
                 for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
             observed = {_key(row): row for resource in ("deployments", "cronjobs") for row in workloads[resource]}
-            expected = (self.originals if self.state_dir is None or self.anchor_dir is None else
-                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir, observed=observed))
+            expected = self._retained_workload_projection(observed)
             qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected,
                 platform_subjects=platform_controller_subjects(self.request.platform_authority))
-            if (self.state_dir is not None and self.anchor_dir is not None
-                    and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir,
-                        observed=observed) != expected):
+            if self._retained_workload_projection(observed) != expected:
                 raise ValueError
         except Exception:
             raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None

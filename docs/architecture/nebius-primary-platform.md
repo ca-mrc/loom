@@ -2789,6 +2789,10 @@ the new manager. The original installation, immediate completed predecessor,
 pool baseline and any superseded failed refresh are requalified; every other
 pool workload retains its completed-cutover identity. This projection alone
 does not supply the still-required live authority verification.
+The connected read-only manager-backend and writer-inventory checks can consume
+that bound projection. They match the actual upgraded manager, not a substituted
+old observation, while preserving the common API-server revision for workload
+and permission inventory and the original database credential identities.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

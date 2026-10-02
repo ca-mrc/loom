@@ -20,7 +20,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 import httpx
@@ -83,6 +83,9 @@ from loom_service.environment_management.candidates import (
     _json,
 )
 from loom_service.pool_management.installation import PoolInstallation
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
 
 
 class PoolCutoverPrivateInputs(BaseModel):
@@ -219,6 +222,7 @@ class PoolCutoverEntryChecks:
 
     context: PoolCutoverContext
     readers: ConnectedPoolReaders
+    refresh: PoolManagerRefresh | None = None
 
     def current(self) -> None:
         try:
@@ -227,6 +231,8 @@ class PoolCutoverEntryChecks:
             if (load_pool_cutover_inputs(context.operation) != context
                     or readers.guards.request != migration
                     or readers.base.api_server.rstrip("/") != context.original.original_inputs.operator_connection.endpoint.rstrip("/")):
+                raise ValueError
+            if self.refresh is not None and self.refresh.qualify().context != context:
                 raise ValueError
             readers.history.qualify_binding(migration, context.request.manager)
         except Exception:
@@ -238,7 +244,10 @@ class PoolCutoverEntryChecks:
                 raise ValueError
             self.current()
             qualify_pool_runtime_databases(self.context, self.readers.guards)
-            qualify_pool_manager_database(self.context, self.readers.history)
+            if self.refresh is None:
+                qualify_pool_manager_database(self.context, self.readers.history)
+            else:
+                qualify_pool_manager_database(self.context, self.readers.history, refresh=self.refresh)
             qualify_pool_provider(self.context, self.readers.base)
             self.current()
         except Exception:
@@ -348,13 +357,16 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
         raise EntryError("pool cutover runtime databases unqualified") from None
 
 
-def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlPoolHistoryAPI) -> None:
+def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlPoolHistoryAPI, *,
+                                  refresh: PoolManagerRefresh | None = None) -> None:
     """Use the predecessor's management binding, never a participant credential."""
     try:
         history.qualify_binding(context.request.fencing.retirement.migration, context.request.manager)
         if load_pool_cutover_inputs(context.operation) != context:
             raise ValueError
-        expected, startup = _runtime_workload_options(context)
+        if refresh is not None and refresh.qualify().context != context:
+            raise ValueError
+        expected, startup = (_runtime_workload_options(context) if refresh is None else (refresh.workload_options(), True))
         original, target = context.request.manager, history.target
         current = history._get("deployment", "loom-service", target.namespace)
         desired, = (row for row in expected[_key(original)] if _matches(current, row, _uid(original)))
@@ -365,15 +377,17 @@ def qualify_pool_manager_database(context: PoolCutoverContext, history: KubectlP
                 raise ValueError
             backend = history._database(target, url_variable="LOOM_SVC_DB_URL")
             binding = target.database
-            url = history._workload_database_url(original, url_variable="LOOM_SVC_DB_URL",
+            reference = original if refresh is None else desired
+            url = history._workload_database_url(reference, url_variable="LOOM_SVC_DB_URL",
                 credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version)
             qualify_database_destination(url, target.namespace)
             if (_uid(history._database(target, url_variable="LOOM_SVC_DB_URL")) != _uid(backend)
-                    or history._workload_database_url(original, url_variable="LOOM_SVC_DB_URL",
+                    or history._workload_database_url(reference, url_variable="LOOM_SVC_DB_URL",
                         credential_uid=binding.credential_uid, credential_resource_version=binding.credential_resource_version) != url
                     or not _matches(history._get("deployment", "loom-service", target.namespace), desired, _uid(original))):
                 raise ValueError
-        if (_runtime_workload_options(context) != (expected, startup)
+        current_options = _runtime_workload_options(context) if refresh is None else (refresh.workload_options(), True)
+        if (current_options != (expected, startup)
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except Exception:
@@ -521,7 +535,7 @@ async def _connected_publication(context: PoolCutoverContext) -> None:
 
 
 @contextmanager
-def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoolReaders]:
+def connected_pool_readers(context: PoolCutoverContext, *, refresh: PoolManagerRefresh | None = None) -> Iterator[ConnectedPoolReaders]:
     """One qualified native authority for HTTPS and fixed SQL transports.
 
     Copy only its current bounded bearer and pinned CA into a fresh private
@@ -532,6 +546,8 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
     """
     if load_pool_cutover_inputs(context.operation) != context:
         raise EntryError("pool cutover context changed before connection")
+    if refresh is not None and refresh.qualify().context != context:
+        raise EntryError("pool refresh context differs before connection")
     try:
         asyncio.run(_connected_publication(context))
     except Exception:
@@ -569,7 +585,10 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
                 history = KubectlPoolHistoryAPI(request=migration, target=target, kubeconfig=kubeconfig, executable=executable)
                 history.qualify_binding(migration, context.request.manager)
                 qualify_pool_runtime_databases(context, guards)
-                qualify_pool_manager_database(context, history)
+                if refresh is None:
+                    qualify_pool_manager_database(context, history)
+                else:
+                    qualify_pool_manager_database(context, history, refresh=refresh)
                 qualify_pool_provider(context, base)
                 if load_pool_cutover_inputs(context.operation) != context:
                     raise ValueError
@@ -583,7 +602,7 @@ def connected_pool_readers(context: PoolCutoverContext) -> Iterator[ConnectedPoo
 
 
 @contextmanager
-def connected_pool_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolCutoverAPI]:
+def connected_pool_api(context: PoolCutoverContext, *, refresh: PoolManagerRefresh | None = None) -> Iterator[HTTPSPoolCutoverAPI]:
     """Compose the fixed parent and children with one qualified operator scope.
 
     The protected handler must call the journaled parent; this factory creates
@@ -591,8 +610,9 @@ def connected_pool_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolCutover
     checks, registration targets or alternative state directories are accepted.
     Credentials and all child HTTP clients expire with this context.
     """
-    with connected_pool_readers(context) as readers:
-        checks = PoolCutoverEntryChecks(context, readers)
+    connection = connected_pool_readers(context) if refresh is None else connected_pool_readers(context, refresh=refresh)
+    with connection as readers:
+        checks = PoolCutoverEntryChecks(context, readers, refresh)
         checks.current()
         with HTTPSPoolRegistrationAPI(request=context.request.fencing.retirement.migration.registration,
                 api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token) as registration:
@@ -600,7 +620,7 @@ def connected_pool_api(context: PoolCutoverContext) -> Iterator[HTTPSPoolCutover
             with HTTPSPoolCutoverAPI(request=context.request, tokens=context.tokens,
                     migration=migration, guards=readers.guards, checks=checks, history=readers.history,
                     api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token,
-                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"])) as api:
+                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"]), refresh=refresh) as api:
                 yield api
 
 
