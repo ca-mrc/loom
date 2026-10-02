@@ -102,6 +102,7 @@ async def test_killed_runner_exposes_failure_and_cleans_only_owned_orphan(
     trial_id, worker_id = uuid4(), uuid4()
     identity = f"worker-death-{trial_id.hex}"
     container_name = f"loom-death-{trial_id.hex}"
+    control_names = (f"{container_name}-active", f"{container_name}-foreign")
     worker_token = f"test-worker-{uuid4().hex}"
     token_hash = hashlib.sha256(worker_token.encode()).digest()
     now = datetime.now(UTC)
@@ -206,11 +207,13 @@ async def test_killed_runner_exposes_failure_and_cleans_only_owned_orphan(
             item = next(item for item in listed.json()["items"] if item["id"] == str(trial_id))
             assert item["failure_message"] == failed["failure_message"]
 
-            for control_trial, control_identity in (
-                (seeded_trials[1], identity), (trial_id, f"foreign-{identity}"),
+            for control_name, control_trial, control_identity in (
+                (control_names[0], seeded_trials[1], identity),
+                (control_names[1], trial_id, f"foreign-{identity}"),
             ):
                 controls.append(await asyncio.to_thread(
                     client.containers.run, "alpine:3.20", ["sleep", "120"], detach=True,
+                    name=control_name,
                     labels={"loom.trial_id": str(control_trial), "loom.sandbox": control_identity},
                 ))
             states = {trial_id: failed["state"], seeded_trials[1]: "running"}
@@ -230,13 +233,15 @@ async def test_killed_runner_exposes_failure_and_cleans_only_owned_orphan(
         if process.is_alive():
             process.kill()
         await asyncio.to_thread(process.join, 5)
-        # Names/IDs are created above; never enumerate or clean other workloads.
-        for container in [orphan, *controls]:
-            if container is not None:
-                try:
-                    await asyncio.to_thread(container.remove, force=True)
-                except docker.errors.NotFound:
-                    pass
+        # Creation may have succeeded before its reply was read or the child
+        # was killed. Recover only the exact unique names assigned above.
+        for name in (container_name, *control_names):
+            try:
+                container = await asyncio.to_thread(client.containers.get, name)
+                assert container.labels["loom.sandbox"] in (identity, f"foreign-{identity}")
+                await asyncio.to_thread(container.remove, force=True)
+            except docker.errors.NotFound:
+                pass
         client.close()
         async with app.state.session_factory() as session, session.begin():
             trial = await session.get(Trial, trial_id)
