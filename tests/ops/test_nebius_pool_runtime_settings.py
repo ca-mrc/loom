@@ -17,9 +17,11 @@ from tests.unit.test_nebius_management_render import management_inputs as manage
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
-@pytest.fixture(params=['controller', 'actuator', 'guest', 'service', 'manager'])
+@pytest.fixture(params=['controller', 'actuator', 'guest', 'service', 'manager', 'gateway'])
 def settings_case(request, guest_runtime_inputs, tmp_path):
     from scripts.ops.nebius_pool_runtime import wire_manager, wire_participant
+
+    from loom_service.pool_management.installation_render import render_gateway
 
     migration, actuators, services, manager, guest = guest_runtime_inputs
     participant = migration.registration.spec.participants[0]
@@ -28,8 +30,13 @@ def settings_case(request, guest_runtime_inputs, tmp_path):
         management_origin='https://manage.example.com', actuator=actuators[participant.participant_id],
         service=services[participant.participant_id], guest_actuators=(guest,),
         runtime_profile=desired_profile(migration, services[participant.participant_id]))
-    target = (wire_manager(request=migration, original=manager) if component == 'manager'
-        else targets[{'controller': 'control_plane', 'guest': 'guest_actuator'}.get(request.param, request.param)])
+    if component == 'gateway':
+        target, = render_gateway(migration.registration.spec, namespace=migration.registration.binding.namespace,
+            service_image=migration.registration.candidate['images']['service']['image_ref'],
+            kubernetes_endpoint='https://kubernetes.default.svc')['workload']
+    else:
+        target = (wire_manager(request=migration, original=manager) if component == 'manager'
+            else targets[{'controller': 'control_plane', 'guest': 'guest_actuator'}.get(request.param, request.param)])
     environment = {key: value for key, value in os.environ.items() if not key.startswith(('LOOM_', 'DATABASE_'))}
     environment.update(LOOM_CP_DB_URL='postgresql+psycopg://fixture:private-db-marker@localhost/loom',
         LOOM_CP_MINIO_ACCESS_KEY='fixture', LOOM_CP_MINIO_SECRET_KEY='fixture', LOOM_CP_STEP_JWT_SIGNING_KEY='private-test-key',
@@ -37,7 +44,8 @@ def settings_case(request, guest_runtime_inputs, tmp_path):
         LOOM_SVC_MINIO_ACCESS_KEY='fixture', LOOM_SVC_MINIO_SECRET_KEY='fixture',
         LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN='private-github-marker',
         LOOM_EXECUTION_ACTUATOR_DB_URL='postgresql+psycopg://fixture:private-db-marker@localhost/loom',
-        LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID='fixture-actuator')
+        LOOM_EXECUTION_ACTUATOR_CONTROLLER_ID='fixture-actuator',
+        LOOM_POOL_GATEWAY_DB_URL='postgresql+psycopg://fixture:private-db-marker@localhost/loom')
     token = tmp_path / 'token'
     token.write_text('private-machine-marker')
     token.chmod(0o600)
@@ -65,10 +73,18 @@ def settings_case(request, guest_runtime_inputs, tmp_path):
         expected.update(mode='application', submission_source={'schema_version': 'loom.pool-submission-source.v1', 'kind': 'environment',
             'data_environment_id': str(participant.environment_id), 'application': None},
             runtime_profile=json.loads(rows['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value']))
-    else:
+    elif component == 'manager':
         rows['LOOM_SVC_POOL_PROFILES_FILE']['value'] = str(catalog)
         options['catalog_sha256'] = hashlib.sha256(catalog.read_bytes()).hexdigest()
         expected.update(mode='management', catalog_path=str(catalog), catalog_sha256=options['catalog_sha256'])
+    else:
+        rows['LOOM_POOL_GATEWAY_BEARER_TOKEN_FILE']['value'] = str(token)
+        options['token_sha256'] = hashlib.sha256(b'private-machine-marker').hexdigest()
+        machine, = (row for row in migration.registration.spec.machines if row.role == 'gateway')
+        expected.update(pool_id=str(migration.registration.spec.pool_id), installation_id=str(migration.registration.spec.installation_id),
+            machine_id=str(machine.machine_id), admission_epoch=migration.registration.spec.admission_epoch,
+            bearer_token_file=str(token), token_sha256=options['token_sha256'],
+            kubernetes=json.loads(rows['LOOM_POOL_GATEWAY_KUBERNETES']['value']))
     environment.update({name: row['value'] for name, row in rows.items() if 'value' in row})
     return component, target, environment, options, expected, token, catalog
 
@@ -98,12 +114,15 @@ def test_fixed_settings_probe_uses_actual_loaded_configuration_and_private_mater
 def test_fixed_settings_probe_rejects_disabled_or_different_runtime_without_exposing_values(settings_case, tmp_path, damage):
     component, _, environment, _, expected, _, _ = settings_case
     variable = {'controller': 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', 'actuator': 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL',
-        'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE'}[component]
+        'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE',
+        'gateway': 'LOOM_POOL_GATEWAY_KUBERNETES'}[component]
     if damage == 'missing':
         environment.pop(variable)
     elif damage == 'settings':
         if component == 'manager':
             environment['LOOM_SVC_SERVICE_MODE'] = 'application'
+        elif component == 'gateway':
+            environment['LOOM_POOL_GATEWAY_MACHINE_ID'] = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
         else:
             value = json.loads(environment[variable])
             value['management_origin' if component != 'service' else 'data_environment_id'] = (
@@ -116,7 +135,7 @@ def test_fixed_settings_probe_rejects_disabled_or_different_runtime_without_expo
     assert result.stderr == b'Pool runtime settings unqualified\n'
 
 
-@pytest.mark.parametrize('settings_case', ['controller', 'actuator', 'guest'], indirect=True)
+@pytest.mark.parametrize('settings_case', ['controller', 'actuator', 'guest', 'gateway'], indirect=True)
 @pytest.mark.parametrize('damage', ['different', 'missing', 'symlink', 'permissions', 'empty', 'oversized'])
 def test_fixed_probe_requires_the_same_owner_only_machine_token(settings_case, tmp_path, damage):
     _, _, _, _, _, token, _ = settings_case
@@ -167,7 +186,8 @@ def test_expected_settings_cannot_use_ambiguous_or_indirect_configuration(settin
         container['envFrom'] = [{'secretRef': {'name': 'foreign'}}]
     elif damage == 'secret_setting':
         variable = {'controller': 'LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON', 'actuator': 'LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL',
-            'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE'}[component]
+            'service': 'LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON', 'manager': 'LOOM_SVC_POOL_PROFILES_FILE',
+            'gateway': 'LOOM_POOL_GATEWAY_KUBERNETES'}[component]
         row = env(target)[variable]
         row.pop('value')
         row['valueFrom'] = {'secretKeyRef': {'name': 'private-marker', 'key': 'settings'}}
