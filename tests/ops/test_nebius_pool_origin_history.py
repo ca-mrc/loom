@@ -218,6 +218,17 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
     'kubernetes', 'kubernetes_uid', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod',
     'capacity', 'late_capacity_secret', 'late_capacity_backend', 'late_capacity_pod'])
 def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='probe')
+
+
+@pytest.mark.parametrize('damage', [None, 'db_settings', 'token', 'original_running', 'unready', 'uid',
+    'pod', 'template', 'registration', 'secret', 'backend', 'history', 'authority', 'kubernetes', 'capacity',
+    'late_capacity_pod', 'open_report', 'open_unknown', 'open_secret', 'open_backend', 'open_pod', 'open_authority'])
+def test_pool_opening_uses_qualified_gateway_once(management_history, projected_gateway, monkeypatch, damage):
+    _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, action='open')
+
+
+def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, damage, *, action):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
     import json
@@ -226,7 +237,7 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
     import sys
 
     from scripts.ops.nebius_pool_migration import PoolMigrationError
-    from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_CAPACITY_COMMAND
+    from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_ACTIVATION_COMMAND, BOUND_POOL_CAPACITY_COMMAND
 
     from loom_service.pool_management.installation import PoolInstallation
     from loom_service.pool_management.installation_render import render_gateway
@@ -316,12 +327,22 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         if args[0] == 'exec':
             assert args[:9] == ['exec', '-n', namespace, 'pod/' + pod['metadata']['name'], '-c', 'gateway', '--', 'python', '-c']
             assert 'private-' not in repr(args)
-            if args[9] == BOUND_POOL_CAPACITY_COMMAND:
+            if args[9] in {BOUND_POOL_CAPACITY_COMMAND, BOUND_POOL_ACTIVATION_COMMAND}:
                 # This fixture doubles the remote database only; owning
                 # integration tests execute the exact command against PostgreSQL.
                 assert len(args) == 12 and all(len(value) == 64 for value in args[10:])
-                result = SimpleNamespace(returncode=1 if damage == 'capacity' else 0,
-                    stdout=b'{"status": "qualified"}\n', stderr=b'')
+                opening = args[9] == BOUND_POOL_ACTIVATION_COMMAND
+                # Bind the exact registration and a fresh challenge; a report
+                # from another installation cannot satisfy this exec contract.
+                import hmac
+                from scripts.ops.nebius_pool_startup_capacity import expected_startup_capacity
+                response = hmac.new(bytes.fromhex(args[10]), json.dumps(expected_startup_capacity(migration.registration.spec),
+                    sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+                assert args[11] == response
+                if opening:
+                    assert len(processes) == 4 and calls[-1][10] != next(row[10] for row in calls if row[0] == 'exec' and row[9] == BOUND_POOL_CAPACITY_COMMAND)
+                result = SimpleNamespace(returncode=1 if damage == 'capacity' or (opening and damage == 'open_unknown') else 0,
+                    stdout=b'{"status": "global"}\n' if opening and damage != 'open_report' else b'{"status": "qualified"}\n', stderr=b'')
             else:
                 result = subprocess.run([sys.executable, *args[8:]], capture_output=True, check=False, timeout=30,
                     cwd=api.kubeconfig.parent, env=environment)
@@ -346,6 +367,14 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
                 state.database['metadata']['uid'] = str(uuid4())
             elif len(processes) == 4 and damage == 'late_capacity_pod':
                 pod['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 5 and damage == 'open_secret':
+                state.secret['metadata']['resourceVersion'] = 'changed'
+            elif len(processes) == 5 and damage == 'open_backend':
+                state.database['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 5 and damage == 'open_pod':
+                pod['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 5 and damage == 'open_authority':
+                selected.kubeconfig.write_bytes(b'private-changed-authority')
             return json.loads(result.stdout)
         if args[:2] == ['get', 'deployment']:
             assert args[2:5] == [name, '-n', namespace]
@@ -360,14 +389,17 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         return api._run(args)
 
     monkeypatch.setattr(selected, '_run', run)
+    invoke = selected.qualify_gateway_runtime if action == 'probe' else selected.open_pool
     if damage:
         with pytest.raises(PoolMigrationError) as error:
-            selected.qualify_gateway_runtime(original=original, expected=expected)
-        assert error.value.stage == 'gateway_runtime' and 'private-' not in str(error.value)
+            invoke(original=original, expected=expected)
+        assert error.value.stage == ('gateway_runtime' if action == 'probe' else 'activation_open') and 'private-' not in str(error.value)
     else:
-        assert selected.qualify_gateway_runtime(original=original, expected=expected) is None
-        assert len(processes) == 4 and all(row.returncode == 0 for row in processes)
+        assert invoke(original=original, expected=expected) is None
+        assert len(processes) == (4 if action == 'probe' else 5) and all(row.returncode == 0 for row in processes)
         assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
+    assert sum(row[0] == 'exec' and row[9] == BOUND_POOL_ACTIVATION_COMMAND for row in calls) == (
+        1 if action == 'open' and (damage is None or damage.startswith('open_')) else 0)
     assert all('private-' not in (row.stdout + row.stderr).decode() for row in processes)
     assert all(row[0] in {'get', 'exec'} for row in calls)
     assert not state.executed

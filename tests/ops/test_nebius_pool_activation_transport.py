@@ -80,3 +80,16 @@ def test_activation_transport_drift_is_unconfirmed_and_never_retried(management_
             api.activation_guard(state.target, 'fence')
     assert 'private-' not in str(error.value)
     assert sum(row[0] == 'exec' for row in state.calls) == (0 if damage in {'credential', 'authority'} else 1)
+
+
+def test_active_role_inspection_rechecks_operator_authority_after_sql(database_guard):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    api, state = database_guard
+    def inspect(query):
+        api.kubeconfig.write_bytes(b'private-changed-authority')
+        return {'status': 'qualified'}
+    state.exec_hook = inspect
+    with pytest.raises(PoolMigrationError):
+        api.runtime_role(state.target, 'inspect')
+    assert sum(row[0] == 'exec' for row in state.calls) == 1
