@@ -118,11 +118,12 @@ def test_protected_inspection_snapshot_transport_never_requests_secret_payloads_
     assert options['timeout'] <= 240
 
 
-def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(snapshot_objects, monkeypatch, tmp_path, capsys):
+def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(pool_snapshot, monkeypatch, tmp_path, capsys):
     import subprocess
 
     from scripts.ops import nebius_application_snapshot as snapshot
 
+    objects, collections, _, _, _ = pool_snapshot
     home = tmp_path / '.loom/nebius-management'
     home.mkdir(parents=True, mode=0o700)
     inputs = home / 'inputs.json'
@@ -137,12 +138,24 @@ def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(sna
     calls = []
     def execute(command, **kwargs):
         assert command[:5] == ['kubectl', '--kubeconfig', str(tmp_path / 'kubeconfig'), '--request-timeout=30s', 'get']
-        calls.append((command[5], command[6]))
-        return subprocess.CompletedProcess(command, 0, json.dumps(snapshot_objects[calls[-1]]).encode(), b'')
+        calls.append(command[5:])
+        if command[5] == '--raw':
+            path = command[6].split('?')[0]
+            resource = path.rsplit('/', 1)[1]
+            kind = next(name for name in ('Deployment', 'StatefulSet', 'CronJob', 'Service', 'ConfigMap',
+                'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding') if name.lower() + 's' == resource)
+            namespace = path.split('/namespaces/')[1].split('/')[0] if '/namespaces/' in path else None
+            row = collections[kind, namespace]
+        else:
+            namespace = command[command.index('-n') + 1] if '-n' in command else None
+            row = objects[command[5], command[6], namespace]
+        return subprocess.CompletedProcess(command, 0, json.dumps(row).encode(), b'')
     monkeypatch.setattr(snapshot.subprocess, 'run', execute)
     assert snapshot.main() == 0
-    assert set(calls) == set(snapshot_objects)
-    assert json.loads(capsys.readouterr().out)['status'] == 'shared_inputs_observed'
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'shared_inputs_observed'
+    assert (home / 'shared-input-observations' / result['observation_id'] / 'pool-resources.json').is_file()
+    assert sum(row[0] == '--raw' for row in calls) == 23
     inputs.chmod(0o644)
     calls.clear()
     assert snapshot.main() == 1 and not calls
@@ -182,6 +195,9 @@ def pool_snapshot(snapshot_objects):
     cm['data']['environment.json'] = json.dumps(config)
     objects = {(kind, name, None if kind == 'namespace' else shared): copy.deepcopy(row)
         for (kind, name), row in snapshot_objects.items()}
+    for (kind, _, _), row in objects.items():
+        if kind == 'namespace':
+            row['metadata'].pop('namespace')
     for index, name in enumerate((execution, execution + '-build'), 7):
         objects['namespace', name, None] = {'apiVersion': 'v1', 'kind': 'Namespace',
             'metadata': {'name': name, 'uid': str(UUID(int=index)), 'resourceVersion': '13'}}
