@@ -1,6 +1,7 @@
 """Only cleanup-qualified owner builds become immutable deployment releases."""
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from uuid import uuid4
@@ -36,6 +37,9 @@ from tests.integration.test_nebius_application_ready import ready_context as rea
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.integration.test_nebius_pool_direct_origins import BODY, configure, public_submit, stored
+from tests.integration.test_nebius_pool_direct_origins import direct_stack as direct_stack
+from tests.integration.test_nebius_pool_direct_origins import fwd_setup as fwd_setup
 from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_application_render import inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -99,7 +103,7 @@ async def test_release_lookup_rejects_foreign_scope_before_returning_build_state
 
 
 async def test_manager_freezes_ready_owner_build_and_replays_without_builder(
-        environment_registry, build_inputs, platform_inputs, tmp_path):
+        environment_registry, build_inputs, platform_inputs, tmp_path, direct_stack):
     _, _, shared, foundation = inputs(platform_inputs)
     alice, bob = environment_registry[2]
     async with setup_worker(environment_registry, build_inputs, tmp_path,
@@ -139,6 +143,32 @@ async def test_manager_freezes_ready_owner_build_and_replays_without_builder(
         replay = await restarted.create(alice, payload, idempotency_key="deploy-build")
         assert replay.operation_id == operation.operation_id
         assert await registry.frozen_plan(lease) == plan
+        # Exercise the actual frozen deployment -> service -> CP -> SQL path,
+        # not a separately invented origin fixture or a mocked submission call.
+        api = deployments["loom-service"]["spec"]["template"]["spec"]["containers"][0]
+        installed, = [entry["value"] for entry in api["env"]
+            if entry["name"] == "LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON"]
+        source = json.loads(installed)
+        configure(direct_stack[0], source)
+        body = BODY | {"idempotency_key": "built-release-" + uuid4().hex}
+        initial = await stored(direct_stack, await public_submit(direct_stack, body))
+        origin = initial.pool_origin
+        assert origin["kind"] == "application"
+        assert origin["data_environment_id"] == str(shared.data_environment_id)
+        assert origin["application"] == {
+            "application_id": str(lease.application_id),
+            "incarnation": plan["registration"]["incarnation"],
+            "deployment_generation": 1,
+            "release_id": str(request.build.build_id),
+            "source_digest": request.build.source.source_digest,
+        }
+        # A newer process must not relabel a task accepted by the old release.
+        configure(direct_stack[0], source | {"application": source["application"] | {
+            "deployment_generation": 2, "release_id": str(uuid4()),
+            "source_digest": "sha256:" + "f" * 64}})
+        retried = await stored(direct_stack, await public_submit(direct_stack, body))
+        assert retried.id == initial.id
+        assert retried.pool_origin == origin
 
 
 @pytest.mark.parametrize("scope", ["installation_id", "data_environment_id", "cluster_id"])
