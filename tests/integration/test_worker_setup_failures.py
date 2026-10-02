@@ -27,7 +27,6 @@ from loom_worker.runner_pool import RunnerPool
 from loom_worker.vllm_registry import WorkerVLLMRegistry
 from tests.integration.test_service_trials_read import trials_setup  # noqa: F401
 
-
 _SECRET_SENTINEL = "setup-secret-do-not-publish"
 
 
