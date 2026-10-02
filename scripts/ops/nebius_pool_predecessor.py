@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 from scripts.ops.nebius_management_refresh_predecessor import CompletedUpgrade, _predecessor_scope
+from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
 from scripts.ops.nebius_pool_completion import PoolCutoverCompletion, load_pool_completion
 from scripts.ops.nebius_pool_cutover_entry import PoolCutoverContext, load_pool_cutover_inputs
 from scripts.ops.nebius_pool_migration import _hash
@@ -67,6 +68,8 @@ def _load_completed_pool(selector: PoolPredecessorV1, *, original: CompletedUpgr
         if completion.outcome == 'global':
             deployment['pool_catalog_operation_id'] = str(context.inputs.installation.operation_id)
         derived = ManagementDeployment.model_validate(deployment)
+        if completion.outcome == 'global' and context.request.application_delivery is not None:
+            derived = derive_application_build_deployment(context.predecessor.deployment, context.inputs.installation)
         active = copy.deepcopy(completion.workloads[_key(context.request.manager)])
         if _uid(active) != _uid(context.predecessor.active) or _uid(active) != _uid(original.active):
             raise ValueError

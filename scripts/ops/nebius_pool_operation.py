@@ -114,7 +114,8 @@ own original journal lock and validates its predecessor before any side effect.
                 else:
                     if not present('startup'):
                         pending = advance('cutover', 'pool_runtime_staged_closed', lambda: stage_pool_cutover(
-                            request=request, tokens=tokens, api=parent, state_dir=state, anchor_dir=anchor))
+                            request=request, tokens=tokens, api=parent, state_dir=state, anchor_dir=anchor,
+                            source_credentials=parent._source_credentials if request.application_delivery is not None else None))
                         if pending is not None:
                             return pending
                     pending = advance('startup', 'pool_startup_staged_closed', lambda: stage_pool_startup(

@@ -232,3 +232,19 @@ def test_builder_complete_operation_retains_source_for_future_refresh(builder_cu
     assert pool.active == pool.completion.workloads[_key(context.request.manager)]
     assert {path: path.read_bytes() for path in before} == before
     assert state.run() == result
+
+
+@pytest.mark.timeout(420)
+def test_builder_rollback_preserves_original_manager_without_source_mounts(builder_cutover_inputs):
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from tests.ops.test_nebius_pool_predecessor import finish_cutover
+
+    operation, _, root, credentials = builder_cutover_inputs
+    context, result = finish_cutover(operation, legacy=True, source_credentials=credentials)
+    pool = load_completed_pool(PoolPredecessorV1(operation=operation,
+        completion_sha256=result['completion_sha256']), original=root)
+    assert pool.completion.outcome == 'legacy'
+    assert pool.deployment == context.predecessor.deployment
+    assert pool.deployment.application_builder_machine_id is None
+    assert pool.deployment.installation.applications.runtime.build is None
+    assert all(row['name'] != 'application-source-credentials' for row in pool.active['spec']['template']['spec']['volumes'])

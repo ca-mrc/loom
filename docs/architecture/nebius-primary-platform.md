@@ -1081,8 +1081,16 @@ Configured builds additionally require a protected dedicated machine ID and pool
 catalog operation. The renderer reuses the private process-owned token mount and
 provides only Job reads and Pod reads/list/logs in the shared build namespace.
 It grants no Job writes, Secret reads or access to other build namespaces.
-The protected operation must still qualify the exact registered machine/profile,
-deliver the source material and stage these resources before activation. Historical
+The protected first cutover derives these settings from its completed predecessor
+and exact registered machine/profile. It qualifies the retained shared control
+plane's source endpoint/bucket/key references and freshly reads the fixed
+`loom-platform-storage` Secret against its protected UID/version/source-only hash.
+Only `source-access-key` and `source-secret-key` are copied into the manager's
+immutable source Secret; data, backup and operator credentials are not copied.
+It stages material, configuration and reader roles before replacing the stopped
+manager, and checks platform fit including the upload spool before downtime.
+Completed global ancestry retains the full builder-enabled configuration; recovery
+to the legacy outcome retains the original manager. Historical
 image-only refresh remains narrow: it preserves the existing source Secret even
 when its revision differs from the older cloud/shared bundles, and cannot enable,
 remove or change source/build runtime settings. Rendering these prerequisites

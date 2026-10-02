@@ -33,7 +33,7 @@ from tests.ops.test_nebius_pool_cutover_entry import retirement_inputs as retire
 from tests.ops.test_nebius_pool_cutover_entry import runtime_inputs as runtime_inputs
 
 
-def finish_cutover(operation, *, legacy=False):
+def finish_cutover(operation, *, legacy=False, source_credentials=None):
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_completion import complete_pool_cutover
     from scripts.ops.nebius_pool_cutover import stage_pool_cutover
@@ -51,7 +51,7 @@ def finish_cutover(operation, *, legacy=False):
     for document in closed.documents.values():
         document['metadata'].setdefault('resourceVersion', '1')
     assert stage_pool_cutover(request=context.request, tokens=context.tokens, api=closed,
-        state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
+        state_dir=state, anchor_dir=anchor, source_credentials=source_credentials)['status'] == 'pool_runtime_staged_closed'
     startup = StartupAPI(context.request, closed, state)
     assert stage_pool_startup(request=context.request, api=startup, state_dir=state,
         anchor_dir=anchor)['status'] == 'pool_startup_staged_closed'
