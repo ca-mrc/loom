@@ -59,7 +59,8 @@ def binding() -> dict:
             "token_secret": {"name": "staging-collector", "key": "token"},
             "nebius_secret": {"name": "nebius-observer", "key": "credentials.json"},
         },
-        "network": {
+        "network": {"kubelet": [{"cidr": "10.40.0.0/24", "port": 10250}]}
+        | {
             name: [{"cidr": f"192.0.2.{index}/32", "port": port}]
             for index, (name, port) in enumerate(
                 [
@@ -391,7 +392,7 @@ def test_attachment_network_policies_scope_each_component(tmp_path: Path) -> Non
     ]
     for name, expected in {
         "loom-attachment-gateway": {"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32", "192.0.2.7/32"},
-        "loom-attachment-actuator": {"192.0.2.1/32", "192.0.2.5/32"},
+        "loom-attachment-actuator": {"192.0.2.1/32", "192.0.2.5/32", "10.40.0.0/24"},
         "loom-attachment-collector": {"192.0.2.4/32", "192.0.2.5/32", "192.0.2.6/32"},
     }.items():
         actual = {

@@ -83,6 +83,7 @@ def attachment() -> dict:
             "nebius_secret": {"name": "nebius-observer", "key": "credentials.json"},
         },
         "network": {
+            "kubelet": [{"cidr": "10.40.0.0/24", "port": 10250}],
             **{
                 name: [{"cidr": "10.42.0.8/32", "port": port}]
                 for name, port in (

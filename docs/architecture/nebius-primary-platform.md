@@ -2249,6 +2249,13 @@ retired identities reject preflight. Separate Job writers in participant executi
 or build namespaces and unregistered cluster-wide Job writers also reject,
 including User and Group subjects. Discovery/self-inspection readers and unrelated
 namespace-local grants outside the pool are preserved.
+CronJob mutation grants count as indirect Job authority: the native CronJob
+controller can create Jobs without a Job grant to the schedule's creator. Every
+existing CronJob in a participant execution/build namespace must also be an exact
+retained original, even with a different ServiceAccount or `suspend: true`.
+Revoking the creator's credential does not retire an existing schedule. Unknown
+schedules reject preflight without being adopted, suspended or deleted; schedules
+in unrelated namespaces and foreign Job/Pod occupancy remain untouched.
 
 Kubernetes controllers and provider administrators are an explicit platform trust
 boundary, not writers the application migration can fence. Protected private inputs
@@ -2438,6 +2445,11 @@ sampled memory and filesystem counters without retaining foreign Pod data.
 It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
 summaries, with no broad `nodes/proxy` fallback. The effective reader review
 accepts only GET on `nodes/stats`, not node proxy or execution authority.
+The staging attachment requires explicit `network.kubelet` private-node CIDRs
+on TCP 10250 and grants that egress only to the actuator, not the gateway or
+collector. Missing routes fail offline rendering; they are not replaced with
+unrestricted egress. Existing attachment inputs must add the approved worker and
+hosting-node routes before upgrading the reader.
 The connected protected preflight checks kubelet reachability, certificate trust
 and summary authorization **inside each retained ordinary and guest actuator Pod**
 before controller retirement. It qualifies the Deployment/ReplicaSet/Pod lineage,
