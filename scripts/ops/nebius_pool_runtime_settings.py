@@ -10,6 +10,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import TypeAdapter
 
@@ -18,8 +19,9 @@ from loom.nebius_pool_priority import PoolSubmissionSourceV1
 from loom.nebius_pool_settings import PoolRuntimeSettings
 from loom.service_execution_materialization import load_service_execution_runtime_profile
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
+from loom_service.environment_management.kubernetes_credentials import ProjectedKubernetesConnection
 
-PoolSettingsComponent = Literal['controller', 'actuator', 'service', 'manager']
+PoolSettingsComponent = Literal['controller', 'actuator', 'service', 'manager', 'gateway']
 
 
 def expected_pool_runtime_settings(component: PoolSettingsComponent, workload: dict[str, Any], *,
@@ -61,6 +63,20 @@ def expected_pool_runtime_settings(component: PoolSettingsComponent, workload: d
                     if prefix + 'TASK_IMAGE_BUILDER' in rows else None)
                 wanted.update(namespace=value(prefix + 'NAMESPACE'), target_id=value(prefix + 'TARGET_ID'),
                     task_image_builder=None if builder is None else builder.model_dump(mode='json'), kubernetes_connection=None)
+        elif component == 'gateway':
+            if token_sha256 is None or re.fullmatch('[0-9a-f]{64}', token_sha256) is None or catalog_sha256 is not None:
+                raise ValueError
+            prefix = 'LOOM_POOL_GATEWAY_'
+            identities = {key: UUID(value(prefix + key.upper())) for key in ('pool_id', 'installation_id', 'machine_id')}
+            epoch = value(prefix + 'ADMISSION_EPOCH')
+            token_path = Path(value(prefix + 'BEARER_TOKEN_FILE'))
+            connection = ProjectedKubernetesConnection.model_validate_json(value(prefix + 'KUBERNETES'))
+            if (not all(identity.int for identity in identities.values()) or re.fullmatch('[1-9][0-9]{0,18}', epoch) is None
+                    or not all(item.is_absolute() for item in (token_path, connection.ca_file, connection.token_file))):
+                raise ValueError
+            wanted.update({key: str(identity) for key, identity in identities.items()})
+            wanted.update(admission_epoch=int(epoch), bearer_token_file=str(token_path), token_sha256=token_sha256,
+                kubernetes=connection.model_dump(mode='json'))
         elif component in {'service', 'manager'}:
             if token_sha256 is not None:
                 raise ValueError
@@ -132,6 +148,14 @@ try:
         ImageAdmissionKeyring.from_json(settings.execution_image_admission_public_keys_json)
         actual.update(global_pool=pool.model_dump(mode="json"), token_sha256=hashlib.sha256(token.encode()).hexdigest(),
             image_admission_keyring=json.loads(settings.execution_image_admission_public_keys_json))
+    elif component == "gateway":
+        from loom_service.pool_management.__main__ import PoolGatewaySettings
+        settings = PoolGatewaySettings()
+        token = read_owner_only_secret(settings.bearer_token_file, maximum_bytes=512)
+        actual.update(pool_id=str(settings.pool_id), installation_id=str(settings.installation_id),
+            machine_id=str(settings.machine_id), admission_epoch=settings.admission_epoch,
+            bearer_token_file=str(settings.bearer_token_file), token_sha256=hashlib.sha256(token.encode()).hexdigest(),
+            kubernetes=settings.kubernetes.model_dump(mode="json"))
     elif component in {"service", "manager"}:
         from loom_service.config import LoomServiceSettings
         settings = LoomServiceSettings()
