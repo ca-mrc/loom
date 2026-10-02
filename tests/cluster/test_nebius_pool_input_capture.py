@@ -6,6 +6,7 @@ import copy
 import json
 import os
 import ssl
+import time
 
 import httpx
 import pytest
@@ -57,6 +58,22 @@ async def test_private_capture_observes_actual_workloads_and_roles_without_secre
         tls = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
         tls.load_cert_chain(configuration.cert_file, configuration.key_file)
 
+        # API/namespace readiness precedes bootstrap RBAC on a fresh K3s.
+        # Capture is a point-in-time observation, not a bootstrap waiter: make
+        # the real role asserted below a fixture prerequisite before capturing.
+        rbac = client.RbacAuthorizationV1Api(core.api_client)
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                admin_role = await asyncio.to_thread(rbac.read_cluster_role, 'cluster-admin')
+                if admin_role.rules:
+                    break
+            except client.ApiException as error:
+                if error.status != 404:
+                    raise
+            assert time.monotonic() < deadline, 'disposable cluster-admin bootstrap role did not appear'
+            await asyncio.sleep(0.1)
+
         def capture():
             with httpx.Client(base_url=configuration.host, verify=tls, trust_env=False, timeout=15) as http:
                 def read(kind, name, namespace):
@@ -86,6 +103,7 @@ async def test_private_capture_observes_actual_workloads_and_roles_without_secre
         assert deployment['metadata']['uid'] == deployment_uid
         assert deployment['spec']['replicas'] == 0
         assert any(row['kind'] == 'ClusterRole' and row['metadata']['name'] == 'cluster-admin'
+            and row['metadata']['uid'] == admin_role.metadata.uid
             and row['rules'] for row in snapshot['resources'])
         assert all(row['metadata'].get('namespace') in {None, shared, execution, execution + '-build'}
             and row['kind'] != 'Secret' for row in snapshot['resources'])
