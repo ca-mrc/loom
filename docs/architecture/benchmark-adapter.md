@@ -746,6 +746,15 @@ diagnostic to
 the build summary and trailing log output with a `truncated setup
 diagnostic` marker instead of preserving only the prefix.
 
+For retained local-worker execution, task-bundle preparation has a configurable
+300-second default deadline (`LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC`). A
+timeout or storage failure before execution is reported through the same Trial
+detail and list APIs, with a `task materialization` diagnostic and the source
+scheme. Error details pass through secret redaction before publication. The
+pre-start heartbeat remains active during preparation; failed materialization
+removes its temporary directory. Existing retry classification and limits
+decide whether setup requeues or fails terminally.
+
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
 - Automatically on `loom service up` after seed, when
