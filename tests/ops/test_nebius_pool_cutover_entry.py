@@ -223,6 +223,41 @@ def save_private(metadata, payload):
     metadata["inputs_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("damage", [None, "extra_field", "running", "database"])
+def test_private_cutover_loads_only_explicit_qualified_dormant_consumers(private_cutover, damage):
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_cutover import cutover_documents, retained_cutover_workloads
+    from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    metadata, payload, _ = private_cutover
+    original = load_pool_cutover_inputs(metadata)
+    consumer = dormant_consumer(original.request.fencing.retirement)
+    value = asdict(consumer)
+    if damage == "extra_field":
+        value["allow_remote_write"] = True
+    elif damage == "running":
+        value["actuator"]["spec"]["replicas"] = 1
+    elif damage == "database":
+        settings = {row["name"]: row for row in value["actuator"]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        settings["LOOM_EXECUTION_ACTUATOR_DB_URL"]["valueFrom"]["secretKeyRef"]["name"] = "foreign-database"
+    payload["dormant_consumers"] = [value]
+    save_private(metadata, payload)
+    if damage:
+        with pytest.raises(EntryError):
+            load_pool_cutover_inputs(metadata)
+        return
+    context = load_pool_cutover_inputs(metadata)
+    assert context.request.fencing.retirement.dormant_consumers == (consumer,)
+    runtime = cutover_documents(context.request)["runtime"]
+    retained = retained_cutover_workloads(context.request,
+        state_dir=Path(metadata["state_dir"]), anchor_dir=Path(metadata["anchor_dir"]))
+    for kind, document in (("Deployment", consumer.actuator), ("CronJob", consumer.collector)):
+        key = kind + ":" + document["metadata"]["namespace"] + ":" + document["metadata"]["name"]
+        assert key in retained and key not in runtime
+        assert retained[key]["metadata"]["uid"] == document["metadata"]["uid"]
+
+
 @pytest.fixture
 def connected_cutover_entry(private_cutover, monkeypatch):
     """The already-qualified reader transport is doubled, not the new assembly."""

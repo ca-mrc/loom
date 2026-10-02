@@ -209,6 +209,33 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
 
 
+def test_connected_cutover_preserves_closed_dormant_consumers_and_rejects_respawn(cutover_inputs, tmp_path):
+    from scripts.ops.nebius_pool_cutover import cutover_documents, retained_cutover_workloads
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    request, tokens = cutover_inputs
+    consumer = dormant_consumer(request.fencing.retirement)
+    request = replace(request, fencing=replace(request.fencing,
+        retirement=replace(request.fencing.retirement, dormant_consumers=(consumer,))))
+    api = CutoverAPI(request)
+    result = run(request, tokens, api, tmp_path)
+    assert result["status"] == "pool_runtime_staged_closed"
+    assert len(api.retirement.patches) == 11 and len(api.migration.guards) == 3
+    runtime = cutover_documents(request)["runtime"]
+    retained = retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
+    for original in (consumer.actuator, consumer.collector):
+        key = _key(original)
+        field = "template" if original["kind"] == "Deployment" else "jobTemplate"
+        assert key not in runtime and key in retained
+        assert api.documents[key]["spec"][field] == original["spec"][field]
+    before = (len(api.patches), len(api.retirement.patches), len(api.resources.creates))
+    assert run(request, tokens, api, tmp_path) == result
+    api.documents[_key(consumer.collector)]["spec"]["suspend"] = False
+    with pytest.raises(ValueError):
+        run(request, tokens, api, tmp_path)
+    assert (len(api.patches), len(api.retirement.patches), len(api.resources.creates)) == before
+
+
 @pytest.mark.parametrize('field,value', [('uid', UUID('aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa')),
     ('resource_version', '28'), ('sha256', 'e' * 64)])
 def test_cutover_recovery_cannot_replace_the_qualified_collector_credential(cutover_inputs, tmp_path, field, value):
@@ -927,6 +954,26 @@ def test_existing_foreign_cronjob_cannot_create_pool_jobs_through_native_control
     else:
         binding_preflight(request, tokens, cutover_binding_inventory, workloads=inventories)
     assert inventories == before  # Never adopt, suspend or delete unknown producers.
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_writer_inventory_requires_explicit_dormant_roster(cutover_inputs, cutover_binding_inventory, declared):
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    request, tokens = cutover_inputs
+    consumer = dormant_consumer(request.fencing.retirement)
+    workloads = writer_workload_inventory(request)
+    workloads["deployments"].append(copy.deepcopy(consumer.actuator))
+    workloads["cronjobs"].append(copy.deepcopy(consumer.collector))
+    before = copy.deepcopy(workloads)
+    if declared:
+        request = replace(request, fencing=replace(request.fencing,
+            retirement=replace(request.fencing.retirement, dormant_consumers=(consumer,))))
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=workloads)
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=workloads)
+    assert workloads == before
 
 
 @pytest.mark.parametrize("boundary", ["foreign_owner", "management_producer"])
