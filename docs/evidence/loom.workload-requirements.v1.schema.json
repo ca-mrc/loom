@@ -170,11 +170,12 @@
               "isolated_kernel_settings",
               "external_cluster",
               "pkcs11_authentication",
-              "dpdk_networking"
+              "dpdk_networking",
+              "emulated_pkcs11_authentication"
             ],
             "type": "string"
           },
-          "maxItems": 6,
+          "maxItems": 7,
           "title": "Capabilities",
           "type": "array"
         },

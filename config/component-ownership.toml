@@ -667,6 +667,17 @@ attestation_owner = "runtime-payload-provenance"
 runtime_policy = "runtime-payload"
 
 [[components]]
+id = "emulated-auth-fixture"
+kind = "runtime-payload-image"
+dockerfile = "tests/fixtures/emulated_auth/Dockerfile"
+build_context = "tests/fixtures/emulated_auth"
+source_paths = ["tests/fixtures/emulated_auth/**"]
+smoke_owner = "task-fixture-conformance"
+scan_owner = "runtime-payload-scan"
+attestation_owner = "runtime-payload-provenance"
+runtime_policy = "runtime-payload"
+
+[[components]]
 id = "tb2-subset-blind-maze-explorer-5x5"
 kind = "runtime-payload-image"
 dockerfile = "packages/loom-benchmark-terminal-bench-2/tests/fixtures/tb2-subset-10/tasks/blind-maze-explorer-5x5/Dockerfile"
@@ -876,6 +887,7 @@ exclude_paths = [
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_sandbox_network_docker.py",
   "tests/integration/test_guest_sandbox_runtime.py",
+  "tests/integration/test_guest_emulated_auth.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
@@ -942,6 +954,7 @@ include_paths = [
   "tests/integration/test_pipeline_core_fixture_image.py",
   "tests/integration/test_sandbox_network_docker.py",
   "tests/integration/test_guest_sandbox_runtime.py",
+  "tests/integration/test_guest_emulated_auth.py",
   "tests/integration/test_subprocess_agent_e2e.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",

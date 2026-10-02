@@ -26,7 +26,8 @@
             "enum": [
               "nested_docker",
               "singularity_mounts",
-              "isolated_kernel_settings"
+              "isolated_kernel_settings",
+              "emulated_pkcs11_authentication"
             ],
             "type": "string"
           },

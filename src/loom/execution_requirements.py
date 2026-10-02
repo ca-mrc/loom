@@ -9,14 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 ExecutionCapability = Literal[
     "nested_docker", "singularity_mounts", "isolated_kernel_settings",
-    "external_cluster", "pkcs11_authentication", "dpdk_networking",
+    "external_cluster", "pkcs11_authentication", "dpdk_networking", "emulated_pkcs11_authentication",
 ]
 GuestExecutionCapability = Literal[
     "nested_docker", "singularity_mounts", "isolated_kernel_settings",
+    "emulated_pkcs11_authentication",
 ]
 GUEST_EXECUTION_CAPABILITIES: frozenset[GuestExecutionCapability] = frozenset({
     "nested_docker", "singularity_mounts", "isolated_kernel_settings",
 })
+# Keep the historical class defaults immutable. Recognition is not readiness.
+ALL_GUEST_EXECUTION_CAPABILITIES: frozenset[GuestExecutionCapability] = (
+    GUEST_EXECUTION_CAPABILITIES | {"emulated_pkcs11_authentication"}
+)
 
 
 class ExecutionPrerequisiteV1(BaseModel):
@@ -37,7 +42,7 @@ class TaskExecutionRequirementsV1(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    capabilities: tuple[ExecutionCapability, ...] = Field(default=(), max_length=6)
+    capabilities: tuple[ExecutionCapability, ...] = Field(default=(), max_length=7)
     prerequisites: tuple[ExecutionPrerequisiteV1, ...] = Field(default=(), max_length=32)
 
     @model_validator(mode="after")
@@ -79,6 +84,10 @@ _CAPABILITY_ACTIONS: dict[ExecutionCapability, tuple[str, str]] = {
     "pkcs11_authentication": (
         "PKCS#11 or emulated smartcard authentication has no qualified service contract.",
         "Declare the actual authentication fixture or device and qualify agent/socket forwarding without bypassing authentication.",
+    ),
+    "emulated_pkcs11_authentication": (
+        "Guest-local emulated PKCS#11 authentication has no qualified service contract.",
+        "Qualify a trial-owned software token, SSH socket forwarding and real authentication on an explicitly enabled emulated-auth guest target; host devices are not supported.",
     ),
     "dpdk_networking": (
         "DPDK device and traffic-generation execution has no qualified service runtime.",

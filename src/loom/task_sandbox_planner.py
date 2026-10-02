@@ -21,7 +21,7 @@ from uuid import UUID
 
 from loom.execution_contract import nebius_guest_execution_class
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
-from loom.execution_requirements import GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
+from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.execution_runtime_contract import (
     TASK_EGRESS_OUTPUT,
     ContainerResourcesV1,
@@ -60,7 +60,7 @@ _MIN_SANDBOX_EXEC_LIMIT_SECONDS = 900
 def guest_capabilities(task: TaskConfig) -> frozenset[GuestExecutionCapability]:
     """Guest capabilities the task declares; any selects the QEMU guest extension."""
     declared = task.environment.execution_requirements
-    return GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
+    return ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
 
 
 def sandbox_phase_argv(mode: str, module: str = SANDBOX_CONTROLLER_MODULE) -> tuple[str, ...]:
@@ -274,6 +274,7 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         command_identity_sha256=request.command_identity,
         execution_class_id=(nebius_guest_execution_class(
             supports_task_web_egress=profile.supports_task_web_egress,
+            supports_emulated_pkcs11="emulated_pkcs11_authentication" in guest.capabilities,
         ).class_id if guest is not None else profile.execution_class_id),
         composition="init_payload", task_image_ref=env.docker_image,
         task_image_materialization_id=request.task_image_materialization_id,

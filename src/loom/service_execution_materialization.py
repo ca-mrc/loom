@@ -27,6 +27,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import (
+    ALL_GUEST_EXECUTION_CAPABILITIES,
     GUEST_EXECUTION_CAPABILITIES,
     GuestExecutionCapability,
     execution_requirement_diagnostics,
@@ -184,6 +185,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     task_resource_requests: dict[str, TaskExecutionResourceRequestsV1] = Field(default_factory=dict)
     supports_task_identity: bool = False
     guest_runtime: Literal["qemu-tcg-v1"] | None = Field(default=None, exclude_if=lambda value: value is None)
+    supports_emulated_pkcs11: bool = Field(default=False, exclude_if=lambda value: not value)
     guest_runtime_volume_mib: int | None = Field(default=None, ge=1024, le=4096, exclude_if=lambda value: value is None)
     guest_max_artifact_bytes: int | None = Field(default=None, gt=0, le=10 * 1024**3, exclude_if=lambda value: value is None)
     runtime_image_ref: str
@@ -200,7 +202,9 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
 
     @property
     def supported_guest_capabilities(self) -> frozenset[GuestExecutionCapability]:
-        return GUEST_EXECUTION_CAPABILITIES if self.guest_runtime is not None else frozenset()
+        if self.guest_runtime is None:
+            return frozenset()
+        return ALL_GUEST_EXECUTION_CAPABILITIES if self.supports_emulated_pkcs11 else GUEST_EXECUTION_CAPABILITIES
 
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
@@ -223,6 +227,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
         if self.guest_runtime is None and (
             self.guest_runtime_volume_mib is not None or self.guest_max_artifact_bytes is not None
+            or self.supports_emulated_pkcs11
         ):
             raise ValueError("guest budgets require an explicit guest runtime")
         execution_class = nebius_cpu_execution_class(
@@ -265,6 +270,7 @@ def build_nebius_runtime_profile(
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
+    supports_emulated_pkcs11: bool = False,
     guest_runtime_volume_mib: int | None = None,
     guest_max_artifact_bytes: int | None = None,
     runtime_volume_mib: int = 32,
@@ -291,6 +297,7 @@ def build_nebius_runtime_profile(
         service_lifecycle_ready=service_lifecycle_ready,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
+        supports_emulated_pkcs11=supports_emulated_pkcs11,
         guest_runtime_volume_mib=guest_runtime_volume_mib,
         guest_max_artifact_bytes=guest_max_artifact_bytes,
         runtime_volume_mib=runtime_volume_mib,
@@ -432,7 +439,9 @@ def automatic_service_execution_rejections(
                 reasons.append("guest_root_identity_required")
         admission = evaluate_execution_admission(
             workload_requirements_from_task(task, trial if network_override_supported else None),
-            nebius_guest_execution_class(),
+            nebius_guest_execution_class(
+                supports_emulated_pkcs11="emulated_pkcs11_authentication" in supported_capabilities,
+            ),
         )
         reasons.extend(reason.code for reason in admission.reasons if reason.code.startswith("guest_"))
     if service_execution_input_binding(source_provenance) is None:

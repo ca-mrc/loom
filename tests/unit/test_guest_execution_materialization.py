@@ -114,6 +114,40 @@ def test_ordinary_plan_and_profile_omit_guest_extensions_even_when_deployment_re
     assert all("guest_execution" not in sidecar for sidecar in old.canonical_payload()["sidecars"])
 
 
+@pytest.mark.parametrize("web", [False, True])
+def test_emulated_auth_requires_profile_opt_in_and_exact_new_class(web):
+    task, trial, old = _guest_inputs("emulated_pkcs11_authentication")
+    with pytest.raises(ValueError, match="emulated_pkcs11_authentication_unqualified"):
+        _compile(task, trial, old)
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **old.model_dump(mode="json"), "supports_emulated_pkcs11": True,
+        "supports_task_web_egress": web,
+        "execution_class_id": "linux-amd64-cpu-web-pod-v1" if web else "linux-amd64-cpu-pod-v1",
+    })
+    plan = _compile(task, trial, profile)
+    assert plan.execution_class_id == (
+        "linux-amd64-cpu-guest-auth-web-v1" if web else "linux-amd64-cpu-guest-auth-v1"
+    )
+    validate_runtime_plan_requirements(plan, workload_requirements_from_task(task))
+    assert all(s.guest_execution.capabilities == ("emulated_pkcs11_authentication",) for s in plan.sidecars)
+    for class_id in ("linux-amd64-cpu-guest-v1", "linux-amd64-cpu-guest-web-v1"):
+        with pytest.raises(ValueError, match="guest"):
+            ExecutionRuntimePlanV1.model_validate({**plan.canonical_payload(), "execution_class_id": class_id})
+
+
+def test_emulated_auth_opt_in_does_not_rebind_historical_tasks():
+    task, trial, old = _guest_inputs("nested_docker")
+    profile = ServiceExecutionRuntimeProfileV1.model_validate({
+        **old.model_dump(mode="json"), "supports_emulated_pkcs11": True,
+    })
+    assert _compile(task, trial, profile).canonical_payload() == _compile(task, trial, old).canonical_payload()
+    ordinary, trial, original = _inputs()
+    assert _compile(ordinary, trial, profile).execution_class_id == original.execution_class_id
+    assert "supports_emulated_pkcs11" not in old.model_dump(mode="json")
+    with pytest.raises(ValueError, match="guest runtime"):
+        ServiceExecutionRuntimeProfileV1.model_validate({**original.model_dump(mode="json"), "supports_emulated_pkcs11": True})
+
+
 def test_guest_specific_budgets_leave_ordinary_plans_unchanged():
     ordinary, trial, original = _inputs()
     task, _, _ = _guest_inputs()

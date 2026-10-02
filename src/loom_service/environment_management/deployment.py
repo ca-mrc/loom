@@ -146,11 +146,12 @@ def render_management(
     config.pop("task_image_builder", None)
     config.pop("task_identity_policy", None)
     config.pop("guest_execution_target", None)
+    config.pop("emulated_auth_execution_target", None)
     # Image capability is not installed execution authority. Retain the approved
     # profile, but inherit neither standalone policy nor execution components.
     revision = digest({"deployment": deployment.model_dump(mode="json"), "candidate": candidate, "profile": profile})
     template_profile = {key: value for key, value in profile.items() if key not in {
-        "guest_runtime", "guest_runtime_volume_mib", "guest_max_artifact_bytes",
+        "guest_runtime", "guest_runtime_volume_mib", "guest_max_artifact_bytes", "supports_emulated_pkcs11",
     }}
     templates = _build_platform(config, candidate, template_profile, deployment.installation.keyring,
                                 repo_root=repo_root, execution_enabled=False)

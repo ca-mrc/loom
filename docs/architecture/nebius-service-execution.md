@@ -1117,7 +1117,9 @@ rejected. Invalid declaration values are redacted from compatibility reports.
 
 The ordinary shared-kernel class and TaskSet compiler reject special capabilities.
 An explicitly opted-in [guest runtime](guest-execution.md) can admit the three
-guest-local capabilities against its separate immutable class. External
+historical guest-local capabilities against its separate immutable class.
+Emulated PKCS#11 authentication requires an additional explicit profile opt-in
+and a distinct guest class/target; existing guest identities remain unchanged. External
 capabilities remain rejected. The local compatibility report records rejection
 reasons before bootstrap adaptation, so later conversion errors do not hide them. A prerequisite without a reference yields
 `execution_prerequisite_missing`; a supplied reference yields
@@ -1131,6 +1133,7 @@ deployed runtime readiness.
 | `isolated_kernel_settings` | An isolated kernel with task-specific configuration and restoration; no shared-host sysctl changes. |
 | `external_cluster` | Owned endpoint, managed authentication, API behavior, egress and resource cleanup. |
 | `pkcs11_authentication` | Actual emulated or physical authentication fixture, socket forwarding and device isolation where needed. |
+| `emulated_pkcs11_authentication` | Trial-owned software token, real forwarding-dependent PAM authentication, isolated users/state and cleanup in the explicitly qualified emulated-auth guest. No physical-device support. |
 | `dpdk_networking` | Owned NICs, hugepages, driver binding, isolated traffic and cleanup in a dedicated runtime. |
 
 These declarations never grant trusted-host privileges. The existing

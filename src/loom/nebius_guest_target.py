@@ -1,11 +1,28 @@
-"""Closed configuration for one guest sibling of an ordinary execution target."""
+"""Closed guest siblings of one ordinary physical execution target."""
 
 import re
 from typing import Any
 
 
 def guest_target_id(config: dict[str, Any]) -> str | None:
-    declaration = config.get("guest_execution_target")
+    return _target_id(config, "guest_execution_target")
+
+
+def emulated_auth_target_id(config: dict[str, Any]) -> str | None:
+    target_id = _target_id(config, "emulated_auth_execution_target")
+    if target_id is not None:
+        historical = guest_target_id(config)
+        if historical is None or target_id == historical:
+            raise ValueError("emulated authentication requires a distinct sibling of the retained guest target")
+    return target_id
+
+
+def guest_target_ids(config: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(value for value in (guest_target_id(config), emulated_auth_target_id(config)) if value is not None)
+
+
+def _target_id(config: dict[str, Any], field: str) -> str | None:
+    declaration = config.get(field)
     if declaration is None:
         return None
     if not isinstance(declaration, dict) or set(declaration) != {"target_id"}:
