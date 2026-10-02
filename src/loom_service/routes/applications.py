@@ -6,6 +6,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, Request, Response
 
+from loom.application_source_upload import (
+    ApplicationSourceUploadRequestV1,
+    ApplicationSourceUploadV1,
+)
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
     ApplicationOperationRequestV1,
@@ -17,6 +21,7 @@ from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
 from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.operation_evidence import read_operation_evidence
+from loom_service.application_management.source_upload import ApplicationSourceUploader
 from loom_service.environment_management.registry import ManagementError
 from loom_service.routes.environments import ManagementPrincipal
 
@@ -29,6 +34,36 @@ def manager(request: Request) -> ApplicationManager:
     if not isinstance(value, ApplicationManager):
         raise ManagementError("application_management_not_configured", 503)
     return value
+
+
+def source_uploader(request: Request) -> ApplicationSourceUploader:
+    value = getattr(request.app.state, "application_source_uploader", None)
+    if not isinstance(value, ApplicationSourceUploader):
+        raise ManagementError("application_source_upload_not_configured", 503)
+    return value
+
+
+@router.post("/application-sources", status_code=201)
+async def create_source_upload(request: Request, response: Response, payload: ApplicationSourceUploadRequestV1,
+                               principal: ManagementPrincipal, idempotency_key: IdempotencyKey) -> ApplicationSourceUploadV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).registry.create(principal=principal, request=payload, idempotency_key=idempotency_key)
+
+
+@router.get("/application-sources/{upload_id}")
+async def source_upload_status(request: Request, response: Response, upload_id: UUID,
+                               principal: ManagementPrincipal) -> ApplicationSourceUploadV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).registry.status(upload_id, principal=principal)
+
+
+@router.put("/application-sources/{upload_id}/content")
+async def upload_source_content(request: Request, response: Response, upload_id: UUID,
+                                principal: ManagementPrincipal) -> ApplicationSourceUploadV1:
+    if request.headers.get("content-type", "").lower() != "application/octet-stream":
+        raise ManagementError("application_source_content_type_required", 415)
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).upload(upload_id, principal=principal, body=request.stream())
 
 
 @router.post("/applications", status_code=202)

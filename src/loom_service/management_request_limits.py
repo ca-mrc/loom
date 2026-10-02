@@ -8,23 +8,39 @@ within the process memory budget, including copies and JSON parsing overhead.
 from __future__ import annotations
 
 import asyncio
+import re
+from collections.abc import Callable
 
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from loom.application_source_archive import MAX_APPLICATION_SOURCE_ARCHIVE_BYTES
+
+_SOURCE_CONTENT = re.compile(r"/api/v1/application-sources/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/content")
+
+
+class _StreamingBodyError(Exception):
+    """Only this outer receive boundary may translate its framing failure."""
+
 
 class ManagementRequestLimitsMiddleware:
-    def __init__(self, app: ASGIApp, *, max_body_bytes: int, max_inflight: int, body_timeout_sec: float) -> None:
+    def __init__(self, app: ASGIApp, *, max_body_bytes: int, max_inflight: int, body_timeout_sec: float,
+                 source_upload_enabled: Callable[[], bool] | None = None) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
         self.max_inflight = max_inflight
         self.body_timeout_sec = body_timeout_sec
+        self.source_upload_enabled = source_upload_enabled
         self._active = 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        streaming = (scope["method"] == "PUT" and _SOURCE_CONTENT.fullmatch(scope["path"]) is not None
+            and self.source_upload_enabled is not None and self.source_upload_enabled())
+        body_limit = MAX_APPLICATION_SOURCE_ARCHIVE_BYTES if streaming else self.max_body_bytes
 
         async def reject(status: int, detail: str) -> None:
             headers = {"Cache-Control": "no-store"}
@@ -47,7 +63,7 @@ class ManagementRequestLimitsMiddleware:
             except ValueError:
                 await reject(400, "invalid request framing")
                 return
-            if declared > self.max_body_bytes:
+            if declared > body_limit:
                 await reject(413, "management request body too large")
                 return
         if any(k.lower() == b"content-encoding" and v.strip().lower() != b"identity" for k, v in headers):
@@ -59,6 +75,66 @@ class ManagementRequestLimitsMiddleware:
             return
         self._active += 1
         try:
+            if streaming:
+                # Do not call receive here: the route must first authenticate
+                # owner/membership/CSRF and check the durable upload intent.
+                # The configured uploader owns reception/storage deadlines and
+                # disk admission; this layer retains framing and the hard cap.
+                size, finished, response_started = 0, False, False
+                failure: tuple[int, str] | None = None
+
+                def framing_error(status: int, detail: str) -> _StreamingBodyError:
+                    nonlocal failure
+                    failure = (status, detail)
+                    return _StreamingBodyError()
+
+                async def bounded_receive() -> Message:
+                    nonlocal size, finished
+                    message = await receive()
+                    if message["type"] == "http.disconnect":
+                        return message
+                    if message["type"] != "http.request":
+                        raise framing_error(400, "invalid request framing")
+                    size += len(message.get("body", b""))
+                    if size > body_limit:
+                        raise framing_error(413, "management request body too large")
+                    if declared is not None and size > declared:
+                        raise framing_error(400, "request body length mismatch")
+                    if not message.get("more_body", False):
+                        if declared is not None and size != declared:
+                            raise framing_error(400, "request body length mismatch")
+                        finished = True
+                    return message
+
+                async def streaming_send(message: Message) -> None:
+                    nonlocal response_started
+                    if message["type"] == "http.response.start":
+                        response_started = True
+                        headers = [(key, value) for key, value in message.get("headers", [])
+                            if key.lower() != b"cache-control"]
+                        headers.append((b"cache-control", b"no-store"))
+                        if not finished and scope.get("http_version", "1.1").startswith("1."):
+                            headers = [(key, value) for key, value in headers if key.lower() != b"connection"]
+                            headers.append((b"connection", b"close"))
+                        message = {**message, "headers": headers}
+                    await send(message)
+
+                try:
+                    await self.app(scope, bounded_receive, streaming_send)
+                except Exception as caught:
+                    # BaseHTTPMiddleware may wrap receive failures in nested
+                    # task groups. Handle only our framing error, never unrelated
+                    # handler errors, cancellation or a partially sent response.
+                    if isinstance(caught, ExceptionGroup):
+                        _, other = caught.split(_StreamingBodyError)
+                        if other is not None:
+                            raise
+                    elif not isinstance(caught, _StreamingBodyError):
+                        raise
+                    if response_started or failure is None:
+                        raise
+                    await reject(*failure)
+                return
             body_buffer = bytearray()
             size = 0
             error: tuple[int, str] | None = None

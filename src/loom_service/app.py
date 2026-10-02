@@ -42,6 +42,7 @@ from loom.workload_trust import WorkloadTrustContract
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.registry import ApplicationRegistry
 from loom_service.application_management.service_runtime import ApplicationServiceRuntime
+from loom_service.application_management.source_upload import ApplicationSourceUploader
 from loom_service.batch_runner import run_loop as batch_run_loop
 from loom_service.behavior_pipeline_adapter import install_behavior_pipeline_public_adapter
 from loom_service.config import LoomServiceSettings
@@ -245,6 +246,8 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
                     del app.state.application_runtime
                 if hasattr(app.state, "application_login"):
                     del app.state.application_login
+                if hasattr(app.state, "application_source_uploader"):
+                    del app.state.application_source_uploader
 
     @asynccontextmanager
     async def _service_lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -557,5 +560,6 @@ def create_app(settings: LoomServiceSettings) -> FastAPI:
             max_body_bytes=settings.management_http_max_body_bytes,
             max_inflight=settings.management_http_max_inflight,
             body_timeout_sec=settings.management_http_body_timeout_sec,
+            source_upload_enabled=lambda: isinstance(getattr(app.state, "application_source_uploader", None), ApplicationSourceUploader),
         )
     return app
