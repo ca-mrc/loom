@@ -384,3 +384,39 @@ def test_publication_exports_bounded_cache_through_the_existing_shared_blob_stor
     assert cache.objects["task-build-cache/v2/blobs/" + hashlib.sha256(content).hexdigest()] == content
     assert {f"task-build-cache/v2/{claim.cache_key}/{index}/manifest.json" for index in range(2)} <= cache.objects.keys()
     assert cache.closed
+
+
+def test_interrupted_publication_progress_cannot_parse_as_a_ready_receipt(source_build, tmp_path, monkeypatch):
+    from loom.application_image_build import ApplicationImagePublicationV1
+    from loom_execution_actuator import application_image_runtime as runtime
+
+    claim = source_build[0].model_copy(update={"cache_bucket": "shared-data"})
+    work = tmp_path / "work"
+    work.mkdir()
+    _, body = oci_output(work, 0)
+    oci_output(work, 1)
+    cache_dir = work / "cache-out/0"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "index.json").write_text("cache")
+
+    class InterruptedCache(FakeS3):
+        def put_object(self, **kwargs):
+            raise RuntimeError("interrupted before completion")
+
+    cache = InterruptedCache({})
+    monkeypatch.setattr(runtime, "_client", lambda binding, secret: cache)
+
+    def run(argv, **kwargs):
+        if "copy" in argv:
+            Path(argv[argv.index("--digestfile") + 1]).write_text("sha256:" + hashlib.sha256(body).hexdigest())
+        else:
+            kwargs["stdout"].write(body)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    path = tmp_path / "receipt"
+    with pytest.raises(RuntimeError, match="interrupted"):
+        runtime.publish(claim, work, tmp_path / "secrets", receipt_path=path)
+    with pytest.raises(ValueError):
+        ApplicationImagePublicationV1.model_validate_json(path.read_bytes())
+    assert cache.closed
