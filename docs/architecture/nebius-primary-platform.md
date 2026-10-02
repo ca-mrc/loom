@@ -2216,6 +2216,18 @@ the same participant credential and global binding, and does not acquire a build
 loop. Guest Pods must drain before retirement qualifies; replay checks them again.
 These checks do not replace installed database or effective writer qualification.
 
+The retirement contract separately accepts an explicit dormant remote-consumer
+roster. Each entry binds an already-zero actuator and suspended collector in an
+existing participant's execution namespace. The actuator must retain that
+participant's database Secret reference, use a distinct fixed ServiceAccount and
+target a namespace outside this operation. A registered target cannot be
+reclassified as dormant. Both retained UIDs and templates join the ordinary
+retirement journal, complete process-drain checks and effective permission review.
+Replay rejects a restarted or changed consumer. Their remote namespaces and pools
+are not added to operation scope, and they are not wired or started as successor
+participants. Unexpected grants remain rejected; dormancy is not credential
+revocation. This is retirement-only support, not an installed cutover claim.
+
 The participant-role phase composes that retained retirement barrier with two
 fixed Role replacements per participant: the existing execution-actuator and
 task-image-builder roles in its namespaces. It preserves Role UIDs, bindings and

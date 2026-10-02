@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_dormant import DormantPoolConsumer, dormant_retirement_documents
 from scripts.ops.nebius_pool_migration import (
     PoolMigrationRequest,
     _hash,
@@ -33,6 +34,7 @@ class PoolRetirementRequest:
     migration: PoolMigrationRequest
     actuators: tuple[dict[str, Any], ...]
     collectors: tuple[dict[str, Any], ...]
+    dormant_consumers: tuple[DormantPoolConsumer, ...] = ()
 
 
 class PoolRetirementAPI(Protocol):
@@ -73,7 +75,11 @@ def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, 
                         raise ValueError
                 elif type(document["spec"].get("suspend")) is not bool or document["spec"].get("concurrencyPolicy") != "Forbid":
                     raise ValueError
-        originals = (*request.collectors, *request.actuators, *(row.controller for row in request.migration.guards))
+        dormant = dormant_retirement_documents(migration=request.migration, actuators=request.actuators,
+            consumers=request.dormant_consumers)
+        originals = (*request.collectors, *(row for row in dormant.values() if row["kind"] == "CronJob"),
+            *request.actuators, *(row for row in dormant.values() if row["kind"] == "Deployment"),
+            *(row.controller for row in request.migration.guards))
         if len({_uid(row) for row in originals}) != len(originals):
             raise ValueError
         result = {}
