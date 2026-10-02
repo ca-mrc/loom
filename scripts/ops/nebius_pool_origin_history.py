@@ -43,6 +43,7 @@ from scripts.ops.nebius_pool_migration import (
 from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
 from scripts.ops.nebius_pool_runtime_settings import expected_pool_runtime_settings
 from scripts.ops.nebius_pool_startup_capacity import (
+    BOUND_POOL_ACTIVATION_COMMAND,
     BOUND_POOL_CAPACITY_COMMAND,
     expected_startup_capacity,
 )
@@ -330,6 +331,9 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
             raise PoolMigrationError('management_pool_settings') from None
 
     def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
+        self._qualified_gateway(original=original, expected=expected)
+
+    def _qualified_gateway(self, *, original: dict[str, Any], expected: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         """Bind the journal's closed gateway child to its actual running settings.
 
         The startup parent supplies the retained child identity, not an operator
@@ -389,5 +393,30 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                     or digest(_target_contract(self.target)) != self.history_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
+            return before, before_database
         except Exception:
             raise PoolMigrationError('gateway_runtime') from None
+
+    def open_pool(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None:
+        """Dispatch fixed opening once in the freshly qualified gateway Pod.
+
+        The parent must persist opening intent first. Any failure is unconfirmed,
+        even after a success report: only bound pool readback can recover it.
+        """
+        try:
+            before, database = self._qualified_gateway(original=original, expected=expected)
+            nonce = secrets.token_hex(32)
+            response = hmac.new(bytes.fromhex(nonce),
+                json.dumps(expected_startup_capacity(self.request.registration.spec), sort_keys=True, separators=(',', ':')).encode(),
+                'sha256').hexdigest()
+            report = self._run(['exec', '-n', self.target.namespace, 'pod/' + before['metadata']['name'], '-c', 'gateway', '--',
+                'python', '-c', BOUND_POOL_ACTIVATION_COMMAND, nonce, response])
+            if (report != {'status': 'global'}
+                    or _uid(self._runtime(self.target, original=original, expected=expected)) != _uid(before)
+                    or _uid(self._database(self.target, url_variable='LOOM_SVC_DB_URL')) != _uid(database)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError('activation_open') from None

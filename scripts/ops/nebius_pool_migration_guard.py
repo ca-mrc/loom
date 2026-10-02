@@ -988,7 +988,9 @@ class KubectlPoolGuardAPI:
             report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
             if (report != {"status": "staged" if action == "stage" else "qualified"}
-                    or _uid(self._database(target)) != _uid(before)):
+                    or _uid(self._database(target)) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             return report
         except Exception:

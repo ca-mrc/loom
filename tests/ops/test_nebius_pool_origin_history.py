@@ -237,7 +237,10 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
     import sys
 
     from scripts.ops.nebius_pool_migration import PoolMigrationError
-    from scripts.ops.nebius_pool_startup_capacity import BOUND_POOL_ACTIVATION_COMMAND, BOUND_POOL_CAPACITY_COMMAND
+    from scripts.ops.nebius_pool_startup_capacity import (
+        BOUND_POOL_ACTIVATION_COMMAND,
+        BOUND_POOL_CAPACITY_COMMAND,
+    )
 
     from loom_service.pool_management.installation import PoolInstallation
     from loom_service.pool_management.installation_render import render_gateway
@@ -335,6 +338,7 @@ def _gateway_runtime_case(management_history, projected_gateway, monkeypatch, da
                 # Bind the exact registration and a fresh challenge; a report
                 # from another installation cannot satisfy this exec contract.
                 import hmac
+
                 from scripts.ops.nebius_pool_startup_capacity import expected_startup_capacity
                 response = hmac.new(bytes.fromhex(args[10]), json.dumps(expected_startup_capacity(migration.registration.spec),
                     sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()

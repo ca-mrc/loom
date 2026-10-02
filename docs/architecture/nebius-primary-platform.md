@@ -2564,6 +2564,10 @@ running application/gateway nor its runtime token. A separate read-only runtime
 ACL inspection accepts active work and absent/recovery guards while preserving
 the same schema and least-privilege checks; the initial role stage/observation
 still requires the original idle guard. Inspection never repairs grants or work.
+Opening uses the exact gateway Pod from fresh settings, database, projected-API
+and capacity qualification. A separate fresh challenge invokes only the fixed
+opening command, once. Its result and the retained Pod/backend/operator scope are
+checked afterward; a lost reply or late drift is unconfirmed, never retried.
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Complete runtime/collector acceptance,
