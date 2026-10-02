@@ -36,15 +36,12 @@ from tests.integration.test_nebius_pool_observation_registry import (
 from tests.integration.test_nebius_pool_registry import sessions as sessions
 
 
-@pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'participant', 'mode', 'quota', 'token_revoked',
-    'wrong_machine', 'wrong_token', 'challenge'])
-async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gateway_authority(sessions, tmp_path, damage):
-    from scripts.ops.nebius_pool_startup_capacity import (
-        BOUND_POOL_CAPACITY_COMMAND,
-        expected_startup_capacity,
-    )
+async def prepare_startup_capacity(sessions, tmp_path, damage=None):
+    from scripts.ops.nebius_pool_startup_capacity import expected_startup_capacity
 
     config, tokens = installation()
+    if damage == 'revision_exhausted':
+        config['policy_revision'] = 2**63 - 1
     spec = PoolInstallation.model_validate(config)
     async with sessions.begin() as session:
         await register_installation(session, spec)
@@ -77,8 +74,10 @@ async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gat
                 NebiusPoolParticipant.participant_id == spec.participants[0].participant_id).values(phase='fenced'))
         elif damage == 'mode':
             await session.execute(update(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == spec.pool_id).values(mode='global'))
-        elif damage == 'token_revoked':
-            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(gateway.token_sha256)).values(revoked_at=datetime.now(UTC)))
+        elif damage in {'token_revoked', 'token_expired'}:
+            values = ({'revoked_at': datetime.now(UTC)} if damage == 'token_revoked'
+                else {'expires_at': datetime.now(UTC) - timedelta(seconds=1)})
+            await session.execute(update(Token).where(Token.token_hash == bytes.fromhex(gateway.token_sha256)).values(**values))
     token = tmp_path / 'machine-token'
     token.write_text('private-wrong-machine-token' if damage == 'wrong_token' else tokens[gateway.machine_id])
     token.chmod(0o600)
@@ -94,25 +93,39 @@ async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gat
         expected['registration_sha256'] = '0' * 64
     nonce = 'ab' * 32
     signature = hmac.new(bytes.fromhex(nonce), json.dumps(expected, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+    return spec, tokens, environment, token, nonce, signature, gateway
+
+
+@pytest.mark.parametrize('operation', ['probe', 'activate'])
+@pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'participant', 'mode', 'quota', 'token_revoked',
+    'token_expired', 'wrong_machine', 'wrong_token', 'challenge', 'revision_exhausted'])
+async def test_startup_capacity_probe_requires_fresh_exact_scope_and_current_gateway_authority(sessions, tmp_path, damage, operation):
+    from scripts.ops import nebius_pool_startup_capacity as commands
+
+    command = commands.BOUND_POOL_CAPACITY_COMMAND if operation == 'probe' else commands.BOUND_POOL_ACTIVATION_COMMAND
+    spec, tokens, environment, token, nonce, signature, gateway = await prepare_startup_capacity(sessions, tmp_path, damage)
 
     async def retained_state():
         async with sessions() as session:
             pool = await session.get(NebiusPoolBinding, spec.pool_id)
-            return (pool.mode, pool.admission_epoch, pool.binding_sha256,
+            return (pool.mode, pool.policy_revision, pool.admission_epoch, pool.binding_sha256,
                 await session.scalar(select(func.count()).select_from(NebiusPoolCapture)),
                 await session.scalar(select(func.count()).select_from(NebiusPoolObservation)),
                 await session.scalar(select(func.count()).select_from(NebiusPoolRequest)))
 
     before = await retained_state()
-    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', BOUND_POOL_CAPACITY_COMMAND, nonce, signature],
+    result = await asyncio.to_thread(subprocess.run, [sys.executable, '-c', command, nonce, signature],
         env=environment, cwd=tmp_path, capture_output=True, timeout=35, check=False)
-    if damage:
-        assert result.returncode == 1 and result.stdout == b'' and result.stderr == b'Pool startup capacity unqualified\n'
+    success = damage is None or (damage == 'revision_exhausted' and operation == 'probe')
+    if not success:
+        error = b'Pool startup capacity unqualified\n' if operation == 'probe' else b'Pool activation unconfirmed; preserve recovery evidence\n'
+        assert result.returncode == 1 and result.stdout == b'' and result.stderr == error
     else:
-        assert (result.returncode, result.stdout, result.stderr) == (0, b'{"status": "qualified"}\n', b'')
+        report = b'{"status": "qualified"}\n' if operation == 'probe' else b'{"status": "global"}\n'
+        assert (result.returncode, result.stdout, result.stderr) == (0, report, b'')
         assert before[0] == 'closed' and before[-1] == 0
     assert all(raw not in (result.stdout + result.stderr).decode() for raw in tokens.values())
     assert 'private-' not in (result.stdout + result.stderr).decode()
-    assert await retained_state() == before
+    assert await retained_state() == (('global', *before[1:]) if success and operation == 'activate' else before)
     assert hashlib.sha256(token.read_bytes()).hexdigest() == (
         hashlib.sha256(b'private-wrong-machine-token').hexdigest() if damage == 'wrong_token' else gateway.token_sha256)
