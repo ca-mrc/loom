@@ -1,10 +1,10 @@
 """Background sweep that reclaims trials from workers whose heartbeat has
 lapsed (spec §2.8 + §3.10).
 
-Runs every `interval_sec`. Trials in claimed/running state owned by a worker
-whose `last_seen_at` is more than `expiry_sec` old go back to queued with a
-30-second backoff, so the scheduler doesn't immediately re-hand them to the
-same dead worker.
+Runs every `interval_sec`. Claimed/running trials and historical started-but-
+queued rows owned by an expired local worker lose that owner and receive an
+actionable diagnostic with a 30-second retry backoff. Current native execution
+attempt leases are excluded; they retain their own recovery authority.
 """
 
 from __future__ import annotations
@@ -37,9 +37,7 @@ UPDATE trials
        failure_reason = CASE
            WHEN failure_reason = 'prod_capacity_pressure'
            THEN failure_reason
-           WHEN state = 'claimed' AND started_at IS NULL
-           THEN 'worker_lost_claim'
-           ELSE failure_reason
+           ELSE 'worker_lost_claim'
        END,
        failure_message = CASE
            WHEN failure_reason = 'prod_capacity_pressure'
@@ -53,10 +51,16 @@ UPDATE trials
                ' expiry_sec=', (:expiry_sec)::int::text,
                ' started_at=NULL'
            )
-           ELSE failure_message
+           ELSE CONCAT(
+               'worker_heartbeat_expired_reclaimed trial_id=', id::text,
+               ' worker_id=', worker_id::text,
+               ' previous_state=', state,
+               ' started_at=', COALESCE(started_at::text, 'NULL'),
+               ' expiry_sec=', (:expiry_sec)::int::text
+           )
        END,
        next_attempt_at = NOW() + INTERVAL '1 second' * 30
- WHERE state IN ('claimed', 'running')
+ WHERE (state IN ('claimed', 'running') OR (state = 'queued' AND started_at IS NOT NULL))
    AND worker_id IN (
        SELECT id FROM workers
         WHERE last_seen_at < NOW() - INTERVAL '1 second' * (:expiry_sec)::int
