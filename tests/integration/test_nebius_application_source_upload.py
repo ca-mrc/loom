@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -14,6 +15,8 @@ from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
 )
+from tests.unit.test_application_source_archive import archive_bytes
+from tests.unit.test_application_source_archive import source as source
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -35,6 +38,126 @@ def intent(**changes):
         "source_digest": "sha256:" + "a" * 64, "archive_sha256": "b" * 64,
         "archive_size_bytes": 10240, "base_commit": "c" * 40,
     } | changes)
+
+
+async def source_chunks(body):
+    for offset in range(0, len(body), 173):
+        yield body[offset:offset + 173]
+
+
+async def test_verified_upload_stores_exact_shared_bytes_for_separate_owners(environment_registry, source, tmp_path):
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    from loom.trajectory.storage import FakeObjectStore
+
+    _, factory, (alice, bob), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model)
+    request = intent(source_digest=model.digest, archive_sha256=hashlib.sha256(body).hexdigest(),
+                     archive_size_bytes=len(body))
+    first, second = await asyncio.gather(*[
+        registry.create(principal=owner, request=request, idempotency_key="same-source") for owner in (alice, bob)
+    ])
+    store = FakeObjectStore()
+    spool = tmp_path / "spool"
+    spool.mkdir(mode=0o700)
+    uploader = ApplicationSourceUploader(registry, store, spool_directory=spool)
+    results = await asyncio.gather(*[
+        uploader.upload(receipt.upload_id, principal=owner, body=source_chunks(body))
+        for receipt, owner in ((first, alice), (second, bob))
+    ])
+    assert first.upload_id != second.upload_id
+    assert all(row.phase == "source_verified" for row in results)
+    assert store.objects == {("shared-source", "application-sources/v1/sha256/" + request.archive_sha256 + ".tar"): body}
+    assert not list(spool.iterdir())
+    for result, owner in zip(results, (alice, bob), strict=True):
+        assert await registry.status(result.upload_id, principal=owner) == result
+
+
+@pytest.mark.parametrize("damage", ["truncated", "extra", "hash", "archive", "source_digest"])
+async def test_invalid_upload_never_writes_or_completes(environment_registry, source, tmp_path, damage):
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    from loom.trajectory.storage import FakeObjectStore
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model, damage="name" if damage == "archive" else None)
+    request = intent(source_digest=model.digest if damage != "source_digest" else "sha256:" + "e" * 64,
+                     archive_sha256=hashlib.sha256(body).hexdigest(), archive_size_bytes=len(body))
+    receipt = await registry.create(principal=alice, request=request, idempotency_key="invalid")
+    if damage == "truncated":
+        body = body[:-1]
+    elif damage == "extra":
+        body += b"!"
+    elif damage == "hash":
+        body = body[:-1] + b"!"
+    store = FakeObjectStore()
+    with pytest.raises(ManagementError, match="application_source_invalid"):
+        await ApplicationSourceUploader(registry, store, spool_directory=tmp_path).upload(
+            receipt.upload_id, principal=alice, body=source_chunks(body))
+    assert store.objects == {}
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+
+
+async def test_foreign_owner_is_rejected_before_consuming_upload(environment_registry, tmp_path):
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    from loom.trajectory.storage import FakeObjectStore
+
+    _, factory, (alice, bob), _ = environment_registry
+    registry = upload_registry(factory)
+    receipt = await registry.create(principal=alice, request=intent(), idempotency_key="private")
+    consumed = []
+    async def body():
+        consumed.append(True)
+        yield b"private-source"
+    store = FakeObjectStore()
+    with pytest.raises(ManagementError, match="application_source_forbidden"):
+        await ApplicationSourceUploader(registry, store, spool_directory=tmp_path).upload(
+            receipt.upload_id, principal=bob, body=body())
+    assert consumed == [] and store.objects == {}
+    assert await registry.status(receipt.upload_id, principal=alice) == receipt
+
+
+@pytest.mark.parametrize("failure", ["before", "after", "corrupt"])
+async def test_storage_reply_is_not_proof_and_uncertain_write_is_only_observed(
+    environment_registry, source, tmp_path, failure,
+):
+    from loom_service.application_management.source_upload import ApplicationSourceUploader
+
+    from loom.trajectory.storage import FakeObjectStore
+
+    class Store(FakeObjectStore):
+        writes = 0
+        async def put_object_stream(self, *, bucket, key, body):
+            self.writes += 1
+            if failure == "before":
+                raise OSError("private-storage-detail")
+            result = await super().put_object_stream(bucket=bucket, key=key, body=body)
+            if failure == "after":
+                raise OSError("private-storage-detail")
+            self.objects[(bucket, key)] = b"wrong stored content"
+            return result
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    _, model = source
+    body = archive_bytes(model)
+    receipt = await registry.create(principal=alice, request=intent(source_digest=model.digest,
+        archive_sha256=hashlib.sha256(body).hexdigest(), archive_size_bytes=len(body)), idempotency_key="store")
+    store = Store()
+    uploader = ApplicationSourceUploader(registry, store, spool_directory=tmp_path)
+    if failure == "after":
+        assert (await uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body))).phase == "source_verified"
+    else:
+        with pytest.raises(ManagementError, match="application_source_storage_unverified") as error:
+            await uploader.upload(receipt.upload_id, principal=alice, body=source_chunks(body))
+        assert "private-storage-detail" not in str(error.value)
+        assert await registry.status(receipt.upload_id, principal=alice) == receipt
+    assert store.writes == 1
 
 
 async def test_concurrent_owner_upload_replay_survives_registry_restart(environment_registry):
