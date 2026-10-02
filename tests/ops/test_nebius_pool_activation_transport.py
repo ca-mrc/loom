@@ -93,3 +93,52 @@ def test_active_role_inspection_rechecks_operator_authority_after_sql(database_g
     with pytest.raises(PoolMigrationError):
         api.runtime_role(state.target, 'inspect')
     assert sum(row[0] == 'exec' for row in state.calls) == 1
+
+
+@pytest.mark.parametrize('scope', ['pool', 'guard'])
+@pytest.mark.parametrize('damage', [None, 'pending', 'backend', 'authority', 'late_authority', 'report'])
+def test_recovery_drain_reads_exact_retained_database_and_rejects_drift(management_history, database_guard, monkeypatch, scope, damage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+
+    from loom_service.pool_management.capacity import digest
+
+    api, state = management_history if scope == 'pool' else database_guard
+    spec = api.request.registration.spec
+    report = {'schema': 'loom.pool-recovery-drain.v1' if scope == 'pool' else 'loom.pool-participant-drain.v1',
+        'operation_id': str(spec.operation_id), 'read_only': True,
+        'counts': ({'unstarted_requests': 0, 'active_requests': 0, 'unconfirmed_creates': 0, 'unqualified_releases': 0}
+            if scope == 'pool' else {'trials': 0, 'executions': 0, 'builds': 0, 'build_cleanup': 0,
+                'execution_outboxes': 0, 'build_outboxes': 0})}
+    if scope == 'pool':
+        report['installation_sha256'] = digest(spec.model_dump(mode='json'))
+        state.report = report
+        run = lambda: api.recovery_pool_drained()
+    else:
+        report.update(participant_id=str(state.target.participant_id), candidate_sha=api.request.registration.candidate['candidate_sha'])
+        state.exec_hook = lambda query: report
+        run = lambda: api.recovery_participant_drained(state.target)
+    if damage == 'pending':
+        report['counts'][next(iter(report['counts']))] = 1
+    elif damage == 'backend':
+        state.after_drift = True
+    elif damage == 'authority':
+        api.kubeconfig.write_bytes(b'private-changed-authority')
+    elif damage == 'report':
+        report['read_only'] = 1
+    original = api._run
+    def bound(args):
+        result = original(args)
+        if damage == 'late_authority' and args[0] == 'exec':
+            api.kubeconfig.write_bytes(b'private-changed-authority')
+        return result
+    monkeypatch.setattr(api, '_run', bound)
+    if damage in {None, 'pending'}:
+        assert run() is (damage is None)
+    else:
+        with pytest.raises(PoolMigrationError) as error:
+            run()
+        assert 'private-' not in str(error.value)
+    commands = [row for row in state.calls if row[0] == 'exec']
+    assert len(commands) == (0 if damage == 'authority' else 1)
+    if commands:
+        assert commands[0][:7] == ['exec', '-n', state.target.namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']

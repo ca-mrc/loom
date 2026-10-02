@@ -56,3 +56,42 @@ def test_connected_fence_uses_fixed_patch_and_readonly_unknown_recovery(activati
         assert state.writes == [key]
         assert state.objects[key]['spec'] == before['spec']
         assert advance(cancel=True)['status'] == 'pool_activation_cancelled'
+
+
+@pytest.mark.timeout(240)
+def test_recovery_drain_requires_settled_fences_and_rechecks_every_participant(activation_http, closed_startup):
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+
+    request, _, _, _, _, root = closed_startup
+    with activation_http(start=False) as (api, state, advance):
+        assert advance(cancel=True)['status'] == 'pool_activation_cancelled'
+        calls = []
+        drained, drift = False, False
+        def pool():
+            calls.append('pool')
+            return drained
+        def participant(target):
+            key = str(target.participant_id)
+            calls.append(key)
+            if drift:
+                state.guards[key] = 'open'
+            return True
+        api.parent.history.recovery_pool_drained = pool
+        api.parent.guards.recovery_participant_drained = participant
+        with pytest.raises(ValueError):
+            api.recovery_drained()
+        assert not calls
+        assert fence_pool_startup(request=request, api=api, state_dir=root / 'cutover',
+            anchor_dir=root / 'cutover-anchor')['status'] == 'startup_writes_fenced'
+        before = list(state.activation_writes)
+        state.fail_closed = True  # Active work cannot be subjected to initial idle preflight.
+        assert api.recovery_drained() is False
+        assert calls == ['pool', *state.guards]
+        calls.clear()
+        drained = True
+        assert api.recovery_drained() is True
+        assert calls == ['pool', *state.guards]
+        drift = True
+        with pytest.raises(ValueError):
+            api.recovery_drained()
+        assert not state.writes and state.activation_writes == before
