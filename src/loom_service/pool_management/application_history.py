@@ -11,6 +11,7 @@ from loom.db.nebius_application_source_schema import NebiusApplicationSourceUplo
 from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolParticipantV1
 from loom.nebius_pool_priority import PoolWorkOriginV1
+from loom.pipeline.keys import canonical_digest
 from loom_service.application_management.build_registry import retained_build_claim
 
 
@@ -46,5 +47,7 @@ async def qualify_application_build_history(session: AsyncSession, origin: PoolW
                 or request.key.participant_id != binding.participant_id
                 or request.admission_epoch != binding.admission_epoch
                 or request.participant_revision != binding.participant_revision
-                or row.desired_state != "running" or attempt is None or attempt.phase not in {"queued", "running"}):
+                or row.desired_state != "running" or attempt is None or attempt.phase not in {"queued", "running"}
+                or attempt.pool_request_json != request.model_dump(mode="json")
+                or attempt.pool_request_sha256 != canonical_digest(request.model_dump(mode="json")).removeprefix("sha256:")):
             raise ValueError("application_build_attempt_unavailable")
