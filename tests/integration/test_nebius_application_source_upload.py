@@ -75,6 +75,72 @@ async def test_verified_upload_stores_exact_shared_bytes_for_separate_owners(env
         assert await registry.status(result.upload_id, principal=owner) == result
 
 
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_upload_reception_does_not_multiply_memory_heavy_verification(
+    environment_registry, source, tmp_path, monkeypatch, cancel_waiter,
+):
+    from loom.trajectory.storage import FakeObjectStore
+    from loom_service.application_management import source_upload
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    body = archive_bytes(source[1])
+    request = intent(source_digest=source[1].digest, archive_sha256=hashlib.sha256(body).hexdigest(),
+                     archive_size_bytes=len(body))
+    receipts = [await registry.create(principal=alice, request=request, idempotency_key=f"parallel-{i}")
+                for i in range(3)]
+    received, release = asyncio.Event(), asyncio.Event()
+    reception_count, active, peak = 0, 0, 0
+    entered = []
+    original = source_upload._verify_off_loop
+
+    async def held(stream, receipt, directory):
+        nonlocal active, peak
+        entered.append(receipt.upload_id)
+        active += 1
+        peak = max(peak, active)
+        try:
+            await release.wait()
+            await original(stream, receipt, directory)
+        finally:
+            active -= 1
+
+    async def receive():
+        nonlocal reception_count
+        yield body
+        reception_count += 1
+        if reception_count == 3:
+            received.set()
+
+    monkeypatch.setattr(source_upload, "_verify_off_loop", held)
+    store = FakeObjectStore()
+    uploader = source_upload.ApplicationSourceUploader(registry, store, spool_directory=tmp_path, max_inflight=3)
+    tasks = [asyncio.create_task(uploader.upload(row.upload_id, principal=alice, body=receive())) for row in receipts]
+    cancelled = None
+    try:
+        await asyncio.wait_for(received.wait(), timeout=5)
+        # All three streams finish, but only two verifier calls may retain
+        # parsed manifests. The spy holds timing, not the real validation result.
+        assert peak == 2
+        if cancel_waiter:
+            cancelled, = (index for index, row in enumerate(receipts) if row.upload_id not in entered)
+            tasks[cancelled].cancel()
+    finally:
+        release.set()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    for index, result in enumerate(results):
+        if index == cancelled:
+            assert isinstance(result, asyncio.CancelledError)
+            assert await registry.status(receipts[index].upload_id, principal=alice) == receipts[index]
+            assert receipts[index].upload_id not in entered
+        else:
+            assert result.phase == "source_verified"
+    assert peak == 2 and active == 0 and not list(tmp_path.iterdir())
+    if cancelled is not None:
+        result = await uploader.upload(receipts[cancelled].upload_id, principal=alice, body=source_chunks(body))
+        assert result.phase == "source_verified"
+
+
 @pytest.mark.parametrize("damage", ["truncated", "extra", "hash", "archive", "source_digest"])
 async def test_invalid_upload_never_writes_or_completes(environment_registry, source, tmp_path, damage):
     from loom.trajectory.storage import FakeObjectStore
