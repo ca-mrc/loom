@@ -149,6 +149,12 @@ class LocalDiskObjectStore:
             temporary.unlink(missing_ok=True)
         return f"s3://{bucket}/{key}"
 
+    async def put_object_stream_with_metadata(
+        self, *, bucket: str, key: str, body: AsyncIterator[bytes],
+    ) -> ObjectWriteResult:
+        uri = await self.put_object_stream(bucket=bucket, key=key, body=body)
+        return ObjectWriteResult(uri=uri, version_id=None)
+
     async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback:
         path = self._path(bucket, key)
         digest = hashlib.sha256()

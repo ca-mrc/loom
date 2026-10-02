@@ -217,10 +217,11 @@ async def repair_accounting(
     objects: list[dict[str, Any]] = []
 
     async def write(path: str, body: bytes, bucket: str, key: str) -> dict[str, Any]:
-        record = {"relative_path": path, "media_type": "application/jsonl" if path.endswith("jsonl") else "application/json",
+        record: dict[str, Any] = {"relative_path": path, "media_type": "application/jsonl" if path.endswith("jsonl") else "application/json",
                   "size_bytes": len(body), "sha256": "sha256:" + _digest(body), "bucket": bucket, "key": key}
         objects.append(record)
-        await store.put_object_with_metadata(bucket=bucket, key=key, body=body)
+        receipt = await store.put_object_with_metadata(bucket=bucket, key=key, body=body)
+        record["version_id"] = receipt.version_id
         readback = await store.stat_object(bucket=bucket, key=key)
         if readback.content_length != len(body) or (
             readback.checksum_sha256 is not None and readback.checksum_sha256 != record["sha256"]
@@ -249,7 +250,7 @@ async def repair_accounting(
         for name, record in (("trajectory", trajectory), ("atif", atif)):
             new_index.update({f"{name}_uri": f"s3://{record['bucket']}/{record['key']}",
                               f"{name}_sha256": record["sha256"].removeprefix("sha256:"),
-                              f"{name}_size_bytes": record["size_bytes"], f"{name}_version_id": None})
+                              f"{name}_size_bytes": record["size_bytes"], f"{name}_version_id": record["version_id"]})
         new_index["artifacts"] = new_storage["files"]
         new_index["atif_schema_version"] = json.loads(atif_body)["schema_version"]
 
@@ -258,7 +259,7 @@ async def repair_accounting(
             for record in objects:
                 await register_lifecycle_object(
                     session, authority_id=authority_id, bucket=record["bucket"], object_key=record["key"],
-                    version_id=None, content_sha256=record["sha256"].removeprefix("sha256:"),
+                    version_id=record["version_id"], content_sha256=record["sha256"].removeprefix("sha256:"),
                     size_bytes=record["size_bytes"], created_at=created_at,
                 )
             await session.execute(delete(TrialEvent).where(TrialEvent.trial_id == trial_id))

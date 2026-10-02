@@ -73,7 +73,7 @@ from loom.service_execution_terminus_trace import (
 )
 from loom.trajectory.atif import project_to_atif
 from loom.trajectory.object_identity import TrajectoryObjectIdentity
-from loom.trajectory.storage import ObjectStore
+from loom.trajectory.storage import ObjectStore, ObjectWriteResult
 from loom_control_plane.metrics import (
     SERVICE_EXECUTION_MATERIALIZATION_BACKLOG,
     SERVICE_EXECUTION_MATERIALIZATION_COMPLETED_TOTAL,
@@ -141,6 +141,7 @@ class MaterializedFile:
     size_bytes: int
     sha256: str
     key: str
+    version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +161,8 @@ class MaterializationResult:
     accounting_call_count: int | None = None
     exception_info: ExceptionInfo | None = None
     preserve_trial_outcome: bool = False
+    events_version_id: str | None = None
+    atif_version_id: str | None = None
 
 
 def _digest(body: bytes) -> str:
@@ -858,7 +861,7 @@ class ServiceExecutionMaterializer:
 
     async def _copy_exact(
         self, *, source_key: str, destination_key: str, expected: str, size: int
-    ) -> None:
+    ) -> ObjectWriteResult:
         observed = hashlib.sha256()
         total = 0
 
@@ -878,7 +881,7 @@ class ServiceExecutionMaterializer:
             except KeyError as exc:
                 raise MaterializationIntegrityError("source_object_missing") from exc
 
-        await self._canonical_store.put_object_stream(
+        receipt = await self._canonical_store.put_object_stream_with_metadata(
             bucket=self._artifacts_bucket, key=destination_key, body=chunks()
         )
         if total != size or "sha256:" + observed.hexdigest() != expected:
@@ -904,6 +907,7 @@ class ServiceExecutionMaterializer:
                 digest.update(chunk)
             if readback_size != size or "sha256:" + digest.hexdigest() != expected:
                 raise MaterializationIntegrityError("canonical_object_readback_mismatch")
+        return receipt
 
     async def _verify_source(self, source: _LoadedSource) -> _VerifiedSource:
         upload_data, lease_data = source.upload_data, source.lease_data
@@ -1016,7 +1020,7 @@ class ServiceExecutionMaterializer:
         for file in source.record.stored_files:
             source_key = f"{source.prefix}artifacts/{source.artifact_id}/{file.relative_path}"
             destination_key = destination_prefix + "files/" + namespace + file.relative_path
-            await self._copy_exact(
+            receipt = await self._copy_exact(
                 source_key=source_key,
                 destination_key=destination_key,
                 expected=file.sha256,
@@ -1029,6 +1033,7 @@ class ServiceExecutionMaterializer:
                     size_bytes=file.size_bytes,
                     sha256=file.sha256,
                     key=destination_key,
+                    version_id=receipt.version_id,
                 )
             )
             if file.relative_path in {
@@ -1043,7 +1048,7 @@ class ServiceExecutionMaterializer:
                 )
         for source_key, name, body, expected in source.evidence:
             destination_name = "source/" + namespace + name
-            await self._copy_exact(
+            receipt = await self._copy_exact(
                 source_key=source_key,
                 destination_key=destination_prefix + destination_name,
                 expected=expected,
@@ -1056,6 +1061,7 @@ class ServiceExecutionMaterializer:
                     size_bytes=len(body),
                     sha256=expected,
                     key=destination_prefix + destination_name,
+                    version_id=receipt.version_id,
                 )
             )
         return materialized, source_evidence, derivation_inputs
@@ -1205,17 +1211,19 @@ class ServiceExecutionMaterializer:
                         relative_path="source/" + item.relative_path,
                         media_type=item.media_type, size_bytes=item.size_bytes,
                         sha256=item.sha256, key=item.key,
+                        version_id=item.version_id,
                     ))
                     materialized.remove(item)
             for path, body in corrected.items():
                 key = destination_prefix + "canonical/" + path
-                await self._canonical_store.put_object_with_metadata(
+                receipt = await self._canonical_store.put_object_with_metadata(
                     bucket=self._artifacts_bucket, key=key, body=body,
                 )
                 materialized.append(MaterializedFile(
                     relative_path=path,
                     media_type="application/x-ndjson" if path.endswith(".jsonl") else "application/json",
                     size_bytes=len(body), sha256=_digest(body), key=key,
+                    version_id=receipt.version_id,
                 ))
         events_body = _canonical_jsonl(events)
         atif_body = build_canonical_atif(
@@ -1230,10 +1238,10 @@ class ServiceExecutionMaterializer:
             trial_id=cast(UUID, lease_data["trial_id"]),
             attempt_count=cast(int, lease_data["attempt"]),
         )
-        await self._canonical_store.put_object_with_metadata(
+        events_receipt = await self._canonical_store.put_object_with_metadata(
             bucket=self._trajectories_bucket, key=identity.events_key, body=events_body
         )
-        await self._canonical_store.put_object_with_metadata(
+        atif_receipt = await self._canonical_store.put_object_with_metadata(
             bucket=self._trajectories_bucket, key=identity.atif_key, body=atif_body
         )
         for key, body in ((identity.events_key, events_body), (identity.atif_key, atif_body)):
@@ -1256,6 +1264,8 @@ class ServiceExecutionMaterializer:
             atif_uri=identity.atif_uri,
             events_sha256=_digest(events_body),
             atif_sha256=_digest(atif_body),
+            events_version_id=events_receipt.version_id,
+            atif_version_id=atif_receipt.version_id,
             final_trial_state=(
                 "succeeded"
                 if runtime_result.status == "succeeded"
@@ -1330,6 +1340,7 @@ class ServiceExecutionMaterializer:
                     "sha256": item.sha256,
                     "bucket": self._artifacts_bucket,
                     "key": item.key,
+                    "version_id": item.version_id,
                 }
                 for item in result.files
             ]
@@ -1346,6 +1357,7 @@ class ServiceExecutionMaterializer:
                         "sha256": item.sha256,
                         "bucket": self._artifacts_bucket,
                         "key": item.key,
+                        "version_id": item.version_id,
                     }
                     for item in result.source_evidence
                 ],
@@ -1368,11 +1380,11 @@ class ServiceExecutionMaterializer:
                 "trajectory_uri": result.events_uri,
                 "trajectory_sha256": result.events_sha256.removeprefix("sha256:"),
                 "trajectory_size_bytes": len(result.events_body),
-                "trajectory_version_id": None,
+                "trajectory_version_id": result.events_version_id,
                 "atif_uri": result.atif_uri,
                 "atif_sha256": result.atif_sha256.removeprefix("sha256:"),
                 "atif_size_bytes": len(result.atif_body),
-                "atif_version_id": None,
+                "atif_version_id": result.atif_version_id,
                 "atif_schema_version": json.loads(result.atif_body)["schema_version"],
                 "attempt": lease.attempt,
                 # Replace the complete index for this materialized attempt.
@@ -1397,23 +1409,25 @@ class ServiceExecutionMaterializer:
                     authority_id=artifact_authority_id,
                     bucket=self._artifacts_bucket,
                     object_key=item.key,
-                    version_id=None,
+                    version_id=item.version_id,
                     content_sha256=item.sha256.removeprefix("sha256:"),
                     size_bytes=item.size_bytes,
                     created_at=artifact.created_at,
                 )
-            for bucket, uri, digest, size in (
+            for bucket, uri, digest, size, version_id in (
                 (
                     self._trajectories_bucket,
                     result.events_uri,
                     result.events_sha256,
                     len(result.events_body),
+                    result.events_version_id,
                 ),
                 (
                     self._trajectories_bucket,
                     result.atif_uri,
                     result.atif_sha256,
                     len(result.atif_body),
+                    result.atif_version_id,
                 ),
             ):
                 prefix = f"s3://{bucket}/"
@@ -1424,7 +1438,7 @@ class ServiceExecutionMaterializer:
                     authority_id=artifact_authority_id,
                     bucket=bucket,
                     object_key=uri.removeprefix(prefix),
-                    version_id=None,
+                    version_id=version_id,
                     content_sha256=digest.removeprefix("sha256:"),
                     size_bytes=size,
                     created_at=artifact.created_at,

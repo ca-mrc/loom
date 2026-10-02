@@ -383,6 +383,16 @@ class ObjectStore(Protocol):
         body: AsyncIterator[bytes],
     ) -> str: ...
 
+    async def put_object_stream_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> ObjectWriteResult:
+        """Stream bounded requests and return the completed write's exact version."""
+        ...
+
     async def stat_object(self, *, bucket: str, key: str) -> ObjectReadback: ...
 
     def stream_object(
@@ -557,6 +567,12 @@ class FakeObjectStore:
             content_length=len(payload),
             checksum_sha256=f"sha256:{sha256(payload).hexdigest()}",
         )
+
+    async def put_object_stream_with_metadata(
+        self, *, bucket: str, key: str, body: AsyncIterator[bytes],
+    ) -> ObjectWriteResult:
+        uri = await self.put_object_stream(bucket=bucket, key=key, body=body)
+        return ObjectWriteResult(uri=uri, version_id=None)
 
     async def stream_object(
         self,
@@ -1012,6 +1028,16 @@ class MinioObjectStore:
         key: str,
         body: AsyncIterator[bytes],
     ) -> str:
+        result = await self.put_object_stream_with_metadata(bucket=bucket, key=key, body=body)
+        return result.uri
+
+    async def put_object_stream_with_metadata(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        body: AsyncIterator[bytes],
+    ) -> ObjectWriteResult:
         # Bound each request independently of total artifact size. Immutable
         # bytes also give SDK retries (and threads surviving a timeout) their
         # own cursor instead of racing over a shared temporary file.
@@ -1044,14 +1070,16 @@ class MinioObjectStore:
             if upload is None:
                 payload = bytes(pending)
 
-                def put(client: Any) -> None:
-                    client.put_object(Bucket=bucket, Key=key, Body=payload, ChecksumAlgorithm="SHA256")
+                def put(client: Any) -> Any:
+                    return client.put_object(Bucket=bucket, Key=key, Body=payload, ChecksumAlgorithm="SHA256")
 
-                await self._run_client_call("put_object_stream", put)
-                return f"s3://{bucket}/{key}"
+                response = await self._run_client_call("put_object_stream", put)
+                return ObjectWriteResult(
+                    uri=f"s3://{bucket}/{key}", version_id=_object_write_version_id(response),
+                )
             if pending:
                 await send_part()
-            return await self.complete_multipart_upload(upload)
+            return await self.complete_multipart_upload_with_metadata(upload)
         except BaseException:
             if upload is not None:
                 # Preserve the original failure/cancellation if best-effort
