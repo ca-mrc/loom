@@ -9,8 +9,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from tests.integration.test_nebius_pool_installation import add_application_builder
 from tests.ops.test_nebius_pool_migration import migration_request
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -86,6 +88,28 @@ def runtime_inputs(platform_inputs, management_inputs):
     manager["metadata"].update(uid=str(uuid4()), resourceVersion="1")
     manager["metadata"]["labels"]["loom.nebius/management-installation"] = request.registration.binding.installation_id
     return request, actuators, services, manager
+
+
+def test_app_target_does_not_require_an_actuator_or_deliver_builder_authority_to_one(runtime_inputs, build_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, actuators, services, _ = runtime_inputs
+    config, builder_id, _ = add_application_builder(request.registration.spec.model_dump(mode="json"), build_inputs[0].recipe)
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(config)))
+    participant, = [row for row in request.registration.spec.participants if row.environment_class == "development"]
+    identity = participant.participant_id
+    machine, = [row for row in request.registration.spec.machines
+        if row.participant_id == identity and row.workload_scope == "environment"]
+    result = wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+        actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]))
+    for key in ("control_plane", "actuator"):
+        volumes = result[key]["spec"]["template"]["spec"]["volumes"]
+        secret, = [row["secret"]["secretName"] for row in volumes if row["name"] == "pool-token-source"]
+        assert secret == "loom-pool-machine-" + machine.machine_id.hex
+        assert result[key]["spec"]["replicas"] == 0
+    assert builder_id.hex not in json.dumps(result)
 
 
 @pytest.fixture
