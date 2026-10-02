@@ -622,6 +622,11 @@ or timeout. Source failure or cancellation attempts to abort the incomplete
 multipart upload; network failure can still require bucket lifecycle cleanup.
 The existing complete-file digest and destination readback checks still gate
 canonical acknowledgement.
+Canonical file, trajectory and ATIF registrations retain the object version
+returned by each successful write, including streamed multipart completion and
+accounting corrections. Unversioned stores retain a null version. Publication
+does not infer the written version from a later lookup of the current key;
+malformed version evidence fails before canonical metadata is acknowledged.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
