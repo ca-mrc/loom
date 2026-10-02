@@ -7,7 +7,11 @@ import json
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_management_switch import _stable
-from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI, gateway_retire, machine_retired
+from tests.ops.test_nebius_pool_gateway_retirement import (
+    GatewayAPI,
+    gateway_retire,
+    machine_retired,
+)
 from tests.ops.test_nebius_pool_gateway_retirement import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_gateway_retirement import collector_inputs as collector_inputs
 from tests.ops.test_nebius_pool_gateway_retirement import (
@@ -26,12 +30,12 @@ class TemplateAPI(GatewayAPI):
         super().__init__(fixture, prior)
         self.authority = copy.deepcopy(prior.authority)
         self.template_calls, self.template_failure = [], None
+        self.drain_targets = {key: _stable(row) for key, row in self.startup.documents.items()}
 
     def successor_drained(self, key, desired):
-        from scripts.ops.nebius_pool_startup import startup_workload_options
-
-        choices = startup_workload_options(self.request, state_dir=self.state, anchor_dir=self.root / 'cutover-anchor')
-        assert any(_stable(self.startup.documents[key]) == _stable(row) for row in choices[key])
+        # This double supplies only the remote process observation. The real
+        # stage verifies projections; the connected test covers this reader.
+        assert _stable(desired) == self.drain_targets[key]
         return self.processes_drained
 
     def preview_legacy_template(self, key, before, desired):
