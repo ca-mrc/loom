@@ -117,3 +117,41 @@ def test_completed_pool_derives_catalog_baseline_and_preserves_original_authorit
     activation.write_text(json.dumps(record))
     with pytest.raises(ValueError, match='pool_predecessor_unqualified'):
         load_completed_pool(selector, original=root)
+
+
+@pytest.mark.timeout(420)
+def test_successive_refresh_completions_keep_the_qualified_pool_baseline(private_cutover):
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from tests.ops.test_nebius_management_refresh_predecessor import complete_refresh, load_refresh
+
+    operation, _, root = private_cutover
+    _, result = finish_cutover(operation)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    prior = pool
+    histories = []
+    for _ in range(2):
+        refreshed, case = complete_refresh(root, prior, pool_baseline=selector.model_dump(mode='json'))
+        completed = load_refresh(refreshed, root)
+        assert completed.pool_baseline == pool
+        assert completed.deployment.pool_catalog_operation_id == pool.deployment.pool_catalog_operation_id
+        assert completed.active['metadata']['uid'] == pool.active['metadata']['uid']
+        assert all(completed.history.get(path) == checksum for path, checksum in pool.history.items())
+        assert len(completed.history) <= 128
+        histories.append(len(completed.history))
+        receipt = json.loads((case[2] / 'completion.json').read_bytes())
+        assert receipt['contract']['pool_baseline'] == selector.model_dump(mode='json')
+        prior = completed
+    assert histories[0] == histories[1], 'ordinary refresh ancestry must remain bounded'
+    # Without its pool baseline, a self-consistent pool-wired refresh still fails
+    # the rooted check; do not accept its caller-supplied before snapshot alone.
+    unbound, _ = complete_refresh(root, prior)
+    with pytest.raises(ValueError, match='refresh_predecessor_unqualified'):
+        load_refresh(unbound, root)
+    completion = Path(operation['state_dir']) / 'completion.json'
+    saved = completion.read_bytes()
+    completion.write_bytes(saved + b'\n')
+    with pytest.raises(ValueError, match='refresh_predecessor_unqualified'):
+        load_refresh(refreshed, root)
+    completion.write_bytes(saved)
+    assert load_refresh(refreshed, root) == prior
