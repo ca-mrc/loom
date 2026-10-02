@@ -98,6 +98,15 @@ loom eval batch create ... \
   --allow-web https://pypi.org
 ```
 
+`loom eval batch show <batch-id>` displays task-authored defaults grouped by
+policy and task count, the selected override, and the resolved policy. It also
+lists tasks whose policy evidence is unavailable. `loom eval trial show
+<trial-id>` displays the task default, selected override, and frozen execution
+policy from the service's materialization evidence. A missing frozen policy is
+shown as unavailable; the CLI does not infer it from the requested override.
+Older responses without network evidence retain their existing summary.
+`--format json` retains the API response shape.
+
 The advanced Batch form exposes the same selection and a read-only compatibility
 preview. Model calls remain on Loom's internal model Gateway; task web egress
 does not grant provider credentials, direct provider access, or an implicit
