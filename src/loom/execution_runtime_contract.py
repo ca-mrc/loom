@@ -29,7 +29,7 @@ from loom.execution_contract import (
 )
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
-from loom.models.networking import NetworkPolicy, TaskHttpEgress, hosted_http_egress
+from loom.models.networking import NetworkPolicy, TaskHttpEgress, WebAllowlist, hosted_http_egress
 from loom.sandbox_identity import SandboxIdentityV1
 
 _DIGEST_REF = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
@@ -369,6 +369,9 @@ class ExecutionRuntimePlanV1(_Strict):
     task_resources: ContainerResourcesV1
     effective_network_policy: NetworkPolicy | None = None
     task_egress: TaskHttpEgress | None = None
+    # Install sources reachable only during setup phases (#2310). Never part of
+    # the task's own network policy; the agent and verifier cannot reach them.
+    setup_egress: WebAllowlist | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     node_resource_allocation: NodeResourceAllocationV1 | None = None
@@ -456,8 +459,13 @@ class ExecutionRuntimePlanV1(_Strict):
             or len(self.sidecars) != 1 + len(expected) or not self.sidecars[0].task_fixture
         ):
             raise ValueError("one prepared fixture requires an isolated attempt controller and both sandboxes")
-        if self.task_egress is not None and TASK_EGRESS_OUTPUT not in self.output_declarations:
+        if (
+            (self.task_egress is not None or self.setup_egress is not None)
+            and TASK_EGRESS_OUTPUT not in self.output_declarations
+        ):
             raise ValueError("task egress requires its immutable diagnostic output declaration")
+        if self.setup_egress is not None and not self.setup:
+            raise ValueError("setup egress requires a setup phase")
         if (
             self.effective_network_policy is not None
             and hosted_http_egress(self.effective_network_policy) != self.task_egress
@@ -600,6 +608,8 @@ class ExecutionRuntimePlanV1(_Strict):
             payload.pop("effective_network_policy")
         if self.task_egress is None:
             payload.pop("task_egress")
+        if self.setup_egress is None:
+            payload.pop("setup_egress")
         # Keep existing published plans byte-compatible when new fields are unused.
         if not self.verifier_after_agent_timeout:
             payload.pop("verifier_after_agent_timeout")

@@ -215,6 +215,12 @@ func (b *workloadBroker) setPhase(role string, deadline time.Time) {
 	b.expires = time.Time{}
 }
 
+func (b *workloadBroker) currentPhaseRole() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.phaseRole
+}
+
 func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	// Serialize refreshes without blocking phase changes on Gateway IO.
 	b.tokenMu.Lock()

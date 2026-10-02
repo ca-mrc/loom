@@ -17,9 +17,10 @@ import shutil
 import signal
 import sys
 import tomllib
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from glob import escape
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from uuid import UUID
 
 import httpx
@@ -30,7 +31,12 @@ from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
-from loom.hosted_harness import HostedHarnessSpec, hosted_harness, workspace_controller_phases
+from loom.hosted_harness import (
+    HARNESS_SETUP_PHASE,
+    HostedHarnessSpec,
+    hosted_harness,
+    workspace_controller_phases,
+)
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NetworkPolicy, hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
@@ -185,6 +191,64 @@ def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
     if spec is None or not spec.workspace or spec.controller_phase not in CONTROLLER_PHASES:
         raise ServiceExecutionTaskError("selected agent has no workspace controller phase")
     return spec
+
+
+def _setup_proxy_environment() -> dict[str, str]:
+    """The runtime's loopback egress proxy, which admits only install sources
+    while the setup phase runs (#2310)."""
+    from urllib.parse import urlsplit
+
+    proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
+    url = urlsplit(proxy)
+    if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
+        raise ServiceExecutionTaskError("harness setup egress is unavailable")
+    environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+    environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
+    return environment
+
+
+async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    """Run the selected harness's pinned install inside the task sandbox.
+
+    Only the install runs here: no task inputs are staged, no task command
+    runs and no model call is possible (the broker refuses non-agent phases).
+    Its output becomes this phase's logs; a non-zero exit is a setup failure.
+    """
+    spec = hosted_harness(trial.agent_name)
+    if spec is None or not spec.workspace or spec.setup is None:
+        raise ServiceExecutionTaskError("selected harness declares no setup")
+    raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
+    deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
+    environment = _setup_proxy_environment()
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    assert current is not None
+    loop.add_signal_handler(signal.SIGTERM, current.cancel)
+    driver = sandbox_driver("task-sandbox", task)
+    try:
+        await driver.start()
+        handle = await driver.exec_streaming(
+            list(spec.setup.install), env_vars=environment, cwd=task.environment.workdir,
+            timeout_sec=deadline.remaining() if deadline else spec.setup.timeout_seconds,
+        )
+        try:
+            async def forward(stream: AsyncIterator[bytes], sink: BinaryIO) -> None:
+                async for chunk in stream:
+                    sink.write(chunk)
+                    sink.flush()
+
+            await asyncio.gather(
+                forward(handle.stdout, sys.stdout.buffer), forward(handle.stderr, sys.stderr.buffer),
+            )
+            code = await handle.wait()
+        except BaseException:
+            await handle.kill()
+            raise
+        if code != 0:
+            raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        await driver.stop()
 
 
 class AgentTimeoutFinalizedError(TimeoutError):
@@ -570,7 +634,7 @@ async def _run_verifier(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=(*workspace_controller_phases(), "verify-sandbox"))
+    parser.add_argument("phase", choices=(*workspace_controller_phases(), HARNESS_SETUP_PHASE, "verify-sandbox"))
     parser.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args()
     workspace = args.workspace
@@ -581,16 +645,17 @@ def main() -> None:
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
-    agent_phase = args.phase != "verify-sandbox"
+    setup_phase = args.phase == HARNESS_SETUP_PHASE
+    agent_phase = args.phase not in {HARNESS_SETUP_PHASE, "verify-sandbox"}
     if agent_phase and args.phase != _workspace_spec(trial).controller_phase:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
-    phase = run_agent if agent_phase else run_verifier
+    phase = run_setup if setup_phase else run_agent if agent_phase else run_verifier
     try:
         asyncio.run(phase(workspace, task, trial))
     except AgentTimeoutFinalizedError:
         raise
     except Exception as exc:
-        directory = "agent" if agent_phase else "verifier"
+        directory = "setup" if setup_phase else "agent" if agent_phase else "verifier"
         path = workspace / ".loom" / directory / "exception.json"
         # An agent failure is captured before cleanup, which can also fail.
         # Keep that original identity instead of replacing it during unwinding.

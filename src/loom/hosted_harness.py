@@ -38,6 +38,8 @@ Readiness = Literal["ready", "unavailable"]
 # `verify-sandbox` phase, so every workspace harness runs through it.
 RESPONSE_RUNNER_MODULE = "loom.service_execution_task"
 SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
+# The controller phase that runs a harness's pinned install (#2310).
+HARNESS_SETUP_PHASE = "setup"
 
 # Operations `ServiceSandboxDriver` implements today. A harness that needs
 # more is not natively runnable.
@@ -62,6 +64,41 @@ class NativeOutput:
 
 
 @dataclass(frozen=True)
+class InstallSource:
+    """An HTTP(S) origin the pinned install may download from during setup."""
+
+    host: str
+    protocol: Literal["http", "https"] = "https"
+
+
+# Bounds for the setup phase's own deadline, separate from the agent's.
+MAX_SETUP_TIMEOUT_SECONDS = 1800
+
+
+@dataclass(frozen=True)
+class HarnessSetup:
+    """The pinned installation an installed harness runs before its agent (#2310).
+
+    `install` runs inside the task sandbox during the setup phase only. It may
+    reach only `sources`, through the Gateway task-egress proxy; no task
+    command or model call runs in setup, and the egress window closes before
+    the agent phase.
+    """
+
+    install: tuple[str, ...]
+    sources: tuple[InstallSource, ...]
+    timeout_seconds: int
+
+    def __post_init__(self) -> None:
+        if not self.install or not all(self.install):
+            raise ValueError("harness setup requires a non-empty install command")
+        if not self.sources:
+            raise ValueError("harness setup requires declared install sources")
+        if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
+            raise ValueError("harness setup timeout is out of range")
+
+
+@dataclass(frozen=True)
 class HostedHarnessSpec:
     name: str
     execution_kind: ExecutionKind
@@ -82,6 +119,9 @@ class HostedHarnessSpec:
     features: frozenset[HarnessFeature] = frozenset()
     required_driver_capabilities: frozenset[DriverCapability] = frozenset()
     native_outputs: tuple[NativeOutput, ...] = ()
+    # How the harness gets into the task sandbox; None means it is already
+    # there (task image or trusted controller).
+    setup: HarnessSetup | None = None
     names: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -101,6 +141,10 @@ class HostedHarnessSpec:
             raise ValueError(f"{self.name}: a workspace harness must declare its driver operations")
         if self.stages_solution and self.model != "forbidden":
             raise ValueError(f"{self.name}: only a model-free harness may receive solution/")
+        if self.setup is not None and (
+            self.execution_kind != "workspace" or "exec_streaming" not in self.required_driver_capabilities
+        ):
+            raise ValueError(f"{self.name}: setup installs into a task sandbox through exec_streaming")
         object.__setattr__(self, "names", frozenset({self.name, *self.aliases}))
 
     @property
@@ -209,7 +253,9 @@ def workspace_controller_phases() -> tuple[str, ...]:
 __all__ = [
     "DIRECT_COMPLETION",
     "GUEST_SANDBOX_DRIVER_CAPABILITIES",
+    "HARNESS_SETUP_PHASE",
     "HOSTED_HARNESSES",
+    "MAX_SETUP_TIMEOUT_SECONDS",
     "NATIVE_EXECUTION_AGENT_NAMES",
     "NATIVE_SANDBOX_DRIVER_CAPABILITIES",
     "ORACLE",
@@ -221,7 +267,9 @@ __all__ = [
     "ExecutionKind",
     "GatewayProtocol",
     "HarnessFeature",
+    "HarnessSetup",
     "HostedHarnessSpec",
+    "InstallSource",
     "ModelUse",
     "NativeOutput",
     "Readiness",

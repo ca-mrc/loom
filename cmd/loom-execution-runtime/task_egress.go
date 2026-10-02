@@ -92,6 +92,37 @@ type storedTaskEgress struct {
 	taskEgressPolicy
 }
 
+// phasedEgressPolicy is the only policy the task-egress proxy enforces. A
+// setup phase may reach only the declared install sources; every other phase
+// gets exactly the task's frozen policy, which is none for gateway-only tasks.
+type phasedEgressPolicy struct {
+	broker *workloadBroker
+	task   taskEgressPolicy
+	setup  *webAllowlist
+}
+
+func (p phasedEgressPolicy) validate() error {
+	if p.task == nil && p.setup == nil {
+		return fmt.Errorf("task egress requires a task or setup policy")
+	}
+	if p.task != nil {
+		if err := p.task.validate(); err != nil {
+			return err
+		}
+	}
+	if p.setup != nil {
+		return p.setup.validate()
+	}
+	return nil
+}
+
+func (p phasedEgressPolicy) permits(d webDestination) bool {
+	if p.broker.currentPhaseRole() == "setup" {
+		return p.setup != nil && p.setup.permits(d)
+	}
+	return p.task != nil && p.task.permits(d)
+}
+
 func (s *storedTaskEgress) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Kind string `json:"kind"`
@@ -238,7 +269,7 @@ func (a *taskEgressAudit) record(d webDestination, outcome string) {
 	_, _ = a.output.Write(payload)
 }
 
-func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, digest string, deadline time.Time) (net.Conn, error) {
+func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, digest string, deadline time.Time, role string) (net.Conn, error) {
 	endpoint := b.endpoint("/task-egress")
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -250,6 +281,8 @@ func (b *workloadBroker) taskTunnel(ctx context.Context, d webDestination, diges
 	}
 	request.Header.Set("X-Loom-Runtime-Contract-SHA256", digest)
 	request.Header.Set("X-Loom-Phase-Deadline", deadline.UTC().Format(time.RFC3339Nano))
+	// The Gateway admits setup-only install sources only for setup phases.
+	request.Header.Set("X-Loom-Execution-Phase", role)
 	client := *b.client
 	client.Timeout = 0
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -350,7 +383,7 @@ func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy taskEg
 			return
 		}
 		b.mu.Lock()
-		deadline, phaseContext := b.phaseDeadline, b.phaseContext
+		deadline, phaseContext, role := b.phaseDeadline, b.phaseContext, b.phaseRole
 		b.mu.Unlock()
 		if phaseContext == nil || !deadline.After(time.Now()) || lifetime.Err() != nil {
 			fail("task_egress_deadline", 504)
@@ -362,7 +395,7 @@ func (b *workloadBroker) startTaskEgressAt(parent context.Context, policy taskEg
 		defer stopParent()
 		stopPhase := context.AfterFunc(phaseContext, cancel)
 		defer stopPhase()
-		tunnel, err := b.taskTunnel(ctx, d, digest, deadline)
+		tunnel, err := b.taskTunnel(ctx, d, digest, deadline, role)
 		if err != nil {
 			fail(err.Error(), 502)
 			return

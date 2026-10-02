@@ -178,13 +178,63 @@ socket-backed `ServiceSandboxDriver`. It deliberately does not call the legacy
 worker `setup()` method, because task images must already contain their bounded
 runtime tools.
 
-Future harness guidance: before reusing a local `SubprocessAgent`, compare its
-driver requirements with the native driver. In particular, local launcher
-agents commonly require `Driver.exec_streaming`;
-`ServiceSandboxDriver.exec_streaming` is currently unsupported. A hosted
-implementation must add a bounded process handle, stream capture, cancellation
-and exit-status contract rather than silently falling back to non-streaming
-execution.
+## Installed harnesses
+
+Installed harnesses (OpenHands SDK, Codex CLI) run their pinned agent process
+and native tools inside the task sandbox, because their tools execute wherever
+the agent runs. The trusted controller supervises them and keeps private
+verifier and solution inputs, Gateway authorization, canonical evidence and
+durable outputs ([#2288](https://github.com/qianyi-sun/loom/issues/2288),
+[#2310](https://github.com/qianyi-sun/loom/issues/2310)). Terminus-2 keeps its
+controller-side model loop.
+
+### Native process interface
+
+`ServiceSandboxDriver.exec_streaming` returns a standard `ExecHandle`, so the
+existing `SubprocessAgent` runners work unchanged. It is backed by
+supervised-process endpoints in `loom-sandbox-runtime`:
+
+| Endpoint | Behaviour |
+|---|---|
+| `POST /processes` | Start a process in its own process group. It uses the same identity, deadline and environment validation as `/exec`, and a process outlives the request. |
+| `GET /processes/{id}/output?stream=&offset=&wait_ms=` | Long-poll bytes by offset. Each stream keeps a bounded 4 MiB window; a slow reader pauses the process through pipe backpressure instead of losing output, and bytes before the read offset are released. |
+| `GET /processes/{id}?wait_ms=` | Status: running, exit code, timed out (`124`), killed (`137`), duration. |
+| `POST /processes/{id}/kill` | Kill the process group. |
+| `DELETE /processes/{id}` | Release an exited process record; at most 16 are retained. |
+
+Exit status is known even when a background descendant keeps the output pipes
+open; that descendant is killed after a one-second drain grace, the same rule
+as `/exec`. The guest (QEMU) path is not yet qualified for supervised
+processes: harnesses requiring `exec_streaming` are rejected there with
+`guest_driver_capabilities_unsupported`.
+
+### Setup phase
+
+A harness spec may declare a `HarnessSetup`: a pinned `install` command, the
+HTTP(S) `sources` it may download from, and a `timeout_seconds` separate from
+the agent's. The planner then emits:
+
+- a `setup` phase (`service_execution_sandbox_task setup`) before the agent
+  phase, with its own deadline and recorded timing in `result.json`;
+- `setup_egress`, the install sources frozen into the plan and its hash.
+  They are never part of `task_egress` or the effective network policy;
+- the task-egress audit output and an optional
+  `diagnostics/setup-exception.json`.
+
+The setup phase runs only the install, inside the task sandbox, through
+`exec_streaming`. It stages no task inputs and runs no task command, and model
+calls are impossible: the pod broker grants model authority only to the agent
+phase. Egress is enforced twice:
+
+1. The runtime's egress proxy permits setup sources only while the setup
+   phase runs, and otherwise only the task's own policy, which is nothing for
+   `gateway-only` tasks. Phase changes also cancel in-flight connections.
+2. The Gateway admits a setup source only when the authenticated runtime marks
+   the connection as a setup-phase connection (`X-Loom-Execution-Phase`).
+   Setup and task egress never widen each other.
+
+A failed install is classified `setup_error`, not an agent failure.
+
 
 ## Verification is harness-independent
 
@@ -305,6 +355,10 @@ reward does not by itself satisfy this checklist.
 
 ## Code map
 
+- Supervised sandbox processes:
+  `cmd/loom-sandbox-runtime/processes.go`, `src/loom/driver/service_sandbox.py`
+- Setup-phase egress: `cmd/loom-execution-runtime/task_egress.go`,
+  `src/loom_llm_gateway/routes/task_egress.py`
 - Typed harness specifications and registry:
   `src/loom/hosted_harness.py`
 - Harness-neutral task-sandbox planner and deferred verifier plan shape:
