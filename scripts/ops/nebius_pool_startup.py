@@ -137,6 +137,29 @@ def _observe_workloads(api: PoolStartupAPI, closed: dict[str, dict[str, Any]],
     return observed
 
 
+def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
+                             anchor_dir: Path) -> dict[str, tuple[dict[str, Any], ...]] | None:
+    """Read-only recovery projection, including both sides of an uncertain CAS.
+
+    Nothing here asserts health, write rejection or permission to roll back.
+    Callers must match their actual retained UID against one of these templates.
+    """
+    operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+    paths = (state_dir / "startup.json", anchor_dir / (operation + "-startup.json"))
+    if not any(path.exists() or path.is_symlink() for path in paths):
+        return None
+    closed, targets = closed_startup_documents(request, state_dir=state_dir, anchor_dir=anchor_dir)
+    _, record = _startup_record(request, state=state_dir, anchor=anchor_dir, closed=closed, targets=targets)
+    if record is None:
+        raise ValueError
+    choices: dict[str, tuple[dict[str, Any], ...]] = {}
+    for key, original in closed.items():
+        phase = record["workloads"].get(key, {"phase": "prepared"})["phase"]
+        choices[key] = ((original,) if phase == "prepared" else (targets[key],) if phase == "started"
+            else (original, targets[key]))
+    return choices
+
+
 def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Start fixed successors under closed admission; expose no public activation."""

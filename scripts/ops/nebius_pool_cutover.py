@@ -210,7 +210,8 @@ def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
     return record
 
 
-def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path) -> dict[str, dict[str, Any]]:
+def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path,
+                               observed: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Read only: derive each original or exactly journal-qualified successor.
 
     This is not drain, runtime-health or database evidence. It selects the right
@@ -249,6 +250,20 @@ def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, 
         for key, item in record["runtime"].items():
             if item["phase"] != "prepared":
                 expected[key] = item["expected"]
+        # Startup keeps the closed parent immutable. An uncertain write may be
+        # either exact template, so callers must supply observation, not guess.
+        from scripts.ops.nebius_pool_startup import startup_workload_options
+
+        choices = startup_workload_options(request, state_dir=state_dir, anchor_dir=anchor_dir)
+        if choices is not None:
+            for key in expected:
+                options = choices[key]
+                if observed is not None:
+                    original = originals[key] if key in originals else documents["producers"][key]
+                    options = tuple(row for row in options if _matches(observed[key], row, _uid(original)))
+                if len(options) != 1:
+                    raise ValueError
+                expected[key] = options[0]
         return copy.deepcopy(expected)
     except Exception:
         raise ValueError("pool_workload_recovery_unqualified") from None
@@ -317,6 +332,9 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
         writer_state, writer_anchor = state / "writers", state / "writer-anchor"
         with private_state._locked_state(anchor):
             path, marker = state / "cutover.json", anchor / (operation + "-cutover.json")
+            if any(item.exists() or item.is_symlink() for item in (
+                    state / "startup.json", anchor / (operation + "-startup.json"))):
+                raise ValueError  # Recovery now belongs to startup, never replay closure.
             record = _read_cutover_record(request, documents, state, anchor)
             if record is None:
                 api.preflight(request)
