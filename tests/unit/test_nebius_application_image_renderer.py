@@ -127,6 +127,15 @@ def test_recipe_digest_binds_options_and_platform_independently_of_owner_and_att
     assert claim.source_key == "application-sources/v1/sha256/" + "b" * 64 + ".tar"
 
 
+def test_application_job_name_fits_kubernetes_at_maximum_attempt(build_inputs):
+    from loom_execution_actuator.application_image_renderer import render_application_image_job
+
+    claim, target, config = build_inputs
+    claim = claim.model_copy(update={"attempt": 2**63 - 1})
+    _, job = render_application_image_job(claim=claim, target=target, config=config)
+    assert len(job["metadata"]["name"]) <= 63
+
+
 @pytest.mark.parametrize("path", ["/absolute", "../outside", "a/../b", "a//b", "a\\b", "a/./b"])
 def test_shared_component_paths_remain_bounded_and_task_names_remain_task_specific(path):
     from loom.native_image_build import NativeImageBuildComponentV1
