@@ -6,19 +6,27 @@ This pure projection performs no Kubernetes, storage or database operation.
 """
 from __future__ import annotations
 
+import copy
+import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from scripts.ops.nebius_ingress_stage import _snapshot
+from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 
 from loom.application_image_build import ApplicationImageBuildBindingV1
 from loom.application_source_upload import ApplicationSourceUploadBindingV1
 from loom_service.application_management.build_deployment import (
     SOURCE_CREDENTIALS_PATH,
     SOURCE_SPOOL_PATH,
+    render_application_build_reader,
 )
 from loom_service.application_management.installation import (
     ApplicationBuildSettings,
     ApplicationSourceUploadSettings,
 )
-from loom_service.environment_management.deployment import ManagementDeployment
+from loom_service.environment_management.deployment import ManagementDeployment, render_management
 from loom_service.pool_management.installation import PoolInstallation
 
 
@@ -66,5 +74,47 @@ def derive_application_build_deployment(before: ManagementDeployment, pool: Pool
         value['installation']['applications']['runtime'].update(
             source_upload=source.model_dump(mode='json'), build=build.model_dump(mode='json'))
         return ManagementDeployment.model_validate(value)
+    except Exception:
+        raise ValueError('pool_application_delivery_unqualified') from None
+
+
+@dataclass(frozen=True, repr=False)
+class RenderedApplicationBuildDelivery:
+    deployment: dict[str, Any]
+    configuration: tuple[dict[str, Any], ...]
+    source_secret_name: str
+
+
+def render_application_build_delivery(*, before: ManagementDeployment, pool: PoolInstallation,
+        active: dict[str, Any], candidate: dict[str, Any], profile: dict[str, Any],
+        repo_root: Path) -> RenderedApplicationBuildDelivery:
+    """Derive fixed first-cutover resources, retaining the old material identity.
+
+    Only the protected parent can supply the completed predecessor and exact
+    catalog. This projection grants no permission to stage or start the result.
+    """
+    try:
+        render_refresh(ManagementRefreshRenderRequest(before, before, active, candidate, profile, repo_root))
+        after = derive_application_build_deployment(before, pool)
+        rendered = render_management(after, candidate=candidate, profile=profile, repo_root=repo_root)
+        deployment, = (copy.deepcopy(row) for row in rendered.files['40-services.yaml'] if row['kind'] == 'Deployment')
+        deployment['metadata'] = _snapshot(active)['metadata']
+        deployment['spec']['replicas'] = 0
+        pod = deployment['spec']['template']['spec']
+        old_volumes = {row['name']: row for row in active['spec']['template']['spec']['volumes']}
+        for volume in pod['volumes']:
+            if volume['name'] in {'management-cloud', 'application-shared'}:
+                volume['secret']['secretName'] = old_volumes[volume['name']]['secret']['secretName']
+        source, = (row for row in pod['volumes'] if row['name'] == 'application-source-credentials')
+        name = 'loom-management-applications-' + rendered.revision[7:19]
+        config, = (copy.deepcopy(row) for row in rendered.files['10-config-network.yaml']
+            if row['kind'] == 'ConfigMap' and row['metadata']['name'] == name)
+        config['data']['installation.json'] = json.dumps(after.installation.model_dump(mode='json'),
+            sort_keys=True, separators=(',', ':'))
+        application = after.installation.applications
+        assert application is not None
+        namespace = after.installation.foundation.platform_config['execution_namespace'] + '-build'
+        reader = render_application_build_reader(application.authority, namespace=namespace)
+        return RenderedApplicationBuildDelivery(deployment, (config, *reader), source['secret']['secretName'])
     except Exception:
         raise ValueError('pool_application_delivery_unqualified') from None
