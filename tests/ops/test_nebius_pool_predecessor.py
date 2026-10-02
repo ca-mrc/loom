@@ -8,6 +8,9 @@ from uuid import uuid4
 
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
+from tests.ops.test_nebius_management_refresh_connected import (
+    connected_refresh as connected_refresh,
+)
 from tests.ops.test_nebius_pool_cutover_entry import (
     application_management_inputs as application_management_inputs,
 )
@@ -668,3 +671,50 @@ def test_pool_refresh_live_preserves_open_work_and_rejects_authority_drift(priva
         assert all(call.method == 'GET' or call.url.path == '/apis/authorization.k8s.io/v1/selfsubjectrulesreviews'
             for call in external.calls)
     assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.timeout(900)
+def test_connected_pool_refresh_completes_without_restoring_other_writers(private_cutover, connected_refresh):
+    from scripts.ops.nebius_management_refresh_connected import HTTPSManagementRefreshInstaller
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+    from tests.ops.test_nebius_management_refresh_connected import run, writes
+    from tests.ops.test_nebius_management_refresh_predecessor import refresh_case
+
+    operation, _, root = private_cutover
+    _, result = finish_cutover(operation)
+    selector = PoolPredecessorV1(operation=operation, completion_sha256=result['completion_sha256'])
+    pool = load_completed_pool(selector, original=root)
+    request, _, directory, anchor = refresh_case(root, pool, pool_baseline=selector.model_dump(mode='json'))
+    bound = PoolManagerRefresh(root, pool, request, directory)
+    original_api, state = connected_refresh
+    state.request, state.directory, state.anchor = request, directory, anchor
+    state.manager.clear()
+    state.manager.update(copy.deepcopy(pool.active))
+    state.manager['metadata'].update(resourceVersion='30', generation=5)
+    manager = _key(pool.context.request.manager)
+    with pool_refresh_http(bound)() as (verifier, external):
+        state.values.update(external.objects)
+        state.values[manager] = state.manager
+        external.objects = state.values
+        retained = {key: copy.deepcopy(state.values[key]) for key in pool.completion.workloads if key != manager}
+        with HTTPSManagementRefreshInstaller(request=request, original=root, predecessor=pool, state_dir=directory,
+                api_server=original_api.api_server, ssl_context=original_api.ssl_context, token=original_api.token,
+                runtime_ca_pem=None, checks=original_api.checks, pool=verifier) as api:
+            external.failure = 'credentials'
+            with pytest.raises(ManagementRefreshInstallError):
+                run((api, state))
+            assert not writes(state)
+            external.failure = None
+            assert run((api, state))['status'] == 'management_refreshed'
+            mutations = writes(state)
+            assert len([row for row in mutations if row[0] == 'PATCH']) == 2
+            assert state.public_calls and state.storage_calls
+            assert {key: state.values[key] for key in retained} == retained
+            assert run((api, state))['status'] == 'management_refreshed'
+            assert writes(state) == mutations
+            external.failure = 'gateway_rights'
+            with pytest.raises(ManagementRefreshInstallError):
+                api.verify_public(request, directory)
+            assert writes(state) == mutations
