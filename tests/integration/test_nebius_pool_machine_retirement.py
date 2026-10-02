@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 from sqlalchemy import insert, select, text, update
+from sqlalchemy.engine import make_url
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolMachine,
@@ -86,6 +87,24 @@ async def test_retirement_transaction_failure_preserves_all_authority(sessions):
     with pytest.raises(psycopg.errors.DivisionByZero):
         read_sql(url, pool_machine_retirement_sql(spec, action='revoke').replace('COMMIT;', 'SELECT 1/0; COMMIT;'))
     assert qualify_machine_retirement_report(spec, read_sql(url, pool_machine_retirement_sql(spec, action='observe'))) == 'active'
+
+
+async def test_machine_retirement_transport_emits_only_one_safe_json_report(sessions):
+    from scripts.ops.nebius_pool_activation_database import fence_pool_activation_sql
+    from scripts.ops.nebius_pool_machine_database import pool_machine_retirement_sql
+
+    spec, _, url = await registered(sessions)
+    read_sql(url, fence_pool_activation_sql(spec))
+    columns = []
+    with psycopg.connect(make_url(url).set(drivername='postgresql').render_as_string(hide_password=False), autocommit=True) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(pool_machine_retirement_sql(spec, action='revoke'), prepare=False)
+            while True:
+                if cursor.description:
+                    columns.append([column.name for column in cursor.description])
+                if not cursor.nextset():
+                    break
+    assert columns == [['report']]
 
 
 @pytest.mark.parametrize('damage', ['no_fence', 'participant', 'epoch', 'token_scope', 'partial', 'extra_credential'])
