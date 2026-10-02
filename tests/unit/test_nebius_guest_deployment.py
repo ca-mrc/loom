@@ -90,7 +90,8 @@ def test_guest_readiness_rejects_incomplete_or_unbound_deployment(platform_input
         build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
-def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path):  # noqa: F811
+@pytest.mark.parametrize("readiness", [None, False, True])
+def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(platform_inputs, tmp_path, readiness):  # noqa: F811
     from scripts.ops.deploy_nebius_platform import load_render
 
     from loom_control_plane.execution_capacity_targets import validate_capacity_owner
@@ -98,9 +99,11 @@ def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(pla
     config, candidate, profile = guest_inputs(platform_inputs)
     original = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
-    profile["supports_emulated_pkcs11"] = True
+    if readiness is not None:
+        profile["supports_emulated_pkcs11"] = readiness
     files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
     data = files["10-config-network.yaml"][0]["data"]
+    assert json.loads(data["profile.json"]).get("supports_emulated_pkcs11") == readiness
     assert data["guest-catalog.json"] == original["10-config-network.yaml"][0]["data"]["guest-catalog.json"]
     auth = json.loads(data["emulated-auth-catalog.json"])
     target, = ExecutionTopologyV1.model_validate(auth["topology"]).targets
@@ -125,15 +128,15 @@ def test_emulated_auth_adds_distinct_target_without_rebinding_existing_guest(pla
     assert readback["emulated_auth_execution_target"] == config["emulated_auth_execution_target"]
 
 
-@pytest.mark.parametrize("damage", ["missing-target", "missing-readiness", "missing-guest", "same-owner", "same-guest", "bad-fields"])
+@pytest.mark.parametrize("damage", ["missing-target", "missing-runtime", "missing-guest", "same-owner", "same-guest", "bad-fields"])
 def test_emulated_auth_readiness_requires_exact_distinct_target(platform_inputs, damage):  # noqa: F811
     config, candidate, profile = guest_inputs(platform_inputs)
     config["emulated_auth_execution_target"] = {"target_id": "nebius-auth-fixture"}
     profile["supports_emulated_pkcs11"] = True
     if damage == "missing-target":
         del config["emulated_auth_execution_target"]
-    elif damage == "missing-readiness":
-        del profile["supports_emulated_pkcs11"]
+    elif damage == "missing-runtime":
+        del profile["guest_runtime"]
     elif damage == "missing-guest":
         del config["guest_execution_target"]
     elif damage == "same-owner":
