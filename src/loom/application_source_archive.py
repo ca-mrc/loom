@@ -62,15 +62,20 @@ def _exact(source: BinaryIO, size: int) -> bytes:
     return value
 
 
-def _read_record(source: BinaryIO, name: str, *, limit: int, size: int | None = None) -> bytes:
+def _record_size(source: BinaryIO, name: str, *, limit: int, size: int | None = None) -> int:
     header = _exact(source, _BLOCK)
     # Parse only one bounded header, never extension records or compressed data.
     member = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
     if (not 0 <= member.size <= limit or (size is not None and member.size != size)
             or header != _header(name, member.size)):
         raise ValueError
-    body = _exact(source, member.size)
-    if any(_exact(source, -member.size % _BLOCK)):
+    return member.size
+
+
+def _read_record(source: BinaryIO, name: str, *, limit: int, size: int | None = None) -> bytes:
+    length = _record_size(source, name, limit=limit, size=size)
+    body = _exact(source, length)
+    if any(_exact(source, -length % _BLOCK)):
         raise ValueError
     return body
 
@@ -115,16 +120,27 @@ def extract_application_source_archive(source: BinaryIO, *, expected_digest: str
         manifest = parse_application_source_manifest(_read_record(source, "manifest.json", limit=MAX_MANIFEST_BYTES),
                                                     expected_digest=expected_digest)
         for index, entry in enumerate(manifest.files):
-            body = _read_record(source, f"files/{index:05d}", limit=entry.size_bytes, size=entry.size_bytes)
-            if "sha256:" + hashlib.sha256(body).hexdigest() != entry.sha256:
-                raise ValueError
             if entry.link_target is not None:
+                # Link payloads are bounded to 1024 bytes by the manifest.
+                body = _read_record(source, f"files/{index:05d}", limit=entry.size_bytes, size=entry.size_bytes)
+                if "sha256:" + hashlib.sha256(body).hexdigest() != entry.sha256:
+                    raise ValueError
                 continue
+            remaining = _record_size(source, f"files/{index:05d}", limit=entry.size_bytes, size=entry.size_bytes)
             with _parent(descriptor, entry.path) as (parent, name):
                 output = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                                  0o600, dir_fd=parent)
                 with os.fdopen(output, "wb") as stream:
-                    stream.write(body)
+                    checksum = hashlib.sha256()
+                    while remaining:
+                        chunk = _exact(source, min(remaining, 1024 * 1024))
+                        remaining -= len(chunk)
+                        checksum.update(chunk)
+                        if stream.write(chunk) != len(chunk):
+                            raise ValueError
+                    if (any(_exact(source, -entry.size_bytes % _BLOCK))
+                            or "sha256:" + checksum.hexdigest() != entry.sha256):
+                        raise ValueError
                     stream.flush()
                     os.fchmod(stream.fileno(), int(entry.mode, 8))
         padding = 2 * _BLOCK + (-(source.tell() + 2 * _BLOCK) % _RECORD)
