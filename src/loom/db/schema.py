@@ -55,6 +55,9 @@ from loom.db.nebius_application_operation_schema import (
 )
 from loom.db.nebius_application_schema import NebiusApplication as NebiusApplication
 from loom.db.nebius_application_schema import NebiusDeploymentNameClaim as NebiusDeploymentNameClaim
+from loom.db.nebius_application_source_schema import (
+    NebiusApplicationSourceUpload as NebiusApplicationSourceUpload,
+)
 from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,

@@ -893,8 +893,20 @@ headers, lengths, content hashes and final padding; it creates source files
 exclusively under a pinned empty private directory and installs safe links last.
 Failed extraction is not accepted context; the caller owns partial-file cleanup.
 
-Publication, global build-capacity admission, image building, release qualification
-and installed source-to-deploy acceptance remain separate, unimplemented consumers.
+The management `ApplicationSourceRegistry` retains owner/team-qualified upload
+intents in `nebius_application_source_uploads` (migration `0173`). Each intent
+freezes its installation/data binding, source digest, archive checksum/length,
+informational Git commit and one-hour-or-shorter database-clock expiry. Concurrent
+same-key retries return one identity; changed intent or team conflicts. Only the
+internal verifier can record `source_verified`, and verified receipts remain
+readable after the upload deadline. SQL retains their immutable identity/history.
+Identical archives select one content-addressed key in the shared source bucket,
+while owners retain separate access records. A source receipt is not a build,
+release, CI approval or capacity reservation.
+
+The registry alone does not upload bytes. Authenticated streaming transport,
+global application-build admission, image building, release qualification and
+installed source-to-deploy acceptance remain separate, unimplemented consumers.
 
 ### Stopped application completion
 

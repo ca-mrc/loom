@@ -278,7 +278,7 @@ def test_cutover_database_pages_bind_identity_and_reject_unsafe_receipts(databas
     participant = next(row for row in state.request.registration.spec.participants
         if row.participant_id == state.target.participant_id)
     identity = str(uuid4())
-    report = {'status': 'observed', 'schema_revision': '0172', 'rows': [{
+    report = {'status': 'observed', 'schema_revision': '0173', 'rows': [{
         'key': 'batch:' + identity, 'source_matches': True, 'origin': {
             'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
             'submission_id': identity, 'kind': 'environment', 'application': None}}]}

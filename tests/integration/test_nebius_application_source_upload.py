@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -11,7 +11,9 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from loom_service.environment_management.registry import ManagementError
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -138,3 +140,37 @@ async def test_upload_database_retains_immutable_identity_and_verified_receipt(e
     assert await registry.status(first.upload_id, principal=alice) == verified
     async with factory() as session:
         assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0173"
+
+
+async def test_expiry_uses_database_clock_without_erasing_completed_source(environment_registry):
+    from loom.db.nebius_application_source_schema import NebiusApplicationSourceUpload
+
+    _, factory, (alice, _), _ = environment_registry
+    registry = upload_registry(factory)
+    first = await registry.create(principal=alice, request=intent(), idempotency_key="source")
+    assert await registry.for_upload(first.upload_id, principal=alice) == first
+    # Seed historical rows in the disposable DB, without a wall-clock sleep or
+    # weakening the production trigger's immutable timestamp contract.
+    earlier = datetime.now(UTC) - timedelta(hours=2)
+    async with factory.begin() as session:
+        current = await session.get(NebiusApplicationSourceUpload, first.upload_id)
+        original = {name: getattr(current, name) for name in NebiusApplicationSourceUpload.__table__.columns.keys()}
+        expired, completed = uuid4(), uuid4()
+        for identity, key in ((expired, "expired"), (completed, "completed")):
+            session.add(NebiusApplicationSourceUpload(**(original | {
+                "upload_id": identity, "idempotency_key": key,
+                "created_at": earlier, "expires_at": earlier + timedelta(hours=1),
+            })))
+        await session.flush()
+        await session.execute(update(NebiusApplicationSourceUpload).where(
+            NebiusApplicationSourceUpload.upload_id == completed,
+        ).values(phase="source_verified", verified_at=earlier + timedelta(minutes=1)))
+    expired_status = await registry.status(expired, principal=alice)
+    for operation in (registry.for_upload, registry.complete):
+        with pytest.raises(ManagementError, match="application_source_expired"):
+            await operation(expired, principal=alice)
+    assert await registry.status(expired, principal=alice) == expired_status
+    completed_status = await registry.status(completed, principal=alice)
+    assert completed_status.phase == "source_verified"
+    assert await registry.for_upload(completed, principal=alice) == completed_status
+    assert await registry.complete(completed, principal=alice) == completed_status

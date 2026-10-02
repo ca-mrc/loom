@@ -26,7 +26,7 @@ from loom.application_source import (
 
 _BLOCK = tarfile.BLOCKSIZE
 _RECORD = tarfile.RECORDSIZE
-_MAX_ARCHIVE_BYTES = MAX_SOURCE_BYTES + MAX_MANIFEST_BYTES + (MAX_SOURCE_FILES + 1) * 2 * _BLOCK + _RECORD
+MAX_APPLICATION_SOURCE_ARCHIVE_BYTES = MAX_SOURCE_BYTES + MAX_MANIFEST_BYTES + (MAX_SOURCE_FILES + 1) * 2 * _BLOCK + _RECORD
 _DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -102,7 +102,7 @@ def extract_application_source_archive(source: BinaryIO, *, expected_digest: str
     descriptor = None
     try:
         length = source.seek(0, os.SEEK_END)
-        if not _RECORD <= length <= _MAX_ARCHIVE_BYTES or length % _RECORD:
+        if not _RECORD <= length <= MAX_APPLICATION_SOURCE_ARCHIVE_BYTES or length % _RECORD:
             raise ValueError
         source.seek(0)
         if destination != destination.resolve(strict=True):
