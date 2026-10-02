@@ -37,6 +37,49 @@ def commit(root):
     return git(root, "rev-parse", "HEAD")
 
 
+def test_upload_package_preserves_dirty_source_and_separate_archive_identity(repo, tmp_path):
+    from loom.application_source_archive import extract_application_source_archive
+    from loom_cli.application_source import package_application_source
+
+    (repo / "app.py").write_bytes(b"committed\n")
+    (repo / "deleted").write_bytes(b"old")
+    head = commit(repo)
+    (repo / "app.py").write_bytes(b"dirty\n")
+    (repo / "deleted").unlink()
+    (repo / "untracked").write_bytes(b"new\n")
+    before = git(repo, "status", "--porcelain=v1")
+    with package_application_source(repo) as packaged:
+        assert packaged.base_commit == head
+        assert packaged.archive.tell() == 0
+        assert os.fstat(packaged.archive.fileno()).st_mode & 0o777 == 0o600
+        body = packaged.archive.read()
+        assert packaged.archive_sha256 == "sha256:" + hashlib.sha256(body).hexdigest()
+        assert packaged.archive_size_bytes == len(body)
+        assert packaged.manifest.digest != packaged.archive_sha256
+        packaged.archive.seek(0)
+        destination = tmp_path / "received"
+        destination.mkdir(mode=0o700)
+        assert extract_application_source_archive(packaged.archive, expected_digest=packaged.manifest.digest,
+                                                  destination=destination) == packaged.manifest
+        assert (destination / "app.py").read_bytes() == b"dirty\n"
+        assert (destination / "untracked").read_bytes() == b"new\n"
+        assert not (destination / "deleted").exists()
+        with package_application_source(repo) as repeated:
+            assert repeated.archive.read() == body
+    assert packaged.archive.closed
+    assert git(repo, "status", "--porcelain=v1") == before
+
+
+def test_upload_package_closes_private_archive_after_caller_failure(repo):
+    from loom_cli.application_source import package_application_source
+
+    (repo / "app").write_bytes(b"source")
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with package_application_source(repo) as packaged:
+            raise RuntimeError("caller failed")
+    assert packaged.archive.closed
+
+
 def test_current_bytes_include_dirty_untracked_and_deletions_without_changing_checkout(repo):
     (repo / "api.py").write_bytes(b"committed\n")
     (repo / "deleted").write_bytes(b"old\n")
