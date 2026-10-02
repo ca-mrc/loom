@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from tests.ops.test_nebius_pool_database_guard import database_guard as database_guard
+from tests.ops.test_nebius_pool_gateway_probe import projected_gateway as projected_gateway
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -213,8 +214,9 @@ def test_manager_runtime_uses_the_retained_management_database(management_histor
 
 @pytest.mark.parametrize('damage', [None, 'db_settings', 'machine_settings', 'epoch_settings', 'token',
     'original_running', 'unready', 'uid', 'pod', 'replica_owner', 'template', 'account', 'name',
-    'registration', 'db_reference', 'secret', 'backend', 'late_secret', 'late_backend', 'history', 'authority'])
-def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, monkeypatch, damage):
+    'registration', 'db_reference', 'secret', 'backend', 'late_secret', 'late_backend', 'history', 'authority',
+    'kubernetes', 'kubernetes_uid', 'late_kubernetes_secret', 'late_kubernetes_backend', 'late_kubernetes_pod'])
+def test_gateway_runtime_binds_closed_child_identity_settings_and_management_database(management_history, projected_gateway, monkeypatch, damage):
     """The new gateway has no running predecessor; only its scalar start is valid."""
     import hashlib
     import json
@@ -244,6 +246,11 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
     container, = original['spec']['template']['spec']['containers']
     rows = {row['name']: row for row in container['env']}
     rows['LOOM_POOL_GATEWAY_BEARER_TOKEN_FILE']['value'] = str(token)
+    wire, projected, _, _, _ = projected_gateway
+    wire['namespaces'].clear()
+    wire['namespaces'].update({ns.name: str(ns.uid) for participant in migration.registration.spec.participants
+        for ns in (participant.execution_namespace, participant.build_namespace)})
+    rows['LOOM_POOL_GATEWAY_KUBERNETES']['value'] = json.dumps(projected['kubernetes'])
     expected = copy.deepcopy(original)
     expected['spec']['replicas'] = 1
     current = copy.deepcopy(expected)
@@ -296,6 +303,10 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         selected.target.controller['metadata']['uid'] = str(uuid4())
     elif damage == 'authority':
         api.kubeconfig.write_bytes(b'private-changed-authority')
+    elif damage == 'kubernetes':
+        wire['damage'] = 'unauthorized'
+    elif damage == 'kubernetes_uid':
+        wire['damage'] = 'uid'
     processes, calls = [], []
 
     def run(args):
@@ -314,6 +325,12 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
                 state.secret['metadata']['resourceVersion'] = 'changed'
             elif len(processes) == 2 and damage == 'late_backend':
                 state.database['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 3 and damage == 'late_kubernetes_secret':
+                state.secret['metadata']['resourceVersion'] = 'changed'
+            elif len(processes) == 3 and damage == 'late_kubernetes_backend':
+                state.database['metadata']['uid'] = str(uuid4())
+            elif len(processes) == 3 and damage == 'late_kubernetes_pod':
+                pod['metadata']['uid'] = str(uuid4())
             return json.loads(result.stdout)
         if args[:2] == ['get', 'deployment']:
             assert args[2:5] == [name, '-n', namespace]
@@ -334,7 +351,8 @@ def test_gateway_runtime_binds_closed_child_identity_settings_and_management_dat
         assert error.value.stage == 'gateway_runtime' and 'private-' not in str(error.value)
     else:
         assert selected.qualify_gateway_runtime(original=original, expected=expected) is None
-        assert len(processes) == 2 and all(row.returncode == 0 for row in processes)
+        assert len(processes) == 3 and all(row.returncode == 0 for row in processes)
+        assert {path for _, path, _ in wire['requests']} == {'/api/v1/namespaces/' + name for name in wire['namespaces']}
     assert all('private-' not in (row.stdout + row.stderr).decode() for row in processes)
     assert all(row[0] in {'get', 'exec'} for row in calls)
     assert not state.executed

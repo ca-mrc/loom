@@ -143,6 +143,7 @@ def test_projected_gateway_probe_rejects_wrong_scope_tls_credentials_or_response
     elif damage == 'token_permissions':
         token.chmod(0o644)
     elif damage == 'token_invalid':
+        token.chmod(0o640)
         token.write_text('private invalid credential')
     elif damage == 'connection':
         wanted['kubernetes']['endpoint'] = 'https://foreign.example.com'
