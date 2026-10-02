@@ -100,3 +100,40 @@ def test_projection_replaces_one_entry_instead_of_retaining_every_operation():
     assert render(Request("two")) == {"operation": "two"}
     assert render(Request("one")) == {"operation": "one"}
     assert calls == ["one", "two", "one"]
+
+
+def test_projection_requalifies_alias_changes_even_when_nested_values_are_equal():
+    @pure_projection
+    def render(request):
+        return {"shared": request.payload[0] is request.payload[1]}
+
+    child = {"replicas": 1}
+    assert render(Request([child, child])) == {"shared": True}
+    assert render(Request([child, dict(child)])) == {"shared": False}
+
+
+def test_input_snapshot_visits_shared_graph_once_per_call_without_hiding_mutation():
+    from scripts.ops.nebius_pool_projection import _snapshot
+
+    reads = {}
+
+    @dataclass
+    class Node:
+        edges: list
+
+        def __getattribute__(self, name):
+            if name == "edges":
+                reads[id(self)] = reads.get(id(self), 0) + 1
+            return object.__getattribute__(self, name)
+
+    leaf = {"replicas": 1}
+    root = Node([leaf])
+    for _ in range(12):
+        root = Node([root, root])
+    before = _snapshot(root)
+    assert len(reads) == 13 and set(reads.values()) == {1}
+    reads.clear()
+    assert _snapshot(root) == before
+    assert len(reads) == 13 and set(reads.values()) == {1}
+    leaf["replicas"] = 2
+    assert _snapshot(root) != before
