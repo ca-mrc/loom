@@ -71,15 +71,17 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                         assert time.monotonic() < bootstrap_deadline, "disposable bootstrap RBAC did not appear"
                         await asyncio.sleep(0.1)
                 platform_resources.append(core.api_client.sanitize_for_serialization(document))
-        # K3s also installs cluster-wide bindings before their referenced roles
-        # (observed for clustercidrs-node). The complete production inventory
-        # correctly rejects that incomplete bootstrap; wait for the real fixture
-        # to settle rather than omitting those bindings or inventing role data.
+        # This pinned K3s image adds its own RBAC after the upstream bootstrap.
+        # An initially complete inventory can therefore precede its late
+        # bindings/roles. Require the actual late roles and resolve bindings at
+        # the same revision; never omit bindings or manufacture permissions.
+        late_bootstrap_roles = {"clustercidrs-node", "system:k3s-controller"}
         while True:
             bootstrap_roles = await asyncio.to_thread(rbac.list_cluster_role)
-            bootstrap_bindings = await asyncio.to_thread(rbac.list_cluster_role_binding)
+            bootstrap_bindings = await asyncio.to_thread(rbac.list_cluster_role_binding,
+                resource_version=bootstrap_roles.metadata.resource_version, resource_version_match="Exact")
             available = {row.metadata.name for row in bootstrap_roles.items}
-            missing = {row.role_ref.name for row in bootstrap_bindings.items} - available
+            missing = ({row.role_ref.name for row in bootstrap_bindings.items} | late_bootstrap_roles) - available
             if not missing:
                 break
             assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
