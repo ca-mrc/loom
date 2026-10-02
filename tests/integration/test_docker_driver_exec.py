@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import tracemalloc
 from collections.abc import AsyncGenerator
 from pathlib import PurePosixPath
 
@@ -48,6 +49,23 @@ async def test_exec_truncates_large_stdout(docker_driver):  # type: ignore[no-un
     r = await docker_driver.exec("yes a | head -c 12582912")
     assert r.truncated is True
     assert len(r.stdout) <= MAX_EXEC_STREAM_BYTES
+
+
+async def test_exec_caps_memory_while_draining_both_streams(docker_driver):  # type: ignore[no-untyped-def]
+    """Truncating after docker-py buffers the whole reply does not bound RAM."""
+    tracemalloc.start()
+    try:
+        result = await docker_driver.exec(
+            "head -c 33554432 /dev/zero; head -c 33554432 /dev/zero >&2; exit 23",
+            timeout_sec=30,
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert result.return_code == 23
+    assert len(result.stdout) == len(result.stderr) == MAX_EXEC_STREAM_BYTES
+    assert result.truncated
+    assert peak < 5 * MAX_EXEC_STREAM_BYTES, f"buffering 64 MiB output allocated {peak} bytes"
 
 
 async def test_exec_with_env_and_cwd(docker_driver):  # type: ignore[no-untyped-def]
