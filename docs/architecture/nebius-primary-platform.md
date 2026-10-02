@@ -2776,6 +2776,12 @@ non-pool contracts remain byte-compatible. The manager-only connected installer
 currently refuses pool-backed refreshes, even if a request omits the inherited
 baseline: the pool-aware live authority verifier must be connected before those
 refreshes are exposed operationally.
+The separate read-only active-pool database proof requires exact global mode,
+installation, epoch, participant and machine registrations, and current unrevoked
+credentials. It permits waiting, reserved and active requests without changing
+them. Its bound transport rechecks the management backend, credential identity
+and operator authority around the read. This does not relax the closed-mode
+startup proof or by itself qualify live refresh workloads and permissions.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

@@ -1,4 +1,4 @@
-"""Fixed READ ONLY proof of startup's retained closed registration.
+"""Fixed READ ONLY proofs of closed startup and active pool authority.
 
 No registration replay, token renewal, pool mutation or caller-provided SQL.
 The result contains only identity/check outcomes, never bearer material.
@@ -6,14 +6,25 @@ The result contains only identity/check outcomes, never bearer material.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from loom_service.pool_management.capacity import digest
 from loom_service.pool_management.installation import PoolInstallation
 
 
 def pool_startup_closed_sql(spec: PoolInstallation) -> str:
+    """Require exact closed registration; this remains a startup-only proof."""
+    return _pool_authority_sql(spec, mode="closed")
+
+
+def pool_active_authority_sql(spec: PoolInstallation) -> str:
+    """Require global registration and credentials, allowing unfinished work."""
+    return _pool_authority_sql(spec, mode="global")
+
+
+def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "global"]) -> str:
     spec = PoolInstallation.model_validate(spec.model_dump())
+    schema = {"closed": "loom.pool-startup-closed.v1", "global": "loom.pool-active-authority.v1"}[mode]
     payload = {"node_selector": spec.node_selector, "admission": spec.admission.model_dump(),
         "quota_identities": {key: list(value) for key, value in spec.quota_identities.items()},
         "installation_sha256": digest(spec.model_dump(mode="json")),
@@ -21,7 +32,7 @@ def pool_startup_closed_sql(spec: PoolInstallation) -> str:
     binding = {"pool_id": str(spec.pool_id), "installation_id": str(spec.installation_id),
         "cluster_id": spec.cluster_id, "node_group_id": spec.node_group_id,
         "policy_revision": spec.policy_revision, "admission_epoch": spec.admission_epoch,
-        "mode": "closed", "binding_json": payload, "binding_sha256": digest(payload)}
+        "mode": mode, "binding_json": payload, "binding_sha256": digest(payload)}
     participants = {str(row.participant_id): {"participant_id": str(row.participant_id),
         "pool_id": str(spec.pool_id), "environment_id": str(row.environment_id), "incarnation": str(row.incarnation),
         "binding_revision": row.binding_revision, "admission_epoch": spec.admission_epoch, "phase": "active",
@@ -42,7 +53,7 @@ BEGIN
     THEN RAISE EXCEPTION 'pool startup schema unqualified'; END IF;
 END $pool_startup_schema$;
 WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value)
-SELECT json_build_object('schema','loom.pool-startup-closed.v1',
+SELECT json_build_object('schema','{schema}',
     'operation_id','{spec.operation_id}','installation_sha256','{payload['installation_sha256']}',
     'read_only',current_setting('transaction_read_only')='on',
     'qualified',COALESCE(
@@ -76,3 +87,11 @@ def qualify_startup_closed_report(spec: PoolInstallation, report: Any) -> None:
             "read_only": True, "qualified": True}
             or report["read_only"] is not True or report["qualified"] is not True):
         raise ValueError("pool_startup_closed_registration_unqualified")
+
+
+def qualify_active_authority_report(spec: PoolInstallation, report: Any) -> None:
+    if (not isinstance(report, dict) or report != {"schema": "loom.pool-active-authority.v1",
+            "operation_id": str(spec.operation_id), "installation_sha256": digest(spec.model_dump(mode="json")),
+            "read_only": True, "qualified": True}
+            or report["read_only"] is not True or report["qualified"] is not True):
+        raise ValueError("pool_active_authority_unqualified")

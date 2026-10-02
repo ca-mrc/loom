@@ -11,6 +11,7 @@ from sqlalchemy.engine import make_url
 
 from loom.db.nebius_pool_schema import (
     NebiusPoolBinding,
+    NebiusPoolEffect,
     NebiusPoolMachine,
     NebiusPoolParticipant,
     NebiusPoolRequest,
@@ -96,24 +97,31 @@ async def test_registration_reader_requires_its_exact_pool_mode_and_machine_auth
                 assert (await register_installation(session, spec))['mode'] == 'closed'
 
 
-@pytest.mark.parametrize('phase', ['waiting', 'reserved', 'active'])
+@pytest.mark.parametrize('phase', ['waiting', 'reserved', 'create_intent', 'observed'])
 async def test_active_authority_allows_unfinished_work_without_changing_it(sessions, tmp_path, phase):
+    from loom_service.pool_management.gateway_journal import PoolGatewayJournal
     from tests.integration.test_nebius_pool_control import action, operate
     from tests.integration.test_nebius_pool_recovery_drain import request_setup
 
     spec, url, principal, request = await request_setup(sessions, tmp_path, waiting=phase == 'waiting')
-    if phase == 'active':
+    if phase in {'create_intent', 'observed'}:
         receipt = await operate(sessions, await principal('participant'), action(request, activation=True),
             profiles=spec.profiles.profiles())
-        assert receipt.phase == 'active'
+        assert receipt.phase == 'create_intent'
+        if phase == 'observed':
+            journal, gateway = PoolGatewayJournal(sessions), await principal('gateway')
+            effect = await journal.prepare_create(gateway, receipt.reservation_id, kind='Job')
+            await journal.dispatch_create(gateway, effect.effect_id)
+            await journal.observe_create(gateway, effect.effect_id, uid=uuid4(), resource_version='1')
 
     async def snapshot():
         async with sessions() as session:
             return [list((await session.execute(select(model.__table__))).mappings())
-                for model in (NebiusPoolRequest, NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine, Token)]
+                for model in (NebiusPoolRequest, NebiusPoolBinding, NebiusPoolParticipant, NebiusPoolMachine, Token, NebiusPoolEffect)]
 
     before = await snapshot()
     assert len(before[0]) == 1 and before[0][0]['phase'] == phase
+    assert (before[0][0]['job_uid'] is not None) == (phase == 'observed')
     assert observe(url, spec, mode='global')['qualified'] is True
     assert await snapshot() == before
     # This proof does not relax startup's closed-mode requirement.

@@ -59,7 +59,9 @@ from scripts.ops.nebius_pool_startup_capacity import (
     expected_startup_capacity,
 )
 from scripts.ops.nebius_pool_startup_database import (
+    pool_active_authority_sql,
     pool_startup_closed_sql,
+    qualify_active_authority_report,
     qualify_startup_closed_report,
 )
 
@@ -283,6 +285,27 @@ class KubectlPoolHistoryAPI(KubectlPoolGuardAPI):
                 raise ValueError
         except Exception:
             raise PoolMigrationError("startup_closed_registration") from None
+
+    def qualify_active_pool(self) -> None:
+        """Read exact open-pool authority without draining or changing any work."""
+        try:
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            spec = self.request.registration.spec
+            query = pool_active_authority_sql(spec)
+            before = self._database(self.target, url_variable="LOOM_SVC_DB_URL")
+            report = self._run(["exec", "-n", self.target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            qualify_active_authority_report(spec, report)
+            if (_uid(self._database(self.target, url_variable="LOOM_SVC_DB_URL")) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or digest(_target_contract(self.target)) != self.history_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError("active_pool_authority") from None
 
     def qualify_manager_database(self, *, expected: dict[str, Any] | None = None) -> None:
         """Bind the retained manager (or anchored successor) to its own backend."""
