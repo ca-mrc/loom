@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
-from sqlalchemy import Text, exists, select, text, update
+from sqlalchemy import Integer, Text, exists, func, or_, select, text, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -51,6 +51,7 @@ from loom_control_plane.service_execution import (
     committed_handoff_files,
     mark_verifier_unavailable,
     reserve_trial_execution,
+    verifier_retries,
 )
 from loom_control_plane.service_execution_task_snapshot import (
     ServiceExecutionTaskSnapshotError,
@@ -456,12 +457,15 @@ async def reserve_next_verifier_executions(
 ) -> list[ServiceExecutionLease]:
     """Reserve the deferred verifier of each attempt whose pod has released capacity.
 
-    Stateless and idempotent: the request id derives from the parent lease and
-    child plan, and one verifier per attempt is a database constraint.
+    Stateless and idempotent: the request id derives from the parent lease, the
+    retry number and the child plan, and one verifier per attempt and retry is a
+    database constraint. A retry waits until the failed verifier's pod is gone.
     """
 
     current_time = (now or datetime.now(UTC)).astimezone(UTC)
     child = aliased(ServiceExecutionLease)
+    retries = sql_cast(func.coalesce(
+        Trial.result["verifier_execution"]["retries"].astext, "0"), Integer)
     candidates = (await session.execute(
         select(ServiceExecutionLease, Trial)
         .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
@@ -483,6 +487,7 @@ async def reserve_next_verifier_executions(
             ~exists().where(
                 child.parent_lease_id == ServiceExecutionLease.id,
                 child.execution_role == "verifier",
+                or_(child.verifier_retry >= retries, child.deleted_at.is_(None)),
             ),
         )
         .order_by(ServiceExecutionLease.deleted_at, ServiceExecutionLease.id)
@@ -500,7 +505,8 @@ async def reserve_next_verifier_executions(
                 ))
         except (ExecutionProvisioningBlockedError, ServiceExecutionConflict) as exc:
             # Capacity, rollout and target health are waits, bounded per handoff.
-            if parent.deleted_at is not None and current_time - parent.deleted_at >= VERIFIER_HANDOFF_TIMEOUT:
+            waiting_since = _handoff_pending_since(trial) or parent.deleted_at
+            if waiting_since is not None and current_time - waiting_since >= VERIFIER_HANDOFF_TIMEOUT:
                 _fail_verifier_handoff(trial, reason=getattr(exc, "reason", None) or str(exc),
                                        now=current_time)
             else:
@@ -511,6 +517,15 @@ async def reserve_next_verifier_executions(
                 ValueError) as exc:
             _fail_verifier_handoff(trial, reason=str(exc), now=current_time)
     return reserved
+
+
+def _handoff_pending_since(trial: Trial) -> datetime | None:
+    handoff = (trial.result or {}).get("verifier_execution")
+    raw = handoff.get("pending_since") if isinstance(handoff, dict) else None
+    try:
+        return datetime.fromisoformat(raw) if isinstance(raw, str) else None
+    except ValueError:
+        return None
 
 
 def _fail_verifier_handoff(trial: Trial, *, reason: str, now: datetime) -> None:
@@ -549,13 +564,17 @@ async def _reserve_verifier_candidate(
     )
     # The verifier's own budget starts at this reservation, not at the agent's.
     deadline_at = _deadline(plan, now=current_time, maximum_seconds=maximum_deadline_seconds)
+    retry = verifier_retries(trial)
+    request: dict[str, object] = {
+        "schema_version": "loom.service-execution-verifier-request.v1",
+        "parent_lease_id": str(parent.id),
+        "runtime_contract_sha256": canonical_digest(plan.canonical_payload()),
+    }
+    if retry:
+        request["verifier_retry"] = retry
     return await reserve_trial_execution(
         session,
-        request_id=canonical_uuid5(_RESERVATION_REQUEST_NAMESPACE, {
-            "schema_version": "loom.service-execution-verifier-request.v1",
-            "parent_lease_id": str(parent.id),
-            "runtime_contract_sha256": canonical_digest(plan.canonical_payload()),
-        }),
+        request_id=canonical_uuid5(_RESERVATION_REQUEST_NAMESPACE, request),
         trial_id=trial.id,
         execution_class_id=plan.execution_class_id,
         target_id=parent.target_id,
@@ -564,6 +583,7 @@ async def _reserve_verifier_candidate(
         image_admission_keyring=image_admission_keyring,
         routing_reason=ExecutionRoutingReason.PREEXISTING_ASSIGNMENT,
         parent_lease_id=parent.id,
+        verifier_retry=retry,
         deadline_at=deadline_at,
         now=current_time,
     )

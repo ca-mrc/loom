@@ -608,6 +608,7 @@ async def reserve_execution_cost(
         batch_id=trial.batch_id,
         attempt=lease.attempt,
         execution_role=lease.execution_role,
+        verifier_retry=lease.verifier_retry,
         pool_id=target.logical_pool_id,
         target_id=target.id,
         price_snapshot_id=price.id,

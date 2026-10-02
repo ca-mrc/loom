@@ -224,7 +224,7 @@ SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search
 DO $pool_cutover_readiness$
 DECLARE access_ready BOOLEAN;
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0172'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0173'
     THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
         SELECT 1 FROM public.nebius_rollout_guard
@@ -269,7 +269,7 @@ WITH pending AS (
     SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
      ORDER BY key COLLATE "C" LIMIT 128
 )
-SELECT json_build_object('status','observed','schema_revision','0172',
+SELECT json_build_object('status','observed','schema_revision','0173',
     'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
 ROLLBACK;
 """
@@ -283,7 +283,7 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
     """
     cursor = _backlog_cursor(after)
     if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
-            or report["status"] != "observed" or report["schema_revision"] != "0172"
+            or report["status"] != "observed" or report["schema_revision"] != "0173"
             or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
         raise ValueError("pool_cutover_database_report_unqualified")
     origins = []
@@ -336,7 +336,7 @@ BEGIN
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR NOT EXISTS (
         SELECT 1 FROM nebius_rollout_guard WHERE id=1 AND owner='{owner}' AND candidate_sha='{candidate}'
     ) THEN RAISE EXCEPTION 'pool runtime role guard unqualified'; END IF;
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0172' OR EXISTS (
+    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0173' OR EXISTS (
         SELECT 1 FROM ({ACTIVITY_SQL}) activity
         WHERE trials<>0 OR executions<>0 OR builds<>0 OR build_cleanup<>0
     ) OR EXISTS (SELECT 1 FROM nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released'))

@@ -25,6 +25,7 @@ class PhaseLease:
     pod_terminated_at: datetime | None
     deleted_at: datetime | None
     runtime_contract: Mapping[str, Any] | None
+    verifier_retry: int = 0
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ def _reserved_until(lease: PhaseLease, now: datetime) -> datetime:
 def _lease_phase(name: PhaseName, lease: PhaseLease, cost: PhaseCost | None, now: datetime) -> dict[str, Any]:
     return {
         "phase": name,
+        "retry": lease.verifier_retry,
         "lease_id": lease.lease_id,
         "state": lease.observed_state,
         "reserved_at": lease.created_at.isoformat(),
@@ -103,17 +105,24 @@ def execution_phases(
     agent = next((item for item in leases if item.execution_role == "attempt"), None)
     if agent is None:
         return None
-    verifier = next((item for item in leases if item.execution_role == "verifier"), None)
+    # A natively failed verifier is retried on a new lease; every try held capacity.
+    verifiers = sorted(
+        (item for item in leases if item.execution_role == "verifier"),
+        key=lambda item: item.verifier_retry,
+    )
+    first = verifiers[0] if verifiers else None
+    verifier = verifiers[-1] if verifiers else None
     mode = (agent.runtime_contract or {}).get("verifier_execution")
     phases = [_lease_phase("agent", agent, costs.get(agent.lease_id), now)]
     handoff = verifier_execution if mode == "separate_execution" else None
     if handoff is not None:
         waiting_since = agent.pod_terminated_at or agent.deleted_at
-        waiting_until = verifier.created_at if verifier is not None else None
+        waiting_until = first.created_at if first is not None else None
         phases.append({
             "phase": "awaiting_verifier",
+            "retry": 0,
             "lease_id": None,
-            "state": "complete" if verifier is not None else str(handoff.get("state") or "pending"),
+            "state": "complete" if first is not None else str(handoff.get("state") or "pending"),
             "reserved_at": None,
             "started_at": _iso(waiting_since),
             "finished_at": _iso(waiting_until),
@@ -125,8 +134,7 @@ def execution_phases(
             "allocated_cost_microusd": None,
             "cost_state": None,
         })
-    if verifier is not None:
-        phases.append(_lease_phase("verifier", verifier, costs.get(verifier.lease_id), now))
+    phases.extend(_lease_phase("verifier", item, costs.get(item.lease_id), now) for item in verifiers)
 
     handoff_bytes = None
     if verifier is not None:
@@ -135,11 +143,11 @@ def execution_phases(
             handoff_bytes = handoff_input.get("total_bytes")
     overlap = None
     gap = None
-    if verifier is not None:
-        overlap_start = max(agent.created_at, verifier.created_at)
-        overlap_end = min(_reserved_until(agent, now), _reserved_until(verifier, now))
+    if first is not None:
+        overlap_start = max(agent.created_at, first.created_at)
+        overlap_end = min(_reserved_until(agent, now), _reserved_until(first, now))
         overlap = max(0.0, (overlap_end - overlap_start).total_seconds())
-        gap = _seconds(agent.pod_terminated_at, verifier.pod_started_at)
+        gap = _seconds(agent.pod_terminated_at, first.pod_started_at)
     return {
         "schema_version": "loom.service-execution-phases.v1",
         "verifier_execution": mode,

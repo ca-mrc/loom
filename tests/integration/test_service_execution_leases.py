@@ -105,6 +105,7 @@ from loom_control_plane.execution_finance import (
 )
 from loom_control_plane.scheduler.crash_detector import reclaim_expired_workers
 from loom_control_plane.service_execution import (
+    MAX_VERIFIER_RETRIES,
     ServiceExecutionConflict,
     ServiceExecutionFenceError,
     acknowledge_execution_command,
@@ -2743,6 +2744,125 @@ async def test_scheduler_reserves_one_verifier_after_parent_cleanup(
             trial = await session.get(Trial, trial_id)
             assert trial is not None and trial.state == "running"
             assert trial.result["verifier_execution"]["state"] == "pending"
+    finally:
+        await engine.dispose()
+
+
+async def _fail_verifier_natively(
+    sessions: async_sessionmaker[AsyncSession], *, lease_id: UUID, at: datetime,
+) -> None:
+    from loom_control_plane.service_execution import (
+        finalize_failed_service_execution,
+        record_kubernetes_observation,
+    )
+
+    async with sessions() as session, session.begin():
+        lease = await session.get(ServiceExecutionLease, lease_id)
+        assert lease is not None
+        await record_kubernetes_observation(
+            session, lease_id=lease.id, generation=lease.generation, observed_at=at,
+            payload={
+                "normalized_state": "failed", "job_uid": lease.job_uid, "pod_uid": lease.pod_uid,
+                "resource_version": f"verifier-failed-{lease.verifier_retry}",
+                "started_at": (at - timedelta(seconds=1)).isoformat(),
+                "reason": "BackoffLimitExceeded", "message": "verifier Job terminated",
+            },
+        )
+        assert await finalize_failed_service_execution(
+            session, lease_id=lease.id, generation=lease.generation,
+            observed_at=at + timedelta(minutes=5),
+        )
+
+
+async def _delete_lease(sessions: async_sessionmaker[AsyncSession], *, lease_id: UUID, at: datetime) -> None:
+    async with sessions() as session, session.begin():
+        row = await session.get(ServiceExecutionLease, lease_id)
+        assert row is not None
+        row.cleanup_state = "complete"
+        row.cleanup_requested_at = row.cleanup_requested_at or at
+        row.cleanup_deadline_at = row.cleanup_deadline_at or at + timedelta(seconds=30)
+        row.desired_state = "deleted"
+        row.observed_state = "deleted"
+        row.deleted_at = at
+
+
+async def test_natively_failed_verifier_retries_on_a_new_lease_until_exhausted(
+    postgres_url: str, _stub_verifier_plan: list[ExecutionRuntimePlanV1],
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        trial_id, parent, target = await _separate_attempt_awaiting_verifier(sessions, now=now)
+        clock = now + timedelta(seconds=5)
+        verifiers: list[ServiceExecutionLease] = []
+        for retry in range(MAX_VERIFIER_RETRIES + 1):
+            async with sessions() as session:
+                await set_execution_target_health(
+                    session, target_id=target.target_id, desired_state="active", observed_state="ready",
+                    health_status="healthy", observed_at=clock,
+                )
+                reserved = await reserve_next_verifier_executions(
+                    session, pool_id=target.logical_pool_id,
+                    image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=clock,
+                )
+                await session.commit()
+            assert [item.verifier_retry for item in reserved] == [retry]
+            verifiers.append(reserved[0])
+            await _fail_verifier_natively(sessions, lease_id=reserved[0].id, at=clock)
+            clock += timedelta(minutes=6)
+            async with sessions() as session:
+                trial = await session.get(Trial, trial_id)
+                assert trial is not None
+                handoff = trial.result["verifier_execution"]
+                if retry < MAX_VERIFIER_RETRIES:
+                    assert trial.state == "running"
+                    assert handoff["state"] == "pending"
+                    assert handoff["retries"] == retry + 1
+                    assert handoff["parent_lease_id"] == str(parent.id)
+                    # The failed verifier still holds capacity until its pod is deleted.
+                    assert await reserve_next_verifier_executions(
+                        session, pool_id=target.logical_pool_id,
+                        image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=clock,
+                    ) == []
+                else:
+                    assert trial.state == "failed"
+                    assert trial.failure_reason == "verifier_unavailable"
+                    assert handoff["state"] == "unavailable"
+            await _delete_lease(sessions, lease_id=reserved[0].id, at=clock)
+
+        assert len({item.job_name for item in verifiers}) == len(verifiers)
+        assert len({item.request_id for item in verifiers}) == len(verifiers)
+        async with sessions() as session:
+            assert await reserve_next_verifier_executions(
+                session, pool_id=target.logical_pool_id,
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=clock,
+            ) == []
+            costs = (await session.execute(
+                select(ExecutionCostReservation.verifier_retry).where(
+                    ExecutionCostReservation.trial_id == trial_id,
+                    ExecutionCostReservation.execution_role == "verifier",
+                ).order_by(ExecutionCostReservation.verifier_retry)
+            )).scalars().all()
+            assert costs == list(range(MAX_VERIFIER_RETRIES + 1))
+    finally:
+        await engine.dispose()
+
+
+async def test_verifier_retry_is_immutable_and_attempts_cannot_carry_one(postgres_url: str) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await session.commit()
+        async with sessions() as session:
+            with pytest.raises(DBAPIError, match="verifier retry identity is immutable"):
+                await session.execute(
+                    text("UPDATE execution_leases SET verifier_retry = 1 WHERE id = :id"), {"id": lease.id},
+                )
     finally:
         await engine.dispose()
 

@@ -110,5 +110,28 @@ def test_on_demand_verifier_reserves_less_than_holding_the_agent_pod_through_gra
     assert on_demand["phases"][1]["reserved_seconds"] == 0.0
 
 
+def test_retried_verifier_reports_every_try_and_counts_its_capacity() -> None:
+    first = _lease("verifier", start=110, deleted=140)
+    retry = PhaseLease(**{
+        **first.__dict__, "lease_id": "verifier-retry", "verifier_retry": 1,
+        "created_at": _T0 + timedelta(seconds=150), "pod_started_at": _T0 + timedelta(seconds=155),
+        "pod_terminated_at": _T0 + timedelta(seconds=208), "deleted_at": _T0 + timedelta(seconds=210),
+    })
+    phases = execution_phases(
+        [retry, _lease("attempt", start=0, deleted=100), first],
+        verifier_execution={"state": "committed", "lease_id": "verifier-retry", "retries": 1},
+        costs={"attempt-lease": _cost(2000), "verifier-lease": _cost(500), "verifier-retry": _cost(500)},
+        now=_T0 + timedelta(hours=1),
+    )
+    assert phases is not None
+    assert [(item["phase"], item["retry"]) for item in phases["phases"]] == [
+        ("agent", 0), ("awaiting_verifier", 0), ("verifier", 0), ("verifier", 1),
+    ]
+    # The wait ends when the first verifier is reserved; both tries held capacity.
+    assert phases["phases"][1]["finished_at"] == (_T0 + timedelta(seconds=110)).isoformat()
+    assert phases["handoff_gap_seconds"] == 17.0
+    assert reserved_cpu_seconds(phases) == 200.0 + 15.0 + 30.0
+
+
 def test_no_attempt_lease_omits_phases() -> None:
     assert execution_phases([], verifier_execution=None, costs={}, now=_T0) is None

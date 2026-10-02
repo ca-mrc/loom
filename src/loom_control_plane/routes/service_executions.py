@@ -395,6 +395,8 @@ async def get_trial_execution(
                     ServiceExecutionLease.parent_lease_id == lease.id,
                     ServiceExecutionLease.execution_role == "verifier",
                 )
+                .order_by(ServiceExecutionLease.verifier_retry.desc())
+                .limit(1)
             )
         ).scalar_one_or_none()
         commands = (

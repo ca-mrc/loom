@@ -245,7 +245,7 @@ def connected_cutover_entry(private_cutover, monkeypatch):
     def database_page(target, *, after):
         assert target in migration.guards and after is None
         observed["database_reads"].append("participant")
-        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else "0172", "rows": []}
+        return {"status": "observed", "schema_revision": "0171" if observed["database_failure"] == "participant" else "0173", "rows": []}
     def history_page(target, origins):
         assert target in migration.guards and origins == ()
         observed["database_reads"].append("manager")

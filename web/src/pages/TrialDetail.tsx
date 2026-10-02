@@ -186,8 +186,9 @@ function ExecutionPhases({
       </p>
       <ol className="space-y-1 text-sm">
         {phases.phases.map((phase) => (
-          <li key={phase.phase}>
-            <strong>{PHASE_LABELS[phase.phase]}</strong>: {phase.state}
+          <li key={`${phase.phase}-${phase.retry}`}>
+            <strong>{PHASE_LABELS[phase.phase]}</strong>
+            {phase.retry ? ` (retry ${phase.retry})` : ""}: {phase.state}
             {phase.lease_id ? ` · reserved ${formatPhaseSeconds(phase.reserved_seconds)}` : " · nothing reserved"}
             {phase.requested
               ? ` · ${phase.requested.cpu_millis / 1000} CPU, ${phase.requested.memory_mib / 1024} GiB memory`
