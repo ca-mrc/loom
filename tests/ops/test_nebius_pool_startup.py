@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from dataclasses import replace
 from uuid import uuid4
@@ -10,7 +11,9 @@ import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_cutover import CutoverAPI, run
 from tests.ops.test_nebius_pool_cutover import collector_inputs as collector_inputs
-from tests.ops.test_nebius_pool_cutover import cutover_binding_inventory as cutover_binding_inventory
+from tests.ops.test_nebius_pool_cutover import (
+    cutover_binding_inventory as cutover_binding_inventory,
+)
 from tests.ops.test_nebius_pool_cutover import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_cutover import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_cutover import retirement_inputs as retirement_inputs
@@ -232,3 +235,21 @@ def test_https_inventory_qualifies_both_sides_of_pending_start_without_writes(cu
         workloads=writer_workload_inventory(request, originals=api.documents.values()))
     assert calls and all(call.method == 'GET' for call in calls)
     assert api.requests == [api.fail_key]
+
+
+def test_startup_rejects_gateway_receipt_that_does_not_match_its_fixed_target(closed_startup):
+    _, _, _, api, _, root = closed_startup
+    child_path = root / 'cutover/workload/stage.json'
+    child = json.loads(child_path.read_bytes())
+    key, item = next(iter(child['resources'].items()))
+    item['observed']['spec']['template']['spec']['containers'][0]['image'] = 'foreign'
+    api.documents[key]['spec']['template']['spec']['containers'][0]['image'] = 'foreign'
+    child_path.write_text(json.dumps(child))
+    # A parent checksum alone is not proof the child observed its fixed target.
+    path = root / 'cutover/cutover.json'
+    parent = json.loads(path.read_bytes())
+    parent['phases']['workload'] = hashlib.sha256(child_path.read_bytes()).hexdigest()
+    path.write_text(json.dumps(parent))
+    with pytest.raises(ValueError):
+        start(closed_startup)
+    assert not api.requests
