@@ -155,7 +155,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
             if any(getattr(guest_profile, key) != getattr(primary_profile, key)
                     for key in ("candidate_sha", "runtime_image_ref", "runtime_binary_sha256")):
                 raise ValueError
-        if seen != {row.target_id for row in participant.targets}:
+        if seen != {row.target_id for row in participant.targets if set(row.workload_kinds) != {"application_image_build"}}:
             raise ValueError
     except Exception:
         raise ValueError("pool_actuator_roster_unqualified") from None
@@ -190,7 +190,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         spec = request.registration.spec
         participant, = (row for row in spec.participants if row.participant_id == participant_id)
         guard, = (row for row in request.guards if row.participant_id == participant_id)
-        machine, = (row for row in spec.machines if row.participant_id == participant_id)
+        machine, = (row for row in spec.machines if row.participant_id == participant_id and row.workload_scope == "environment")
         cp, cp_pod, cp_container = _disabled(guard.controller, namespace=guard.namespace, name="loom-control-plane",
             container_name="loom-control-plane", image=_image(request, "control_plane"))
         worker, worker_pod, worker_container = _disabled(actuator, namespace=participant.execution_namespace.name,

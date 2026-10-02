@@ -1003,9 +1003,20 @@ the separate management builder credential can submit/control only application
 builds in the same data participant. Prepare/replay, allocation and every retained
 request operation recheck that scope under the existing authority locks. Credential
 rotation cannot change it. Existing machines retain environment scope on upgrade;
-this does not install the dedicated builder credential or expand a pool catalog.
+this does not expand an already registered pool catalog. Initial registration
+requires exactly one environment machine for each participant and exactly one
+builder machine for each development participant with application-build targets.
+Application targets are distinct from execution/task-build targets, use the same
+participant build namespace and physical node group, and require bound profiles.
+Default environment scope is omitted from serialized installations so historical
+installation hashes do not change. Registration remains closed and exact-replay-only.
 
-Protected delivery of the credential/mount, the user-facing build command, the
+The protected material stage delivers the builder token only to the management
+namespace, never to a shared controller, execution worker or personal namespace.
+Ordinary actuator wiring selects the environment credential explicitly and does
+not require an actuator for the dedicated application-build target.
+
+Protected manager mounting and worker configuration, the user-facing build command, the
 durable management worker, image building, release qualification and installed
 source-to-deploy acceptance remain incomplete consumers.
 
