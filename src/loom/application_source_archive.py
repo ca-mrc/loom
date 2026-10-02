@@ -134,6 +134,12 @@ def extract_application_source_archive(source: BinaryIO, *, expected_digest: str
             if entry.link_target is not None:
                 with _parent(descriptor, entry.path) as (parent, name):
                     os.symlink(entry.link_target, name, dir_fd=parent)
+        current = destination.stat(follow_symlinks=False)
+        if (destination != destination.resolve(strict=True) or not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino, current.st_uid) != (
+                    metadata.st_dev, metadata.st_ino, metadata.st_uid)
+                or current.st_mode & 0o077):
+            raise ValueError
         return manifest
     except (OSError, ValueError, tarfile.TarError, UnicodeError, OverflowError):
         raise ValueError("invalid application source archive") from None
