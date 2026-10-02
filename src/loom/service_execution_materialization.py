@@ -45,6 +45,7 @@ from loom.execution_runtime_contract import (
     TaskExecutionResourceRequestsV1,
 )
 from loom.hosted_harness import (
+    GUEST_SANDBOX_DRIVER_CAPABILITIES,
     NATIVE_EXECUTION_AGENT_NAMES,
     harnesses_supporting,
     hosted_harness,
@@ -430,6 +431,8 @@ def automatic_service_execution_rejections(
     if guest_capabilities(task):
         if not controller:
             reasons.append("guest_private_sandboxes_required")
+        elif spec is not None and not spec.required_driver_capabilities <= GUEST_SANDBOX_DRIVER_CAPABILITIES:
+            reasons.append("guest_driver_capabilities_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
         for user in (env.user, task.verifier.user):

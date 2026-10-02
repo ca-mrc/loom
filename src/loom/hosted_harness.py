@@ -40,8 +40,13 @@ RESPONSE_RUNNER_MODULE = "loom.service_execution_task"
 SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
 
 # Operations `ServiceSandboxDriver` implements today. A harness that needs
-# more (e.g. `exec_streaming` for launcher agents) is not natively runnable.
+# more is not natively runnable.
 NATIVE_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
+    {"exec", "exec_streaming", "upload", "download"},
+)
+# Operations the QEMU guest sandbox path is qualified for. Supervised
+# processes (#2310) are not yet validated through the guest channel.
+GUEST_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
     {"exec", "upload", "download"},
 )
 
@@ -203,6 +208,7 @@ def workspace_controller_phases() -> tuple[str, ...]:
 
 __all__ = [
     "DIRECT_COMPLETION",
+    "GUEST_SANDBOX_DRIVER_CAPABILITIES",
     "HOSTED_HARNESSES",
     "NATIVE_EXECUTION_AGENT_NAMES",
     "NATIVE_SANDBOX_DRIVER_CAPABILITIES",

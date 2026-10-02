@@ -208,6 +208,7 @@ func (s runtimeServer) handler() http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ready": true, "instance_id": instanceID})
 	})
 	mux.HandleFunc("POST /exec", s.execute)
+	s.registerProcesses(mux, newProcessTable(maxManagedProcesses))
 	mux.HandleFunc("PUT /file", s.upload)
 	mux.HandleFunc("GET /file", s.download)
 	mux.HandleFunc("GET /readlink", s.readlink)
@@ -255,6 +256,37 @@ func (s runtimeServer) handler() http.Handler {
 	return mux
 }
 
+// commandRejection is a fixed reason code plus a message without request data.
+type commandRejection struct{ code, message string }
+
+func (r *commandRejection) write(w http.ResponseWriter) {
+	w.Header().Set("X-Loom-Sandbox-Error", r.code)
+	http.Error(w, r.message, http.StatusBadRequest)
+}
+
+// validateCommand applies the identity, deadline and environment rules shared
+// by buffered /exec and supervised /processes.
+func (s runtimeServer) validateCommand(req execRequest) (time.Duration, []string, *commandRejection) {
+	if req.User != nil && *req.User != strconv.Itoa(os.Geteuid()) && !(*req.User == "root" && os.Geteuid() == 0) {
+		return 0, nil, &commandRejection{"exec_user_mismatch", "exec user must match sandbox UID"}
+	}
+	if math.IsNaN(req.Timeout) || math.IsInf(req.Timeout, 0) || req.Timeout < 0 || req.Timeout > s.maxTimeout.Seconds() {
+		return 0, nil, &commandRejection{"exec_timeout_invalid", "exec timeout outside configured limit"}
+	}
+	deadline := s.maxTimeout
+	if req.Timeout > 0 {
+		deadline = time.Duration(req.Timeout * float64(time.Second))
+	}
+	environment := os.Environ()
+	for key, value := range req.Env {
+		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
+			return 0, nil, &commandRejection{"exec_environment_invalid", "invalid exec environment"}
+		}
+		environment = append(environment, key+"="+value)
+	}
+	return deadline, environment, nil
+}
+
 func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 	var req execRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024*1024))
@@ -264,33 +296,16 @@ func (s runtimeServer) execute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid exec request", http.StatusBadRequest)
 		return
 	}
-	if req.User != nil && *req.User != strconv.Itoa(os.Geteuid()) && !(*req.User == "root" && os.Geteuid() == 0) {
-		w.Header().Set("X-Loom-Sandbox-Error", "exec_user_mismatch")
-		http.Error(w, "exec user must match sandbox UID", http.StatusBadRequest)
+	deadline, environment, rejection := s.validateCommand(req)
+	if rejection != nil {
+		rejection.write(w)
 		return
-	}
-	if math.IsNaN(req.Timeout) || math.IsInf(req.Timeout, 0) || req.Timeout < 0 || req.Timeout > s.maxTimeout.Seconds() {
-		w.Header().Set("X-Loom-Sandbox-Error", "exec_timeout_invalid")
-		http.Error(w, "exec timeout outside configured limit", http.StatusBadRequest)
-		return
-	}
-	deadline := s.maxTimeout
-	if req.Timeout > 0 {
-		deadline = time.Duration(req.Timeout * float64(time.Second))
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), deadline)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir = req.Cwd
-	cmd.Env = os.Environ()
-	for key, value := range req.Env {
-		if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, '\x00') {
-			w.Header().Set("X-Loom-Sandbox-Error", "exec_environment_invalid")
-			http.Error(w, "invalid exec environment", http.StatusBadRequest)
-			return
-		}
-		cmd.Env = append(cmd.Env, key+"="+value)
-	}
+	cmd.Env = environment
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

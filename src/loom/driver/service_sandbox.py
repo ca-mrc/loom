@@ -49,6 +49,9 @@ _EXEC_REASONS = frozenset({
     "exec_request_invalid", "exec_user_mismatch", "exec_timeout_invalid",
     "exec_environment_invalid",
 })
+_PROCESS_REASONS = _EXEC_REASONS | {"process_limit_reached", "process_offset_unavailable"}
+# Long-poll budget per process status/output request; the server caps it at 10s.
+_PROCESS_POLL_MS = 5000
 _PROCESS_DIAGNOSTIC = re.compile(
     r"pid=([1-9][0-9]{0,9});ppid=([0-9]{1,10});state=([RSDTtXZPIUW]);"
     r"uid=([0-9]{1,10});expected_uid=([0-9]{1,10})"
@@ -82,12 +85,14 @@ class SandboxRPCError(DriverError):
     """Only fixed operation/reason codes and HTTP status are safe to publish."""
 
     def __init__(self, path: str, exc: httpx.HTTPError) -> None:
-        operation = _RPC_OPERATIONS.get(path, "request")
+        process = path == "/processes" or path.startswith("/processes/")
+        operation = "process" if process else _RPC_OPERATIONS.get(path, "request")
         if isinstance(exc, httpx.HTTPStatusError):
             status = exc.response.status_code
             reason = exc.response.headers.get("X-Loom-Sandbox-Error", "")
             allowed_reasons = (
                 _EXEC_REASONS if path == "/exec" else
+                _PROCESS_REASONS if process else
                 frozenset({"restore_request_invalid", "directory_restore_failed"})
                 if path == "/restore-directory" else
                 _CLEANUP_REASONS if path in {"/stop-processes", "/pause-processes", "/resume-processes"}
@@ -111,6 +116,73 @@ class SandboxRPCError(DriverError):
         else:
             detail = "transport_timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"
         super().__init__(f"sandbox {operation} failed ({detail})")
+
+
+class _SandboxProcess:
+    """Client half of one supervised sandbox process."""
+
+    def __init__(self, driver: ServiceSandboxDriver, process_id: str, pid: int) -> None:
+        self._driver = driver
+        self._path = f"/processes/{process_id}"
+        self._pid = pid
+        self._exit_code: int | None = None
+        self._drained: set[str] = set()
+        self._released = False
+
+    def handle(self) -> ExecHandle:
+        return ExecHandle(
+            pid=self._pid, stdout=self._stream("stdout"), stderr=self._stream("stderr"),
+            _wait=self._wait, _kill=self._kill,
+        )
+
+    async def _stream(self, name: str) -> AsyncIterator[bytes]:
+        offset = 0
+        while True:
+            response = await self._driver._request(
+                "GET", self._path + "/output",
+                params={"stream": name, "offset": offset, "wait_ms": _PROCESS_POLL_MS},
+                timeout=_PROCESS_POLL_MS / 1000 + 10,
+            )
+            chunk = response.content
+            try:
+                following = int(response.headers["X-Loom-Next-Offset"])
+            except (KeyError, ValueError):
+                raise DriverError("sandbox process output response invalid") from None
+            if following != offset + len(chunk):
+                raise DriverError("sandbox process output offset mismatch")
+            offset = following
+            if chunk:
+                yield chunk
+            if response.headers.get("X-Loom-EOF") == "1":
+                self._drained.add(name)
+                await self._release()
+                return
+
+    async def _wait(self) -> int:
+        while self._exit_code is None:
+            response = await self._driver._request(
+                "GET", self._path, params={"wait_ms": _PROCESS_POLL_MS},
+                timeout=_PROCESS_POLL_MS / 1000 + 10,
+            )
+            status = response.json()
+            if status.get("running") is False:
+                self._exit_code = int(status["exit_code"])
+        await self._release()
+        return self._exit_code
+
+    async def _kill(self) -> None:
+        if self._exit_code is None and not self._released:
+            await self._driver._request("POST", self._path + "/kill", timeout=10)
+
+    async def _release(self) -> None:
+        """Free the sandbox record once the exit status and both streams are read."""
+        if self._released or self._exit_code is None or self._drained != {"stdout", "stderr"}:
+            return
+        self._released = True
+        try:
+            await self._driver._request("DELETE", self._path, timeout=10)
+        except DriverError:
+            pass  # The record is bounded server-side and dies with the sandbox.
 
 
 class ServiceSandboxDriver:
@@ -228,9 +300,30 @@ class ServiceSandboxDriver:
         env_vars: dict[str, str],
         cwd: PurePosixPath,
         user: str | int | None = None,
+        timeout_sec: float | None = None,
     ) -> ExecHandle:
-        self._running_client()
-        raise DriverError("native sandbox streaming is not used by the Harbor bridge")
+        """Start a supervised sandbox process (#2310).
+
+        The sandbox bounds it by `timeout_sec` (or its configured maximum) and
+        kills its process group on deadline or `kill()`. Output is read by
+        offset; a slow reader pauses the process instead of losing output.
+        """
+        if not argv:
+            raise DriverError("exec_streaming requires a command")
+        response = await self._request(
+            "POST",
+            "/processes",
+            json={
+                "argv": list(argv),
+                "user": str(user) if user is not None else None,
+                "cwd": str(cwd),
+                "env": {**self._command_environment, **env_vars},
+                "timeout_sec": timeout_sec or 0,
+            },
+            timeout=30,
+        )
+        started = response.json()
+        return _SandboxProcess(self, str(started["id"]), int(started["pid"])).handle()
 
     async def upload(self, src: Path, dst: PurePosixPath) -> None:
         self._running_client()
