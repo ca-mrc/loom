@@ -28,6 +28,7 @@ from loom.nebius_pool_contract import PoolWaitingV1 as PoolWaitingV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
 from loom.nebius_pool_workload import PoolExecutionPrepareV1
 from loom_control_plane.execution_placement import PlacementUnavailableError
+from loom_service.pool_management.application_images import PoolApplicationImageProfile
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 from loom_service.pool_management.capacity import (
     CHARGED_PHASES,
@@ -60,6 +61,7 @@ class PoolProfiles:
 
     execution: Mapping[UUID, PoolExecutionProfile] = field(default_factory=dict)
     task_images: Mapping[UUID, PoolTaskImageProfile] = field(default_factory=dict)
+    application_images: Mapping[UUID, PoolApplicationImageProfile] = field(default_factory=dict)
 
 
 def _render(request: PoolPrepareWorkload, participant: PoolParticipantV1, profiles: PoolProfiles,

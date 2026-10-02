@@ -133,7 +133,7 @@ def test_protected_catalog_loads_personal_builder_without_changing_existing_cata
 
     _, _, legacy = document()
     parsed = PoolProfileCatalog.model_validate(legacy)
-    assert parsed.model_dump(mode="json") == legacy
+    assert parsed.model_dump(mode="json") == json.loads(json.dumps(legacy))
     participant, body, profile = pool_inputs(build_inputs)
     configured = legacy | {"application_images": [{"profile_id": str(profile.profile_id),
         "target": asdict(profile.target), "settings": profile.settings.model_dump(mode="json"),
