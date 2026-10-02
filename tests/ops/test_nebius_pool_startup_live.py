@@ -267,6 +267,28 @@ def test_live_scope_checks_exact_inputs_and_fresh_identity_without_rerendering(s
             api.parent._scope()
 
 
+def test_live_scope_rechecks_image_admission_after_clock_rollback(startup_http, closed_startup, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from loom import execution_image_admission as admission
+
+    request, _, _, _, _, _ = closed_startup
+    with startup_http() as (api, state):
+        api.parent._scope()
+        before_issuance = min(row.statement.issued_at for profile in request.profiles.values()
+            for row in profile.image_admission.admissions) - timedelta(hours=1)
+
+        class EarlierClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return before_issuance
+
+        monkeypatch.setattr(admission, 'datetime', EarlierClock)
+        with pytest.raises(ValueError):
+            api.parent._scope()
+        assert state.writes == []
+
+
 @pytest.mark.parametrize('damage', ['closed', 'guard', 'material', 'role', 'unanchored_start'])
 def test_fixed_startup_refuses_live_authority_drift_and_out_of_journal_patch(startup_http, closed_startup, damage):
     from scripts.ops.nebius_ingress_stage import _snapshot

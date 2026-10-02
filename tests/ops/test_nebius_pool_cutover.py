@@ -93,6 +93,28 @@ def test_pure_projection_never_reuses_mutated_model_inputs(cutover_inputs):
         cutover_documents(changed)
 
 
+def test_reused_cutover_projection_rechecks_current_image_admission_clock(cutover_inputs, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+
+    from loom import execution_image_admission as admission
+
+    request, _ = cutover_inputs
+    cutover_documents(request)
+    before_issuance = min(row.statement.issued_at for profile in request.profiles.values()
+        for row in profile.image_admission.admissions) - timedelta(hours=1)
+
+    class EarlierClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return before_issuance
+
+    monkeypatch.setattr(admission, "datetime", EarlierClock)
+    with pytest.raises(ValueError):
+        cutover_documents(request)
+
+
 @pytest.fixture
 def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_inputs):
     from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
