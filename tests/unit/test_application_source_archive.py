@@ -140,3 +140,49 @@ def test_encoder_refuses_changed_snapshot_and_nonempty_output(source):
     (root / "src/api.py").write_bytes(b"later change")
     with pytest.raises(ValueError):
         write_application_source_archive(root, model, io.BytesIO())
+
+
+@pytest.mark.parametrize("replace_root", [False, True])
+def test_destination_replacement_during_read_cannot_redirect_or_accept_context(source, tmp_path, replace_root):
+    from loom.application_source_archive import extract_application_source_archive
+
+    _, model = source
+    destination, outside = tmp_path / "extracted", tmp_path / "outside"
+    destination.mkdir(mode=0o700)
+    outside.mkdir(mode=0o700)
+
+    class ReplaceDuringRead(io.BytesIO):
+        def read(self, size=-1):
+            body = super().read(size)
+            if body == b"local change\n":
+                if replace_root:
+                    destination.rename(tmp_path / "retained")
+                    destination.symlink_to(outside, target_is_directory=True)
+                else:
+                    (destination / "src").symlink_to(outside, target_is_directory=True)
+            return body
+
+    with pytest.raises(ValueError, match="invalid application source archive"):
+        extract_application_source_archive(ReplaceDuringRead(archive_bytes(model)),
+            expected_digest=model.digest, destination=destination)
+    assert list(outside.iterdir()) == []
+
+
+def test_declared_oversize_manifest_is_rejected_before_payload_read(source, tmp_path):
+    from loom.application_source_archive import extract_application_source_archive
+
+    _, model = source
+    member = tarfile.TarInfo("manifest.json")
+    member.size, member.mode = 8 * 1024**2 + 1, 0o644
+    malformed = member.tobuf(format=tarfile.USTAR_FORMAT) + bytes(10240 - 512)
+
+    class BoundedRead(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 <= size <= 8192, "unqualified archive size reached the I/O boundary"
+            return super().read(size)
+
+    destination = tmp_path / "extracted"
+    destination.mkdir(mode=0o700)
+    with pytest.raises(ValueError, match="invalid application source archive"):
+        extract_application_source_archive(BoundedRead(malformed), expected_digest=model.digest, destination=destination)
+    assert list(destination.iterdir()) == []
