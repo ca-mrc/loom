@@ -174,9 +174,9 @@ def source_material_inputs(delivery_inputs, platform_inputs):
     before, _, _ = delivery_inputs
     config, candidate, profile = copy.deepcopy(platform_inputs)
     documents = build_platform(config, candidate, profile, {}, repo_root=ROOT)
-    service = next(row for row in documents['40-services.yaml'] if row['kind'] == 'Deployment'
-        and row['metadata']['name'] == 'loom-service')
-    service['metadata'].update(uid=str(uuid4()), resourceVersion='21')
+    controller = next(row for group in documents.values() for row in group if row['kind'] == 'Deployment'
+        and row['metadata']['name'] == 'loom-control-plane')
+    controller['metadata'].update(uid=str(uuid4()), resourceVersion='21')
     material = {'access-key': 'source-only-access', 'secret-key': 'source-only-secret'}
     secret = {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
         'metadata': {'namespace': before.installation.applications.shared.platform_namespace,
@@ -186,7 +186,7 @@ def source_material_inputs(delivery_inputs, platform_inputs):
             'secret-key': base64.b64encode(b'data-secret-must-not-copy').decode()}}
     pin = {'uid': secret['metadata']['uid'], 'resource_version': '25',
         'sha256': hashlib.sha256(json.dumps(material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
-    return before, service, secret, pin, material
+    return before, controller, secret, pin, material
 
 
 def test_source_material_copies_only_exact_retained_source_identity(source_material_inputs):
@@ -195,27 +195,27 @@ def test_source_material_copies_only_exact_retained_source_identity(source_mater
         qualify_application_source_material,
     )
 
-    before, service, secret, pin, expected = source_material_inputs
-    snapshot = copy.deepcopy((service, secret))
-    result = qualify_application_source_material(before=before, service=service,
+    before, controller, secret, pin, expected = source_material_inputs
+    snapshot = copy.deepcopy((controller, secret))
+    result = qualify_application_source_material(before=before, controller=controller,
         secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin))
     assert result == expected
-    assert (service, secret) == snapshot
+    assert (controller, secret) == snapshot
     result['access-key'] = 'detached-result'
-    assert qualify_application_source_material(before=before, service=service,
+    assert qualify_application_source_material(before=before, controller=controller,
         secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin)) == expected
 
 
 @pytest.mark.parametrize('damage', ['uid', 'version', 'hash', 'namespace', 'name', 'deleting',
-    'service_namespace', 'source_reference', 'endpoint', 'bucket', 'duplicate_env', 'payload', 'whitespace'])
+    'controller_namespace', 'source_reference', 'endpoint', 'bucket', 'duplicate_env', 'payload', 'whitespace'])
 def test_source_material_rejects_drift_and_never_returns_other_shared_credentials(source_material_inputs, damage):
     from scripts.ops.nebius_pool_application_delivery import (
         ApplicationSourceCredentialPin,
         qualify_application_source_material,
     )
 
-    before, service, secret, pin, _ = source_material_inputs
-    env = service['spec']['template']['spec']['containers'][0]['env']
+    before, controller, secret, pin, _ = source_material_inputs
+    env = controller['spec']['template']['spec']['containers'][0]['env']
     if damage in {'uid', 'namespace', 'name'}:
         secret['metadata'][damage] = str(uuid4()) if damage == 'uid' else 'foreign'
     elif damage == 'version':
@@ -224,16 +224,16 @@ def test_source_material_rejects_drift_and_never_returns_other_shared_credential
         pin['sha256'] = '0' * 64
     elif damage == 'deleting':
         secret['metadata']['deletionTimestamp'] = '2026-10-02T00:00:00Z'
-    elif damage == 'service_namespace':
-        service['metadata']['namespace'] = 'foreign'
+    elif damage == 'controller_namespace':
+        controller['metadata']['namespace'] = 'foreign'
     elif damage == 'source_reference':
-        next(row for row in env if row['name'] == 'LOOM_SVC_SERVICE_EXECUTION_SOURCE_ACCESS_KEY')['valueFrom']['secretKeyRef']['key'] = 'access-key'
+        next(row for row in env if row['name'] == 'LOOM_CP_SERVICE_EXECUTION_SOURCE_ACCESS_KEY')['valueFrom']['secretKeyRef']['key'] = 'access-key'
     elif damage in {'endpoint', 'bucket'}:
-        next(row for row in env if row['name'] == 'LOOM_SVC_SERVICE_EXECUTION_SOURCE_' + damage.upper())['value'] = 'foreign'
+        next(row for row in env if row['name'] == 'LOOM_CP_SERVICE_EXECUTION_SOURCE_' + damage.upper())['value'] = 'foreign'
     elif damage == 'duplicate_env':
         env.append(copy.deepcopy(env[0]))
     else:
         secret['data']['source-secret-key'] = 'not-base64' if damage == 'payload' else base64.b64encode(b'secret with space').decode()
     with pytest.raises(ValueError, match='pool_application_source_unqualified'):
-        qualify_application_source_material(before=before, service=service,
+        qualify_application_source_material(before=before, controller=controller,
             secret=secret, pin=ApplicationSourceCredentialPin.model_validate(pin))

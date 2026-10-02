@@ -6,13 +6,17 @@ This pure projection performs no Kubernetes, storage or database operation.
 """
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
-from scripts.ops.nebius_ingress_stage import _snapshot
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 
 from loom.application_image_build import ApplicationImageBuildBindingV1
@@ -28,6 +32,88 @@ from loom_service.application_management.installation import (
 )
 from loom_service.environment_management.deployment import ManagementDeployment, render_management
 from loom_service.pool_management.installation import PoolInstallation
+
+
+class ApplicationSourceCredentialPin(BaseModel):
+    """Protected shared source identity; never the credential itself."""
+
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    uid: UUID
+    resource_version: str = Field(min_length=1, max_length=160)
+    sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+    @model_validator(mode='after')
+    def non_nil_identity(self) -> ApplicationSourceCredentialPin:
+        if not self.uid.int:
+            raise ValueError('nil source credential identity')
+        return self
+
+
+def source_material_json(material: dict[str, str], pin: ApplicationSourceCredentialPin) -> str:
+    """Same bounded source-only payload for live qualification and fixed delivery."""
+    try:
+        pin = ApplicationSourceCredentialPin.model_validate(pin.model_dump())
+        if (set(material) != {'access-key', 'secret-key'} or any(
+                not isinstance(value, str) or not 1 <= len(value) <= 4096 or not value.isascii()
+                or any(ord(char) < 33 or ord(char) == 127 for char in value) for value in material.values())):
+            raise ValueError
+        payload = json.dumps(material, sort_keys=True, separators=(',', ':'))
+        if hashlib.sha256(payload.encode()).hexdigest() != pin.sha256:
+            raise ValueError
+        return payload
+    except Exception:
+        raise ValueError('pool_application_source_unqualified') from None
+
+
+def qualify_application_source_material(*, before: ManagementDeployment, controller: dict[str, Any],
+        secret: dict[str, Any], pin: ApplicationSourceCredentialPin) -> dict[str, str]:
+    """Qualify the installed shared source credential, not data/operator material.
+
+    The protected caller must read this exact Secret and qualify the retained
+    control-plane UID/template against current cutover ancestry before any write.
+    """
+    try:
+        before = ManagementDeployment.model_validate(before.model_dump())
+        pin = ApplicationSourceCredentialPin.model_validate(pin.model_dump())
+        application = before.installation.applications
+        if application is None:
+            raise ValueError
+        namespace = application.shared.platform_namespace
+        config = before.installation.foundation.platform_config
+        active = _snapshot(controller)
+        _uid(controller)
+        container, = active['spec']['template']['spec']['containers']
+        env = {row['name']: row for row in container['env']}
+        if (active['apiVersion'] != 'apps/v1' or active['kind'] != 'Deployment'
+                or active['metadata']['namespace'] != namespace or active['metadata']['name'] != 'loom-control-plane'
+                or container['name'] != 'loom-control-plane' or len(env) != len(container['env'])):
+            raise ValueError
+        prefix = 'LOOM_CP_SERVICE_EXECUTION_SOURCE_'
+        for suffix, value in (('ENDPOINT', config['storage_endpoint']), ('REGION', config['region']),
+                ('BUCKET', config['buckets']['source'])):
+            if env[prefix + suffix] != {'name': prefix + suffix, 'value': value}:
+                raise ValueError
+        for suffix, key in (('ACCESS_KEY', 'source-access-key'), ('SECRET_KEY', 'source-secret-key')):
+            if env[prefix + suffix] != {'name': prefix + suffix, 'valueFrom': {
+                    'secretKeyRef': {'name': 'loom-platform-storage', 'key': key}}}:
+                raise ValueError
+        _snapshot(secret)
+        if (secret.get('apiVersion') != 'v1' or secret.get('kind') != 'Secret'
+                or secret.get('type') != 'Opaque' or secret.get('stringData')
+                or (secret['metadata']['namespace'], secret['metadata']['name'],
+                    _uid(secret), secret['metadata']['resourceVersion']) !=
+                    (namespace, 'loom-platform-storage', str(pin.uid), pin.resource_version)):
+            raise ValueError
+        material = {}
+        for key in ('access-key', 'secret-key'):
+            encoded = secret['data']['source-' + key]
+            if not isinstance(encoded, str) or not 0 < len(encoded) <= 4 * ((4096 + 2) // 3):
+                raise ValueError
+            material[key] = base64.b64decode(encoded, validate=True).decode('ascii')
+        source_material_json(material, pin)
+        return material
+    except Exception:
+        raise ValueError('pool_application_source_unqualified') from None
 
 
 def derive_application_build_deployment(before: ManagementDeployment, pool: PoolInstallation) -> ManagementDeployment:
