@@ -700,7 +700,8 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
 
 
 @pytest.mark.parametrize('damage', [None, 'running_again', 'backend', 'copied_secret_drift'])
-def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_retired_pods(private_cutover, damage):
+@pytest.mark.parametrize('startup', [None, 'started', 'uncertain'])
+def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_retired_pods(private_cutover, damage, startup):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -719,12 +720,26 @@ def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_ret
         state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
     migration = context.request.fencing.retirement.migration
     by_key = api.documents
+    if startup:
+        from scripts.ops.nebius_pool_startup import stage_pool_startup
+        from tests.ops.test_nebius_pool_startup import StartupAPI
+
+        successor = StartupAPI(context.request, api, Path(metadata['state_dir']))
+        if startup == 'uncertain':
+            successor.fail_key = _key(migration.guards[0].controller)
+            successor.failure = 'before'
+        result = stage_pool_startup(request=context.request, api=successor,
+            state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+        assert result['status'] == ('pending_startup_outcome' if startup == 'uncertain' else 'pool_startup_staged_closed')
+        by_key = successor.documents
+        if startup == 'uncertain':
+            by_key[successor.fail_key]['spec']['replicas'] = 1  # The delayed CAS commits.
     reads = []
     def get(kind, name, namespace=None):
         assert kind == 'deployment'
         value = copy.deepcopy(by_key['Deployment:' + namespace + ':' + name])
         if damage == 'running_again' and name == 'loom-control-plane':
-            value['spec']['replicas'] = 1
+            value['spec']['replicas'] = 2 if startup else 1
         return value
 
     def credential(original, *, url_variable, credential_uid, credential_resource_version):
@@ -755,7 +770,8 @@ def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_ret
 
 
 @pytest.mark.parametrize('damage', [None, 'running_again', 'backend', 'credential_drift'])
-def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(private_cutover, damage):
+@pytest.mark.parametrize('startup', [None, 'started', 'uncertain'])
+def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(private_cutover, damage, startup):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -771,14 +787,29 @@ def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(p
         document['metadata'].setdefault('resourceVersion', '1')
     stage_pool_cutover(request=context.request, tokens=context.tokens, api=api,
         state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+    by_key = api.documents
+    if startup:
+        from scripts.ops.nebius_ingress_stage import _key
+        from scripts.ops.nebius_pool_startup import stage_pool_startup
+        from tests.ops.test_nebius_pool_startup import StartupAPI
+
+        successor = StartupAPI(context.request, api, Path(metadata['state_dir']))
+        if startup == 'uncertain':
+            successor.fail_key, successor.failure = _key(context.request.manager), 'before'
+        result = stage_pool_startup(request=context.request, api=successor,
+            state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+        assert result['status'] == ('pending_startup_outcome' if startup == 'uncertain' else 'pool_startup_staged_closed')
+        by_key = successor.documents
+        if startup == 'uncertain':
+            by_key[successor.fail_key]['spec']['replicas'] = 1
     target = derive_management_history_target(original=context.original, predecessor=context.predecessor, credential=history_credential(root))
     reads = []
 
     def get(kind, name, namespace):
         assert kind == 'deployment' and (namespace, name) == (target.namespace, 'loom-service')
-        value = copy.deepcopy(api.documents['Deployment:' + namespace + ':' + name])
+        value = copy.deepcopy(by_key['Deployment:' + namespace + ':' + name])
         if damage == 'running_again':
-            value['spec']['replicas'] = 1
+            value['spec']['replicas'] = 2 if startup else 1
         return value
 
     def credential(original, **binding):
