@@ -136,6 +136,29 @@ def test_prepare_extracts_exact_dirty_source_without_executing_migrations(source
     assert source.closed and source.body.closed
 
 
+def test_schema_qualification_accepts_the_repository_git_placeholder(source_build):
+    from loom_execution_actuator.application_image_runtime import qualify_source_schema
+
+    _, _, root, marker = source_build
+    (root / "database/migrations/versions/.gitkeep").write_bytes(b"")
+    qualify_source_schema(root, expected_revision="0173")
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_schema_placeholder_must_remain_a_regular_file(source_build, kind):
+    from loom_execution_actuator.application_image_runtime import qualify_source_schema
+
+    _, _, root, _ = source_build
+    path = root / "database/migrations/versions/.gitkeep"
+    if kind == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to("0001_initial.py")
+    with pytest.raises(ValueError):
+        qualify_source_schema(root, expected_revision="0173")
+
+
 @pytest.mark.parametrize("damage", ["truncated", "extra", "hash", "manifest", "schema", "occupied", "link"])
 def test_prepare_rejects_unbound_content_or_destination_and_closes_source(source_build, tmp_path, monkeypatch, damage):
     from loom_execution_actuator import application_image_runtime as runtime
