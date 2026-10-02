@@ -2767,6 +2767,15 @@ after legacy restoration), preserving the original workload UID and credentials.
 The existing strict refresh renderer validates the derived configuration against
 the recorded manager. No caller-supplied post-cutover manager is accepted, and
 reading this baseline neither replays installation nor authorizes a live refresh.
+Ordinary refresh completion contracts may retain this qualified pool baseline.
+Their cumulative configuration and runtime checks are rooted in that baseline,
+not a caller-provided `before` snapshot, and still preserve the original manager
+UID. Repeated ordinary refreshes retain bounded root/pool/immediate evidence;
+cross-kind pool/refresh loading rejects cycles and excessive ancestry. Historical
+non-pool contracts remain byte-compatible. The manager-only connected installer
+currently refuses pool-backed refreshes, even if a request omits the inherited
+baseline: the pool-aware live authority verifier must be connected before those
+refreshes are exposed operationally.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact

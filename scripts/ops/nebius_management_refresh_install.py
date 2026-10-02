@@ -41,6 +41,7 @@ class ManagementRefreshInstallRequest:
     resources: ManagementRefreshResourcesRequest
     history: dict[Path, str]
     installation_anchor: Path
+    pool_baseline: dict[str, Any] | None = None
 
 
 class ManagementRefreshInstallError(RuntimeError):
@@ -93,6 +94,10 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
         'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
     if resources.switch.initial_stopped is not None:
         contract['initial_stopped'] = resources.switch.initial_stopped
+    if request.pool_baseline is not None:
+        from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1
+
+        contract['pool_baseline'] = PoolPredecessorV1.model_validate(request.pool_baseline).model_dump(mode='json')
     return contract
 
 

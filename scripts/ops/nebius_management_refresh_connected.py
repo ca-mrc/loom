@@ -51,6 +51,7 @@ from scripts.ops.nebius_management_upgrade_live import (
     HTTPSManagementUpgradeAPI,
     ManagementUpgradePrerequisites,
 )
+from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
 
 
 class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
@@ -62,7 +63,7 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
     """
 
     def __init__(self, *, request: ManagementRefreshInstallRequest, original: CompletedUpgrade,
-                 predecessor: CompletedUpgrade | CompletedRefresh, state_dir: Path, api_server: str,
+                 predecessor: CompletedUpgrade | CompletedRefresh | CompletedPoolCutover, state_dir: Path, api_server: str,
                  ssl_context: ssl.SSLContext, runtime_ca_pem: str | None,
                  checks: ManagementUpgradePrerequisites, token: str | None = None,
                  superseded: FailedRefreshProof | None = None):
@@ -80,6 +81,13 @@ class HTTPSManagementRefreshInstaller(HTTPSApplicationSetupAPI):
 
     def _binding(self, request: ManagementRefreshInstallRequest) -> None:
         render, setup = request.resources.switch.render, self.original.upgrade.setup
+        # Receipt support is not live pool-authority qualification. Keep the
+        # manager-only installer closed until the protected pool-aware reader is
+        # connected, including a request that omits its inherited baseline.
+        if (request.pool_baseline is not None or isinstance(self.predecessor, CompletedPoolCutover)
+                or render.before.pool_catalog_operation_id is not None
+                or (isinstance(self.predecessor, CompletedRefresh) and self.predecessor.pool_baseline is not None)):
+            raise ManagementStageError('pool-aware refresh authority qualification is not connected')
         root = Path(self.original.selector.operation['inputs_path']).parent.parent
         expected_state = root / 'refresh' / str(request.resources.switch.operation_id) / 'state'
         if (request != self.request or request.installation_anchor != self.original.upgrade.original_anchor

@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
-from scripts.ops.nebius_management_refresh_predecessor import CompletedUpgrade
+from scripts.ops.nebius_management_refresh_predecessor import CompletedUpgrade, _predecessor_scope
 from scripts.ops.nebius_pool_completion import PoolCutoverCompletion, load_pool_completion
 from scripts.ops.nebius_pool_cutover_entry import PoolCutoverContext, load_pool_cutover_inputs
 from scripts.ops.nebius_pool_migration import _hash
@@ -41,6 +41,15 @@ class CompletedPoolCutover:
 
 
 def load_completed_pool(selector: PoolPredecessorV1, *, original: CompletedUpgrade) -> CompletedPoolCutover:
+    """Load one terminal baseline, refusing cyclic or unbounded mixed ancestry."""
+    try:
+        with _predecessor_scope('pool-cutover', selector.operation['operation_id']):
+            return _load_completed_pool(selector, original=original)
+    except Exception:
+        raise ValueError('pool_predecessor_unqualified') from None
+
+
+def _load_completed_pool(selector: PoolPredecessorV1, *, original: CompletedUpgrade) -> CompletedPoolCutover:
     """Derive manager configuration from the qualified predecessor and outcome.
 
     A caller supplies neither a post-cutover Deployment nor a catalog identity.

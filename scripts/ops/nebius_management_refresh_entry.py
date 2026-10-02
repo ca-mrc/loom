@@ -42,6 +42,11 @@ from scripts.ops.nebius_management_refresh_supersession import (
     load_failed_refresh,
 )
 from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
+from scripts.ops.nebius_pool_predecessor import (
+    CompletedPoolCutover,
+    PoolPredecessorV1,
+    load_completed_pool,
+)
 
 from loom_service.environment_management.deployment import ManagementDeployment
 
@@ -51,7 +56,7 @@ class RefreshPrivateInputs(BaseModel):
 
     schema_version: Literal['loom.nebius-management-refresh-private-inputs.v1']
     original_upgrade: UpgradePredecessorV1
-    predecessor: Annotated[UpgradePredecessorV1 | RefreshPredecessorV1, Field(discriminator='kind')]
+    predecessor: Annotated[UpgradePredecessorV1 | RefreshPredecessorV1 | PoolPredecessorV1, Field(discriminator='kind')]
     deployment: ManagementDeployment
     candidate: dict[str, Any]
     profile: dict[str, Any]
@@ -66,7 +71,7 @@ class RefreshPrivateInputs(BaseModel):
 class RefreshContext:
     inputs: RefreshPrivateInputs
     original: CompletedUpgrade
-    predecessor: CompletedUpgrade | CompletedRefresh
+    predecessor: CompletedUpgrade | CompletedRefresh | CompletedPoolCutover
     request: ManagementRefreshInstallRequest
     superseded: FailedRefreshProof | None = None
 
@@ -95,15 +100,19 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
                 or inputs.candidate.get('candidate_sha') != operation['candidate']
                 or inputs.profile.get('candidate_sha') != operation['candidate']):
             raise ValueError
-        predecessor: CompletedUpgrade | CompletedRefresh
+        predecessor: CompletedUpgrade | CompletedRefresh | CompletedPoolCutover
         if isinstance(inputs.predecessor, UpgradePredecessorV1):
             if inputs.predecessor != inputs.original_upgrade:
                 raise ValueError
             predecessor = original
-        else:
+        elif isinstance(inputs.predecessor, RefreshPredecessorV1):
             if inputs.predecessor.operation_id == operation_id:
                 raise ValueError
             predecessor = load_completed_refresh(inputs.predecessor, original=original)
+        else:
+            if inputs.predecessor.operation['operation_id'] == str(operation_id):
+                raise ValueError
+            predecessor = load_completed_pool(inputs.predecessor, original=original)
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,
             inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2])
         config_name = render_refresh(render).config['metadata']['name']
@@ -130,7 +139,10 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id,
             superseded.stopped if superseded is not None else None),
             setup.binding, setup.shared_namespace_uid, inputs.manager_revision, inputs.target_manager_revision)
-        request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor)
+        pool_baseline = (predecessor if isinstance(predecessor, CompletedPoolCutover) else
+            predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
+        request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor,
+            None if pool_baseline is None else pool_baseline.selector.model_dump(mode='json'))
         return RefreshContext(inputs, original, predecessor, request, superseded)
     except Exception:
         raise EntryError('management private refresh inputs unqualified') from None
