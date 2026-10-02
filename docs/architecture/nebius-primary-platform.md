@@ -2612,6 +2612,25 @@ CREATE followed by absence remains charged and pending, without redispatch or a
 fabricated rejection. This read-only barrier itself neither stops processes nor
 restores legacy writers.
 
+Once both journals drain, an anchored shutdown stage stops only the successor
+startup targets in reverse order, leaving the gateway and manager until last.
+Its fixed updates change only Deployment replicas to zero or suspend the
+collector CronJob; templates, UIDs, startup-fence annotations and dormant siblings
+are preserved. Each one-time update retains its original resourceVersion before
+dispatch and tests the UID, version, complete metadata and spec. Unknown replies
+are observed, never resent; definite API rejection alone permits another prepared
+attempt. Already-stopped roots need no update. The shared recovery projection
+accepts only the anchored before/after templates, including partially started
+operations. The connected transport rechecks fresh two-sided drain before each
+PATCH and accepts no caller-supplied replacement manifest.
+Completion requires complete ReplicaSet/Job and Pod inventories for every
+successor, acknowledged Deployment generations with zero replica counts, and
+terminal collector history. Terminating Deployment Pods still block; paginated
+or incomplete lists cannot prove drain. Global/local fences and both journals
+are rechecked afterward.
+This phase neither deletes resources nor revokes cleanup credentials, and still
+withholds legacy-restoration authority pending successor credential retirement.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

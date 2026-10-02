@@ -9,7 +9,9 @@ from scripts.ops.nebius_ingress_stage import _key
 from tests.ops.test_nebius_pool_startup_fence import FenceAPI, advance, fence, start
 from tests.ops.test_nebius_pool_startup_fence import closed_startup as closed_startup
 from tests.ops.test_nebius_pool_startup_fence import collector_inputs as collector_inputs
-from tests.ops.test_nebius_pool_startup_fence import cutover_binding_inventory as cutover_binding_inventory
+from tests.ops.test_nebius_pool_startup_fence import (
+    cutover_binding_inventory as cutover_binding_inventory,
+)
 from tests.ops.test_nebius_pool_startup_fence import cutover_inputs as cutover_inputs
 from tests.ops.test_nebius_pool_startup_fence import fencing_inputs as fencing_inputs
 from tests.ops.test_nebius_pool_startup_fence import management_inputs as management_inputs
@@ -51,7 +53,11 @@ class ShutdownAPI(FenceAPI):
         return True
 
     def successor_drained(self, key, desired):
-        assert self.startup.documents[key]['spec'] == desired['spec']
+        from scripts.ops.nebius_management_switch import _stable
+
+        # The retained projection canonicalizes Kubernetes resource quantities;
+        # transport readback may still use equivalent Gi/milli spellings.
+        assert _stable(self.startup.documents[key]) == _stable(desired)
         self.drain_calls.append(key)
         return self.processes_drained
 
@@ -97,7 +103,9 @@ def test_shutdown_changes_only_successor_scale_after_cleanup_and_replays_without
     assert startup.documents[_key(dormant.collector)] == original[_key(dormant.collector)]
     assert shutdown(closed_startup, api) == result and len(api.stop_calls) == len(startup.requests)
     options = startup_workload_options(request, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
-    assert all(len(options[key]) == 1 and options[key][0]['spec'] == startup.documents[key]['spec'] for key in startup.requests)
+    assert all(len(options[key]) == 1 and options[key][0]['spec'][
+        'suspend' if startup.documents[key]['kind'] == 'CronJob' else 'replicas'] == (
+            True if startup.documents[key]['kind'] == 'CronJob' else 0) for key in startup.requests)
     assert advance(closed_startup, api, cancel=True)['status'] == 'pool_activation_cancelled'
 
 
@@ -129,6 +137,29 @@ def test_process_drain_is_required_even_when_roots_are_already_stopped(closed_st
     assert api.drain_calls
     api.processes_drained = True
     assert shutdown(closed_startup, api)['status'] == 'pool_successors_stopped'
+
+
+@pytest.mark.parametrize('late_start', [False, True])
+def test_partial_startup_shutdown_preserves_its_settled_fence_and_never_starts_other_roots(closed_startup, late_start):
+    request, _, _, startup, _, _ = closed_startup
+    manager_key = _key(request.manager)
+    gateway_key = 'Deployment:' + request.manager['metadata']['namespace'] + ':loom-pool-gateway'
+    startup.fail_key, startup.failure = gateway_key, 'before'
+    assert start(closed_startup)['status'] == 'pending_startup_outcome'
+    assert startup.requests == [manager_key, gateway_key]
+    if late_start:
+        startup.documents[gateway_key]['spec']['replicas'] = 1
+        startup.documents[gateway_key]['metadata']['resourceVersion'] = str(
+            int(startup.documents[gateway_key]['metadata']['resourceVersion']) + 1)
+    api = cancelled(closed_startup, started=False)
+    annotations = copy.deepcopy(startup.documents[gateway_key]['metadata'].get('annotations', {}))
+    if not late_start:
+        assert annotations['loom.nebius/pool-startup-fence'] == str(request.fencing.retirement.migration.registration.spec.operation_id)
+    assert shutdown(closed_startup, api)['status'] == 'pool_successors_stopped'
+    assert api.stop_calls == ([gateway_key, manager_key] if late_start else [manager_key])
+    assert startup.documents[gateway_key]['metadata'].get('annotations', {}) == annotations
+    assert startup.requests == [manager_key, gateway_key]
+    assert advance(closed_startup, api, cancel=True)['status'] == 'pool_activation_cancelled'
 
 
 @pytest.mark.parametrize('damage', ['pool', 'guard', 'retained', 'startup_fence', 'uid', 'template', 'missing_anchor'])

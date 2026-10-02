@@ -9,10 +9,12 @@ import copy
 from typing import Any
 
 from scripts.ops.nebius_ingress_stage import _uid
-from scripts.ops.nebius_management_switch import _stable
+from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import activation_record
 from scripts.ops.nebius_pool_migration import PoolGuardTarget
+from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_pool_retirement_live import _patch_result
+from scripts.ops.nebius_pool_shutdown import _shutdown_record
 from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
 from scripts.ops.nebius_pool_startup_fence import (
     _fence_record,
@@ -93,6 +95,60 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             return all(results)
         except Exception:
             raise ValueError('pool_recovery_drain_unconfirmed') from None
+
+    def _stop_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            closed, originals, targets, _, record = _shutdown_record(self.request, state=self.state, anchor=self.anchor)
+            version = before['metadata']['resourceVersion']
+            if (closed != self.closed or record is None or key not in targets
+                    or originals[key] == targets[key] or not _matches(before, originals[key], _uid(closed[key]))
+                    or _stable(desired) != targets[key]
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
+                        'before_resource_version': None if preview else version}):
+                raise ValueError
+            if self.recovery_drained() is not True:
+                raise ValueError
+            if _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            field = 'suspend' if targets[key]['kind'] == 'CronJob' else 'replicas'
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(closed[key])},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/spec', 'value': before['spec']},
+                {'op': 'replace', 'path': '/spec/' + field, 'value': targets[key]['spec'][field]}]
+            with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(closed[key]))
+        except Exception:
+            raise ValueError('pool_shutdown_update_unconfirmed') from None
+
+    def preview_stop(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._stop_patch(key, before, desired, preview=True) else None
+
+    def stop_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._stop_patch(key, before, desired, preview=False)
+
+    def successor_drained(self, key: str, desired: dict[str, Any]) -> bool:
+        try:
+            closed, _, targets, _, record = _shutdown_record(self.request, state=self.state, anchor=self.anchor)
+            if (closed != self.closed or record is None or key not in targets
+                    or record['workloads'][key]['phase'] != 'stopped' or _stable(desired) != targets[key]):
+                raise ValueError
+            current = self.read_workload(key)
+            namespace = str(current['metadata']['namespace'])
+            path = ('/apis/apps/v1/namespaces/' + namespace + '/replicasets' if current['kind'] == 'Deployment'
+                else '/apis/batch/v1/namespaces/' + namespace + '/jobs')
+            children = self.parent._request('GET', path + '?limit=1000')
+            pods = self.parent._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
+            if (children is None or pods is None or _stable(self.read_workload(key)) != _stable(current)
+                    or _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record):
+                raise ValueError
+            return qualify_closed_workload_drain(original=closed[key], desired=targets[key],
+                current=current, children=children, pods=pods)
+        except Exception:
+            raise ValueError('pool_successor_drain_unconfirmed') from None
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
