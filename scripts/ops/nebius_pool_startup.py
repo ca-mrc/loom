@@ -151,6 +151,10 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     """
     operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
     paths = (state_dir / "startup.json", anchor_dir / (operation + "-startup.json"))
+    from scripts.ops.nebius_pool_legacy_restart import (
+        legacy_restart_exists,
+        restarted_legacy_options,
+    )
     from scripts.ops.nebius_pool_shutdown import shutdown_exists, shutdown_workload_options
     from scripts.ops.nebius_pool_startup_fence import fenced_startup_options, startup_fence_exists
     from scripts.ops.nebius_pool_template_restoration import (
@@ -161,7 +165,8 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     started = any(path.exists() or path.is_symlink() for path in paths)
     if (not started and not startup_fence_exists(request, state=state_dir, anchor=anchor_dir)
             and not shutdown_exists(request, state=state_dir, anchor=anchor_dir)
-            and not template_restoration_exists(request, state=state_dir, anchor=anchor_dir)):
+            and not template_restoration_exists(request, state=state_dir, anchor=anchor_dir)
+            and not legacy_restart_exists(request, state=state_dir, anchor=anchor_dir)):
         return None
     closed, targets = closed_startup_documents(request, state_dir=state_dir, anchor_dir=anchor_dir)
     _, record = _startup_record(request, state=state_dir, anchor=anchor_dir, closed=closed, targets=targets)
@@ -175,7 +180,8 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     choices = fenced_startup_options(request, state=state_dir, anchor=anchor_dir,
         closed=closed, targets=targets, startup=record, choices=choices)
     choices = shutdown_workload_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
-    return restored_template_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
+    choices = restored_template_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
+    return restarted_legacy_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
 
 
 def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,

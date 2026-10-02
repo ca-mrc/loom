@@ -83,7 +83,9 @@ def test_legacy_restart_restores_exact_original_scalars_and_keeps_gateway_dorman
         if key in originals:
             field = 'suspend' if row['kind'] == 'CronJob' else 'replicas'
             expected['spec'][field] = originals[key]['spec'][field]
-            assert row['spec'] == originals[key]['spec']
+            # Template restoration already canonicalizes Kubernetes quantities;
+            # restart must preserve that spec byte-for-byte except this scalar.
+            assert _stable(row)['spec'] == _stable(originals[key])['spec']
         if _stable(expected) != _stable(before[key]):
             expected_calls.add(key)
             expected['metadata']['resourceVersion'] = str(int(before[key]['metadata']['resourceVersion']) + 1)
@@ -145,3 +147,20 @@ def test_legacy_restart_rejects_changed_or_incomplete_authority_before_any_write
     api.processes_drained = False
     assert restart(api)['status'] == 'pending_successor_drain'
     assert not api.restart_calls
+
+
+@pytest.mark.parametrize('artifact', ['journal', 'anchor'])
+def test_orphan_legacy_restart_evidence_cannot_fall_back_to_original_startup(cutover_inputs, tmp_path, artifact):
+    from scripts.ops.nebius_pool_startup import startup_workload_options
+
+    request, _ = cutover_inputs
+    state, anchor = tmp_path / 'restart-state', tmp_path / 'restart-anchor'
+    state.mkdir()
+    anchor.mkdir()
+    assert startup_workload_options(request, state_dir=state, anchor_dir=anchor) is None
+    operation = request.fencing.retirement.migration.registration.spec.operation_id
+    path = state / 'legacy-restart.json' if artifact == 'journal' else anchor / (str(operation) + '-legacy-restart.json')
+    path.write_text('{}')
+    path.chmod(0o600)
+    with pytest.raises((ValueError, OSError)):
+        startup_workload_options(request, state_dir=state, anchor_dir=anchor)

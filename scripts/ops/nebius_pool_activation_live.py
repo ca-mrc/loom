@@ -20,6 +20,7 @@ from scripts.ops.nebius_pool_gateway_retirement import (
     _gateway_record,
     qualify_gateway_retirement_drain,
 )
+from scripts.ops.nebius_pool_legacy_restart import _restart_record, qualify_legacy_restart
 from scripts.ops.nebius_pool_machine_database import MachineRetirementState
 from scripts.ops.nebius_pool_machine_retirement import (
     _machine_record,
@@ -260,11 +261,25 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def qualify_gateway_retired(self) -> None:
         """Prove effective read-only rights, not just the fixed Role manifests."""
         try:
+            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            self.qualify_gateway_readonly()
+            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+        except Exception:
+            raise ValueError('pool_gateway_retired_authority_unconfirmed') from None
+
+    def qualify_gateway_readonly(self) -> None:
+        """Effective permission proof without requiring old workloads stopped.
+
+        The closed restart barrier independently proves the gateway's process
+        drain. Existing retirement retains its all-successor-stopped checks.
+        """
+        try:
             originals, targets, _, record = _gateway_record(self.request, state=self.state, anchor=self.anchor)
             if record is None or any(row['phase'] != 'restricted' for row in record['roles'].values()):
                 raise ValueError
-            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
-                raise ValueError
+            self.verify_retained()
             bindings = [row for resource, kind in (('rolebindings', 'RoleBinding'), ('clusterrolebindings', 'ClusterRoleBinding'))
                 for row in inventory_resources(self.parent._request, 'rbac.authorization.k8s.io/v1', resource, kind)]
             migration = self.request.fencing.retirement.migration
@@ -272,11 +287,11 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             for namespace in gateway_review_namespaces(migration, bindings):
                 review_gateway_rules(self.parent.client, manager_namespace=migration.registration.binding.namespace,
                     namespace=namespace, authority=authority)
-            if (qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None
-                    or _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record):
+            self.verify_retained()
+            if _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
         except Exception:
-            raise ValueError('pool_gateway_retired_authority_unconfirmed') from None
+            raise ValueError('pool_gateway_readonly_authority_unconfirmed') from None
 
     def _legacy_template_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
         try:
@@ -349,6 +364,39 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
 
     def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         return self._legacy_role_patch(key, before, desired, preview=False)
+
+    def _legacy_restart_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            originals, stopped, targets, _, record = _restart_record(self.request, state=self.state, anchor=self.anchor)
+            version = before['metadata']['resourceVersion']
+            if (record is None or key not in targets or stopped[key] == targets[key]
+                    or not _matches(before, stopped[key], _uid(originals[key])) or _stable(desired) != targets[key]
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
+                        'before_resource_version': None if preview else version}):
+                raise ValueError
+            if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            if _restart_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            field = 'suspend' if before['kind'] == 'CronJob' else 'replicas'
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(originals[key])},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/spec', 'value': before['spec']},
+                {'op': 'replace', 'path': '/spec/' + field, 'value': targets[key]['spec'][field]}]
+            with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(originals[key]))
+        except Exception:
+            raise ValueError('pool_legacy_restart_update_unconfirmed') from None
+
+    def preview_legacy_restart(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._legacy_restart_patch(key, before, desired, preview=True) else None
+
+    def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._legacy_restart_patch(key, before, desired, preview=False)
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)

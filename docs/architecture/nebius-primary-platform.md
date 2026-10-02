@@ -2702,6 +2702,20 @@ Exact Role and journal readbacks bracket these reviews. No workload starts and
 no admission guard is released: `pool_legacy_roles_restored_closed` still sets
 `legacy_restore_allowed` to false. Restart and reopening are separate phases.
 
+Closed legacy restart restores only each retained predecessor's original replica
+or suspend scalar. Its journal binds completed Role/template restoration, records
+intent before UID/version/full-metadata/spec CAS, and admits only its exact
+prepared/intent/started projections. Unknown replies only observe; a definite
+rejection may prepare again. The first restart requires a fresh complete stopped
+recovery barrier. Subsequent writes still require globally fenced mode, every
+local recovery guard, revoked machine credentials, exact effective legacy rights,
+fresh two-sided journal drain, and the stopped gateway's read-only authority and
+process inventory. Running the exact old workload is no longer interpreted as a
+surviving successor, without relaxing the original all-stopped retirement check.
+Originally dormant workloads and the gateway remain unchanged. The
+`pool_legacy_restart_staged_closed` result asserts neither runtime health nor
+permission to reopen; restored runtime readiness and guard reopening are separate.
+
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
 candidate. It takes the admission lock and the guard row lock, then freshly
