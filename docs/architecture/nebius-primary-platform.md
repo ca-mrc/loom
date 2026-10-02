@@ -2666,6 +2666,22 @@ incomplete review blocks completion even if every fixed Role is read-only.
 No binding is deleted, no unrelated resource is changed, and legacy-restoration
 permission remains withheld until the separate workload/role restoration path.
 
+The next anchored recovery phase restores only retained pre-migration workload
+specs, with every Deployment kept at zero replicas and every CronJob suspended.
+It preserves current top-level metadata and all retirement/startup fences; the
+gateway, material, configuration and permission resources remain untouched.
+Unchanged dormant and retired templates need no write. The journal binds the
+completed gateway retirement, shutdown and exact before/after workload catalog.
+Every spec update requires fresh gateway effective-readonly, revoked-machine and
+process/journal-drain checks, then an intent-bound UID/version/metadata/spec CAS.
+Unknown outcomes only observe the same retained object; definite rejection alone
+permits another prepared attempt. Recovery entrypoints and writer inventories
+consume the same anchored partial-restoration projection. Process drain still
+requires complete child/Pod inventories and acknowledgment of the current
+Deployment generation after a spec update, not merely zero requested replicas.
+This stage grants no write role, starts no process and releases no intake guard;
+legacy permission restoration, restart and reopening remain separate prerequisites.
+
 The startup stage
 does not open admission or claim a working execution pool, and is not exposed as
 an independent deployment command. Installed runtime/collector acceptance,

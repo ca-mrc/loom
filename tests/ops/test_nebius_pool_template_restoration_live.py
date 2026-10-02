@@ -33,6 +33,22 @@ from tests.ops.test_nebius_pool_gateway_retirement_live import (
 from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, restore
 
 
+def test_original_shutdown_drain_stays_strict_without_restoration(retirement_http):
+    from scripts.ops.nebius_pool_shutdown import _shutdown_record
+
+    with retirement_http() as (api, state, _):
+        targets = _shutdown_record(api.request, state=api.state, anchor=api.anchor)[2]
+        key = next(key for key in targets if key.startswith('Deployment:'))
+        assert api.successor_drained(key, targets[key]) is True
+        state.objects[key]['status']['observedGeneration'] = 0
+        assert api.successor_drained(key, targets[key]) is False
+        state.objects[key]['status']['observedGeneration'] = 1
+        # An orphan restoration journal cannot fall back to the original proof.
+        (api.state / 'template-restoration.json').write_text('{}')
+        with pytest.raises(ValueError):
+            api.successor_drained(key, targets[key])
+
+
 @pytest.mark.timeout(600)
 def test_fixed_template_patch_uses_intent_and_keeps_unobserved_generation_undrained(retirement_http, closed_startup):
     from scripts.ops.nebius_pool_shutdown import _shutdown_record
@@ -47,9 +63,17 @@ def test_fixed_template_patch_uses_intent_and_keeps_unobserved_generation_undrai
         for key in gateway.role_calls:
             apply_role(key)
         remote = TemplateAPI(closed_startup, gateway)
+        _, originals, targets, _, _ = _template_record(api.request, state=api.state, anchor=api.anchor)
+        key = next(key for key in targets if key.startswith('Deployment:') and originals[key] != targets[key])
+        remote.template_fail_key = key
         remote.template_failure = 'before'
         assert restore(closed_startup, remote)['status'] == 'pending_template_restoration_outcome'
-        key, = remote.template_calls
+        assert remote.template_calls[-1] == key
+        # Restore order includes CronJobs. Carry their already-settled remote
+        # effects into HTTP readback before testing a Deployment generation.
+        for previous in remote.template_calls[:-1]:
+            state.objects[previous]['spec'] = copy.deepcopy(remote.startup.documents[previous]['spec'])
+            state.objects[previous]['metadata']['resourceVersion'] = remote.startup.documents[previous]['metadata']['resourceVersion']
         before = copy.deepcopy(state.objects[key])
         desired = _template_record(api.request, state=api.state, anchor=api.anchor)[2][key]
         path = api._path(key)

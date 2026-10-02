@@ -30,6 +30,7 @@ class TemplateAPI(GatewayAPI):
         super().__init__(fixture, prior)
         self.authority = copy.deepcopy(prior.authority)
         self.template_calls, self.template_failure = [], None
+        self.template_fail_key = None
         self.drain_targets = {key: _stable(row) for key, row in self.startup.documents.items()}
 
     def successor_drained(self, key, desired):
@@ -47,15 +48,16 @@ class TemplateAPI(GatewayAPI):
             'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         assert self.machine_phase == 'revoked' and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}
         self.template_calls.append(key)
-        if self.template_failure == 'before':
+        failure = self.template_failure if self.template_fail_key in (None, key) else None
+        if failure == 'before':
             raise OSError('private-marker')
-        if self.template_failure == 'conflict':
+        if failure == 'conflict':
             return False
         current = copy.deepcopy(before)
         current['spec'] = copy.deepcopy(desired['spec'])
         current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
         self.startup.documents[key] = current
-        if self.template_failure == 'after':
+        if failure == 'after':
             raise OSError('private-marker')
         return True
 
@@ -72,6 +74,8 @@ def restore(fixture, api):
     return restore_pool_templates(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
 
 
+# These cases include the predecessor retirement plus full restoration/replay.
+@pytest.mark.timeout(180)
 def test_restoration_recovers_exact_old_specs_but_keeps_every_writer_stopped(closed_startup):
     from scripts.ops.nebius_pool_cutover import retained_cutover_workloads
     from scripts.ops.nebius_pool_retirement import retirement_documents
@@ -105,6 +109,7 @@ def test_restoration_recovers_exact_old_specs_but_keeps_every_writer_stopped(clo
 
 
 @pytest.mark.parametrize('failure', ['before', 'after', 'conflict'])
+@pytest.mark.timeout(180)
 def test_template_lost_replies_observe_and_only_definite_rejection_can_retry(closed_startup, failure):
     from scripts.ops.nebius_pool_startup import startup_workload_options
 
@@ -135,7 +140,8 @@ def test_template_restoration_requires_fresh_drain_before_any_change(closed_star
     assert not api.template_calls
 
 
-@pytest.mark.parametrize('damage', ['gateway_journal', 'effective', 'machine', 'uid', 'spec', 'anchor'])
+@pytest.mark.parametrize('damage', ['gateway_journal', 'effective', 'machine', 'uid', 'spec', 'stale_version',
+    pytest.param('anchor', marks=pytest.mark.timeout(180))])
 def test_template_restoration_rejects_foreign_or_unretired_authority(closed_startup, damage):
     api = gateway_retired(closed_startup)
     key = _key(api.request.manager)
@@ -149,6 +155,15 @@ def test_template_restoration_rejects_foreign_or_unretired_authority(closed_star
         api.startup.documents[key]['metadata']['uid'] = 'aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'
     elif damage == 'spec':
         api.startup.documents[key]['spec']['replicas'] = 1
+    elif damage == 'stale_version':
+        from scripts.ops.nebius_pool_template_restoration import _template_record
+
+        api.template_failure = 'before'
+        assert restore(closed_startup, api)['status'] == 'pending_template_restoration_outcome'
+        key, = api.template_calls
+        targets = _template_record(api.request, state=api.state, anchor=api.root / 'cutover-anchor')[2]
+        api.startup.documents[key]['spec'] = copy.deepcopy(targets[key]['spec'])
+        api.template_calls.clear()  # No corresponding new resourceVersion: not a settled CAS.
     else:
         assert restore(closed_startup, api)['status'] == 'pool_legacy_templates_restored_closed'
         next((api.root / 'cutover-anchor').glob('*-template-restoration.json')).unlink()

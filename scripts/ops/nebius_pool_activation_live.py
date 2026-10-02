@@ -29,7 +29,11 @@ from scripts.ops.nebius_pool_migration import PoolGuardTarget
 from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
 from scripts.ops.nebius_pool_retirement_live import _patch_result
 from scripts.ops.nebius_pool_shutdown import _shutdown_record
-from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
+from scripts.ops.nebius_pool_startup import (
+    _startup_record,
+    closed_startup_documents,
+    startup_workload_options,
+)
 from scripts.ops.nebius_pool_startup_fence import (
     _fence_record,
     marked_startup_document,
@@ -37,6 +41,11 @@ from scripts.ops.nebius_pool_startup_fence import (
     startup_fence_patches,
 )
 from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
+from scripts.ops.nebius_pool_template_restoration import (
+    _template_record,
+    qualify_template_restoration,
+    template_restoration_exists,
+)
 
 
 class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
@@ -145,21 +154,31 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         return self._stop_patch(key, before, desired, preview=False)
 
     def successor_drained(self, key: str, desired: dict[str, Any]) -> bool:
+        """Fresh process drain of the anchored closed successor or restored spec."""
         try:
+            def projection() -> dict[str, tuple[dict[str, Any], ...]] | None:
+                if not template_restoration_exists(self.request, state=self.state, anchor=self.anchor):
+                    return None
+                return startup_workload_options(self.request, state_dir=self.state, anchor_dir=self.anchor)
+
             closed, _, targets, _, record = _shutdown_record(self.request, state=self.state, anchor=self.anchor)
             if (closed != self.closed or record is None or key not in targets
                     or record['workloads'][key]['phase'] != 'stopped' or _stable(desired) != targets[key]):
                 raise ValueError
             current = self.read_workload(key)
+            options = projection()
+            choices = (targets[key],) if options is None else options[key]
+            expected, = (row for row in choices if _matches(current, row, _uid(closed[key])))
             namespace = str(current['metadata']['namespace'])
             path = ('/apis/apps/v1/namespaces/' + namespace + '/replicasets' if current['kind'] == 'Deployment'
                 else '/apis/batch/v1/namespaces/' + namespace + '/jobs')
             children = self.parent._request('GET', path + '?limit=1000')
             pods = self.parent._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
             if (children is None or pods is None or _stable(self.read_workload(key)) != _stable(current)
-                    or _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record):
+                    or _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record
+                    or projection() != options):
                 raise ValueError
-            return qualify_closed_workload_drain(original=closed[key], desired=targets[key],
+            return qualify_closed_workload_drain(original=closed[key], desired=expected,
                 current=current, children=children, pods=pods)
         except Exception:
             raise ValueError('pool_successor_drain_unconfirmed') from None
@@ -257,6 +276,38 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 raise ValueError
         except Exception:
             raise ValueError('pool_gateway_retired_authority_unconfirmed') from None
+
+    def _legacy_template_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+        try:
+            self._scope()
+            closed, originals, targets, _, record = _template_record(self.request, state=self.state, anchor=self.anchor)
+            version = before['metadata']['resourceVersion']
+            if (closed != self.closed or record is None or key not in targets or originals[key] == targets[key]
+                    or not _matches(before, originals[key], _uid(closed[key])) or _stable(desired) != targets[key]
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
+                        'before_resource_version': None if preview else version}):
+                raise ValueError
+            if qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
+                raise ValueError
+            if _template_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
+                raise ValueError
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(closed[key])},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/spec', 'value': before['spec']},
+                {'op': 'replace', 'path': '/spec', 'value': targets[key]['spec']}]
+            with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                return _patch_result(response, desired=desired, uid=_uid(closed[key]))
+        except Exception:
+            raise ValueError('pool_legacy_template_update_unconfirmed') from None
+
+    def preview_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return copy.deepcopy(desired) if self._legacy_template_patch(key, before, desired, preview=True) else None
+
+    def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._legacy_template_patch(key, before, desired, preview=False)
 
     def _write_record(self) -> dict[str, Any]:
         record = activation_record(self.request, state_dir=self.state, anchor_dir=self.anchor)
