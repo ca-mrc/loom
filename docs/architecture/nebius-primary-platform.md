@@ -1083,8 +1083,10 @@ provides only Job reads and Pod reads/list/logs in the shared build namespace.
 It grants no Job writes, Secret reads or access to other build namespaces.
 The protected operation must still qualify the exact registered machine/profile,
 deliver the source material and stage these resources before activation. Historical
-image-only refresh remains narrow; rendering these prerequisites does not install
-them or establish multi-owner acceptance.
+image-only refresh remains narrow: it preserves the existing source Secret even
+when its revision differs from the older cloud/shared bundles, and cannot enable,
+remove or change source/build runtime settings. Rendering these prerequisites
+does not install them or establish multi-owner acceptance.
 
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected
