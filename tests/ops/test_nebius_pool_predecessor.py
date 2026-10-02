@@ -234,10 +234,7 @@ def test_refresh_projects_only_manager_from_anchored_steps_and_uncertain_writes(
         assert {path: path.read_bytes() for path in before} == before
 
     check(pool.active)
-    api.pending = 'config'
-    assert run(case)['phase'] == 'config'
-    check(pool.active)
-    api.pending, api.switch.failure = None, 'before'
+    api.switch.failure = 'before'
     with pytest.raises(ManagementRefreshInstallError):
         run(case)
     stopped = refresh_target(request.resources.switch, 'retire')

@@ -2782,6 +2782,13 @@ credentials. It permits waiting, reserved and active requests without changing
 them. Its bound transport rechecks the management backend, credential identity
 and operator authority around the read. This does not relax the closed-mode
 startup proof or by itself qualify live refresh workloads and permissions.
+The manager-only refresh projection reuses the anchored parent and switch
+readers. It admits both sides only while a retirement or activation write is
+uncertain, and requires the recorded activation prerequisites before accepting
+the new manager. The original installation, immediate completed predecessor,
+pool baseline and any superseded failed refresh are requalified; every other
+pool workload retains its completed-cutover identity. This projection alone
+does not supply the still-required live authority verification.
 
 The internal recovery-release database primitive is distinct from the original
 activation release: it can remove only `pool-recovery:<operation>` for the exact
