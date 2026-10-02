@@ -283,13 +283,21 @@ def test_closed_projection_bounds_full_input_captures_and_detaches_results(close
         closed_startup_documents(request, **arguments)
 
 
-def test_closed_projection_rejects_input_mutated_during_evidence_read(closed_startup, monkeypatch):
+@pytest.mark.parametrize('entry', ['startup', 'cutover'])
+def test_closed_projection_rejects_input_mutated_during_evidence_read(closed_startup, monkeypatch, entry):
     from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_pool_cutover import _read_cutover_record, cutover_documents
     from scripts.ops.nebius_pool_startup import closed_startup_documents
 
     request, _, _, _, _, root = closed_startup
     arguments = {'state_dir': root / 'cutover', 'anchor_dir': root / 'cutover-anchor'}
-    closed_startup_documents(request, **arguments)
+    def observe():
+        if entry == 'startup':
+            return closed_startup_documents(request, **arguments)
+        return _read_cutover_record(request, cutover_documents(request),
+            arguments['state_dir'], arguments['anchor_dir'])
+
+    observe()
     read = private_state._private_read
 
     def mutate(path, **kwargs):
@@ -300,7 +308,7 @@ def test_closed_projection_rejects_input_mutated_during_evidence_read(closed_sta
 
     monkeypatch.setattr(private_state, '_private_read', mutate)
     with pytest.raises(ValueError):
-        closed_startup_documents(request, **arguments)
+        observe()
 
 
 @pytest.mark.parametrize('damage', ['cutover', 'child', 'permission', 'missing', 'symlink'])
