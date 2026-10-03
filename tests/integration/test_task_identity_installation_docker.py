@@ -166,6 +166,47 @@ async def sandboxes(native_binary, tmp_path, request):
         client.close()
 
 
+@pytest.fixture(scope="module")
+def native_direct_verifier_tests(native_binary):
+    directory = native_binary.parent
+    repository = Path(__file__).resolve().parents[2]
+    subprocess.run([
+        "docker", "run", "--rm", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{repository}:/src:ro", "-v", f"{directory}:/output", "-w", "/src",
+        "-e", "GOCACHE=/tmp/go-cache", "-e", "GOMODCACHE=/output/modules",
+        "-e", "CGO_ENABLED=0", "-e", "GOPROXY=off", "golang:1.26-alpine3.23",
+        "go", "test", "-c", "-o", "/output/loom-execution-runtime.test", "./cmd/loom-execution-runtime",
+    ], check=True, timeout=120, capture_output=True)
+    return directory / "loom-execution-runtime.test"
+
+
+@pytest.mark.parametrize("uid", [0, 65532], ids=["root", "nonroot"])
+def test_direct_native_verifier_report_preparation(native_direct_verifier_tests, uid):
+    """Exercise trusted native preparation and real script/output capture as each UID."""
+    import docker
+
+    client = docker.from_env()
+    container = None
+    try:
+        container = client.containers.run(
+            "python:3.11-slim", ["-test.run", "^TestDirectVerifier", "-test.v", "-test.timeout", "20s"],
+            entrypoint="/loom-execution-runtime.test", detach=True, user=f"{uid}:{uid}",
+            network_mode="none", cap_drop=["ALL"], security_opt=["no-new-privileges"],
+            volumes={str(native_direct_verifier_tests): {"bind": "/loom-execution-runtime.test", "mode": "ro"}},
+        )
+        result = container.wait(timeout=30)
+        output = container.logs()
+        assert result["StatusCode"] == 0, output.decode("utf-8", errors="replace")
+        assert b"--- PASS: TestDirectVerifierPreparesReportDirectory" in output
+        assert b"--- PASS: TestDirectVerifierCannotReuseStaleReport" in output
+        assert b"--- PASS: TestDirectVerifierRejectsPlantedReportPaths" in output
+        assert b"--- PASS: TestDirectVerifierReportReplacementDoesNotTruncateHardlink" in output
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        client.close()
+
+
 async def test_root_installs_real_deb_and_fresh_verifier_observes_owned_system_state(sandboxes, tmp_path):
     agent, verifier, default = sandboxes
     for driver in (agent, verifier):
