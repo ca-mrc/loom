@@ -1264,6 +1264,10 @@ Pin all production, staging and shared-development participants, dormant consume
 actual namespace/workload/credential identities, provider pool and quota scope,
 effective writer permissions, and the protected candidate/runtime publication.
 Preserve the original management upgrade and immediate completed predecessor.
+Include both configured execution-only guest targets, including the emulated-auth
+target, in the same participant's retained actuator roster and execution profiles.
+They share the ordinary collector and capacity authority; do not omit a running
+sibling or classify it as dormant merely because its originating issue is closed.
 
 Use a new nonzero UUID and private
 `nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The

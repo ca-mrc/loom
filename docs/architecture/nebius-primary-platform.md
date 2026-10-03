@@ -2466,11 +2466,12 @@ protected pool operation, not to retirement alone.
 
 An installed execution-only guest actuator belongs to its ordinary data
 participant, not another database, collector or builder. Retirement and runtime
-wiring require the complete registered target set. The supported guest sibling
-must retain its renderer-defined name, distinct UID, shared database references,
+wiring require the complete registered target set, including both the ordinary
+guest and the separate emulated-authentication guest when installed. Each sibling
+must retain its renderer-defined name, mutually distinct UID, shared database references,
 ServiceAccount and ordinary Pod configuration, differing only in target identity,
 labels/affinity and absence of the native builder. Missing, duplicate or changed
-siblings reject the migration inputs. Its replacement remains stopped, receives
+siblings reject the migration inputs. Each replacement remains stopped, receives
 the same participant credential and global binding, and does not acquire a build
 loop. Guest Pods must drain before retirement qualifies; replay checks them again.
 These checks do not replace installed database or effective writer qualification.
