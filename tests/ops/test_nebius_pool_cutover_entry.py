@@ -575,6 +575,10 @@ def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
     ('pool cutover operator readers unqualified', 'pool_operator_readers'),
     ('pool cutover runtime databases unqualified', 'pool_runtime_databases'),
     ('pool cutover runtime telemetry unqualified', 'pool_runtime_telemetry'),
+    *(('pool cutover runtime telemetry ' + detail + ' unqualified', 'pool_runtime_telemetry_' + detail)
+        for detail in ('binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client',
+            'tls', 'authorization', 'network', 'http', 'reader', 'counters', 'close',
+            'identity', 'address', 'authority', 'payload')),
     ('pool cutover management database unqualified', 'pool_management_database'),
     ('pool cutover provider unqualified', 'pool_provider'),
     ('pool cutover connected scope unqualified', 'pool_connected_scope'),
@@ -752,7 +756,8 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
     assert not path.exists()
 
 
-@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider", "telemetry"])
+@pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider", "telemetry",
+    "telemetry_tls", "telemetry_unknown"])
 def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -812,6 +817,8 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         telemetry.append(original)
         if damage == 'telemetry':
             raise PoolMigrationError('runtime_telemetry')
+        if damage in {'telemetry_tls', 'telemetry_unknown'}:
+            raise PoolMigrationError('runtime_telemetry_' + ('tls' if damage == 'telemetry_tls' else 'private-token'))
 
     monkeypatch.setattr(entry, 'connected_checks', connect)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
@@ -823,7 +830,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         with pytest.raises(PoolOperationError) as error:
             entry.execute_pool_cutover(context, 'preflight')
         expected_stage = {'manager': 'pool_management_database', 'provider': 'pool_provider',
-            'telemetry': 'pool_runtime_telemetry'}.get(damage, 'pool_runtime_databases')
+            'telemetry': 'pool_runtime_telemetry', 'telemetry_tls': 'pool_runtime_telemetry_tls'}.get(damage, 'pool_runtime_databases')
         assert error.value.stage == expected_stage
     else:
         with entry.connected_pool_readers(context):
