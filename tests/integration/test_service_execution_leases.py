@@ -3809,9 +3809,11 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
     "terminal_state",
     [NormalizedJobState.SUCCEEDED, NormalizedJobState.FAILED],
 )
+@pytest.mark.parametrize("extra_artifacts", [0, 512])
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,
     terminal_state: NormalizedJobState,
+    extra_artifacts: int,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -3819,6 +3821,17 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
     signing_key = "b" * 64
     pod_ip = "10.24.7.19"
     runtime_contract = _complete_output_contract(now=now)
+    extra_outputs = tuple(
+        RuntimeOutputDeclarationV1(
+            source_path=f"artifacts/part-{index:04}.json",
+            relative_path=f"artifacts/part-{index:04}.json",
+            kind="task_artifact", required=False,
+        )
+        for index in range(extra_artifacts)
+    )
+    runtime_contract = runtime_contract.model_copy(update={
+        "output_declarations": (*runtime_contract.output_declarations, *extra_outputs),
+    })
     try:
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
@@ -3884,6 +3897,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             "accounting/usage.json": b'{"call_count":1}\n',
             "verifier/output.json": b'{"rewards":{"passed":1}}\n',
         }
+        bundle_payloads.update({item.relative_path: b"{}" for item in extra_outputs})
         result_document = _runtime_result_payload(authorized, started_at=now)
         result_document.update(
             status="runtime_error",
@@ -3901,6 +3915,8 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             verifier_rewards={"passed": 1.0},
         )
         result_payload = canonical_document(result_document)
+        if extra_artifacts:
+            assert len(result_payload) > 65_536
         store = FakeObjectStore()
         repository = SqlArtifactCommitRepository(
             session_factory=sessions,
@@ -4000,7 +4016,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert artifact.content_hash == digest_bytes(result_payload)
             assert artifact.name == "trial_bundle"
             assert artifact.artifact_type == "loom.trial-artifact-bundle.v1"
-            assert artifact.file_count == 5
+            assert artifact.file_count == 5 + extra_artifacts
             trial = await session.get(Trial, trial_id)
             assert trial is not None
             assert trial.trajectory_index is not None
@@ -4067,6 +4083,10 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert persisted.observed_state == "finalized"
             assert trial.state == "failed"
             assert trial.failure_reason == "runtime_error"
+            assert trial.result is not None
+            assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                result_document,
+            ).model_dump(mode="json")
             assert (
                 await session.scalar(
                     select(func.count(ServiceExecutionCommand.id)).where(
