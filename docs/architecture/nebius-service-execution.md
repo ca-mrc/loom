@@ -738,7 +738,7 @@ operator projections also return at most 500 event and 500 history rows. These
 limits are contract errors, not invitations to discard older authority.
 Runtime results can legitimately contain up to 10,000 output entries. When a
 validated `result_reported` or `finalized` payload exceeds the database's JSONB
-text bound, its owning output Artifact retains the complete canonical JSON text
+text bound, its owning output Artifact retains the complete JSON text
 under `metadata.execution_event_payloads`. The lifecycle event stores a compact
 `loom.execution-event-payload-reference.v1` document binding the Artifact,
 generation/ordinal/kind key and full-payload digest. The event's own digest hashes
@@ -748,7 +748,7 @@ bounded diagnosis readers. Other event kinds and command limits are unchanged.
 Commit replay and finalization resolve the full payload only after verifying
 the reference digest and exact lease, team, trial, upload-session, resource
 generation and runtime-contract ownership. Changed, missing or foreign payloads
-fail closed. Canonical JSON text preserves number representation across JSONB
+fail closed. JSON text preserves integer/float types across JSONB
 round trips. Small and historical inline events keep their existing behavior.
 Trial results, rewards, source `result.json` and normal API/download semantics
 retain the complete runtime result; no output inventory is truncated. Artifact

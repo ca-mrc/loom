@@ -55,7 +55,7 @@ from loom.execution_runtime_contract import (
 )
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
-from loom.pipeline.keys import canonical_digest, canonical_document, canonical_uuid5
+from loom.pipeline.keys import canonical_digest, canonical_uuid5
 from loom.task_image_materialization import (
     get_trial_task_image_execution_grant,
     resolve_prepared_task,
@@ -1562,9 +1562,10 @@ async def _stored_execution_event_payload(
     if not isinstance(payloads, dict):
         raise ServiceExecutionConflict("execution event payload metadata is invalid")
     key = reference["payload_key"]
-    # Preserve the canonical JSON as text. JSONB can normalize exponent-form
-    # floats into integers, changing their canonical digest on the next read.
-    serialized = canonical_document(payload).decode("utf-8")
+    # Preserve numeric types as JSON text. Both JSONB and JCS can turn valid
+    # floats into integer tokens outside the canonicalizer's safe integer range.
+    # The reference still binds the full payload's canonical digest.
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     if key in payloads and payloads[key] != serialized:
         raise ServiceExecutionConflict("execution event payload identity drift")
     artifact.artifact_metadata = {
@@ -1591,12 +1592,13 @@ async def _resolve_execution_event_payload(
     serialized = payloads.get(key) if isinstance(payloads, dict) else None
     try:
         payload = json.loads(serialized) if isinstance(serialized, str) else None
+        expected = _event_payload_reference(
+            artifact=artifact, generation=event.generation, ordinal=event.ordinal,
+            event_kind=event.event_kind, payload=payload,
+        ) if isinstance(payload, dict) else None
     except ValueError as exc:
         raise ServiceExecutionConflict("execution event payload is invalid") from exc
-    if not isinstance(payload, dict) or reference != _event_payload_reference(
-        artifact=artifact, generation=event.generation, ordinal=event.ordinal,
-        event_kind=event.event_kind, payload=payload,
-    ):
+    if not isinstance(payload, dict) or reference != expected:
         raise ServiceExecutionConflict("execution event payload reference identity drift")
     return payload
 
