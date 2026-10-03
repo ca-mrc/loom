@@ -523,9 +523,9 @@ get cleaned up via `rmtree` on the next call.
   unittest TestCase as a pytest file
 - `structured_verifier_script(script_body, out_dir)` — write a
   script-verifier shim. The body must emit a `VerifierResult` JSON object to
-  `LOOM_VERIFIER_OUTPUT`; derive task/artifact paths from the script location
-  or explicit paths such as `/workspace`, because `ScriptVerifier` only
-  guarantees the output env var.
+  `LOOM_VERIFIER_OUTPUT`; Loom prepares its parent directory. Use
+  `LOOM_TASK_DIR` or explicit paths for task inputs and artifacts, following
+  the [verifier protocol](verifier-protocol.md#script-verifier-bundle-contract).
 - `embed_base64_image(image_bytes, alt_text)` — for multimodal
   benchmarks (SWE-Bench Multimodal)
 - `download_files_from_record(...)` — fetch per-instance assets
