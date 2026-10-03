@@ -368,7 +368,23 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
             if phase.endswith('probe'):
                 with HTTPSManagementRefreshEvidenceAPI(request=resources, phase=phase,
                         api_server=endpoint, ssl_context=trust) as proof:
-                    observed = proof.probe_report(state)
+                    try:
+                        observed = proof.probe_report(state)
+                    except Exception as error:
+                        # Production errors suppress private API/log values. Keep
+                        # that boundary while locating the failed CI invariant.
+                        error.add_note(f'refresh probe phase: {phase}')
+                        context = error.__context__
+                        seen = {id(error)}
+                        while context is not None and id(context) not in seen:
+                            seen.add(id(context))
+                            trace = context.__traceback__
+                            while trace is not None:
+                                filename = Path(trace.tb_frame.f_code.co_filename).name
+                                error.add_note(f'suppressed {type(context).__name__} at {filename}:{trace.tb_lineno}')
+                                trace = trace.tb_next
+                            context = context.__context__
+                        raise
                 assert observed is not None
                 assert observed['probe'] == {'schema': 'loom.nebius-management-refresh-probe.v1',
                     'status': 'qualified', 'mode': 'shared' if phase == 'shared-probe' else 'manager',
