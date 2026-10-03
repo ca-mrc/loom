@@ -176,6 +176,54 @@ def test_builder_preflight_uses_larger_manager_footprint_before_downtime(connect
     assert observed['guard_calls'] == [] and not Path(context.operation['state_dir']).exists()
 
 
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize('capacity_loss', ['headroom', 'unready'])
+def test_builder_recovery_can_fence_after_installation_capacity_disappears(connected_builder_entry, capacity_loss):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from tests.ops.test_nebius_pool_activation_stage import ActivationAPI
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+    from tests.ops.test_nebius_pool_startup import StartupAPI
+
+    context, _, _, _, credentials, node = connected_builder_entry
+    request = context.request
+    state, anchor = Path(context.operation['state_dir']), Path(context.operation['anchor_dir'])
+    with entry.connected_pool_api(context) as parent:
+        # Use the real connected private/source/database/provider checks and
+        # platform inventory; only external write transports are doubled.
+        parent.checks.preflight(request)
+        closed = CutoverAPI(request)
+        for document in closed.documents.values():
+            document['metadata'].setdefault('resourceVersion', '1')
+        assert stage_pool_cutover(request=request, tokens=context.tokens, api=closed,
+            source_credentials=credentials, state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
+        startup = StartupAPI(request, closed, state)
+
+        class RecoveryAPI(ActivationAPI):
+            def verify_retained(self):
+                # Same connected entry check used by HTTPSPoolActivationAPI:
+                # it must not inherit fresh-install resource-fit requirements.
+                parent.checks.preflight(request)
+                super().verify_retained()
+
+        recovery = RecoveryAPI((request, context.tokens, closed, startup, None, state.parent))
+        recovery.state = state
+        recovery.mode = 'global'
+        recovery.ready = False
+        recovery.guards = dict.fromkeys(recovery.guards, 'open')
+        if capacity_loss == 'headroom':
+            node['status']['allocatable']['ephemeral-storage'] = '32Gi'
+        else:
+            node['status']['conditions'] = [{'type': 'Ready', 'status': 'False'}]
+        result = advance_pool_activation(request=request, api=recovery, state_dir=state,
+            anchor_dir=anchor, cancel=True)
+        assert result['status'] == 'pool_activation_cancelled'
+        assert recovery.calls == [('fence', None), *(('guard-fence', key) for key in recovery.guards)]
+        assert recovery.mode == 'fenced' and set(recovery.guards.values()) == {'fenced'}
+        assert recovery.runtime_checks == 0
+
+
 async def test_protected_publication_qualifies_application_builder_tools(builder_cutover_inputs, publication_http):
     from scripts.ops import nebius_pool_cutover_entry as entry
 
