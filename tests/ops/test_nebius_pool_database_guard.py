@@ -771,8 +771,11 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     ('missing_counter', 'counters'), ('boolean_counter', 'counters'), ('negative_counter', 'counters'),
     ('old_image', 'reader'), ('tls', 'tls'), ('timeout', 'network'), ('connect', 'network'),
     ('http_failure', 'http'), ('payload', 'payload'), ('close', 'close'),
+    ('node_address', 'address'), ('bearer', 'authority'), ('summary_identity', 'payload'),
+    ('client', 'client'), ('tls_close', 'tls'),
+    ('missing_ca', 'authority'), ('unreadable_ca', 'authority'),
 ])
-def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, damage, stage):
+def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, tmp_path, damage, stage):
     import json
     import os
     import ssl
@@ -803,8 +806,14 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
     configuration.host = 'https://kubernetes.default.svc'
     configuration.ssl_ca_cert = '/mounted/ca.crt'
     configuration.api_key['authorization'] = 'bearer private-runtime-token'
+    if damage == 'bearer':
+        configuration.api_key.clear()
     monkeypatch.setattr(client.Configuration, '_default', None)
-    monkeypatch.setattr(config, 'load_incluster_config', lambda: client.Configuration.set_default(configuration))
+    def load_config():
+        if damage == 'client':
+            raise RuntimeError('private-runtime-token')
+        client.Configuration.set_default(configuration)
+    monkeypatch.setattr(config, 'load_incluster_config', load_config)
     requests, closed = [], []
     def node_read(_self, method, url, *args, **kwargs):
         assert (method, url) == ('GET', 'https://kubernetes.default.svc/api/v1/nodes/node-1')
@@ -813,12 +822,13 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
             raise ApiException(status=403, reason='private-runtime-token')
         return HTTPResponse(body=json.dumps({'apiVersion': 'v1', 'kind': 'Node',
             'metadata': {'name': 'node-1', 'uid': str(uuid4()) if damage == 'node_uid' else uid},
-            'status': {'addresses': [{'type': 'InternalIP', 'address': '10.20.0.2'}]}}).encode(), status=200)
+            'status': {'addresses': [{'type': 'InternalIP',
+                'address': '8.8.8.8' if damage == 'node_address' else '10.20.0.2'}]}}).encode(), status=200)
     def summary(_self, url, **kwargs):
         assert url == 'https://10.20.0.2:10250/stats/summary'
         assert kwargs['headers'] == {'Authorization': 'bearer private-runtime-token'}
         requests.append(url)
-        if damage == 'tls':
+        if damage in {'tls', 'tls_close'}:
             try:
                 raise ssl.SSLCertVerificationError('private-runtime-token')
             except ssl.SSLError as error:
@@ -827,7 +837,7 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
             raise (httpx.ReadTimeout if damage == 'timeout' else httpx.ConnectError)('private-runtime-token')
         if damage == 'payload':
             return httpx.Response(200, content=b'private-not-json', request=httpx.Request('GET', url))
-        node = {'nodeName': 'node-1', 'cpu': {'usageCoreNanoSeconds': 1000},
+        node = {'nodeName': 'foreign' if damage == 'summary_identity' else 'node-1', 'cpu': {'usageCoreNanoSeconds': 1000},
             'memory': {'workingSetBytes': 2000}, 'fs': {'usedBytes': 3000}}
         if damage == 'missing_counter':
             del node['cpu']
@@ -841,13 +851,20 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
     async def close(self):
         closed.append(True)
         await actual_close(self)
-        if damage == 'close':
+        if damage in {'close', 'tls_close'}:
             raise RuntimeError('private-runtime-token')
     async def legacy_summary(self, *, node_name):
         pytest.fail('legacy unpinned reader executed')
+    actual_create_context = ssl.create_default_context
+    def create_context(**kwargs):
+        if damage == 'missing_ca':
+            return actual_create_context(cafile=str(tmp_path / 'private-missing-ca.crt'))
+        if damage == 'unreadable_ca':
+            raise PermissionError('private-unreadable-ca.crt')
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(client.ApiClient, 'request', node_read)
     monkeypatch.setattr(httpx.Client, 'get', summary)
-    monkeypatch.setattr(ssl, 'create_default_context', lambda **_: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setattr(ssl, 'create_default_context', create_context)
     monkeypatch.setattr(InClusterKubernetesJobApi, 'close', close)
     if damage == 'old_image':
         monkeypatch.setattr(InClusterKubernetesJobApi, 'resource_summary', legacy_summary)
@@ -860,10 +877,12 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
     else:
         assert json.loads(output.out) == {'status': 'qualified', 'node_name': 'node-1', 'node_uid': uid}
         assert not output.err
-    if damage in {'namespace', 'target', 'remote'}:
+    if damage in {'namespace', 'target', 'remote', 'client'}:
         assert not requests and not closed
     else:
         assert closed == [True]
+    if damage in {'missing_ca', 'unreadable_ca'}:
+        assert not requests
 
 
 @pytest.mark.parametrize('damage', ['loaded_url', 'secret_identity', 'secret_version', 'foreign_database',
