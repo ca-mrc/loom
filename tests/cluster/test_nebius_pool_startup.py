@@ -35,6 +35,7 @@ pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1'
 
 @pytest.mark.timeout(300)
 async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committed_reply(cutover_inputs, tmp_path):
+    from kubernetes.client.exceptions import ApiException
     from scripts.ops.nebius_pool_cutover import stage_pool_cutover
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
     from scripts.ops.nebius_pool_retirement import retirement_documents
@@ -70,14 +71,26 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
             path += '/namespaces/' + value['metadata']['namespace'] + '/' + resource
             if replace_existing:
                 path += '/' + value['metadata']['name']
-                current = await asyncio.to_thread(core.api_client.call_api, path, 'GET', response_type='object',
-                    auth_settings=['BearerToken'], _return_http_data_only=True)
-                value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
             # Bootstrap the complete stopped fixture, not a merge that retains
             # old RollingUpdate defaults after the target selects Recreate.
-            return await asyncio.to_thread(core.api_client.call_api, path, 'PUT' if replace_existing else 'POST',
-                body=value, response_type='object', auth_settings=['BearerToken'], _return_http_data_only=True,
-                header_params={'Content-Type': 'application/json'})
+            expected_uid = value['metadata'].get('uid')
+            for attempt in range(10):
+                if replace_existing:
+                    current = await asyncio.to_thread(core.api_client.call_api, path, 'GET', response_type='object',
+                        auth_settings=['BearerToken'], _return_http_data_only=True)
+                    expected_uid = expected_uid or current['metadata']['uid']
+                    assert current['metadata']['uid'] == expected_uid
+                    value['metadata'].update(uid=expected_uid, resourceVersion=current['metadata']['resourceVersion'])
+                try:
+                    return await asyncio.to_thread(core.api_client.call_api, path, 'PUT' if replace_existing else 'POST',
+                        body=value, response_type='object', auth_settings=['BearerToken'], _return_http_data_only=True,
+                        header_params={'Content-Type': 'application/json'})
+                except ApiException as exc:
+                    # Deployment-controller status changes can invalidate the
+                    # bootstrap RV. This is before the startup CAS under test.
+                    if not replace_existing or exc.status != 409 or attempt == 9:
+                        raise
+                    await asyncio.sleep(0.05)
 
         originals = [*retirement_documents(request.fencing.retirement).values(), request.manager, *request.services]
         installed = {}
