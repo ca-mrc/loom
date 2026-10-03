@@ -153,7 +153,7 @@ def test_connected_builder_rejects_changed_source_before_transport_writes(connec
     assert not Path(context.operation['state_dir']).exists()
 
 
-def test_builder_preflight_uses_larger_manager_footprint_before_downtime(connected_builder_entry):
+def test_builder_preflight_uses_larger_manager_footprint_before_downtime(connected_builder_entry, monkeypatch):
     from dataclasses import replace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -169,10 +169,15 @@ def test_builder_preflight_uses_larger_manager_footprint_before_downtime(connect
         deployment=context.predecessor.deployment, candidate=context.inputs.candidate, profile=context.inputs.profile))
     ApplicationUpgradePrerequisites(base=readers.base, settings=context.original.inputs.prerequisites).platform_capacity(old)
     with entry.connected_pool_api(context) as api:
-        with pytest.raises(entry.EntryError):
-            api.checks.preflight(context.request)
+        # Isolate external namespace/writer/readiness observations; exercise the
+        # real public preflight, connected entry checks and capacity calculation.
+        monkeypatch.setattr(api, '_scope', lambda: None)
+        monkeypatch.setattr(api, 'qualify_writer_bindings', lambda: None)
+        monkeypatch.setattr(api, '_qualify_database_readiness', lambda: None)
+        with pytest.raises(entry.EntryError, match='initial capacity'):
+            api.preflight(context.request)
         node['status']['allocatable']['ephemeral-storage'] = '512Gi'
-        api.checks.preflight(context.request)
+        api.preflight(context.request)
     assert observed['guard_calls'] == [] and not Path(context.operation['state_dir']).exists()
 
 
@@ -182,6 +187,7 @@ def test_builder_recovery_can_fence_after_installation_capacity_disappears(conne
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from scripts.ops.nebius_pool_startup import stage_pool_startup
     from tests.ops.test_nebius_pool_activation_stage import ActivationAPI
     from tests.ops.test_nebius_pool_cutover import CutoverAPI
     from tests.ops.test_nebius_pool_startup import StartupAPI
@@ -193,12 +199,15 @@ def test_builder_recovery_can_fence_after_installation_capacity_disappears(conne
         # Use the real connected private/source/database/provider checks and
         # platform inventory; only external write transports are doubled.
         parent.checks.preflight(request)
+        parent.checks.qualify_initial_capacity(request)
         closed = CutoverAPI(request)
         for document in closed.documents.values():
             document['metadata'].setdefault('resourceVersion', '1')
         assert stage_pool_cutover(request=request, tokens=context.tokens, api=closed,
             source_credentials=credentials, state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
         startup = StartupAPI(request, closed, state)
+        assert stage_pool_startup(request=request, api=startup, state_dir=state,
+            anchor_dir=anchor)['status'] == 'pool_startup_staged_closed'
 
         class RecoveryAPI(ActivationAPI):
             def verify_retained(self):
@@ -209,13 +218,17 @@ def test_builder_recovery_can_fence_after_installation_capacity_disappears(conne
 
         recovery = RecoveryAPI((request, context.tokens, closed, startup, None, state.parent))
         recovery.state = state
-        recovery.mode = 'global'
+        assert advance_pool_activation(request=request, api=recovery, state_dir=state,
+            anchor_dir=anchor)['status'] == 'pool_activation_complete'
+        recovery.calls.clear()
+        recovery.runtime_checks = 0
         recovery.ready = False
-        recovery.guards = dict.fromkeys(recovery.guards, 'open')
         if capacity_loss == 'headroom':
             node['status']['allocatable']['ephemeral-storage'] = '32Gi'
         else:
             node['status']['conditions'] = [{'type': 'Ready', 'status': 'False'}]
+        with pytest.raises(entry.EntryError, match='initial capacity'):
+            parent.checks.qualify_initial_capacity(request)
         result = advance_pool_activation(request=request, api=recovery, state_dir=state,
             anchor_dir=anchor, cancel=True)
         assert result['status'] == 'pool_activation_cancelled'

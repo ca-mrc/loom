@@ -276,6 +276,16 @@ class PoolCutoverEntryChecks:
             else:
                 qualify_pool_manager_database(self.context, self.readers.history, refresh=self.refresh)
             qualify_pool_provider(self.context, self.readers.base)
+            self.current()
+        except Exception:
+            raise EntryError("pool cutover connected prerequisites unqualified") from None
+
+    def qualify_initial_capacity(self, request: PoolCutoverRequest) -> None:
+        """New delivery must fit; retained recovery must not require spare space."""
+        try:
+            if request != self.context.request:
+                raise ValueError
+            self.current()
             application = request.application_delivery
             if application is not None and self.refresh is None:
                 deployment = derive_application_build_deployment(application.before,
@@ -287,7 +297,7 @@ class PoolCutoverEntryChecks:
                     settings=self.context.original.inputs.prerequisites).platform_capacity(fit)
             self.current()
         except Exception:
-            raise EntryError("pool cutover connected prerequisites unqualified") from None
+            raise EntryError("pool cutover initial capacity unqualified") from None
 
     def qualify_quiescence(self) -> None:
         # The HTTPS parent independently checks schema, retired application

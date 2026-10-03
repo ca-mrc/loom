@@ -68,6 +68,7 @@ if TYPE_CHECKING:
 
 class PoolCutoverChecks(Protocol):
     def preflight(self, request: PoolCutoverRequest) -> None: ...
+    def qualify_initial_capacity(self, request: PoolCutoverRequest) -> None: ...
     def qualify_quiescence(self) -> None: ...
 
 
@@ -223,6 +224,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         self._scope()
         self.qualify_writer_bindings()
         self.checks.preflight(request)
+        if request.application_delivery is not None:
+            self.checks.qualify_initial_capacity(request)
         self._qualify_database_readiness()
         self.qualify_writer_bindings()
 
