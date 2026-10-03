@@ -41,6 +41,14 @@ Refresh uses dedicated protected metadata and a separate exact-bundle SSH key;
 to another management authority. These are installed-operation entry points, not
 PR validation or evidence that the development environment is already accepted.
 
+The same job and concurrency carry `management-pool-preflight`,
+`management-pool-install` and `management-pool-rollback`. They require dedicated
+`NEBIUS_MANAGEMENT_POOL_OPERATION_JSON` metadata and
+`NEBIUS_MANAGEMENT_POOL_SSH_KEY`, with no other-key fallback. The metadata pins
+the exact integrated tooling/candidate and private cutover operation; rollback
+uses a separate fixed SSH command allowed only for that pool grant. A terminal
+cutover receipt is migration evidence, not multi-owner acceptance.
+
 ## Retained validation
 
 All four protected contexts remain required: `repository-checks`, `images-gate`,
@@ -114,7 +122,18 @@ Go checks validate the retained execution runtime, gateway sandbox, and sandbox
 runtime. Removed host controllers and builder supervisors are not restored by
 manual compatibility selection.
 
-## Integration shard balance
+## Test shard balance
+
+The root Python lane uses eight complete, non-overlapping file shards with the
+existing manifest-owned stable hash salt. The long gateway retirement and two
+restoration files are assigned to separate shards, retaining the previous pins.
+Both previous two-shard jobs
+exhausted their 40-minute limits at approximately 35–36% in PR #2305. The job and
+per-test limits remain unchanged. Each shard stops on its first failing test to
+retain the underlying failure report before its deadline; successful shards run
+every selected test. Other shards are not cancelled, and `repository-checks`
+still requires the aggregate result. This repartitions the expanded lane without
+excluding tests; its new duration balance requires measurement on CI runners.
 
 The fast integration lane uses four complete, non-overlapping file shards.
 `config/component-ownership.toml` owns the stable hash salt and the paired

@@ -9,9 +9,12 @@ import copy
 import hashlib
 import json
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -67,6 +70,26 @@ from scripts.ops.nebius_management_upgrade import _STAGES, ManagementUpgradeRequ
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.deployment import ManagementDeployment, render_management
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_predecessor import CompletedPoolCutover
+
+_PREDECESSORS: ContextVar[tuple[tuple[str, str], ...]] = ContextVar('nebius_predecessors', default=())
+
+
+@contextmanager
+def _predecessor_scope(kind: str, operation: str) -> Iterator[None]:
+    """Bound cross-kind ancestry; ordinary refreshes still load no ancestors."""
+    _uuid(operation)
+    identity = (kind, operation)
+    prior = _PREDECESSORS.get()
+    if identity in prior or len(prior) >= 8:
+        raise ValueError('predecessor ancestry is cyclic or too deep')
+    token = _PREDECESSORS.set((*prior, identity))
+    try:
+        yield
+    finally:
+        _PREDECESSORS.reset(token)
+
 
 class UpgradePredecessorV1(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
@@ -110,6 +133,7 @@ class CompletedRefresh:
     resources: ManagementRefreshResourcesRequest
     history: dict[Path, str]
     retained: dict[str, dict[str, Any]]
+    pool_baseline: CompletedPoolCutover | None = None
 
 
 def load_completed_upgrade(selector: UpgradePredecessorV1) -> CompletedUpgrade:
@@ -200,11 +224,21 @@ def load_completed_upgrade(selector: UpgradePredecessorV1) -> CompletedUpgrade:
 
 
 def load_completed_refresh(selector: RefreshPredecessorV1, *, original: CompletedUpgrade) -> CompletedRefresh:
-    """Validate a frozen completion, retaining root plus immediate evidence only.
+    """Qualify bounded root/pool/immediate evidence without replaying an upgrade."""
+    try:
+        with _predecessor_scope('refresh', str(selector.operation_id)):
+            return _load_completed_refresh(selector, original=original)
+    except Exception:
+        raise ValueError('refresh_predecessor_unqualified') from None
+
+
+def _load_completed_refresh(selector: RefreshPredecessorV1, *, original: CompletedUpgrade) -> CompletedRefresh:
+    """Validate a frozen completion, retaining root/pool/immediate evidence only.
 
     The protected selector's completion hash freezes prior ancestry. Do not load
-    ancestors recursively: this receipt must establish its own complete barriers
-    and its final runtime must still satisfy the original fixed authority/material.
+    ordinary ancestors recursively: this receipt establishes its own barriers.
+    Final runtime must satisfy the original fixed authority/material or the
+    independently qualified pool baseline, never an arbitrary before snapshot.
     Live Deployment and resource qualification remains mandatory before writes.
     """
     try:
@@ -248,11 +282,23 @@ def load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complete
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, selector.operation_id,
             contract.get('initial_stopped')),
             setup.binding, setup.shared_namespace_uid, contract['manager_revision'], contract['target_manager_revision'])
-        request = ManagementRefreshInstallRequest(resources, {}, original.upgrade.original_anchor)
+        request = ManagementRefreshInstallRequest(resources, {}, original.upgrade.original_anchor,
+            contract.get('pool_baseline'))
         if (refresh_contract(request) != contract or _uid(render.active) != _uid(original.active)
                 or receipt['active_uid'] != _uid(original.active)):
             raise ValueError
-        _configuration(original.deployment, render.before)
+        pool_baseline = None
+        baseline: CompletedUpgrade | CompletedPoolCutover = original
+        if request.pool_baseline is not None:
+            from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+
+            pool_baseline = load_completed_pool(PoolPredecessorV1.model_validate(request.pool_baseline), original=original)
+            baseline = pool_baseline
+            for path, checksum in baseline.history.items():
+                if ancestry.get(str(path)) != checksum:
+                    raise ValueError
+                read(path, checksum)
+        _configuration(baseline.deployment, render.before)
         rendered = render_refresh(render)
         identity = {'schema': 'loom.nebius-management-refresh-install.v1', 'state_dir': str(state),
             'operation_id': operation, 'binding': asdict(setup.binding),
@@ -305,12 +351,13 @@ def load_completed_refresh(selector: RefreshPredecessorV1, *, original: Complete
                 or _qualified_defaulted(desired, receipt['active']) != canonical_active):
             raise ValueError
         # Independently qualify cumulative runtime/credential preservation against
-        # the original upgrade, not a caller-rewritten before snapshot.
-        rooted = replace(resources.switch, render=replace(render, before=original.deployment, active=original.active))
+        # the original upgrade or its qualified terminal pool baseline, never
+        # just a caller-rewritten before snapshot or unqualified catalog UUID.
+        rooted = replace(resources.switch, render=replace(render, before=baseline.deployment, active=baseline.active))
         if _qualified_defaulted(refresh_target(rooted, 'activate'), receipt['active']) != canonical_active:
             raise ValueError
         active = copy.deepcopy(receipt['active'])
         active['metadata']['uid'] = receipt['active_uid']
-        return CompletedRefresh(selector, render.after, active, resources, history, retained)
+        return CompletedRefresh(selector, render.after, active, resources, history, retained, pool_baseline)
     except Exception:
         raise ValueError('refresh_predecessor_unqualified') from None

@@ -15,12 +15,14 @@ from typing import Any, Protocol
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_dormant import DormantPoolConsumer, dormant_retirement_documents
 from scripts.ops.nebius_pool_migration import (
     PoolMigrationRequest,
     _hash,
     _proof,
     migration_contract,
 )
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_runtime import qualify_participant_actuators
 
 from loom.nebius_platform_render import digest
@@ -33,6 +35,7 @@ class PoolRetirementRequest:
     migration: PoolMigrationRequest
     actuators: tuple[dict[str, Any], ...]
     collectors: tuple[dict[str, Any], ...]
+    dormant_consumers: tuple[DormantPoolConsumer, ...] = ()
 
 
 class PoolRetirementAPI(Protocol):
@@ -45,6 +48,7 @@ class PoolRetirementAPI(Protocol):
     def drained(self, key: str) -> bool: ...
 
 
+@pure_projection
 def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, Any]]:
     try:
         migration_contract(request.migration)
@@ -73,7 +77,11 @@ def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, 
                         raise ValueError
                 elif type(document["spec"].get("suspend")) is not bool or document["spec"].get("concurrencyPolicy") != "Forbid":
                     raise ValueError
-        originals = (*request.collectors, *request.actuators, *(row.controller for row in request.migration.guards))
+        dormant = dormant_retirement_documents(migration=request.migration, actuators=request.actuators,
+            consumers=request.dormant_consumers)
+        originals = (*request.collectors, *(row for row in dormant.values() if row["kind"] == "CronJob"),
+            *request.actuators, *(row for row in dormant.values() if row["kind"] == "Deployment"),
+            *(row.controller for row in request.migration.guards))
         if len({_uid(row) for row in originals}) != len(originals):
             raise ValueError
         result = {}
@@ -87,17 +95,33 @@ def retirement_documents(request: PoolRetirementRequest) -> dict[str, dict[str, 
         raise ValueError("pool_retirement_inputs_unqualified") from None
 
 
-def stopped_document(request: PoolRetirementRequest, key: str) -> dict[str, Any]:
-    desired = _snapshot(retirement_documents(request)[key])
-    desired["metadata"].setdefault("annotations", {})[MARKER] = str(request.migration.registration.spec.operation_id)
+def _stopped_document(original: dict[str, Any], operation: str) -> dict[str, Any]:
+    desired = _snapshot(original)
+    desired["metadata"].setdefault("annotations", {})[MARKER] = operation
     desired["spec"]["suspend" if desired["kind"] == "CronJob" else "replicas"] = True if desired["kind"] == "CronJob" else 0
     return desired
 
 
+def stopped_documents(request: PoolRetirementRequest) -> dict[str, dict[str, Any]]:
+    """Project one qualified roster without rescanning it for every workload."""
+    originals = retirement_documents(request)
+    operation = str(request.migration.registration.spec.operation_id)
+    return {key: _stopped_document(original, operation) for key, original in originals.items()}
+
+
+def stopped_document(request: PoolRetirementRequest, key: str) -> dict[str, Any]:
+    return _stopped_document(retirement_documents(request)[key], str(request.migration.registration.spec.operation_id))
+
+
 def _closed(request: PoolMigrationRequest, state: Path, anchor: Path) -> str:
+    return _read_closed_migration(request, state, anchor, contract_sha256=digest(migration_contract(request)))
+
+
+def _read_closed_migration(request: PoolMigrationRequest, state: Path, anchor: Path, *, contract_sha256: str) -> str:
+    """Read all closure evidence afresh against an input-derived expectation."""
     operation = str(request.registration.spec.operation_id)
     identity = {"schema": "loom.nebius-pool-migration.v1", "operation_id": operation,
-        "state_dir": str(state), "contract_sha256": digest(migration_contract(request))}
+        "state_dir": str(state), "contract_sha256": contract_sha256}
     if json.loads(private_state._private_read(anchor / (operation + ".json"))) != identity:
         raise ValueError
     record = json.loads(private_state._private_read(state / "migration.json", limit=4 * 1024**2))

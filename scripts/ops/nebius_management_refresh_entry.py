@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -42,6 +42,11 @@ from scripts.ops.nebius_management_refresh_supersession import (
     load_failed_refresh,
 )
 from scripts.ops.nebius_management_refresh_switch import ManagementRefreshSwitchRequest
+from scripts.ops.nebius_pool_predecessor import (
+    CompletedPoolCutover,
+    PoolPredecessorV1,
+    load_completed_pool,
+)
 
 from loom_service.environment_management.deployment import ManagementDeployment
 
@@ -51,7 +56,7 @@ class RefreshPrivateInputs(BaseModel):
 
     schema_version: Literal['loom.nebius-management-refresh-private-inputs.v1']
     original_upgrade: UpgradePredecessorV1
-    predecessor: Annotated[UpgradePredecessorV1 | RefreshPredecessorV1, Field(discriminator='kind')]
+    predecessor: Annotated[UpgradePredecessorV1 | RefreshPredecessorV1 | PoolPredecessorV1, Field(discriminator='kind')]
     deployment: ManagementDeployment
     candidate: dict[str, Any]
     profile: dict[str, Any]
@@ -66,7 +71,7 @@ class RefreshPrivateInputs(BaseModel):
 class RefreshContext:
     inputs: RefreshPrivateInputs
     original: CompletedUpgrade
-    predecessor: CompletedUpgrade | CompletedRefresh
+    predecessor: CompletedUpgrade | CompletedRefresh | CompletedPoolCutover
     request: ManagementRefreshInstallRequest
     superseded: FailedRefreshProof | None = None
 
@@ -95,15 +100,19 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
                 or inputs.candidate.get('candidate_sha') != operation['candidate']
                 or inputs.profile.get('candidate_sha') != operation['candidate']):
             raise ValueError
-        predecessor: CompletedUpgrade | CompletedRefresh
+        predecessor: CompletedUpgrade | CompletedRefresh | CompletedPoolCutover
         if isinstance(inputs.predecessor, UpgradePredecessorV1):
             if inputs.predecessor != inputs.original_upgrade:
                 raise ValueError
             predecessor = original
-        else:
+        elif isinstance(inputs.predecessor, RefreshPredecessorV1):
             if inputs.predecessor.operation_id == operation_id:
                 raise ValueError
             predecessor = load_completed_refresh(inputs.predecessor, original=original)
+        else:
+            if inputs.predecessor.operation['operation_id'] == str(operation_id):
+                raise ValueError
+            predecessor = load_completed_pool(inputs.predecessor, original=original)
         render = ManagementRefreshRenderRequest(predecessor.deployment, inputs.deployment, predecessor.active,
             inputs.candidate, inputs.profile, Path(__file__).resolve().parents[2])
         config_name = render_refresh(render).config['metadata']['name']
@@ -130,7 +139,10 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
         resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id,
             superseded.stopped if superseded is not None else None),
             setup.binding, setup.shared_namespace_uid, inputs.manager_revision, inputs.target_manager_revision)
-        request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor)
+        pool_baseline = (predecessor if isinstance(predecessor, CompletedPoolCutover) else
+            predecessor.pool_baseline if isinstance(predecessor, CompletedRefresh) else None)
+        request = ManagementRefreshInstallRequest(resources, history, original.upgrade.original_anchor,
+            None if pool_baseline is None else pool_baseline.selector.model_dump(mode='json'))
         return RefreshContext(inputs, original, predecessor, request, superseded)
     except Exception:
         raise EntryError('management private refresh inputs unqualified') from None
@@ -139,15 +151,31 @@ def _load_refresh_inputs(operation: dict[str, Any], ancestors: tuple[str, ...], 
 @contextmanager
 def connected_refresh_api(context: RefreshContext, operation: dict[str, Any]) -> Iterator[HTTPSManagementRefreshInstaller]:
     original = context.original
-    with connected_checks(original.original_inputs, original.ingress,
-            foundation_candidate=context.inputs.foundation_candidate) as (base, trust, token):
+    with ExitStack() as stack:
+        base, trust, token = stack.enter_context(connected_checks(original.original_inputs, original.ingress,
+            foundation_candidate=context.inputs.foundation_candidate))
         connection = original.original_inputs.operator_connection
         checks = ApplicationUpgradePrerequisites(base=base, settings=context.inputs.prerequisites)
-        with HTTPSManagementRefreshInstaller(request=context.request, original=original, predecessor=context.predecessor,
-            superseded=context.superseded,
+        pool = None
+        if (context.request.pool_baseline is not None or isinstance(context.predecessor, CompletedPoolCutover)
+                or (isinstance(context.predecessor, CompletedRefresh) and context.predecessor.pool_baseline is not None)):
+            from scripts.ops.nebius_pool_cutover_entry import connected_pool_api
+            from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+            from scripts.ops.nebius_pool_refresh_live import HTTPSPoolRefreshAPI
+
+            if not isinstance(context.predecessor, (CompletedPoolCutover, CompletedRefresh)):
+                raise EntryError('pool refresh predecessor differs')
+            projection = PoolManagerRefresh(original, context.predecessor, context.request,
+                Path(operation['state_dir']), context.superseded)
+            # Pool authority keeps its own fixed reader/credential lifetime; do
+            # not widen the retained manager reader into execution namespaces.
+            parent = stack.enter_context(connected_pool_api(projection.qualify().context, refresh=projection))
+            pool = HTTPSPoolRefreshAPI(parent=parent)
+        api = stack.enter_context(HTTPSManagementRefreshInstaller(request=context.request, original=original,
+            predecessor=context.predecessor, superseded=context.superseded, pool=pool,
             state_dir=Path(operation['state_dir']), api_server=connection.endpoint, ssl_context=trust, token=token,
-            runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks) as api:
-            yield api
+            runtime_ca_pem=_private(connection.ca_file, 1024**2).decode(), checks=checks))
+        yield api
 
 
 def execute_refresh(context: RefreshContext, operation: dict[str, Any], action: str) -> dict[str, Any]:

@@ -28,7 +28,12 @@ from scripts.ops.nebius_ingress_bootstrap import validate_config
 from scripts.ops.nebius_ingress_gateway import TLSBinding
 from scripts.ops.nebius_ingress_operation import LiveIngressAPI
 from scripts.ops.nebius_management_bootstrap import BootstrapBinding
-from scripts.ops.nebius_management_gateway import DIAGNOSTIC_STAGES, safe_report, validate_operation
+from scripts.ops.nebius_management_gateway import (
+    DIAGNOSTIC_STAGES,
+    safe_report,
+    validate_action,
+    validate_operation,
+)
 from scripts.ops.nebius_management_install import (
     ManagementInstallRequest,
     install_management,
@@ -231,15 +236,33 @@ def main(operation_path: str, action: str) -> int:
     qualified: dict[str, Any] | None = None
     api: HTTPSManagementInstallationAPI | HTTPSManagementUpgradeAPI | None = None
     try:
-        if action not in {"qualify", "preflight", "install"}:
+        if action not in {"qualify", "preflight", "install", "rollback"}:
             raise ValueError()
         operation = _json(_private(Path(operation_path), 16384))
-        validate_operation(operation)
+        validate_action(action, operation)
         if action == "qualify":
+            if operation['schema'] == 'loom.nebius-management-refresh-operation.v1':
+                # Refresh has deferred pool/rollback readers. Qualify the real
+                # dependency closure before marking this tooling installation
+                # complete, without opening private inputs or any transport.
+                from scripts.ops.nebius_management_refresh_entry import load_refresh_inputs
+
+            elif operation['schema'] == 'loom.nebius-pool-cutover-operation.v1':
+                from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
-        if operation['schema'] == 'loom.nebius-management-refresh-operation.v1':
+        if operation['schema'] == 'loom.nebius-pool-cutover-operation.v1':
+            from scripts.ops.nebius_pool_cutover_entry import (
+                execute_pool_cutover,
+                load_pool_cutover_inputs,
+            )
+
+            pool = load_pool_cutover_inputs(operation)
+            qualified = operation
+            result = execute_pool_cutover(pool, action)
+        elif operation['schema'] == 'loom.nebius-management-refresh-operation.v1':
             from scripts.ops.nebius_management_refresh_entry import (
                 execute_refresh,
                 load_refresh_inputs,
@@ -311,8 +334,9 @@ def main(operation_path: str, action: str) -> int:
                 stage = "operation"
             failure = {"status": "blocked", "stage": stage,
                        **{key: qualified[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
-            if qualified['schema'] == 'loom.nebius-management-refresh-operation.v1':
+            if qualified['schema'] in {'loom.nebius-management-refresh-operation.v1', 'loom.nebius-pool-cutover-operation.v1'}:
                 failure['operation_id'] = qualified['operation_id']
+            if qualified['schema'] == 'loom.nebius-management-refresh-operation.v1':
                 capacity = getattr(error, 'capacity', None)
                 if stage == 'refresh_platform_capacity' and isinstance(capacity, dict):
                     failure['capacity'] = capacity

@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -88,3 +89,58 @@ def test_empty_selection_is_safe_and_selector_failure_still_fails_the_job(
              "SELECT_EXIT": str(selection_exit)},
     )
     assert result.returncode == selection_exit, result.stderr
+
+
+@pytest.mark.parametrize("scope", ["all", "nebius"])
+def test_root_workflow_runs_eight_complete_disjoint_fail_fast_shards(tmp_path: Path, scope: str) -> None:
+    """Exercise the workflow/selector boundary, not a second shard algorithm."""
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+    job = workflow["jobs"]["tests-root"]
+    matrix = job["strategy"]["matrix"]["include"]
+    step = next(row for row in job["steps"] if row.get("name", "").startswith("Pytest"))
+    count = int(step["env"]["SHARD_COUNT"])
+    assert count == 8
+    assert sorted(row["shard_index"] for row in matrix) == list(range(count))
+    complete = subprocess.run(
+        [sys.executable, "scripts/component_ownership.py", "test-paths", "--lane", "tests-root",
+         "--test-scope", scope], cwd=root, text=True, capture_output=True, check=True,
+    ).stdout.splitlines()
+    uv = tmp_path / "uv"
+    uv.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, subprocess, sys\nfrom pathlib import Path\n"
+        "if 'test-paths' in sys.argv:\n"
+        "    sys.exit(subprocess.run([sys.executable, *sys.argv[sys.argv.index('python') + 1:]]).returncode)\n"
+        "assert 'pytest' in sys.argv\n"
+        "Path(os.environ['SELECTED_TEST_ARGS']).write_text(json.dumps(sys.argv))\n"
+        "sys.exit(int(os.environ['PYTEST_EXIT']))\n"
+    )
+    uv.chmod(0o755)
+    shards = []
+    for row in matrix:
+        recorded = tmp_path / f"args-{row['shard_index']}.json"
+        # A failed test remains a failed shard, including the first shard.
+        pytest_exit = 17 if row["shard_index"] == 0 else 0
+        result = subprocess.run(
+            ["bash", "-c", step["run"]], cwd=root, text=True, capture_output=True,
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
+                 "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": str(row["shard_index"]),
+                 "SHARD_COUNT": str(count), "COVERAGE_ENABLED": "false", "TEST_CHANGED_PATHS": "[]",
+                 "CI_TEST_SCOPE": scope, "SELECTED_TEST_ARGS": str(recorded), "PYTEST_EXIT": str(pytest_exit)},
+        )
+        assert result.returncode == pytest_exit, result.stderr
+        arguments = json.loads(recorded.read_text())
+        assert "-x" in arguments or "--maxfail=1" in arguments
+        paths = {arg for arg in arguments if arg.startswith("tests/")}
+        assert paths
+        assert all(paths.isdisjoint(previous) for previous in shards)
+        shards.append(paths)
+    assert set().union(*shards) == set(complete)
+    gateway = next(shard for shard in shards if "tests/ops/test_nebius_pool_gateway_retirement_live.py" in shard)
+    assert gateway.isdisjoint({"tests/ops/test_nebius_pool_role_restoration_live.py",
+                               "tests/ops/test_nebius_pool_template_restoration_live.py"})
+    predecessor_groups = [next(index for index, shard in enumerate(shards) if path in shard) for path in (
+        "tests/ops/test_nebius_pool_predecessor.py", "tests/ops/test_nebius_pool_predecessor_live.py",
+        "tests/ops/test_nebius_pool_refresh_connected.py")]
+    assert len(set(predecessor_groups)) == 3

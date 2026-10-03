@@ -1341,8 +1341,8 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
 
     root_matrix = jobs["tests-root"]["strategy"]["matrix"]["include"]
     assert root_matrix == [
-        {"shard": "1-of-2", "shard_index": 0},
-        {"shard": "2-of-2", "shard_index": 1},
+        {"shard": f"{index + 1}-of-8", "shard_index": index}
+        for index in range(8)
     ]
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
@@ -1366,7 +1366,9 @@ def test_python_test_shards_are_complete_and_non_overlapping() -> None:
         )
         for shard in root_matrix
     ]
-    assert root_shards[0].isdisjoint(root_shards[1])
+    for index, shard in enumerate(root_shards):
+        assert shard
+        assert all(shard.isdisjoint(other) for other in root_shards[index + 1:])
     assert set().union(*root_shards) == set(root_paths)
 
     integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]

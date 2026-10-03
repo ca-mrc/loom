@@ -141,7 +141,7 @@ def test_pool_history_target_denies_foreign_credentials_or_lost_completed_histor
     assert 'private-marker' not in str(error.value)
 
 
-def refresh_case(root, predecessor=None):
+def refresh_case(root, predecessor=None, *, pool_baseline=None):
     """Prepare the real parent request, without staging or cutover."""
     from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
     from scripts.ops.nebius_management_refresh_resources import ManagementRefreshResourcesRequest
@@ -164,16 +164,16 @@ def refresh_case(root, predecessor=None):
     resources = ManagementRefreshResourcesRequest(ManagementRefreshSwitchRequest(render, operation_id),
         setup.binding, setup.shared_namespace_uid, '0168', '0168')
     case = install_case(resources, directory, history={**prior.history, inputs: checksum(inputs)},
-        installation_anchor=root.upgrade.original_anchor)
+        installation_anchor=root.upgrade.original_anchor, pool_baseline=pool_baseline)
     case[1].switch.document['metadata'].update(resourceVersion='30', generation=5)
     return case
 
 
-def complete_refresh(root, predecessor=None):
+def complete_refresh(root, predecessor=None, *, pool_baseline=None):
     """Run real journals with external cluster/proof boundaries doubled."""
     from tests.ops.test_nebius_management_refresh_install import run
 
-    case = refresh_case(root, predecessor)
+    case = refresh_case(root, predecessor, pool_baseline=pool_baseline)
     operation_id = case[0].resources.switch.operation_id
     directory = case[2].parent
     inputs = directory / 'inputs.json'

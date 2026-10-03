@@ -6,6 +6,7 @@ does not itself grant installation authority or accept arbitrary manifests.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
@@ -26,6 +27,9 @@ from scripts.ops.nebius_management_refresh_resources import (
 from scripts.ops.nebius_management_refresh_switch import (
     ManagementRefreshSwitchAPI,
     ManagementRefreshSwitchRequest,
+    refresh_initial,
+    refresh_switch_record,
+    refresh_target,
     switch_refresh,
 )
 from scripts.ops.nebius_management_stage import ManagementStageAPI
@@ -41,6 +45,7 @@ class ManagementRefreshInstallRequest:
     resources: ManagementRefreshResourcesRequest
     history: dict[Path, str]
     installation_anchor: Path
+    pool_baseline: dict[str, Any] | None = None
 
 
 class ManagementRefreshInstallError(RuntimeError):
@@ -93,6 +98,10 @@ def refresh_contract(request: ManagementRefreshInstallRequest) -> dict[str, Any]
         'target_manager_revision': resources.target_manager_revision, 'installation_anchor': str(request.installation_anchor)}
     if resources.switch.initial_stopped is not None:
         contract['initial_stopped'] = resources.switch.initial_stopped
+    if request.pool_baseline is not None:
+        from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1
+
+        contract['pool_baseline'] = PoolPredecessorV1.model_validate(request.pool_baseline).model_dump(mode='json')
     return contract
 
 
@@ -181,6 +190,85 @@ def qualify_refresh_activation(*, request: ManagementRefreshInstallRequest, api:
         raise ManagementRefreshInstallError('activation') from None
 
 
+def refresh_record(request: ManagementRefreshInstallRequest, *, state: Path, anchor: Path,
+                   history: dict[str, str]) -> dict[str, Any] | None:
+    """Qualify the parent anchor and child hashes without installing or locking."""
+    identity = _identity(request, state, history)
+    marker, journal = anchor / (str(request.resources.switch.operation_id) + '.json'), state / 'refresh.json'
+    if not (marker.exists() or marker.is_symlink()):
+        if state.exists() or state.is_symlink():
+            raise ValueError
+        return None
+    if json.loads(private_state._private_read(marker)) != identity:
+        raise ValueError
+    record = json.loads(private_state._private_read(journal, limit=1024**2))
+    if (not isinstance(record, dict) or set(record) != {*identity, 'phases', 'switch_started', 'activation_started', 'completion_sha256'}
+            or any(record[key] != value for key, value in identity.items())
+            or set(record['phases']) != set(_PHASES[:len(record['phases'])])
+            or type(record['switch_started']) is not bool or type(record['activation_started']) is not bool):
+        raise ValueError
+    for phase, item in record['phases'].items():
+        child = state / phase / 'stage.json'
+        if (set(item) != {'sha256', 'proof'} or not child.is_file() or child.is_symlink()
+                or (item['sha256'] is not None and _hash(child) != item['sha256'])):
+            raise ValueError
+    if record['switch_started'] and not (state / 'switch/cutover.json').is_file():
+        raise ValueError
+    if record['activation_started'] and (not record['switch_started']
+            or set(record['phases']) != set(_PHASES)
+            or any(item['sha256'] is None for item in record['phases'].values())
+            or any(record['phases'][phase]['proof'] is None for phase in ('manager-probe', 'shared-probe', 'backup', 'post-migration-probe'))):
+        raise ValueError
+    if record['completion_sha256'] is not None and (not record['activation_started']
+            or _hash(state / 'completion.json') != record['completion_sha256']):
+        raise ValueError
+    return record
+
+
+def refresh_manager_options(request: ManagementRefreshInstallRequest, *, state: Path, anchor: Path) -> tuple[dict[str, Any], ...]:
+    """Only journal-authorized manager states, including both sides of a lost CAS.
+
+    The caller separately qualifies original/predecessor and any superseded
+    failed refresh. These options attest neither current runtime health nor
+    permission to write. Every non-manager pool workload must remain unchanged.
+    """
+    if any(not path.is_absolute() or path != path.resolve() for path in (state, anchor)):
+        raise ValueError
+    history = _history(request)
+    parent = refresh_record(request, state=state, anchor=anchor, history=history)
+    switch = request.resources.switch
+    child = refresh_switch_record(switch, state_dir=state / 'switch')
+    if parent is None or not parent['switch_started']:
+        if child is not None:
+            raise ValueError
+        options = (refresh_initial(switch),)
+    else:
+        if child is None or (child['phase'] in {'activate_intent', 'active'} and not parent['activation_started']):
+            raise ValueError
+        if parent['activation_started']:
+            for phase, item in parent['phases'].items():
+                if phase.endswith('probe') or phase == 'backup':
+                    _proof(request, phase, state, item['proof'])
+                elif item['proof'] is not None:
+                    raise ValueError
+        options = {
+            'prepared': (refresh_initial(switch),),
+            'retire_intent': (refresh_initial(switch), refresh_target(switch, 'retire')),
+            'stopped': (refresh_target(switch, 'retire'),),
+            'activate_intent': (refresh_target(switch, 'retire'), child['active']),
+            'active': (child['active'],),
+        }[child['phase']]
+    # Rendered targets and qualified previews deliberately omit volatile UIDs;
+    # all permitted states retain the same original Deployment identity.
+    result = tuple(copy.deepcopy(row) for row in options)
+    for row in result:
+        row['metadata']['uid'] = _uid(switch.render.active)
+    if (_history(request) != history or refresh_record(request, state=state, anchor=anchor, history=history) != parent
+            or refresh_switch_record(switch, state_dir=state / 'switch') != child):
+        raise ValueError
+    return result
+
+
 def refresh_management(*, request: ManagementRefreshInstallRequest, api: ManagementRefreshInstallAPI,
                        state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Never restart a lost child journal or activate before all runtime barriers."""
@@ -202,33 +290,8 @@ def refresh_management(*, request: ManagementRefreshInstallRequest, api: Managem
             history = _history(request)
             identity = _identity(request, state, history)
             marker, journal = anchor / (str(switch.operation_id) + '.json'), state / 'refresh.json'
-            if marker.exists() or marker.is_symlink():
-                if json.loads(private_state._private_read(marker)) != identity:
-                    raise ValueError
-                record = json.loads(private_state._private_read(journal, limit=1024**2))
-                if (set(record) != {*identity, 'phases', 'switch_started', 'activation_started', 'completion_sha256'}
-                        or any(record[key] != value for key, value in identity.items())
-                        or set(record['phases']) != set(_PHASES[:len(record['phases'])])
-                        or type(record['switch_started']) is not bool or type(record['activation_started']) is not bool):
-                    raise ValueError
-                for phase, item in record['phases'].items():
-                    child = state / phase / 'stage.json'
-                    if (set(item) != {'sha256', 'proof'} or not child.is_file() or child.is_symlink()
-                            or (item['sha256'] is not None and _hash(child) != item['sha256'])):
-                        raise ValueError
-                if record['switch_started'] and not (state / 'switch/cutover.json').is_file():
-                    raise ValueError
-                if record['activation_started'] and (not record['switch_started']
-                        or set(record['phases']) != set(_PHASES)
-                        or any(item['sha256'] is None for item in record['phases'].values())
-                        or any(record['phases'][phase]['proof'] is None for phase in ('manager-probe', 'shared-probe', 'backup', 'post-migration-probe'))):
-                    raise ValueError
-                if record['completion_sha256'] is not None and (not record['activation_started']
-                        or _hash(state / 'completion.json') != record['completion_sha256']):
-                    raise ValueError
-            else:
-                if state.exists() or state.is_symlink():
-                    raise ValueError
+            record = refresh_record(request, state=state, anchor=anchor, history=history)
+            if record is None:
                 record = {**identity, 'phases': {}, 'switch_started': False, 'activation_started': False, 'completion_sha256': None}
             stage = 'prerequisites'
             api.preflight(request)

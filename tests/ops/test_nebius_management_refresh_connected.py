@@ -154,6 +154,7 @@ def connected_refresh(completed_upgrade, monkeypatch):
             assert document['kind'] in {'ConfigMap', 'Job'}
             observed = external.default_resource(document)
             observed['metadata'].setdefault('uid', str(uuid4()))
+            observed['metadata'].update(resourceVersion='77', generation=1)
             if not message.url.params:
                 if document['kind'] == 'Job':
                     observed['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}

@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 
@@ -28,6 +29,17 @@ from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.environment_management.deployment import mount_pool_profiles
 from loom_service.pool_management.installation_render import mount_machine_token
+
+
+class _RetainedPoolCollectorSettings(PoolCapacityCollectorSettings):
+    """Validate only protected retained inputs, never the operator's environment."""
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource, env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource, file_secret_settings: PydanticBaseSettingsSource,
+            ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
 
 
 class PoolCollectorCredential(BaseModel):
@@ -325,7 +337,7 @@ retained for the existing two-file initializer, but now holds observer authority
         values.update(pool_id=spec.pool_id, management_url=management_origin,
             nebius_credentials_file=paths[prefix + "NEBIUS_CREDENTIALS_FILE"],
             management_bearer_token_file=paths[prefix + "CONTROL_PLANE_BEARER_TOKEN_FILE"])
-        settings = PoolCapacityCollectorSettings(_env_file=None, **values)
+        settings = _RetainedPoolCollectorSettings(_env_file=None, **values)
         quotas = {key: (settings.nebius_quota_parent_id or settings.nebius_project_id, settings.nebius_region,
             settings.quota_service, getattr(settings, "quota_" + key + "_name"), getattr(settings, "quota_" + key + "_unit"))
             for key in ("nodes", "vcpu", "memory", "storage") if getattr(settings, "quota_" + key + "_name") is not None}

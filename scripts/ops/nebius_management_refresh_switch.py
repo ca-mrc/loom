@@ -158,6 +158,25 @@ def qualify_refresh_drain(request: ManagementRefreshSwitchRequest, *, deployment
         raise ValueError('management refresh drain observation unqualified') from None
 
 
+def refresh_switch_record(request: ManagementRefreshSwitchRequest, *, state_dir: Path) -> dict[str, Any] | None:
+    """Read the existing fixed switch contract without replaying any operation."""
+    identity = refresh_switch_identity(request, state_dir)
+    path = state_dir / 'cutover.json'
+    if not (path.exists() or path.is_symlink()):
+        return None
+    record = json.loads(private_state._private_read(path, limit=4 * 1024**2))
+    if (not isinstance(record, dict) or set(record) != {*identity, 'original', 'phase', 'active'}
+            or any(record[key] != value for key, value in identity.items())
+            or record['original'] != refresh_initial(request)
+            or record['phase'] not in {'prepared', 'retire_intent', 'stopped', 'activate_intent', 'active'}
+            or (record['phase'] in {'activate_intent', 'active'}) != (record['active'] is not None)):
+        raise ValueError('management refresh switch history differs')
+    if (record['active'] is not None
+            and _qualified_defaulted(refresh_target(request, 'activate'), record['active']) != record['active']):
+        raise ValueError('management refresh switch preview differs')
+    return record
+
+
 def switch_refresh(*, request: ManagementRefreshSwitchRequest, api: ManagementRefreshSwitchAPI,
                    state_dir: Path, activate: bool) -> bool:
     """Stop/drain or activate exactly once; an unresolved write stays unresolved."""
@@ -169,17 +188,8 @@ def switch_refresh(*, request: ManagementRefreshSwitchRequest, api: ManagementRe
         with private_state._locked_state(state_dir):
             path = state_dir / 'cutover.json'
             actual = api.read()
-            if path.exists() or path.is_symlink():
-                record = json.loads(private_state._private_read(path, limit=4 * 1024**2))
-                if (set(record) != {*identity, 'original', 'phase', 'active'}
-                        or any(record[key] != value for key, value in identity.items())
-                        or record['original'] != original
-                        or record['phase'] not in {'prepared', 'retire_intent', 'stopped', 'activate_intent', 'active'}
-                        or (record['phase'] in {'activate_intent', 'active'}) != (record['active'] is not None)):
-                    raise ValueError
-                if record['active'] is not None and _qualified_defaulted(desired, record['active']) != record['active']:
-                    raise ValueError
-            else:
+            record = refresh_switch_record(request, state_dir=state_dir)
+            if record is None:
                 if activate or not _matches(actual, original, uid):
                     raise ValueError
                 record = {**identity, 'original': copy.deepcopy(original), 'phase': 'prepared', 'active': None}

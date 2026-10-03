@@ -223,6 +223,41 @@ def save_private(metadata, payload):
     metadata["inputs_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize("damage", [None, "extra_field", "running", "database"])
+def test_private_cutover_loads_only_explicit_qualified_dormant_consumers(private_cutover, damage):
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_cutover import cutover_documents, retained_cutover_workloads
+    from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    metadata, payload, _ = private_cutover
+    original = load_pool_cutover_inputs(metadata)
+    consumer = dormant_consumer(original.request.fencing.retirement)
+    value = asdict(consumer)
+    if damage == "extra_field":
+        value["allow_remote_write"] = True
+    elif damage == "running":
+        value["actuator"]["spec"]["replicas"] = 1
+    elif damage == "database":
+        settings = {row["name"]: row for row in value["actuator"]["spec"]["template"]["spec"]["containers"][0]["env"]}
+        settings["LOOM_EXECUTION_ACTUATOR_DB_URL"]["valueFrom"]["secretKeyRef"]["name"] = "foreign-database"
+    payload["dormant_consumers"] = [value]
+    save_private(metadata, payload)
+    if damage:
+        with pytest.raises(EntryError):
+            load_pool_cutover_inputs(metadata)
+        return
+    context = load_pool_cutover_inputs(metadata)
+    assert context.request.fencing.retirement.dormant_consumers == (consumer,)
+    runtime = cutover_documents(context.request)["runtime"]
+    retained = retained_cutover_workloads(context.request,
+        state_dir=Path(metadata["state_dir"]), anchor_dir=Path(metadata["anchor_dir"]))
+    for kind, document in (("Deployment", consumer.actuator), ("CronJob", consumer.collector)):
+        key = kind + ":" + document["metadata"]["namespace"] + ":" + document["metadata"]["name"]
+        assert key in retained and key not in runtime
+        assert retained[key]["metadata"]["uid"] == document["metadata"]["uid"]
+
+
 @pytest.fixture
 def connected_cutover_entry(private_cutover, monkeypatch):
     """The already-qualified reader transport is doubled, not the new assembly."""
@@ -362,6 +397,33 @@ def test_concrete_cutover_checks_requalify_the_bound_readers(connected_cutover_e
     assert all(transport.client.is_closed for transport in (api, api.retirement, api.fencing, api.migration.registration))
 
 
+@pytest.mark.parametrize('stage', ['startup', 'activation'])
+def test_connected_startup_reuses_the_exact_parent_transport_without_mutations(connected_cutover_entry, stage):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    context, readers, observed = connected_cutover_entry
+    closed = CutoverAPI(context.request)
+    for document in closed.documents.values():
+        document['metadata'].setdefault('resourceVersion', '1')
+    state, anchor = Path(context.operation['state_dir']), Path(context.operation['anchor_dir'])
+    assert stage_pool_cutover(request=context.request, tokens=context.tokens, api=closed,
+        state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
+    before = {path: path.read_bytes() for path in state.rglob('*.json')}
+    connect = entry.connected_pool_startup_api if stage == 'startup' else entry.connected_pool_activation_api
+    with connect(context) as startup:
+        parent = startup.parent
+        assert startup.request == context.request and startup.state == state and startup.anchor == anchor
+        assert parent.guards is readers.guards and parent.history is readers.history
+        assert not observed['closed']
+        assert not (state / 'startup.json').exists()
+        assert not (state / 'activation.json').exists()
+        assert {path: path.read_bytes() for path in state.rglob('*.json')} == before
+    assert observed['closed'] and all(transport.client.is_closed for transport in (
+        parent, parent.retirement, parent.fencing, parent.migration.registration))
+
+
 @pytest.mark.parametrize("failure", [None, "before", "after"])
 def test_connected_registration_stages_once_and_does_not_confuse_creation_with_success(connected_cutover_entry, failure):
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -431,6 +493,69 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
     assert len(context.tokens) == len(payload["machine_token_files"])
     assert {path: path.read_bytes() for path in root.history} == before
     assert not Path(metadata["state_dir"]).exists()
+
+
+def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is_readonly(private_cutover, monkeypatch):
+    from contextlib import contextmanager
+
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from scripts.ops.nebius_management_entry import EntryError
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    metadata, _, _ = private_cutover
+    selected = entry.load_pool_cutover_inputs(metadata)
+    parent = CutoverAPI(selected.request)
+    parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    opened = []
+
+    @contextmanager
+    def connect(context):
+        assert context == selected
+        opened.append('opened')
+        try:
+            yield parent
+        finally:
+            opened.append('closed')
+
+    monkeypatch.setattr(entry, 'connected_pool_api', connect)
+    assert entry.execute_pool_cutover(selected, 'preflight') == {
+        'status': 'preflight_qualified', 'operation_id': metadata['operation_id']}
+    assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
+    assert opened == ['opened', 'closed']
+    with pytest.raises(EntryError):
+        entry.execute_pool_cutover(selected, 'open')
+    path = Path(metadata['inputs_path'])
+    path.write_bytes(path.read_bytes() + b'\n')
+    with pytest.raises(EntryError):
+        entry.execute_pool_cutover(selected, 'install')
+    assert opened == ['opened', 'closed'] and not parent.state_dir.exists()
+
+
+def test_protected_main_routes_pool_preflight_through_bound_operation(private_cutover, monkeypatch, capsys):
+    from contextlib import contextmanager
+
+    from scripts.ops import nebius_management_entry as management
+    from scripts.ops import nebius_pool_cutover_entry as entry
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+
+    metadata, _, _ = private_cutover
+    selected = entry.load_pool_cutover_inputs(metadata)
+    parent = CutoverAPI(selected.request)
+    parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    path = Path(metadata['inputs_path']).with_name('operation.json')
+    path.write_text(json.dumps(metadata))
+    path.chmod(0o600)
+
+    @contextmanager
+    def connect(context):
+        assert context == selected
+        yield parent
+
+    monkeypatch.setattr(entry, 'connected_pool_api', connect)
+    assert management.main(str(path), 'preflight') == 0
+    assert json.loads(capsys.readouterr().out) == {'status': 'preflight_qualified',
+        **{key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
+    assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
 
 
 def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
@@ -664,8 +789,23 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     assert not Path(metadata['state_dir']).exists()
 
 
+def _cancel_and_fence_recovery(context, metadata, closed, successor):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_startup_fence import FenceAPI
+
+    state, anchor = Path(metadata['state_dir']), Path(metadata['anchor_dir'])
+    api = FenceAPI((context.request, context.tokens, closed, successor, None, state.parent))
+    api.state = state
+    assert advance_pool_activation(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor, cancel=True)['status'] == 'pool_activation_cancelled'
+    assert fence_pool_startup(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor)['status'] == 'startup_writes_fenced'
+
+
 @pytest.mark.parametrize('damage', [None, 'running_again', 'backend', 'copied_secret_drift'])
-def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_retired_pods(private_cutover, damage):
+@pytest.mark.parametrize('startup', [None, 'started', 'uncertain', 'fenced'])
+def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_retired_pods(private_cutover, damage, startup):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -684,12 +824,28 @@ def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_ret
         state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
     migration = context.request.fencing.retirement.migration
     by_key = api.documents
+    if startup:
+        from scripts.ops.nebius_pool_startup import stage_pool_startup
+        from tests.ops.test_nebius_pool_startup import StartupAPI
+
+        successor = StartupAPI(context.request, api, Path(metadata['state_dir']))
+        if startup in {'uncertain', 'fenced'}:
+            successor.fail_key = _key(migration.guards[0].controller)
+            successor.failure = 'before'
+        result = stage_pool_startup(request=context.request, api=successor,
+            state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+        assert result['status'] == ('pending_startup_outcome' if startup in {'uncertain', 'fenced'} else 'pool_startup_staged_closed')
+        by_key = successor.documents
+        if startup == 'uncertain':
+            by_key[successor.fail_key]['spec']['replicas'] = 1  # The delayed CAS commits.
+        elif startup == 'fenced':
+            _cancel_and_fence_recovery(context, metadata, api, successor)
     reads = []
     def get(kind, name, namespace=None):
         assert kind == 'deployment'
         value = copy.deepcopy(by_key['Deployment:' + namespace + ':' + name])
         if damage == 'running_again' and name == 'loom-control-plane':
-            value['spec']['replicas'] = 1
+            value['spec']['replicas'] = 2 if startup else 1
         return value
 
     def credential(original, *, url_variable, credential_uid, credential_resource_version):
@@ -720,7 +876,8 @@ def test_entry_recovery_qualifies_stopped_rewired_references_without_exec_in_ret
 
 
 @pytest.mark.parametrize('damage', [None, 'running_again', 'backend', 'credential_drift'])
-def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(private_cutover, damage):
+@pytest.mark.parametrize('startup', [None, 'started', 'uncertain', 'fenced'])
+def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(private_cutover, damage, startup):
     from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -736,14 +893,31 @@ def test_stopped_manager_recovery_keeps_its_backend_binding_without_restarting(p
         document['metadata'].setdefault('resourceVersion', '1')
     stage_pool_cutover(request=context.request, tokens=context.tokens, api=api,
         state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+    by_key = api.documents
+    if startup:
+        from scripts.ops.nebius_ingress_stage import _key
+        from scripts.ops.nebius_pool_startup import stage_pool_startup
+        from tests.ops.test_nebius_pool_startup import StartupAPI
+
+        successor = StartupAPI(context.request, api, Path(metadata['state_dir']))
+        if startup in {'uncertain', 'fenced'}:
+            successor.fail_key, successor.failure = _key(context.request.manager), 'before'
+        result = stage_pool_startup(request=context.request, api=successor,
+            state_dir=Path(metadata['state_dir']), anchor_dir=Path(metadata['anchor_dir']))
+        assert result['status'] == ('pending_startup_outcome' if startup in {'uncertain', 'fenced'} else 'pool_startup_staged_closed')
+        by_key = successor.documents
+        if startup == 'uncertain':
+            by_key[successor.fail_key]['spec']['replicas'] = 1
+        elif startup == 'fenced':
+            _cancel_and_fence_recovery(context, metadata, api, successor)
     target = derive_management_history_target(original=context.original, predecessor=context.predecessor, credential=history_credential(root))
     reads = []
 
     def get(kind, name, namespace):
         assert kind == 'deployment' and (namespace, name) == (target.namespace, 'loom-service')
-        value = copy.deepcopy(api.documents['Deployment:' + namespace + ':' + name])
+        value = copy.deepcopy(by_key['Deployment:' + namespace + ':' + name])
         if damage == 'running_again':
-            value['spec']['replicas'] = 1
+            value['spec']['replicas'] = 2 if startup else 1
         return value
 
     def credential(original, **binding):
