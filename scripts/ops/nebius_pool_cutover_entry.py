@@ -91,6 +91,18 @@ from loom_service.environment_management.candidates import (
 )
 from loom_service.pool_management.installation import PoolInstallation
 
+_CONNECTION_ERRORS = {
+    'pool cutover publication unqualified': 'publication',
+    'pool cutover operator readers unqualified': 'operator_readers',
+    'pool cutover runtime databases unqualified': 'runtime_databases',
+    'pool cutover runtime telemetry unqualified': 'runtime_telemetry',
+    'pool cutover management database unqualified': 'management_database',
+    'pool cutover provider unqualified': 'provider',
+    'pool cutover connected scope unqualified': 'connected_scope',
+    'pool cutover context changed before connection': 'private_inputs',
+    'pool cutover context changed during publication': 'private_inputs',
+}
+
 if TYPE_CHECKING:
     from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
 
@@ -704,5 +716,10 @@ def execute_pool_cutover(context: PoolCutoverContext, action: str) -> dict[str, 
             return run_pool_operation(parent=parent, tokens=context.tokens, action=action)
     except PoolOperationError:
         raise
+    except EntryError as error:
+        # Only exact, locally authored prerequisite codes cross the gateway.
+        # Unknown errors remain coarse; no exception text or provider payload
+        # becomes an operational diagnostic or permission to retry a write.
+        raise PoolOperationError(_CONNECTION_ERRORS.get(str(error), 'connection')) from None
     except Exception:
         raise PoolOperationError('connection') from None
