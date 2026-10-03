@@ -4,13 +4,39 @@ import json
 import threading
 import time
 import urllib.request
-
-import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from loom.service_execution_task import run_direct_completion
+import pytest
+
+from loom.service_execution_task import (
+    ServiceExecutionTaskError,
+    run_direct_completion,
+    task_artifact_paths,
+)
+
+
+@pytest.mark.parametrize(("selector", "legacy"), [("0", None), ("", None), ("1", "[]"), (None, '[1]')])
+def test_artifact_paths_reject_ambiguous_or_malformed_transport(tmp_path, monkeypatch, selector, legacy):
+    for name, value in (("LOOM_TASK_ARTIFACTS_FROM_INPUT", selector), ("LOOM_TASK_ARTIFACTS_JSON", legacy)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with pytest.raises(ServiceExecutionTaskError):
+        task_artifact_paths(tmp_path)
+
+
+def test_artifact_input_rejects_multiple_steps(tmp_path, monkeypatch):
+    from tests.unit.test_service_execution_materialization import _task
+
+    task = _task()
+    task = task.model_copy(update={"steps": [*task.steps, task.steps[0].model_copy(update={"name": "second"})]})
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")
+    monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON", raising=False)
+    with pytest.raises(ServiceExecutionTaskError, match="one task step"):
+        task_artifact_paths(tmp_path, task)
 
 
 def test_direct_completion_waits_for_slow_loopback_model_response(tmp_path, monkeypatch):

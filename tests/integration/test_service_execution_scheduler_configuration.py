@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
+    Batch,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
     ExecutionCostReservation,
@@ -27,10 +28,12 @@ from tests.integration.test_service_execution_leases import (
     _seed_ready_trial,
 )
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
+from tests.unit.test_service_execution_materialization import _profile, _provenance, _task, _trial
 
 
+@pytest.mark.parametrize("automatic", [False, True])
 async def test_invalid_runtime_contract_does_not_block_next_trial_or_leak_input(
-    postgres_url: str, caplog: pytest.LogCaptureFixture,
+    postgres_url: str, caplog: pytest.LogCaptureFixture, automatic: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -48,7 +51,18 @@ async def test_invalid_runtime_contract_does_not_block_next_trial_or_leak_input(
             task = await session.get(Task, invalid.task_id)
             assert task is not None
             config = deepcopy(task.config)
-            config["service_execution"]["runtime_template"]["main"]["environment"] = {"LOOM_TASK_ARTIFACTS_JSON": private_input}
+            if automatic:
+                # A frozen older controller cannot read declarations from its
+                # task input. Reject its oversized plan without reselecting it.
+                config = _task().model_dump(mode="json")
+                config["steps"][0]["artifacts"] = [f"private-configuration-sentinel-{i:04}.txt" for i in range(515)]
+                task.source_provenance = _provenance()
+                batch = await session.get(Batch, invalid.batch_id)
+                assert batch is not None
+                batch.service_execution_runtime_profile = _profile().model_dump(mode="json")
+                invalid.config = _trial().model_dump(mode="json")
+            else:
+                config["service_execution"]["runtime_template"]["main"]["environment"] = {"LOOM_TASK_ARTIFACTS_JSON": private_input}
             task.config = config
             next_id, _ = await _seed_ready_trial(session, now=now)
             await _configure_scheduler_trial(session, trial_id=next_id, now=now)

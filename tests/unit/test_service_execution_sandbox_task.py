@@ -34,6 +34,10 @@ async def test_collects_many_immutable_input_artifacts_after_agent_exit(
         return uuid4(), uuid4()
 
     async def terminus(**kwargs):
+        # The agent can replace its public task.toml, but declarations belong
+        # to the controller's frozen input, never the returned workspace.
+        agent.filesystem[PurePosixPath("/app/task.toml")] = b'[[steps]]\nartifacts = ["forged.txt"]\n'
+        agent.filesystem[PurePosixPath("/app/forged.txt")] = b"untrusted"
         for path in (*paths, "required.txt"):
             agent.filesystem[PurePosixPath("/app") / path] = path.encode()
         (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
@@ -49,6 +53,7 @@ async def test_collects_many_immutable_input_artifacts_after_agent_exit(
         await run_agent(tmp_path, task, trial)
     for path in (*paths, "required.txt"):
         assert (tmp_path / ".loom/collected" / path).read_bytes() == path.encode()
+    assert not (tmp_path / ".loom/collected/forged.txt").exists()
     assert agent.state == "stopped"
 
 

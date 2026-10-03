@@ -10,9 +10,11 @@ Kubernetes rendering.
 from __future__ import annotations
 
 import inspect
+import json
 import re
 
 import pytest
+from pydantic import ValidationError
 
 import loom.hosted_harness as hosted
 import loom.task_sandbox_planner as planner
@@ -106,6 +108,41 @@ def test_many_artifact_paths_compile_without_oversized_environment(name: str) ->
     assert plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
     assert "LOOM_TASK_ARTIFACTS_JSON" not in plan.main.environment
     assert task.steps[0].artifacts == paths
+
+
+@pytest.mark.parametrize("name", ["direct-completion", "oracle-shared", "terminus-2-separate"])
+@pytest.mark.parametrize("encoded_bytes", [4096, 4097])
+@pytest.mark.parametrize("supports_inputs", [False, True])
+def test_artifact_transport_respects_frozen_profile_and_environment_boundary(
+    name: str, encoded_bytes: int, supports_inputs: bool,
+) -> None:
+    from loom.service_execution_materialization import compile_service_execution_plan
+
+    task, trial, profile = _CASES[name]()
+    # Direct-completion uses compact JSON; the sandbox's legacy encoding uses
+    # spaces. Size the fixture against each existing wire format.
+    separators = (",", ":") if name == "direct-completion" else (", ", ": ")
+    paths = [f"out/{index:04}" for index in range(339)]
+    paths[-1] += "a" * (encoded_bytes - len(json.dumps(paths, separators=separators)))
+    encoded = json.dumps(paths, separators=separators)
+    assert len(encoded.encode("utf-8")) == encoded_bytes
+    task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+        "artifacts": paths, "required_artifacts": [],
+    })]})
+    profile = profile.model_copy(update={"supports_task_artifact_inputs": supports_inputs})
+    arguments = dict(task=task, trial=trial, profile=profile,
+                     source_provenance=_provenance(), task_revision_sha256=_REVISION)
+    if encoded_bytes > 4096 and not supports_inputs:
+        with pytest.raises(ValidationError, match="process environment value is invalid"):
+            compile_service_execution_plan(**arguments)
+        return
+    plan = compile_service_execution_plan(**arguments)
+    if encoded_bytes > 4096:
+        assert plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
+        assert "LOOM_TASK_ARTIFACTS_JSON" not in plan.main.environment
+    else:
+        assert plan.main.environment["LOOM_TASK_ARTIFACTS_JSON"] == encoded
+        assert "LOOM_TASK_ARTIFACTS_FROM_INPUT" not in plan.main.environment
 
 
 @pytest.mark.parametrize("shared", [False, True])

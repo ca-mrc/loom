@@ -21,6 +21,29 @@ from tests.support.execution_image_admission import signed_image_admission_bundl
 from tests.unit.test_service_execution_materialization import _profile, _provenance, _task, _trial
 
 
+@pytest.mark.parametrize("same_controller", [False, True])
+def test_large_artifact_transport_requires_the_qualified_controller(same_controller: bool) -> None:
+    runtime = release()
+    profile = _profile().model_copy(update={
+        "supports_task_artifact_inputs": True,
+        "agent_image_ref": runtime.agent_image_ref if same_controller else None,
+    })
+    profile = freeze_agent_runtime_releases(profile, (runtime,))
+    task = _task()
+    task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+        "artifacts": [f"out/part-{index:04}.json" for index in range(515)],
+    })]})
+    trial = _trial().model_copy(update={"agent_name": "terminus-2", "agent_version": runtime.agent_version})
+    arguments = dict(task=task, trial=trial, task_revision_sha256="sha256:" + "c" * 64,
+                     source_provenance=_provenance(), profile=profile)
+    if not same_controller:
+        with pytest.raises(ValidationError, match="process environment value is invalid"):
+            compile_service_execution_plan(**arguments)
+    else:
+        plan = compile_service_execution_plan(**arguments)
+        assert plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
+
+
 @pytest.mark.parametrize("independent_controller", [False, True])
 def test_versions_select_exact_controller_and_frozen_trial_json(
     independent_controller: bool,
