@@ -83,6 +83,56 @@ async def test_reclaim_expired_workers_moves_trials_to_queued(postgres_url: str)
     await engine.dispose()
 
 
+@pytest.mark.parametrize("state", ["claimed", "running", "queued"])
+async def test_reclaim_started_trial_keeps_worker_death_diagnostic(
+    postgres_url: str, state: str,
+):
+    """A started-but-queued legacy row also must lose its dead owner (#19)."""
+    engine = create_async_engine(postgres_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    team_id, worker_id, trial_id = uuid4(), uuid4(), uuid4()
+    task_id = f"worker-death-{trial_id}"
+    now = datetime.now(UTC)
+    started = now - timedelta(seconds=120)
+    try:
+        async with factory() as session, session.begin():
+            session.add(Team(id=team_id, name=f"worker-death-{team_id}"))
+            await session.flush()
+            session.add(TeamQuota(team_id=team_id, max_attempts_ceiling=1))
+            session.add(Worker(id=worker_id, hostname="dead-local-worker", version="test",
+                               capabilities=[], registered_at=started,
+                               last_seen_at=now - timedelta(seconds=60), status="active"))
+            session.add(Task(id=task_id, checksum="0" * 64, config={}))
+            await session.flush()
+            session.add(Trial(id=trial_id, team_id=team_id, task_id=task_id, config={},
+                              requires_caps={}, state=state, worker_id=worker_id,
+                              claimed_at=started, started_at=started, attempt_count=1))
+        async with factory() as session, session.begin():
+            assert await reclaim_expired_workers(session, expiry_sec=15) == 1
+        async with factory() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial.state == "queued"
+            assert trial.worker_id is None
+            assert trial.failure_reason == "worker_lost_claim"
+            assert "worker_heartbeat_expired_reclaimed" in trial.failure_message
+            assert str(worker_id) in trial.failure_message
+            assert f"previous_state={state}" in trial.failure_message
+            assert trial.started_at == started
+            assert trial.next_attempt_at > now
+            diagnostic = trial.failure_message
+        async with factory() as session, session.begin():
+            assert await reclaim_expired_workers(session, expiry_sec=15) == 0
+            assert await sweep_retry_exhausted(session) == [trial_id]
+        async with factory() as session:
+            trial = await session.get(Trial, trial_id)
+            assert trial.state == "failed"
+            assert trial.failure_reason == "retry_exhausted"
+            assert trial.failure_message == diagnostic
+            assert trial.finished_at is not None
+    finally:
+        await engine.dispose()
+
+
 async def test_reclaim_preserves_prod_pressure_retry_diagnostic(postgres_url: str):
     engine = create_async_engine(postgres_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

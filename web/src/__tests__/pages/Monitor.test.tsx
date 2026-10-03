@@ -522,7 +522,8 @@ describe("Monitor human-readable labels", () => {
     expect(await screen.findByText("Ada / Dev")).toBeInTheDocument();
     expect(screen.getByLabelText("search")).toHaveValue("ada");
     expect(screen.getByLabelText("filter by state")).toHaveValue("failed");
-    expect(screen.getByLabelText("filter by team")).toHaveValue("team-a");
+    // Admin controls depend on auth, which can settle after the trial rows.
+    expect(await screen.findByLabelText("filter by team")).toHaveValue("team-a");
     expect(screen.getByLabelText("filter by benchmark")).toHaveValue("mbpp");
     expect(screen.getByLabelText("filter by agent name")).toHaveValue("litellm");
     expect(screen.getByLabelText("filter by model provider")).toHaveValue("openai-compatible");

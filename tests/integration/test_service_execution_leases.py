@@ -50,6 +50,7 @@ from loom.db.schema import (
     Trial,
     TrialEvent,
     TrialResourceUsage,
+    Worker,
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
@@ -804,6 +805,51 @@ async def _reserve(
         deadline_at=now + timedelta(seconds=deadline_seconds),
         now=now,
     )
+
+
+@pytest.mark.parametrize("state", ["claimed", "running", "queued"])
+async def test_worker_reclaim_preserves_native_attempt_with_stale_worker_pointer(
+    postgres_url: str, state: str,
+) -> None:
+    """Legacy worker recovery must never requeue a native current attempt."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    worker_id = uuid4()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            session.add(Worker(
+                id=worker_id, hostname="stale-native-pointer", version="test",
+                capabilities=[], registered_at=now - timedelta(minutes=10),
+                last_seen_at=now - timedelta(minutes=5), status="active",
+            ))
+            await session.flush()
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            trial.state = state
+            trial.started_at = now - timedelta(minutes=1)
+            trial.worker_id = worker_id
+            await session.commit()
+            generation = lease.generation
+        async with sessions() as session, session.begin():
+            assert await reclaim_expired_workers(session, expiry_sec=15) == 0
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            lease = await session.get(ServiceExecutionLease, lease.id)
+            assert trial is not None and lease is not None
+            assert trial.state == state
+            assert trial.worker_id == worker_id
+            assert trial.failure_reason is None
+            assert trial.failure_message is None
+            assert trial.next_attempt_at is None
+            assert lease.generation == generation
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(update(Trial).where(Trial.worker_id == worker_id).values(worker_id=None))
+            await session.execute(delete(Worker).where(Worker.id == worker_id))
+        await engine.dispose()
 
 
 async def test_default_catalog_upgrade_preserves_existing_class_identity(postgres_url: str) -> None:
