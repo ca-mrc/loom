@@ -172,8 +172,9 @@ def test_direct_completion_writes_every_declared_artifact(
 
         task = _task()
         paths += [f"out/part-{index:04}.json" for index in range(513)]
-        task.steps[0].artifacts = paths
-        task.steps[0].required_artifacts = [paths[-1], "required.txt"]
+        task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+            "artifacts": paths, "required_artifacts": [paths[-1], "required.txt"],
+        })]})
         (tmp_path / "task.toml").write_text(tomli_w.dumps(task.model_dump(mode="json", exclude_none=True)))
         monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON")
         monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")

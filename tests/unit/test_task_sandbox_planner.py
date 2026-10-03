@@ -91,8 +91,9 @@ def test_many_artifact_paths_compile_without_oversized_environment(name: str) ->
 
     task, trial, profile = _CASES[name]()
     paths = [f"out/part-{index:04}.json" for index in range(515)]
-    task.steps[0].artifacts = paths
-    task.steps[0].required_artifacts = [paths[-1]]
+    task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+        "artifacts": paths, "required_artifacts": [paths[-1]],
+    })]})
     profile = profile.model_copy(update={"supports_task_artifact_inputs": True})
 
     plan = compile_service_execution_plan(

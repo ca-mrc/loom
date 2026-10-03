@@ -20,8 +20,9 @@ async def test_collects_many_immutable_input_artifacts_after_agent_exit(
 ):
     task, trial, _ = _inputs()
     paths = [f"out/part-{index:04}.json" for index in range(515)]
-    task.steps[0].artifacts = paths
-    task.steps[0].required_artifacts = [paths[-1], "required.txt"]
+    task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+        "artifacts": paths, "required_artifacts": [paths[-1], "required.txt"],
+    })]})
     (tmp_path / "instruction.md").write_text("Produce declared output")
     agent = Sandbox()
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
