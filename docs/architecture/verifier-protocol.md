@@ -178,6 +178,10 @@ refuse symlinks in every path component, and atomically replace stale report
 bytes without truncating hardlink targets. The script must write valid output;
 leaving the empty report is a verifier failure. Report preparation failures
 stop execution, retaining the normal phase evidence and cleanup behavior.
+The direct runtime captures a declared report only after successful preparation;
+an earlier execution or preparation failure cannot publish an existing stale
+report or reward. An authored report from a verifier that subsequently fails
+still follows the ordinary partial-evidence rules.
 
 The script must write a `VerifierResult` JSON object to
 `$LOOM_VERIFIER_OUTPUT`:

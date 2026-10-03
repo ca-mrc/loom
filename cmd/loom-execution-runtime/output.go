@@ -21,10 +21,26 @@ func captureDeclaredOutputs(
 	result.Outputs = make([]outputEvidence, 0, len(p.OutputDeclarations))
 	var total int64
 	var firstError error
+	unpreparedVerifier := !result.verifierReportPrepared && (declaresVerifierReport(p.Main) ||
+		(p.Verifier != nil && declaresVerifierReport(*p.Verifier)))
 	for _, declaration := range p.OutputDeclarations {
 		evidence := outputEvidence{
 			SourcePath: declaration.SourcePath, RelativePath: declaration.RelativePath,
 			Kind: declaration.Kind, Required: declaration.Required, State: "missing",
+		}
+		if declaration.Kind == "verifier" && unpreparedVerifier {
+			// Preparation can fail while an old report is still readable, or
+			// execution can stop before the verifier phase. Never publish that
+			// file as this attempt's authored grading evidence.
+			if firstError == nil {
+				firstError = fmt.Errorf("verifier report was not prepared for this execution")
+			}
+			if result.Status == "succeeded" {
+				result.Status = "verifier_error"
+				result.PartialEvidence = true
+			}
+			result.Outputs = append(result.Outputs, evidence)
+			continue
 		}
 		size, digest, err := copyWorkspaceOutput(
 			workspace,

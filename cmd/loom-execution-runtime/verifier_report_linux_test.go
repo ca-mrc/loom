@@ -82,7 +82,9 @@ func TestDirectVerifierCannotCaptureUnpreparedReport(t *testing.T) {
 				p.Main.Argv = []string{"/bin/false"}
 			} else {
 				directory := filepath.Join(workspace, ".loom/verifier")
-				if err := os.Chmod(directory, 0o500); err != nil { t.Fatal(err) }
+				if err := os.Chmod(directory, 0o500); err != nil {
+					t.Fatal(err)
+				}
 				t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
 				// uid 0 without CAP_DAC_OVERRIDE also observes this failure in
 				// the Docker lane. Ordinary privileged root may still write.
@@ -93,15 +95,34 @@ func TestDirectVerifierCannotCaptureUnpreparedReport(t *testing.T) {
 				}
 			}
 			result, err := runPlan(context.Background(), p, workspace, output, nil)
-			if err == nil { t.Fatal("expected execution failure") }
+			if err == nil {
+				t.Fatal("expected execution failure")
+			}
 			if err := captureDeclaredOutputs(p, workspace, output, &result); err == nil {
 				t.Fatal("unprepared report accepted after execution failed before verifier launch")
 			}
-			if len(result.VerifierRewards) != 0 { t.Fatalf("stale reward reused: %#v", result.VerifierRewards) }
+			if len(result.VerifierRewards) != 0 {
+				t.Fatalf("stale reward reused: %#v", result.VerifierRewards)
+			}
 			if len(result.Outputs) != 1 || result.Outputs[0].State != "missing" {
 				t.Fatalf("stale report was published: %#v", result.Outputs)
 			}
 		})
+	}
+}
+
+func TestDirectVerifierRetainsAuthoredPartialReport(t *testing.T) {
+	workspace, output := t.TempDir(), t.TempDir()
+	p := directVerifierPlan(t, workspace, `printf '{"rewards":{"passed":0}}' > "$LOOM_VERIFIER_OUTPUT"; exit 7`)
+	result, err := runPlan(context.Background(), p, workspace, output, nil)
+	if err == nil || result.Status != "verifier_error" {
+		t.Fatal("expected verifier failure")
+	}
+	if err := captureDeclaredOutputs(p, workspace, output, &result); err != nil {
+		t.Fatal(err)
+	}
+	if reward, ok := result.VerifierRewards["passed"]; !ok || reward != 0 || !result.PartialEvidence {
+		t.Fatalf("valid partial report lost: %#v", result)
 	}
 }
 
