@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
     PoolActivationV1,
@@ -46,6 +47,7 @@ from loom_service.pool_management.registry import (
     _WORKLOAD,
     PoolAdmissionError,
     PoolProfiles,
+    prepare_application_image,
     prepare_execution,
     prepare_task_image,
 )
@@ -141,6 +143,8 @@ async def _participant(request: Request, pool_id: UUID,
                     raise _error(503, "pool_profiles_unavailable")
                 if isinstance(workload, PoolExecutionPrepareV1):
                     result = await prepare_execution(session, principal, workload, profiles=profiles)
+                elif isinstance(workload, PoolApplicationImagePrepareV1):
+                    result = await prepare_application_image(session, principal, workload, profiles=profiles)
                 else:
                     result = await prepare_task_image(session, principal, workload, profiles=profiles)
             elif operation in {"stop", "drain"}:

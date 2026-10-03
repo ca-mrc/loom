@@ -12,12 +12,15 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from loom.application_image_build import ApplicationImageRecipeV1
 from loom.execution_contract import ExecutionClassV1
 from loom.execution_image_admission import ImageAdmissionKeyring
+from loom.pipeline.keys import canonical_digest
 from loom.task_image_materialization import NativeCPUArch
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.contracts import ResourceTotals
+from loom_service.pool_management.application_images import PoolApplicationImageProfile
 from loom_service.pool_management.registry import PoolProfiles
 from loom_service.pool_management.render import PoolExecutionProfile
 from loom_service.pool_management.task_images import PoolTaskImageProfile
@@ -78,20 +81,48 @@ class _TaskImage(_Strict):
             target=self.target, settings=self.settings, runtime_class_overhead=self.runtime_class_overhead)
 
 
+class _ApplicationImage(_Strict):
+    profile_id: UUID
+    recipe: ApplicationImageRecipeV1
+    target: ExecutionTargetRuntime
+    settings: NativeTaskImageSettings
+    runtime_class_overhead: ResourceTotals | None = None
+
+    @model_validator(mode="after")
+    def qualified(self) -> _ApplicationImage:
+        _target(self.target, self.runtime_class_overhead)
+        config = self.settings.job_config()
+        if (not self.profile_id.int or self.target.namespace != self.settings.namespace
+                or (config.service_image, config.buildkit_image, config.snapshotter, config.export_cache_mode,
+                    config.oci_export_format) != (self.recipe.trusted_image_ref, self.recipe.buildkit_image_ref,
+                    self.recipe.snapshotter, self.recipe.export_cache_mode, self.recipe.oci_export_format)
+                or (self.settings.cache_secret_name is None) != (self.settings.cache_bucket is None)):
+            raise ValueError("invalid application build profile identity")
+        return self
+
+    def profile(self) -> PoolApplicationImageProfile:
+        return PoolApplicationImageProfile(profile_id=self.profile_id, recipe=self.recipe,
+            target=self.target, settings=self.settings, runtime_class_overhead=self.runtime_class_overhead)
+
+
 class PoolProfileCatalog(_Strict):
     schema_version: Literal["loom.pool-profiles.v1"]
     image_admission_keyring: dict[str, Any]
     execution: tuple[_Execution, ...] = Field(max_length=128)
     task_images: tuple[_TaskImage, ...] = Field(max_length=128)
+    application_images: tuple[_ApplicationImage, ...] = Field(default=(), max_length=128, exclude_if=lambda value: not value)
 
     def profiles(self) -> PoolProfiles:
-        if ((not self.execution and not self.task_images)
+        if ((not self.execution and not self.task_images and not self.application_images)
                 or len({row.profile_id for row in self.execution}) != len(self.execution)
-                or len({row.profile_id for row in self.task_images}) != len(self.task_images)):
+                or len({row.profile_id for row in self.task_images}) != len(self.task_images)
+                or len({row.profile_id for row in self.application_images}) != len(self.application_images)):
             raise ValueError("empty or duplicate pool profiles")
         keyring = ImageAdmissionKeyring.from_json(json.dumps(self.image_admission_keyring))
         return PoolProfiles(MappingProxyType({row.profile_id: row.profile(keyring) for row in self.execution}),
-            MappingProxyType({row.profile_id: row.profile() for row in self.task_images}))
+            MappingProxyType({row.profile_id: row.profile() for row in self.task_images}),
+            MappingProxyType({row.profile_id: row.profile() for row in self.application_images}),
+            canonical_digest(self.model_dump(mode="json")).removeprefix("sha256:"))
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

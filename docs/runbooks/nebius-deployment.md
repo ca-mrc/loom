@@ -63,12 +63,62 @@ loom --context management-alice dev app login APPLICATION_UUID --browser
 ```
 
 Replace uppercase placeholders with verified installation values. `--release`
-selects an application release already qualified in the management installation;
-it is not a branch, candidate ID or local directory. This command does not build
-or publish arbitrary local source. Use the exact `loom --context app-...` command
+selects a protected pinned release or your own completed application build;
+it is not a branch, candidate ID or local directory. `create` itself does not build
+or publish source. Use the exact `loom --context app-...` command
 printed after login to talk to that personal API. The default and management
 contexts, model-provider settings and credentials are not copied or replaced.
 Omit `--browser` on a headless machine.
+
+After the protected source/build runtime is installed, build local feature code
+through that same management context:
+
+```bash
+loom --context management-alice dev app build --source /PATH/TO/CHECKOUT \
+  --idempotency-key alice-feature-1
+loom --context management-alice dev app build-status BUILD_UUID
+loom --context management-alice dev app build-wait BUILD_UUID --timeout 900
+loom --context management-alice dev app create alice --release BUILD_UUID \
+  --idempotency-key alice-create-1
+```
+
+The source capture includes committed, modified and non-ignored untracked files,
+with credential/owner-context exclusions. It is **not CI-approved source**. A build
+uses shared capacity at personal-development priority; it does not deploy anything.
+Only `ready` status, after publication and pool cleanup, includes the qualified
+release. That release ID is the build ID and can also be used with `app update`.
+An unconfigured management installation returns 503; these commands do not bypass
+protected installation or prove that an installation is ready.
+
+After an uncertain response, use the latest printed retry command with its original
+key and management context. Before upload completes the command binds the captured
+source digest; changed source is refused. After verification it uses `--upload-id`
+and no longer reads the checkout. `build-wait` exits 0 only for a ready build,
+1 for failure/cancellation/request errors, and 2 for a local timeout without cancelling
+the remote build. Explicit controls retain the expected attempt from build status:
+
+```bash
+loom --context management-alice dev app build-cancel BUILD_UUID --attempt ATTEMPT
+loom --context management-alice dev app build-retry BUILD_UUID --attempt ATTEMPT
+```
+
+Retry is available only after a failed/cancelled attempt has completed cleanup.
+It keeps the original source and recipe; use a new build key for different source.
+Ready builds cannot be retried or retargeted to different images.
+
+The version sidebar identifies personal source by digest. Its details distinguish
+the JavaScript this page loaded from the backend instance that answered, and show
+the base commit only as informational—not CI approval. A newer served build shows
+an update notice without relabelling or automatically refreshing the current page.
+Compare these reports with the ready build's source digest; they are not a substitute
+for the management operation's deployment/readiness evidence.
+
+Operator installation must deliver the configured source-only Secret, private
+builder token and shared-build read permissions through the protected operation.
+The management renderer reserves 2 GiB of temporary disk per concurrent source
+upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
+Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+Do not hand-mount credentials or treat the renderer as installation authority.
 
 Subsequent lifecycle changes use the same management context:
 
@@ -929,6 +979,12 @@ Roles and RoleBindings in the configured shared/execution/build namespaces,
 their namespace identities and complete ClusterRole/ClusterRoleBinding lists.
 Only identity/version pins for fixed database Secrets and an identity/version/
 SHA256 pin for the fixed collector credential are recorded, not their contents.
+The fixed shared `loom-platform-storage` Secret also supplies an
+`application_source_credential` UID/version pin and SHA256 of canonical JSON
+containing only its source access/secret keys. No source credential bytes are
+exported. The capture rejects malformed material or a changed Secret generation;
+the protected builder cutover independently rereads and qualifies the same pin
+against the actual shared control-plane source consumer before delivery.
 Collection count/size limits and missing pages fail closed. Typed list entries
 inherit omitted Kubernetes kind/version fields from their collection; conflicting
 types are rejected. The private resource snapshot is not atomic and grants no
@@ -1208,6 +1264,10 @@ Pin all production, staging and shared-development participants, dormant consume
 actual namespace/workload/credential identities, provider pool and quota scope,
 effective writer permissions, and the protected candidate/runtime publication.
 Preserve the original management upgrade and immediate completed predecessor.
+Include both configured execution-only guest targets, including the emulated-auth
+target, in the same participant's retained actuator roster and execution profiles.
+They share the ordinary collector and capacity authority; do not omit a running
+sibling or classify it as dormant merely because its originating issue is closed.
 
 Use a new nonzero UUID and private
 `nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The
@@ -1508,7 +1568,7 @@ against changed templates is invalid. A restarted producer, effective extra
 writer grant, changed UID or missing evidence stops further mutation. Do not
 interpret an idle activity count as an empty future queue. The fixed database
 readiness pages also inspect delayed native work and batches awaiting fan-out,
-require schema `0172` and reject live application access even with no connected
+require schema `0173` and reject live application access even with no connected
 session. Preserve unknown queued origins: drain through the existing execution
 path before cutover instead of rewriting provenance or cancelling unrelated work.
 The protected parent still must qualify retained personal origin history in the

@@ -33,6 +33,9 @@ export default defineConfig(({ command }) => ({
     __LOOM_BUILD_REVISION__: JSON.stringify(process.env.VITE_BUILD_REVISION ?? ""),
     __LOOM_BUILD_SOURCE_REF__: JSON.stringify(process.env.VITE_BUILD_SOURCE_REF ?? ""),
     __LOOM_BUILD_TIME__: JSON.stringify(process.env.VITE_BUILD_TIME ?? ""),
+    __LOOM_BUILD_KIND__: JSON.stringify(process.env.VITE_BUILD_KIND ?? ""),
+    __LOOM_SOURCE_DIGEST__: JSON.stringify(process.env.VITE_SOURCE_DIGEST ?? ""),
+    __LOOM_SOURCE_BASE_COMMIT__: JSON.stringify(process.env.VITE_SOURCE_BASE_COMMIT ?? ""),
   },
   // Production builds keep relative assets. The Vite 8.0.16 dev server with
   // `base: "./"` does not match `/api` proxy rules, so `/api/v1/auth/me`

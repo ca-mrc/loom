@@ -42,14 +42,15 @@ from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 from tests.unit.test_nebius_pool_execution_render import inputs
 
 
-async def machine(sessions, pool_id, participant_id=None, *, role=None):
+async def machine(sessions, pool_id, participant_id=None, *, role=None, workload_scope="environment"):
     raw = "loom_pool_" + uuid4().hex + uuid4().hex
     token_hash = hashlib.sha256(raw.encode()).digest()
     machine_id = uuid4()
     async with sessions.begin() as session:
         await session.execute(insert(NebiusPoolMachine).values(
             machine_id=machine_id, pool_id=pool_id, participant_id=participant_id,
-            role=role or ("participant" if participant_id else "observer"), credential_epoch=1, phase="active"))
+            role=role or ("participant" if participant_id else "observer"), workload_scope=workload_scope,
+            credential_epoch=1, phase="active"))
         await session.execute(insert(Token).values(token_hash=token_hash, type="pool_machine", scopes=[],
             issued_at=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(hours=1)))
         await session.execute(insert(NebiusPoolMachineCredential).values(
@@ -60,7 +61,9 @@ async def machine(sessions, pool_id, participant_id=None, *, role=None):
 
 async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
                 parent_id=None, quota_nodes=None, environment_classes=("development", "development"),
-                pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1", namespace_uids=None):
+                pinned=True, memory_quota=True, data_environment_id=None, cluster_id="cluster-1", namespace_uids=None,
+                installation_id=None,
+                workload_kinds=("trial", "verifier", "task_image_build")):
     placement = CapacityPlacement.model_validate(placement_fixture(
         target_id=group_id, parent_id=parent_id, node_cpu=3000, node_memory=8192, node_storage=32768,
         requested_cpu=occupied_cpu, quota_nodes=quota_nodes or max_nodes, used_nodes=1,
@@ -70,6 +73,8 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
         placement = placement.model_copy(update={"quota_resources": {
             key: quota for key, quota in placement.quota_resources.items() if key != "memory"}})
     first, body = inputs()
+    if installation_id is not None:
+        first = first.model_copy(update={"installation_id": installation_id})
     policy = {"observation_max_age_seconds": 60, "max_create_per_minute": 10,
               "max_pending_jobs": 10, "max_unschedulable_jobs": 0,
               "max_image_pull_backoff_jobs": 0, "build_concurrency_limit": 2}
@@ -98,7 +103,7 @@ async def setup(sessions, *, occupied_cpu=0, max_nodes=1, group_id="pool-test",
             "build_namespace": first.build_namespace.model_copy(update={"name": f"{group_id}-build-{index}",
                 "uid": (namespace_uids or {}).get(f"{group_id}-build-{index}", uuid4())}),
             "targets": (first.targets[0].model_copy(update={"profile_id": uuid4(),
-                "workload_kinds": ("trial", "verifier", "task_image_build")}),),
+                "workload_kinds": workload_kinds}),),
         })
         async with sessions.begin() as session:
             await session.execute(insert(NebiusPoolParticipant).values(

@@ -1984,6 +1984,29 @@ def test_all_image_ownership_covers_every_local_copy_input() -> None:
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom/application_image_build.py",
+        "src/loom/application_session.py",
+        "src/loom/application_source.py",
+        "src/loom/application_source_archive.py",
+        "src/loom/application_source_upload.py",
+        "src/loom/native_image_build.py",
+        "src/loom/nebius_application_contract.py",
+        "src/loom/nebius_environment_contract.py",
+        "src/loom/nebius_management_authority.py",
+        "src/loom/nebius_pool_application_image.py",
+    ],
+)
+def test_application_build_dependency_changes_select_actuator_image(path: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest, changed_paths=(path,), force_all=False, image_set="nebius",
+    )
+    assert "execution-actuator" in {entry["image"] for entry in selected}
+
+
+@pytest.mark.parametrize(
     ("path", "consumer"),
     [
         ("src/loom_listen/metrics.py", "egress-xds"),

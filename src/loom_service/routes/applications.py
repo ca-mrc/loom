@@ -6,6 +6,15 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header, Request, Response
 
+from loom.application_image_build import (
+    ApplicationImageBuildAttemptRequestV1,
+    ApplicationImageBuildRequestV1,
+    ApplicationImageBuildStatusV1,
+)
+from loom.application_source_upload import (
+    ApplicationSourceUploadRequestV1,
+    ApplicationSourceUploadV1,
+)
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
     ApplicationOperationRequestV1,
@@ -14,9 +23,11 @@ from loom.nebius_application_contract import (
     ApplicationStatusV1,
 )
 from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
+from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.operation_evidence import read_operation_evidence
+from loom_service.application_management.source_upload import ApplicationSourceUploader
 from loom_service.environment_management.registry import ManagementError
 from loom_service.routes.environments import ManagementPrincipal
 
@@ -29,6 +40,71 @@ def manager(request: Request) -> ApplicationManager:
     if not isinstance(value, ApplicationManager):
         raise ManagementError("application_management_not_configured", 503)
     return value
+
+
+def source_uploader(request: Request) -> ApplicationSourceUploader:
+    value = getattr(request.app.state, "application_source_uploader", None)
+    if not isinstance(value, ApplicationSourceUploader):
+        raise ManagementError("application_source_upload_not_configured", 503)
+    return value
+
+
+def build_registry(request: Request) -> ApplicationBuildRegistry:
+    value = getattr(request.app.state, "application_build_registry", None)
+    if not isinstance(value, ApplicationBuildRegistry):
+        raise ManagementError("application_build_not_configured", 503)
+    return value
+
+
+@router.post("/application-builds", status_code=201)
+async def create_build(request: Request, response: Response, payload: ApplicationImageBuildRequestV1,
+                       principal: ManagementPrincipal, idempotency_key: IdempotencyKey) -> ApplicationImageBuildStatusV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await build_registry(request).create(principal=principal, upload_id=payload.upload_id, idempotency_key=idempotency_key)
+
+
+@router.get("/application-builds/{build_id}")
+async def build_status(request: Request, response: Response, build_id: UUID,
+                       principal: ManagementPrincipal) -> ApplicationImageBuildStatusV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await build_registry(request).status(build_id, principal=principal)
+
+
+@router.post("/application-builds/{build_id}/cancel", status_code=202)
+async def cancel_build(request: Request, response: Response, build_id: UUID, payload: ApplicationImageBuildAttemptRequestV1,
+                       principal: ManagementPrincipal) -> ApplicationImageBuildStatusV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await build_registry(request).cancel(build_id, principal=principal, attempt=payload.attempt)
+
+
+@router.post("/application-builds/{build_id}/retry", status_code=202)
+async def retry_build(request: Request, response: Response, build_id: UUID, payload: ApplicationImageBuildAttemptRequestV1,
+                      principal: ManagementPrincipal) -> ApplicationImageBuildStatusV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await build_registry(request).retry(build_id, principal=principal, attempt=payload.attempt)
+
+
+@router.post("/application-sources", status_code=201)
+async def create_source_upload(request: Request, response: Response, payload: ApplicationSourceUploadRequestV1,
+                               principal: ManagementPrincipal, idempotency_key: IdempotencyKey) -> ApplicationSourceUploadV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).registry.create(principal=principal, request=payload, idempotency_key=idempotency_key)
+
+
+@router.get("/application-sources/{upload_id}")
+async def source_upload_status(request: Request, response: Response, upload_id: UUID,
+                               principal: ManagementPrincipal) -> ApplicationSourceUploadV1:
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).registry.status(upload_id, principal=principal)
+
+
+@router.put("/application-sources/{upload_id}/content")
+async def upload_source_content(request: Request, response: Response, upload_id: UUID,
+                                principal: ManagementPrincipal) -> ApplicationSourceUploadV1:
+    if request.headers.get("content-type", "").lower() != "application/octet-stream":
+        raise ManagementError("application_source_content_type_required", 415)
+    response.headers["Cache-Control"] = "no-store"
+    return await source_uploader(request).upload(upload_id, principal=principal, body=request.stream())
 
 
 @router.post("/applications", status_code=202)

@@ -108,6 +108,10 @@ async def test_private_capture_observes_actual_workloads_and_roles_without_secre
         assert all(row['metadata'].get('namespace') in {None, shared, execution, execution + '-build'}
             and row['kind'] != 'Secret' for row in snapshot['resources'])
         assert 'private-collector' not in (root / 'pool-resources.json').read_text()
+        source = await asyncio.to_thread(core.read_namespaced_secret, 'loom-platform-storage', shared)
+        assert snapshot['application_source_credential']['uid'] == source.metadata.uid
+        assert snapshot['application_source_credential']['resource_version'] == source.metadata.resource_version
+        assert 'private-source' not in (root / 'pool-resources.json').read_text()
         assert set(result) == {'status', 'observation_id', 'candidate_sha'}
         assert (root / 'pool-resources.json').stat().st_mode & 0o777 == 0o600
         assert not (await asyncio.to_thread(core.list_namespaced_pod, shared)).items

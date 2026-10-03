@@ -16,7 +16,7 @@ import re
 import ssl
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -25,6 +25,7 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_application_upgrade_prerequisites import ApplicationUpgradePrerequisites
 from scripts.ops.nebius_ingress_stage import _key, _uid
 from scripts.ops.nebius_management_entry import EntryError, _private, connected_checks
 from scripts.ops.nebius_management_prerequisites import HTTPSManagementPrerequisites
@@ -38,6 +39,12 @@ from scripts.ops.nebius_management_refresh_predecessor import (
 )
 from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+from scripts.ops.nebius_pool_application_delivery import (
+    ApplicationBuildDeliveryRequest,
+    ApplicationSourceCredentialPin,
+    derive_application_build_deployment,
+    qualify_application_source_material,
+)
 from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     cutover_documents,
@@ -106,6 +113,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     services: tuple[dict[str, Any], ...]
     collector_config: dict[str, Any]
     collector_credential: PoolCollectorCredential
+    application_source_credential: ApplicationSourceCredentialPin | None = None
     platform_authority: PoolPlatformAuthority
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     machine_token_files: dict[UUID, Path]
@@ -187,10 +195,16 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
                     or target.database.actuator_credential_resource_version is None for target in inputs.guards)):
             raise ValueError
         migration = PoolMigrationRequest(PoolRegistrationRequest(spec, binding, inputs.candidate), inputs.guards)
+        application_delivery = None
+        if bool(spec.profiles.application_images) != (inputs.application_source_credential is not None):
+            raise ValueError
+        if inputs.application_source_credential is not None:
+            application_delivery = ApplicationBuildDeliveryRequest(predecessor.deployment, inputs.profile,
+                original.upgrade.setup.repo_root, inputs.application_source_credential)
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
             inputs.actuators, inputs.collectors, inputs.dormant_consumers), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
-            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority)
+            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority, application_delivery)
         cutover_documents(request)
         names = {row.machine_id for row in spec.machines}
         paths = set(inputs.machine_token_files.values())
@@ -224,7 +238,7 @@ class PoolCutoverEntryChecks:
     readers: ConnectedPoolReaders
     refresh: PoolManagerRefresh | None = None
 
-    def current(self) -> None:
+    def current(self) -> dict[str, str] | None:
         try:
             context, readers = self.context, self.readers
             migration = context.request.fencing.retirement.migration
@@ -235,6 +249,19 @@ class PoolCutoverEntryChecks:
             if self.refresh is not None and self.refresh.qualify().context != context:
                 raise ValueError
             readers.history.qualify_binding(migration, context.request.manager)
+            application = context.request.application_delivery
+            if application is None:
+                return None
+            shared = application.before.installation.applications
+            if shared is None:
+                raise ValueError
+            namespace = shared.shared.platform_namespace
+            guard, = (row for row in migration.guards if row.namespace == namespace)
+            source = readers.base._request('GET', '/api/v1/namespaces/' + namespace + '/secrets/loom-platform-storage')
+            if source is None:
+                raise ValueError
+            return qualify_application_source_material(before=application.before, controller=guard.controller,
+                secret=source, pin=application.source_credential)
         except Exception:
             raise EntryError("pool cutover connected scope unqualified") from None
 
@@ -252,6 +279,25 @@ class PoolCutoverEntryChecks:
             self.current()
         except Exception:
             raise EntryError("pool cutover connected prerequisites unqualified") from None
+
+    def qualify_initial_capacity(self, request: PoolCutoverRequest) -> None:
+        """New delivery must fit; retained recovery must not require spare space."""
+        try:
+            if request != self.context.request:
+                raise ValueError
+            self.current()
+            application = request.application_delivery
+            if application is not None and self.refresh is None:
+                deployment = derive_application_build_deployment(application.before,
+                    request.fencing.retirement.migration.registration.spec)
+                upgrade = self.context.original.upgrade
+                fit = replace(upgrade, setup=replace(upgrade.setup, deployment=deployment,
+                    candidate=self.context.inputs.candidate, profile=self.context.inputs.profile))
+                ApplicationUpgradePrerequisites(base=self.readers.base,
+                    settings=self.context.original.inputs.prerequisites).platform_capacity(fit)
+            self.current()
+        except Exception:
+            raise EntryError("pool cutover initial capacity unqualified") from None
 
     def qualify_quiescence(self) -> None:
         # The HTTPS parent independently checks schema, retired application
@@ -522,7 +568,9 @@ async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.Asyn
                     runtime.candidate_sha, runtime.runtime_image_ref, runtime.runtime_binary_sha256)
                 for row in inputs.installation.profiles.execution)
                 or any(row.settings.service_image != runtime.task_image_ref
-                    for row in inputs.installation.profiles.task_images)):
+                    for row in inputs.installation.profiles.task_images)
+                or any(row.settings.service_image != runtime.task_image_ref
+                    for row in inputs.installation.profiles.application_images)):
             raise ValueError
     except Exception:
         raise EntryError("pool cutover publication unqualified") from None
@@ -613,14 +661,15 @@ def connected_pool_api(context: PoolCutoverContext, *, refresh: PoolManagerRefre
     connection = connected_pool_readers(context) if refresh is None else connected_pool_readers(context, refresh=refresh)
     with connection as readers:
         checks = PoolCutoverEntryChecks(context, readers, refresh)
-        checks.current()
+        source_credentials = checks.current()
         with HTTPSPoolRegistrationAPI(request=context.request.fencing.retirement.migration.registration,
                 api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token) as registration:
             migration = _ConnectedPoolMigration(checks, registration, lambda: api.preflight(context.request))
             with HTTPSPoolCutoverAPI(request=context.request, tokens=context.tokens,
                     migration=migration, guards=readers.guards, checks=checks, history=readers.history,
                     api_server=readers.base.api_server, ssl_context=readers.ssl_context, token=readers.token,
-                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"]), refresh=refresh) as api:
+                    state_dir=Path(context.operation["state_dir"]), anchor_dir=Path(context.operation["anchor_dir"]),
+                    refresh=refresh, source_credentials=source_credentials) as api:
                 yield api
 
 

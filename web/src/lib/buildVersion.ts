@@ -43,13 +43,14 @@ export interface ServedFrontendBuild {
   revision: string | null;
   sourceRef: string | null;
   buildTime: string | null;
+  sourceDigest?: string | null;
 }
 
 /** Throwing (rather than resolving `null`) makes react-query keep the last
  * successful data, so a transient failure cannot clear a confirmed update. */
 async function fetchServedBuildForCheck(): Promise<ServedFrontendBuild> {
   const served = await fetchServedBuildInfo();
-  if (!served?.revision) {
+  if (!served?.revision && !served?.sourceDigest) {
     throw new Error("served frontend build revision is unavailable");
   }
   return served;
@@ -78,6 +79,7 @@ export function useServedFrontendBuild(): ServedFrontendBuildCheck {
         revision: config.servedBuildRevision ?? null,
         sourceRef: config.servedSourceRef ?? null,
         buildTime: config.servedBuildTime ?? null,
+        ...(config.servedSourceDigest !== undefined ? { sourceDigest: config.servedSourceDigest } : {}),
       };
     },
     initialDataUpdatedAt: () => Date.now(),
@@ -155,13 +157,16 @@ export interface FrontendUpdateStatus {
  */
 export function frontendUpdateStatus(
   loadedRevision: string | null,
-  served: { revision: string | null } | null | undefined,
+  served: { revision: string | null; sourceDigest?: string | null } | null | undefined,
+  loadedSourceDigest: string | null = null,
 ): FrontendUpdateStatus {
   const servedRevision = served?.revision ?? null;
+  const loadedIdentity = loadedSourceDigest ?? loadedRevision;
+  const servedIdentity = served?.sourceDigest ?? servedRevision;
   const hasNewerBuild =
-    loadedRevision !== null &&
-    servedRevision !== null &&
-    servedRevision !== loadedRevision;
+    loadedIdentity !== null &&
+    servedIdentity !== null &&
+    servedIdentity !== loadedIdentity;
   return { hasNewerBuild, servedRevision };
 }
 

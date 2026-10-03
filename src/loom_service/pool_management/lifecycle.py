@@ -5,6 +5,7 @@ from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.nebius_pool_schema import NebiusPoolRequest
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolReceiptV1
 from loom.nebius_pool_lifecycle import PoolDrainV1, PoolStopV1
 from loom.nebius_pool_task_image import PoolTaskImagePrepareV1
@@ -20,7 +21,12 @@ def _qualified(row: NebiusPoolRequest | None, body: PoolStopV1 | PoolDrainV1) ->
             or row.plan_json is None or digest(row.plan_json) != row.plan_sha256):
         raise PoolControlError
     request = _WORKLOAD.validate_python(row.request_json)
-    generation = request.build.expected_lease_epoch + 1 if isinstance(request, PoolTaskImagePrepareV1) else request.execution.lease_generation
+    if isinstance(request, PoolTaskImagePrepareV1):
+        generation = request.build.expected_lease_epoch + 1
+    elif isinstance(request, PoolApplicationImagePrepareV1):
+        generation = request.build.attempt
+    else:
+        generation = request.execution.lease_generation
     if body.lease_generation != generation:
         raise PoolControlError
     return row
@@ -56,7 +62,8 @@ async def drain_pool_request(session: AsyncSession, principal: PoolPrincipal, bo
         if (row.phase not in {"cleanup_intent", "released"} or row.stop_json is None
                 or row.stop_json.get("request_sha256") != body.stop_sha256
                 or digest(row.stop_json["request"]) != body.stop_sha256
-                or (row.workload_kind == "task_image_build" and body.output_generation != body.lease_generation)):
+                or (row.workload_kind in {"task_image_build", "application_image_build"}
+                    and body.output_generation != body.lease_generation)):
             raise PoolControlError
         payload = body.model_dump(mode="json")
         if row.drain_json is not None:

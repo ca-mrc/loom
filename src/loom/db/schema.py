@@ -38,6 +38,10 @@ from sqlalchemy.dialects.postgresql import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+from loom.db.nebius_application_build_schema import NebiusApplicationBuild as NebiusApplicationBuild
+from loom.db.nebius_application_build_schema import (
+    NebiusApplicationBuildAttempt as NebiusApplicationBuildAttempt,
+)
 from loom.db.nebius_application_cloud_schema import (
     NebiusApplicationCloudEffect as NebiusApplicationCloudEffect,
 )
@@ -55,6 +59,9 @@ from loom.db.nebius_application_operation_schema import (
 )
 from loom.db.nebius_application_schema import NebiusApplication as NebiusApplication
 from loom.db.nebius_application_schema import NebiusDeploymentNameClaim as NebiusDeploymentNameClaim
+from loom.db.nebius_application_source_schema import (
+    NebiusApplicationSourceUpload as NebiusApplicationSourceUpload,
+)
 from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,

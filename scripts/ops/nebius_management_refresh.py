@@ -111,6 +111,15 @@ def render_refresh(request: ManagementRefreshRenderRequest) -> RenderedManagemen
             retained_secrets[name] = secret
         if len({name[-12:] for name in retained_secrets.values()}) != 1:
             raise ValueError
+        application = request.before.installation.applications
+        if application is not None and application.runtime.source_upload is not None:
+            # First pool cutover introduces source-only material after the
+            # original cloud/shared bundles. Preserve its independent revision;
+            # image-only refresh neither creates nor rotates credentials.
+            secret = volumes['application-source-credentials']['secret']['secretName']
+            if re.fullmatch(r'loom-applications-source-[0-9a-f]{12}', secret) is None:
+                raise ValueError
+            retained_secrets['application-source-credentials'] = secret
         rendered = render_management(request.after, candidate=request.candidate, profile=request.profile,
             repo_root=request.repo_root)
         wanted = copy.deepcopy(next(doc for doc in rendered.files['40-services.yaml'] if doc['kind'] == 'Deployment'))

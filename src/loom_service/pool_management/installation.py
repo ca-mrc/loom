@@ -39,6 +39,8 @@ class PoolMachineInstallation(_Strict):
     machine_id: UUID
     role: Literal["participant", "observer", "gateway"]
     participant_id: UUID | None
+    workload_scope: Literal["environment", "application_builder"] = Field(
+        default="environment", exclude_if=lambda value: value == "environment")
     credential_epoch: int = Field(gt=0, strict=True)
     token_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     issued_at: datetime
@@ -47,6 +49,7 @@ class PoolMachineInstallation(_Strict):
     @model_validator(mode="after")
     def identity(self) -> PoolMachineInstallation:
         if (not self.machine_id.int or (self.role == "participant") != (self.participant_id is not None)
+                or (self.workload_scope == "application_builder" and self.role != "participant")
                 or (self.participant_id is not None and not self.participant_id.int)
                 or self.issued_at.utcoffset() is None or self.expires_at.utcoffset() is None
                 or self.issued_at >= self.expires_at):
@@ -67,7 +70,7 @@ class PoolInstallation(_Strict):
     admission: PoolCapacityPolicyV1
     quota_identities: dict[str, tuple[str, str, str, str, str]]
     participants: tuple[PoolParticipantV1, ...] = Field(min_length=1, max_length=128)
-    machines: tuple[PoolMachineInstallation, ...] = Field(min_length=3, max_length=130)
+    machines: tuple[PoolMachineInstallation, ...] = Field(min_length=3, max_length=258)
     profiles: PoolProfileCatalog
 
     @model_validator(mode="after")
@@ -85,12 +88,15 @@ class PoolInstallation(_Strict):
                 or len({ns.uid for ns in namespaces}) != len(namespaces)):
             raise ValueError("duplicate pool participant or namespace")
         profiles = self.profiles.profiles()
-        used_execution, used_build = set(), set()
+        used_execution, used_build, used_application, application_participants = set(), set(), set(), set()
         for row in self.participants:
             if (row.installation_id, row.pool_id, row.admission_epoch) != (
                     self.installation_id, self.pool_id, self.admission_epoch):
                 raise ValueError("participant differs from installation")
             for target in row.targets:
+                if "application_image_build" in target.workload_kinds and (
+                        row.environment_class != "development" or target.workload_kinds != ("application_image_build",)):
+                    raise ValueError("application build requires a dedicated development target")
                 for kind in target.workload_kinds:
                     if kind in {"trial", "verifier"}:
                         execution = profiles.execution.get(target.profile_id)
@@ -105,16 +111,24 @@ class PoolInstallation(_Strict):
                         runtime, namespace = build.target, row.build_namespace.name
                         used_build.add(target.profile_id)
                     else:
-                        raise ValueError("application build adapter is not installed")
+                        application = profiles.application_images.get(target.profile_id)
+                        if application is None:
+                            raise ValueError("missing application build profile")
+                        runtime, namespace = application.target, row.build_namespace.name
+                        used_application.add(target.profile_id)
+                        application_participants.add(row.participant_id)
                     if ((runtime.target_id, runtime.namespace) != (target.target_id, namespace)
                             or any((runtime.node_selector or {}).get(key) != value for key, value in self.node_selector.items())):
                         raise ValueError("profile differs from protected target")
-        if used_execution != set(profiles.execution) or used_build != set(profiles.task_images):
+        if (used_execution != set(profiles.execution) or used_build != set(profiles.task_images)
+                or used_application != set(profiles.application_images)):
             raise ValueError("unbound renderer profile")
-        owners = [row.participant_id for row in self.machines if row.role == "participant"]
+        owners = [row.participant_id for row in self.machines if row.role == "participant" and row.workload_scope == "environment"]
+        builders = [row.participant_id for row in self.machines if row.workload_scope == "application_builder"]
         if (len({row.machine_id for row in self.machines}) != len(self.machines)
                 or len({row.token_sha256 for row in self.machines}) != len(self.machines)
                 or len(owners) != len(participants) or set(owners) != set(participants)
+                or len(builders) != len(application_participants) or set(builders) != application_participants
                 or sum(row.role == "observer" for row in self.machines) != 1
                 or sum(row.role == "gateway" for row in self.machines) != 1):
             raise ValueError("incomplete dedicated machine identities")
@@ -173,7 +187,8 @@ async def register_installation(session: AsyncSession, spec: PoolInstallation) -
     for machine in spec.machines:
         hashed = bytes.fromhex(machine.token_sha256)
         await _retain(session, NebiusPoolMachine, machine.machine_id, dict(machine_id=machine.machine_id, pool_id=spec.pool_id,
-            participant_id=machine.participant_id, role=machine.role, credential_epoch=machine.credential_epoch, phase="active"))
+            participant_id=machine.participant_id, role=machine.role, workload_scope=machine.workload_scope,
+            credential_epoch=machine.credential_epoch, phase="active"))
         await _retain(session, Token, hashed, dict(token_hash=hashed, type="pool_machine", scopes=[], team_id=None,
             created_by_user_id=None, issued_at=machine.issued_at, expires_at=machine.expires_at, revoked_at=None))
         await _retain(session, NebiusPoolMachineCredential, hashed, dict(token_hash=hashed,

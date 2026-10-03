@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
+import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_application_render import inputs as application_inputs
 from tests.unit.test_nebius_environment_contract import foundation_from
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -70,7 +74,8 @@ def test_absent_pool_binding_preserves_historical_serialized_inputs(management_i
 
     raw, _, _ = management_inputs
     original = ManagementDeployment.model_validate(raw)
-    explicit = ManagementDeployment.model_validate({**raw, 'pool_catalog_operation_id': None})
+    explicit = ManagementDeployment.model_validate({**raw, 'pool_catalog_operation_id': None,
+        'application_builder_machine_id': None})
     assert original.model_dump(mode='json') == explicit.model_dump(mode='json')
     assert 'pool_catalog_operation_id' not in original.model_dump(mode='json')
     assert json.loads(original.model_dump_json()) == original.model_dump(mode='json')
@@ -386,6 +391,127 @@ def test_application_manager_uses_its_own_account_and_versioned_configuration(ap
             assert not any('application' in volume['name'] or 'management' in volume['name']
                            for volume in pod(doc).get('volumes', []))
     assert application_management_inputs == before
+
+
+@pytest.fixture
+def source_management_inputs(application_management_inputs):
+    data = application_management_inputs[0]
+    data['installation']['applications']['runtime']['source_upload'] = {
+        'credentials_file': '/var/run/loom-application-source-credentials/credentials.json',
+        'spool_directory': '/var/run/loom-application-source/spool', 'max_inflight': 2,
+    }
+    return application_management_inputs
+
+
+@pytest.fixture
+def builder_management_inputs(source_management_inputs, build_inputs):
+    data = source_management_inputs[0]
+    application = data['installation']['applications']
+    platform = json.loads(data['installation']['foundation']['platform_config_json'])
+    claim = build_inputs[0]
+    data['pool_catalog_operation_id'] = str(uuid4())
+    data['application_builder_machine_id'] = str(uuid4())
+    application['runtime']['build'] = {
+        'binding': {
+            'source': {'installation_id': data['installation_id'],
+                'data_environment_id': application['shared']['data_environment_id'],
+                'cluster_id': application['shared']['cluster_id'], 'source_bucket': platform['buckets']['source']},
+            'recipe': claim.recipe.model_copy(update={'schema_revision': application['shared']['schema_revision']}).model_dump(mode='json'),
+            'storage_endpoint': platform['storage_endpoint'], 'storage_region': platform['region'],
+            'registry_repository': claim.registry_repository, 'pool_id': str(uuid4()),
+            'participant_id': str(uuid4()), 'profile_id': str(uuid4()), 'target_id': 'application-builder',
+            'admission_epoch': 1, 'participant_revision': 1,
+        },
+        'management_origin': 'https://' + data['public_host'],
+        'bearer_token_file': '/var/run/loom-pool-token/token',
+    }
+    return source_management_inputs
+
+
+def test_source_runtime_has_private_bounded_spool_and_management_only_material(source_management_inputs, tmp_path):
+    result = render(source_management_inputs)
+    docs = documents(result)
+    service, = [doc for doc in docs if doc['kind'] == 'Deployment']
+    template = pod(service)
+    volumes = {item['name']: item for item in template['volumes']}
+    assert volumes['application-source']['emptyDir'] == {'sizeLimit': '4096Mi'}
+    assert volumes['application-source-credentials']['secret'] == {
+        'secretName': 'loom-applications-source-' + result.revision[7:19], 'defaultMode': 0o440,
+        'items': [{'key': 'credentials.json', 'path': 'credentials.json'}]}
+    main, = template['containers']
+    assert main['resources']['requests']['ephemeral-storage'] == '4352Mi'
+    assert main['resources']['limits']['ephemeral-storage'] == '4352Mi'
+    initializer, = [item for item in template['initContainers'] if item['name'] == 'prepare-application-source']
+    assert initializer['securityContext']['runAsNonRoot'] is True
+    assert not initializer['securityContext']['allowPrivilegeEscalation']
+    command = initializer['command']
+    directory = tmp_path / 'private-spool'
+    subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)
+    directory.chmod(0o755)
+    rejected = subprocess.run([sys.executable, *command[1:-1], str(directory)], capture_output=True)
+    assert rejected.returncode != 0
+    directory.chmod(0o700)
+    linked = tmp_path / 'linked-spool'
+    linked.symlink_to(directory, target_is_directory=True)
+    rejected = subprocess.run([sys.executable, *command[1:-1], str(linked)], capture_output=True)
+    assert rejected.returncode != 0
+    without_source = copy.deepcopy(source_management_inputs)
+    without_source[0]['installation']['applications']['runtime'].pop('source_upload')
+    # Compare equal Recreate strategies: rolling management also reserves surge.
+    without_source[0]['pool_catalog_operation_id'] = str(uuid4())
+    assert result.platform_envelope.ephemeral_storage_mib == render(without_source).platform_envelope.ephemeral_storage_mib + 4096
+    assert directory.stat().st_mode & 0o777 == 0o700
+    # Restarting an init container must preserve the private directory safely.
+    subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)
+    for doc in docs:
+        if doc['kind'] in {'StatefulSet', 'Job', 'CronJob'}:
+            assert not any(item['name'].startswith('application-source') for item in pod(doc)['volumes'])
+
+
+def test_builder_runtime_uses_dedicated_private_token_and_readonly_native_observation(builder_management_inputs):
+    data = builder_management_inputs[0]
+    result = render(builder_management_inputs)
+    docs = documents(result)
+    service, = [doc for doc in docs if doc['kind'] == 'Deployment']
+    template = pod(service)
+    volumes = {item['name']: item for item in template['volumes']}
+    assert volumes['pool-token-source']['secret']['secretName'] == (
+        'loom-pool-machine-' + data['application_builder_machine_id'].replace('-', ''))
+    assert service['spec']['strategy'] == {'type': 'Recreate'}
+    assert any(item['name'] == 'prepare-pool-token' for item in template['initContainers'])
+    platform = json.loads(data['installation']['foundation']['platform_config_json'])
+    reader, = [doc for doc in docs if doc['kind'] == 'Role']
+    assert reader['metadata']['namespace'] == platform['execution_namespace'] + '-build'
+    assert reader['rules'] == [
+        {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get']},
+        {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list']},
+        {'apiGroups': [''], 'resources': ['pods/log'], 'verbs': ['get']},
+    ]
+    binding, = [doc for doc in docs if doc['kind'] == 'RoleBinding']
+    assert binding['subjects'] == [{'kind': 'ServiceAccount', 'name': 'loom-application-provisioner',
+        'namespace': data['namespace']}]
+    assert binding['roleRef']['name'] == reader['metadata']['name']
+    assert binding['metadata']['namespace'] == reader['metadata']['namespace']
+
+
+@pytest.mark.parametrize('damage', ['credentials', 'spool', 'token', 'origin', 'machine', 'catalog', 'nil-machine'])
+def test_builder_delivery_rejects_unmounted_or_unbound_runtime(builder_management_inputs, damage):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    data = builder_management_inputs[0]
+    runtime = data['installation']['applications']['runtime']
+    if damage in {'credentials', 'spool'}:
+        runtime['source_upload']['credentials_file' if damage == 'credentials' else 'spool_directory'] = '/ambient/path'
+    elif damage == 'token':
+        runtime['build']['bearer_token_file'] = '/ambient/token'
+    elif damage == 'origin':
+        runtime['build']['management_origin'] = 'https://foreign.example.com'
+    elif damage == 'nil-machine':
+        data['application_builder_machine_id'] = '00000000-0000-0000-0000-000000000000'
+    else:
+        data.pop('application_builder_machine_id' if damage == 'machine' else 'pool_catalog_operation_id')
+    with pytest.raises(ValueError):
+        ManagementDeployment.model_validate(data)
 
 
 @pytest.mark.parametrize('path,value', [

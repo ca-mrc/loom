@@ -39,7 +39,8 @@ def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "glob
         "binding_json": row.model_dump(mode="json"), "binding_sha256": digest(row.model_dump(mode="json"))} for row in spec.participants}
     machines = {str(row.machine_id): {"machine_id": str(row.machine_id), "pool_id": str(spec.pool_id),
         "participant_id": str(row.participant_id) if row.participant_id is not None else None,
-        "role": row.role, "credential_epoch": row.credential_epoch, "phase": "active"} for row in spec.machines}
+        "role": row.role, "workload_scope": row.workload_scope,
+        "credential_epoch": row.credential_epoch, "phase": "active"} for row in spec.machines}
     expected = {"binding": binding, "participants": participants, "machines": machines,
         "credentials": [row.model_dump(mode="json") for row in spec.machines]}
     encoded = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode().hex()
@@ -49,7 +50,7 @@ def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "glob
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_startup_schema$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0172'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0173'
     THEN RAISE EXCEPTION 'pool startup schema unqualified'; END IF;
 END $pool_startup_schema$;
 WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value)

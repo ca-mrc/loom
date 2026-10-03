@@ -27,7 +27,7 @@ def test_pool_downgrade_refuses_parent_read_locks_without_waiting(isolated_migra
             with pytest.raises(DBAPIError, match="could not obtain lock"):
                 command.downgrade(config, "0171")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0172"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0173"
     finally:
         engine.dispose()
 

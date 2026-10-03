@@ -880,8 +880,265 @@ unmerged indices and included-file/parent/inventory changes. Transfer bounds are
 25,000 files, 512 MiB aggregate and 8 MiB canonical manifest, not execution quotas.
 Consumers must use the verified manifest reader rather than reopen unchecked
 paths. The owned temporary snapshot is removed on exit, including errors.
-Publication, global build-capacity admission, image building, release qualification
-and installed source-to-deploy acceptance remain separate, unimplemented consumers.
+
+`package_application_source` composes that capture with the shared verified
+archive encoder, yielding an anonymous owner-only temporary upload stream, its
+byte length and archive SHA256. The archive checksum is distinct from the source
+manifest digest; neither turns the informational base commit into CI approval.
+The stream is rewound for upload and closed on caller exit or failure.
+`loom.application_source_archive` encodes deterministic uncompressed USTAR:
+one canonical manifest followed by fixed numbered regular byte records. Archive
+names never become extraction paths. The trusted reader bounds and validates
+headers, lengths, content hashes and final padding; it creates source files
+exclusively under a pinned empty private directory and installs safe links last.
+Failed extraction is not accepted context; the caller owns partial-file cleanup.
+
+The management `ApplicationSourceRegistry` retains owner/team-qualified upload
+intents in `nebius_application_source_uploads` (migration `0173`). Each intent
+freezes its installation/data binding, source digest, archive checksum/length,
+informational Git commit and one-hour-or-shorter database-clock expiry. Concurrent
+same-key retries return one identity; changed intent or team conflicts. Only the
+internal verifier can record `source_verified`, and verified receipts remain
+readable after the upload deadline. SQL retains their immutable identity/history.
+Identical archives select one content-addressed key in the shared source bucket,
+while owners retain separate access records. A source receipt is not a build,
+release, CI approval or capacity reservation.
+
+`ApplicationSourceUploader` authenticates this intent before consuming its stream,
+spools bounded bytes privately, verifies both the transport hash and full source
+archive, then writes only verified content to the server-derived shared key. It
+reads back and hashes stored content before recording acceptance; an ETag or a
+successful PUT reply is insufficient, and an uncertain PUT is observed without
+another explicit upload call. The shared S3 adapter can retry identical verified
+bytes under its existing SDK retry policy; this does not grant another source
+identity or retry a build/deployment mutation. Database-clock expiry is rechecked after reception and before
+completion. Per-process in-flight limits and reception/storage deadlines bound the
+work. At most two archive verifiers run concurrently, independently of the
+configured reception/storage limit, to bound parsed-manifest memory in the
+management Pod. Other admitted uploads wait with their private disk spool;
+cancellation before verification releases that spool without starting a parser.
+Cancellation during verification retains the spool and admission until off-loop
+verification finishes, then cleans private temporary state. Manifest validation
+uses sorted-path prefix lookup rather than expanding every directory ancestor.
+
+Management exposes `POST /api/v1/application-sources` (idempotent intent),
+`GET /api/v1/application-sources/{upload_id}` (owner status) and
+`PUT /api/v1/application-sources/{upload_id}/content` (raw
+`application/octet-stream`). Session/membership/CSRF checks and upload ownership
+precede body consumption. Only that exact configured PUT route bypasses ordinary
+JSON buffering; it retains strict framing, encoding and incremental byte limits.
+Responses are non-cacheable; HTTP/1 rejection with an unread body closes the
+connection. Personal application APIs do not expose these routes, and there is
+no caller-controlled completion endpoint.
+
+Optional protected `applications.runtime.source_upload` configuration enables the
+uploader. It names absolute `credentials_file` and private `spool_directory` paths,
+`max_inflight` (default 2, range 1–16), reception/storage deadlines (default 300
+seconds each, range 1–3600) and `upload_ttl_seconds` (default 3600, range 60–3600).
+The bounded private credential file contains only `access-key` and `secret-key`;
+the installer must supply a source-scoped identity and bounded spool volume.
+Bucket, endpoint, region and installation/data/cluster identities come from the
+protected shared configuration, never owner input or ambient credentials. The
+runtime owns the storage client and closes it on shutdown or failed startup;
+omitting these settings preserves old installation fingerprints and disables
+upload. Configuration support is not evidence that the capability is installed.
+
+`ApplicationClient` connects packaged source to these authenticated intent,
+status and streaming-upload routes. It checks every returned source identity and
+upload ID, uses the same frozen archive on an explicit CSRF rejection, and never
+automatically retries an uncertain network write. This is the transport used by
+the build command, not a standalone deployment command or CI approval.
+The native application Job adapter shares the existing task-image
+prepare/rootless-build/publish rendering mechanism. Its protected claim binds
+owner, source upload, build attempt, installation/data/cluster and an immutable
+recipe; fixed service/web components use `deploy/Dockerfile.service` and
+`deploy/Dockerfile.web`. Recipe identity includes platform, tool images, component
+paths and output format. Application Jobs carry their own build identity, not
+synthetic Task or materialization fields. Credentials remain outside the
+untrusted build phase and publication sees the build volume read-only. Personal
+build arguments distinguish the source digest from its informational base commit
+and never label that commit as a CI-approved build.
+
+The trusted application runtime verifies the exact uploaded archive size, SHA256
+and source manifest before extraction. It parses migration revision literals and
+their complete acyclic ancestry, including historical merges, without importing
+developer Python or running migrations. The single declared head must match the
+protected shared schema. This is a metadata compatibility check, not a claim that
+arbitrary application code is semantically safe; personal code receives no DDL
+authority. Only the rootless build phase executes developer build instructions.
+
+Publication validates exactly two bounded local OCI outputs against the recipe's
+architecture, preserves digests through Skopeo, and reads back each immutable
+registry manifest. The final receipt binds both images to owner, source, recipe,
+installation/data/cluster and build attempt. Interrupted progress has a distinct
+schema and cannot qualify a release; unknown publication is not retried. Native
+cache keys include a separate application domain, source digest and recipe
+(including platform); the existing bounded blob store and GC are shared without
+fabricating Tasks. Source/registry credentials never enter the build context.
+These runtime helpers do not themselves admit or launch application builds.
+
+`ApplicationBuildRegistry` records owner/team/install/data/cluster-bound build
+intent from a verified source upload. Concurrent requests with the same replay
+key retain one build and one queued attempt. Each attempt freezes its source and
+protected recipe/storage/pool binding; replay after a management restart uses
+those retained inputs even if the active recipe catalog changes. SQL prevents
+deleting build history or rewriting source, owner or attempt inputs. Status
+checks the retained claim against the original source and binding before returning
+it. Creating this intent performs no network operation, resource admission or
+release qualification; its queued state does not mean a builder has been launched.
+
+`ApplicationBuildDispatch` commits the exact pool request and absolute deadline
+on that same retained attempt before a caller can perform network I/O. Concurrent
+selection and restart return the same request, including its original recipe and
+deadline. SQL prevents rewriting or erasing it. A cancelled build cannot create
+new demand, but its existing request remains readable for cancellation and
+uncertain-reply reconciliation. Reading that record is not activation consent;
+the automatic worker and its activation/completion evidence are separate consumers.
+
+`ApplicationBuildWorker` drives that request through the common pool's existing
+prepare/status/activate and stop/drain APIs. The attempt journal uses database-time
+leases and runner epochs; stale workers cannot commit results. Each activation
+consent and each cleanup message is retained once before HTTP, so uncertain replies
+reconcile the same build attempt without extending consent or creating another
+Job. Its Kubernetes interface only reads the exact gateway-bound Job and Pods.
+Successful publication requires completed prepare/build/publish containers without
+restarts and the complete trusted publisher receipt for this owner/source/recipe.
+The attempt remains `settling` and charged until the common pool returns its
+authenticated cleanup receipt; only then can it become `ready`. Cancellation wins
+over a result observed afterward. Failed/cancelled attempts also retain their
+charge until cleanup; an unsubmitted cancellation needs no pool call, while any
+frozen request requires a pool cancellation tombstone or cleanup receipt. SQL
+retains evidence and forbids a successor attempt before prior cleanup. Heartbeats
+run independently of external reads, cancellation drains in-flight work before
+releasing its lease, and bounded keyset polling avoids first-page starvation.
+Management-only `/api/v1/application-builds` accepts a verified `upload_id` and
+an idempotency header, not caller-selected images, target, recipe or priority.
+Owner/team-scoped status and generation-checked cancel/retry controls use the same
+retained build. Cancel records intent, not capacity release. Retry requires the
+previous attempt to be failed/cancelled with cleanup completed; its expected
+attempt number is the replay key, so a repeated retry cannot create two successors.
+The successor keeps the original source and recipe. These endpoints return 503
+without the explicitly configured build registry and are absent from personal
+application services. This implementation does not itself configure management
+credentials or install the read-only role.
+
+Ready build status includes a deployable `ApplicationReleaseV1`: its release ID
+is the build ID, and its source/schema and immutable service/web image digests
+come from the retained qualified publisher receipt. Resolution is scoped to the
+authenticated owner/team and installed management/data/cluster binding. A published
+but still-settling build is not a release; the retained released pool receipt must
+match the original request, reservation, plan and Job. SQL makes ready attempts
+immutable and prohibits retrying them, so the same release ID cannot later target
+different images. Changing the current recipe catalog does not change old releases.
+
+`ApplicationManager` accepts these completed owner builds alongside the protected
+pinned release catalog. Create/update/resume use the same build registry as the
+automatic worker and owner status routes. They still enforce exact shared-schema
+compatibility and freeze the selected release and rendered images in the operation.
+Already-frozen operation replay does not need the current catalog or a running
+builder. Resume resolves the application's recorded release, never a newer build.
+
+The application builder supplies personal kind, manifest digest and informational
+base commit as Docker build arguments, while leaving the actual Git build revision
+unknown. The service image records these beside its existing build metadata;
+`/api/v1/version` reports `buildKind`, `sourceDigest` and `sourceBaseCommit` for
+personal code and never presents that code as the base Git revision. The web image
+bakes the same fields into the loaded JavaScript and separately publishes served
+metadata for update checks. A later fetch cannot relabel an already-open page.
+Version details label personal code as not CI-approved, with separate frontend and
+responding-backend source identities. These are informational reports from authored
+code, not authorization or proof that every replica has rolled out; retained
+publication and frozen deployment evidence remain authoritative.
+
+Optional protected `applications.runtime.build` settings connect these controls
+and the automatic worker to the management service lifecycle. They bind the
+source/recipe/pool profile, management HTTPS origin, dedicated private bearer-token
+file, concurrency (default 4, range 1–16), polling interval (default 5 seconds,
+range 1–60), and pool HTTP timeout (default 30 seconds, range 1–60). The source
+uploader must also be configured. Startup checks shared installation/data/cluster,
+schema and source storage, matches the loaded profile catalog's digest against
+protected pool registration, and authenticates the dedicated builder machine in
+the real management database. The origin must match the management service's
+public origin. A registered closed pool permits startup, not resource admission;
+every common-pool operation still reauthorizes the machine and admission mode.
+
+The runtime owns both deployment and build workers. Readiness requires both to
+be healthy; shutdown drains both before closing their HTTP, Kubernetes and database
+dependencies. Build observation reuses the native Kubernetes reader with an
+explicit endpoint, CA and per-request projected-token refresh, never ambient
+kubeconfig or the cloud provisioning identity. Routes receive the build registry
+only after successful runtime creation. Omitted settings preserve historical
+installation fingerprints.
+
+The management renderer binds configured source uploads to a revision-named,
+source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
+initializer verifies the spool directory's ownership and mode on every Pod start.
+The spool is capped at 2 GiB per admitted concurrent upload (4 GiB at the default
+concurrency of two), included in the manager's ephemeral-storage request and limit,
+and disappears with the Pod; it creates no PVC or backup requirement. Archive
+verification streams regular files in 1 MiB chunks, retaining content hashes,
+strict headers/padding and link-last validation without allocating a whole source
+file in management memory. Filesystem-metadata-heavy trees remain subject to the
+spool limit. Source-enabled management uses `Recreate`, preventing a rolling surge
+from multiplying this local upload allowance.
+
+Configured builds additionally require a protected dedicated machine ID and pool
+catalog operation. The renderer reuses the private process-owned token mount and
+provides only Job reads and Pod reads/list/logs in the shared build namespace.
+It grants no Job writes, Secret reads or access to other build namespaces.
+The protected first cutover derives these settings from its completed predecessor
+and exact registered machine/profile. It qualifies the retained shared control
+plane's source endpoint/bucket/key references and freshly reads the fixed
+`loom-platform-storage` Secret against its protected UID/version/source-only hash.
+Only `source-access-key` and `source-secret-key` are copied into the manager's
+immutable source Secret; data, backup and operator credentials are not copied.
+It stages material, configuration and reader roles before replacing the stopped
+manager, and checks platform fit including the upload spool before downtime.
+Completed global ancestry retains the full builder-enabled configuration; recovery
+to the legacy outcome retains the original manager. Historical
+image-only refresh remains narrow: it preserves the existing source Secret even
+when its revision differs from the older cloud/shared bundles, and cannot enable,
+remove or change source/build runtime settings. Rendering these prerequisites
+does not install them or establish multi-owner acceptance.
+
+The common pool registry has an application-build adapter. New admission and
+activation check the retained current build attempt, verified source, protected
+participant/profile binding and cancellation state under the pool transaction.
+The owner cannot replace the frozen claim. Personal builds receive priority 3
+and share the existing build-concurrency/resource accounting with task builds and
+execution. Cancelled or obsolete waiting builds no longer protect capacity from
+other work. The native Job wrapper retains the same reservation-specific name,
+absolute phase deadlines, credential isolation and rendered-Pod resource charge
+for both build kinds. The existing machine-only pool API transports this typed
+request. Gateway dispatch, retained native-runtime readback and the physical
+collector bind application Jobs to build ID/attempt and observed Job UID. Stop
+and output-drain use that same attempt; neither releases capacity without the
+existing gateway absence check. Pool adapter support alone does not install the
+management worker or enable owner-facing build endpoints.
+
+Participant machine identity also retains an immutable workload scope. Ordinary
+environment credentials can submit/control trials, verifiers and task builds;
+the separate management builder credential can submit/control only application
+builds in the same data participant. Prepare/replay, allocation and every retained
+request operation recheck that scope under the existing authority locks. Credential
+rotation cannot change it. Existing machines retain environment scope on upgrade;
+this does not expand an already registered pool catalog. Initial registration
+requires exactly one environment machine for each participant and exactly one
+builder machine for each development participant with application-build targets.
+Application targets are distinct from execution/task-build targets, use the same
+participant build namespace and physical node group, and require bound profiles.
+Default environment scope is omitted from serialized installations so historical
+installation hashes do not change. Registration remains closed and exact-replay-only.
+
+The protected material stage delivers the builder token only to the management
+namespace, never to a shared controller, execution worker or personal namespace.
+Ordinary actuator wiring selects the environment credential explicitly and does
+not require an actuator for the dedicated application-build target.
+
+Protected manager mounting and worker configuration, the user-facing build
+command, durable management worker, image building and release qualification
+are implemented as described above. Protected installation and live multi-owner
+source-to-deploy acceptance remain separate, unproven delivery steps.
 
 ### Stopped application completion
 
@@ -2209,11 +2466,12 @@ protected pool operation, not to retirement alone.
 
 An installed execution-only guest actuator belongs to its ordinary data
 participant, not another database, collector or builder. Retirement and runtime
-wiring require the complete registered target set. The supported guest sibling
-must retain its renderer-defined name, distinct UID, shared database references,
+wiring require the complete registered target set, including both the ordinary
+guest and the separate emulated-authentication guest when installed. Each sibling
+must retain its renderer-defined name, mutually distinct UID, shared database references,
 ServiceAccount and ordinary Pod configuration, differing only in target identity,
 labels/affinity and absence of the native builder. Missing, duplicate or changed
-siblings reject the migration inputs. Its replacement remains stopped, receives
+siblings reject the migration inputs. Each replacement remains stopped, receives
 the same participant credential and global binding, and does not acquire a build
 loop. Guest Pods must drain before retirement qualifies; replay checks them again.
 These checks do not replace installed database or effective writer qualification.
@@ -2321,7 +2579,7 @@ replacement. Targets are generated from the retained manager, complete shared
 API/actuator roster and one development collector; arbitrary manifests are not
 inputs. Producer Pod drain is followed by independent application-access,
 schema-readiness and queued-origin qualification. It cannot manufacture provenance
-for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
+for a legacy queue. The fixed live adapter now reads schema `0173`, idle guard/
 work state and personal-access quiescence through each retained database Pod,
 qualifying its StatefulSet, Service, Secret version and Pod identity before and
 after every read-only page. Complete EndpointSlice readback also binds the Service

@@ -86,11 +86,15 @@ class NebiusPoolMachine(Base):
         CheckConstraint("(role = 'participant' AND participant_id IS NOT NULL) OR "
                         "(role IN ('observer','gateway') AND participant_id IS NULL)",
                         name="nebius_pool_machine_role_check"),
+        CheckConstraint("workload_scope IN ('environment','application_builder') AND "
+                        "(workload_scope = 'environment' OR role = 'participant')",
+                        name="nebius_pool_machine_workload_scope_check"),
     )
     machine_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True)
     pool_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("nebius_pool_bindings.pool_id", ondelete="RESTRICT"), nullable=False)
     participant_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True))
     role: Mapped[str] = mapped_column(Text, nullable=False)
+    workload_scope: Mapped[str] = mapped_column(Text, nullable=False, server_default="environment")
     credential_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
 

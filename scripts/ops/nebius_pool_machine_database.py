@@ -25,7 +25,8 @@ def _state_sql(spec: PoolInstallation) -> str:
         'binding_json': row.model_dump(mode='json'), 'binding_sha256': digest(row.model_dump(mode='json'))} for row in spec.participants}
     machines = {str(row.machine_id): {'machine_id': str(row.machine_id), 'pool_id': str(spec.pool_id),
         'participant_id': str(row.participant_id) if row.participant_id is not None else None,
-        'role': row.role, 'credential_epoch': row.credential_epoch} for row in spec.machines}
+        'role': row.role, 'workload_scope': row.workload_scope,
+        'credential_epoch': row.credential_epoch} for row in spec.machines}
     encoded = json.dumps({'participants': participants, 'machines': machines,
         'credentials': [row.model_dump(mode='json') for row in spec.machines]}, sort_keys=True, separators=(',', ':')).encode().hex()
     return f"""WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value),

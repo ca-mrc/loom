@@ -14,6 +14,7 @@ import httpx
 from pydantic import Field, TypeAdapter
 
 from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import (
     MAX_POOL_REQUEST_BYTES,
     PoolActivationV1,
@@ -92,12 +93,14 @@ class PoolClient:
         except ValueError:
             raise PoolRequestUnconfirmedError from None
 
-    async def prepare(self, request: PoolExecutionPrepareV1 | PoolTaskImagePrepareV1) -> PoolResult:
-        parsed: PoolExecutionPrepareV1 | PoolTaskImagePrepareV1
+    async def prepare(self, request: PoolExecutionPrepareV1 | PoolTaskImagePrepareV1 | PoolApplicationImagePrepareV1) -> PoolResult:
+        parsed: PoolExecutionPrepareV1 | PoolTaskImagePrepareV1 | PoolApplicationImagePrepareV1
         if isinstance(request, PoolExecutionPrepareV1):
             parsed = PoolExecutionPrepareV1.model_validate_json(request.model_dump_json())
         elif isinstance(request, PoolTaskImagePrepareV1):
             parsed = PoolTaskImagePrepareV1.model_validate_json(request.model_dump_json())
+        elif isinstance(request, PoolApplicationImagePrepareV1):
+            parsed = PoolApplicationImagePrepareV1.model_validate_json(request.model_dump_json())
         else:
             raise ValueError("unsupported pool workload")
         action = PoolRequestActionV1(pool_id=parsed.pool_id, request_key=parsed.key,

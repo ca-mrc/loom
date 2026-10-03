@@ -91,9 +91,9 @@ def _pool_resources(*, read: Callable[[str, str, str | None], dict[str, Any]],
             collections.append({'kind': kind, 'namespace': ns, 'resource_version': metadata['resourceVersion'],
                 'count': len(items)})
 
-    def secret(name: str) -> dict[str, Any]:
-        row = read('secret', name, execution)
-        identity(row, 'Secret', 'v1', execution)
+    def secret(name: str, ns: str = execution) -> dict[str, Any]:
+        row = read('secret', name, ns)
+        identity(row, 'Secret', 'v1', ns)
         if row['metadata']['name'] != name:
             raise ValueError
         return row
@@ -108,6 +108,19 @@ def _pool_resources(*, read: Callable[[str, str, str | None], dict[str, Any]],
     credential = base64.b64decode(encoded, validate=True)
     if not 0 < len(credential) <= 1024**2:
         raise ValueError
+    source = secret('loom-platform-storage', namespace)
+    if source.get('type') != 'Opaque' or source.get('stringData'):
+        raise ValueError
+    source_material = {}
+    for source_key in ('access-key', 'secret-key'):
+        encoded = source['data']['source-' + source_key]
+        if not isinstance(encoded, str) or not 0 < len(encoded) <= 4 * ((4096 + 2) // 3):
+            raise ValueError
+        value = base64.b64decode(encoded, validate=True).decode('ascii')
+        if not 0 < len(value) <= 4096 or any(ord(char) < 33 or ord(char) == 127 for char in value):
+            raise ValueError
+        source_material[source_key] = value
+    source_sha256 = hashlib.sha256(json.dumps(source_material, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def pin(row: dict[str, Any]) -> dict[str, str]:
         return {'uid': row['metadata']['uid'], 'resource_version': row['metadata']['resourceVersion']}
@@ -118,13 +131,15 @@ def _pool_resources(*, read: Callable[[str, str, str | None], dict[str, Any]],
             or read('secret', 'loom-platform-db', namespace) != database
             or secret('loom-execution-actuator-db') != actuator
             or secret('loom-execution-capacity-collector-nebius') != collector
+            or secret('loom-platform-storage', namespace) != source
             or any(read('namespace', ns, None)['metadata']['uid'] != row['metadata']['uid']
                 for ns, row in roots.items())):
         raise ValueError
     return json.dumps({'schema_version': 'loom.nebius-pool-resource-observation.v1',
         'cluster_id': cluster_id, 'namespace': namespace, 'candidate_sha': candidate,
         'collections': collections, 'resources': resources, 'database_credential': pin(database),
-        'actuator_credential': pin(actuator), 'collector_credential': {
+        'actuator_credential': pin(actuator), 'application_source_credential': {**pin(source), 'sha256': source_sha256},
+        'collector_credential': {
             **pin(collector), 'sha256': hashlib.sha256(credential).hexdigest()}}, sort_keys=True)
 
 

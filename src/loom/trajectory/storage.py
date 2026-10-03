@@ -703,7 +703,20 @@ class MinioObjectStore:
         self._operation_timeout = operation_timeout
         self._operation_attempts = max(1, operation_attempts)
         self._client_lock = threading.Lock()
+        self._closed = False
         self._client = self._build_client()
+
+    def close(self) -> None:
+        """Close the owned SDK client after callers have drained operations.
+
+        Idempotent; a timed-out operation cannot reopen this store on a late
+        retry. Threads already inside the SDK retain its network timeouts.
+        """
+        with self._client_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._client.close()
 
     def _build_client(self) -> Any:
         client = boto3.client(**self._client_kwargs)
@@ -720,6 +733,8 @@ class MinioObjectStore:
 
     def _replace_client(self, stale_client: Any) -> None:
         with self._client_lock:
+            if self._closed:
+                return
             with contextlib.suppress(Exception):
                 stale_client.close()
             if self._client is stale_client:
@@ -732,7 +747,10 @@ class MinioObjectStore:
     ) -> _T:
         last_retryable: BaseException | None = None
         for attempt in range(self._operation_attempts):
-            client = self._client
+            with self._client_lock:
+                if self._closed:
+                    raise RuntimeError("object store is closed")
+                client = self._client
             try:
                 return await asyncio.wait_for(
                     asyncio.to_thread(call, client),
@@ -988,7 +1006,10 @@ class MinioObjectStore:
         lock = threading.Lock()
         abandoned = False
         allocated: MultipartUpload | None = None
-        client_kwargs = dict(self._client_kwargs)
+        with self._client_lock:
+            if self._closed:
+                raise RuntimeError("object store is closed")
+            client_kwargs = dict(self._client_kwargs)
         client_kwargs["config"] = self._client_config.merge(Config(retries={"max_attempts": 0}))
 
         def create() -> MultipartUpload:
