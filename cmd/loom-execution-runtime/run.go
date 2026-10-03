@@ -300,7 +300,14 @@ func runPhase(
 	command.Stdout, command.Stderr = stdout, stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	started := time.Now().UTC()
-	err = command.Start()
+	// Direct script phases declare their report here. Workspace controllers
+	// prepare reports in the private sandbox instead, through its trusted RPC.
+	if report, declared := item.Environment["LOOM_VERIFIER_OUTPUT"]; item.Role == "verifier" && declared {
+		err = prepareVerifierReport(workspace, report)
+	}
+	if err == nil {
+		err = command.Start()
+	}
 	if err == nil {
 		waited := make(chan error, 1)
 		go func() { waited <- command.Wait() }()

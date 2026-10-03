@@ -169,12 +169,15 @@ Script verifiers receive these environment variables:
 Scripts should prefer these variables or explicit absolute paths. Do not infer
 the task workspace from the verifier script directory or process cwd.
 
-Before native verifier execution, Loom uploads an empty report through the
-trusted file RPC. This creates missing parent directories under the sandbox's
-runtime identity, refuses symlinks in every path component, and replaces stale
-report bytes. The script must write valid output; leaving the empty report is
-a verifier failure. Report preparation failures stop execution and still run
-normal sandbox cleanup.
+Before native workspace verifier execution, Loom uploads an empty report
+through the trusted sandbox file RPC. Direct-completion verifier phases run
+in the native execution container; its trusted Go runtime prepares the
+canonical `/workspace/.loom/verifier/output.json` before launching the script.
+Both mechanisms create missing parent directories under the runtime identity,
+refuse symlinks in every path component, and atomically replace stale report
+bytes without truncating hardlink targets. The script must write valid output;
+leaving the empty report is a verifier failure. Report preparation failures
+stop execution, retaining the normal phase evidence and cleanup behavior.
 
 The script must write a `VerifierResult` JSON object to
 `$LOOM_VERIFIER_OUTPUT`:
