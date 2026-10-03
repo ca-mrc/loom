@@ -87,6 +87,79 @@ def make_store(monkeypatch, client):
     return MinioObjectStore(endpoint_url="http://test-s3", access_key="test", secret_key="test")
 
 
+class VersionlessCompletionS3(StreamS3):
+    """S3-compatible completion omits versions; HEAD still returns identity."""
+
+    def __init__(self, *, head_version="version-owned", replace=False, completion_version=None):
+        super().__init__()
+        self.head_version = head_version
+        self.replace = replace
+        self.completion_version = completion_version
+        self.upload_metadata = {}
+        self.metadata = {}
+        self.head_calls = 0
+
+    def create_multipart_upload(self, **kwargs):
+        response = super().create_multipart_upload(**kwargs)
+        self.upload_metadata[response["UploadId"]] = dict(kwargs.get("Metadata", {}))
+        return response
+
+    def complete_multipart_upload(self, **kwargs):
+        super().complete_multipart_upload(**kwargs)
+        self.metadata[kwargs["Bucket"], kwargs["Key"]] = self.upload_metadata[kwargs["UploadId"]]
+        if self.replace:
+            # Even identical bytes/ETag cannot bind a different writer's object.
+            self.metadata[kwargs["Bucket"], kwargs["Key"]] = {"foreign-write": "other"}
+        response = {"ETag": '"same-content-etag"'}
+        if self.completion_version is not None:
+            response["VersionId"] = self.completion_version
+        return response
+
+    def head_object(self, *, Bucket, Key):  # noqa: N803
+        self.head_calls += 1
+        assert self.completion_version is None, "explicit write versions need no current HEAD"
+        response = {"ContentLength": len(self.objects[Bucket, Key]),
+                    "ETag": '"same-content-etag"', "Metadata": self.metadata[Bucket, Key]}
+        if self.head_version is not None:
+            response["VersionId"] = self.head_version
+        return response
+
+
+@pytest.mark.parametrize("version", ["version-owned", None], ids=["versioned", "unversioned"])
+async def test_stream_completion_recovers_only_its_own_readback_version(monkeypatch, version):
+    backend = VersionlessCompletionS3(head_version=version)
+    store = make_store(monkeypatch, backend)
+    payload = b"same-upload" * (1024**2)
+    result = await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(payload))
+    assert result.version_id == version
+    assert result.uri == "s3://b/k" and backend.objects["b", "k"] == payload
+    assert backend.head_calls == 1
+    assert not backend.active_uploads
+
+
+async def test_stream_completion_rejects_readback_from_competing_same_content_write(monkeypatch):
+    backend = VersionlessCompletionS3(replace=True)
+    store = make_store(monkeypatch, backend)
+    with pytest.raises(ValueError, match="identity"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+    assert backend.head_calls == 1
+
+
+@pytest.mark.parametrize("version", ["", " padded ", 3, False, {}])
+async def test_stream_completion_rejects_malformed_readback_version(monkeypatch, version):
+    backend = VersionlessCompletionS3(head_version=version)
+    store = make_store(monkeypatch, backend)
+    with pytest.raises(ValueError, match="malformed VersionId"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+
+
+async def test_stream_completion_preserves_explicit_version_without_head(monkeypatch):
+    backend = VersionlessCompletionS3(completion_version="completed-version")
+    store = make_store(monkeypatch, backend)
+    result = await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+    assert result.version_id == "completed-version" and backend.head_calls == 0
+
+
 async def chunks(*values):
     for value in values:
         yield value
