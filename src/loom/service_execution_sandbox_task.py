@@ -46,6 +46,7 @@ from loom.service_execution_task import (
     ServiceExecutionTaskError,
     _safe_workspace_path,
     _write_json_atomic,
+    task_artifact_paths,
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
@@ -352,7 +353,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 reference_files=task.environment.workspace_reference_files,
                                 reference_symlinks=task.environment.reference_file_symlinks,
                             )
-                        for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
+                        for path in task_artifact_paths(workspace, task):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
                                 await driver.download(task.environment.workdir / path, destination)

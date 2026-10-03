@@ -6,12 +6,14 @@ import json
 import math
 import os
 import sys
+import tomllib
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from loom.models.task import TaskConfig, normalize_steps
 from loom.request_params import sanitize_request_extras
 
 
@@ -44,6 +46,30 @@ def _json_environment(name: str, expected_type: type[Any]) -> Any:
     if not isinstance(value, expected_type):
         raise ServiceExecutionTaskError(f"{name} has the wrong JSON shape")
     return value
+
+
+def task_artifact_paths(workspace: Path, task: TaskConfig | None = None) -> list[str]:
+    """Read the frozen task declarations when the plan selects input transport.
+
+    Older plans retain their explicit environment list. The controller owns the
+    immutable input directory; agents receive a separate sandbox workspace.
+    """
+    mode = os.environ.get("LOOM_TASK_ARTIFACTS_FROM_INPUT")
+    if mode is None:
+        paths = _json_environment("LOOM_TASK_ARTIFACTS_JSON", list)
+        if not all(isinstance(path, str) for path in paths):
+            raise ServiceExecutionTaskError("artifact declarations must be paths")
+        return list(paths)
+    if mode != "1" or "LOOM_TASK_ARTIFACTS_JSON" in os.environ:
+        raise ServiceExecutionTaskError("artifact declaration source is ambiguous or unsupported")
+    if task is None:
+        with _safe_workspace_path(workspace, "task.toml").open("rb") as stream:
+            task = TaskConfig.model_validate(tomllib.load(stream))
+    task = normalize_steps(task)
+    if len(task.steps) != 1:
+        raise ServiceExecutionTaskError("artifact input transport requires one task step")
+    step = task.steps[0]
+    return list(dict.fromkeys((*step.artifacts, *step.required_artifacts)))
 
 
 def _completion_content(response: dict[str, Any]) -> tuple[str, str]:
@@ -149,7 +175,7 @@ def run_direct_completion(*, workspace: Path = Path("/workspace")) -> None:
         _required_environment("LOOM_TASK_INSTRUCTION_FILE"),
     )
     instruction = instruction_path.read_text(encoding="utf-8")
-    artifact_paths = _json_environment("LOOM_TASK_ARTIFACTS_JSON", list)
+    artifact_paths = task_artifact_paths(workspace)
     request_params = sanitize_request_extras(
         _json_environment("LOOM_TASK_REQUEST_PARAMS_JSON", dict)
     )
