@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable
 from glob import escape
@@ -491,6 +492,11 @@ async def _run_verifier(
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
             else task.environment.workdir / ".loom/verifier/output.json"
         )
+        # The trusted file RPC creates parents under the runtime identity and
+        # refuses symlinks in every component. Clear stale scoring bytes too;
+        # an empty report remains invalid unless the verifier writes its result.
+        with tempfile.NamedTemporaryFile() as empty_report:
+            await driver.upload(Path(empty_report.name), remote_output)
         script_path = str(task.verifier.args["script_path"])
         if separate_private_inputs:
             script_path = str(input_root / script_path)

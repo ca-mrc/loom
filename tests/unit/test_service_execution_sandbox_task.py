@@ -360,7 +360,9 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
             assert cmd == "/bin/sh " + task.verifier.args["script_path"]
         assert verifier.filesystem[PurePosixPath("/app/answer.txt")] == b"42"
         assert verifier.filesystem[PurePosixPath("/app/fixture.txt")] == b"baked fixture"
-        assert not any(str(path).startswith("/app/.loom/") for path in verifier.filesystem)
+        workspace_reports = {path for path in verifier.filesystem if str(path).startswith("/app/.loom/")}
+        assert workspace_reports == (set() if separate_private_inputs else {PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])})
+        assert verifier.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] == b""
         verifier.filesystem[PurePosixPath(env["LOOM_VERIFIER_OUTPUT"])] = b'{"rewards":{"passed":0}}'
         verifier.filesystem[PurePosixPath("/logs/verifier/ctrf.json")] = b'{}'
         return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
@@ -494,6 +496,60 @@ async def test_verifier_cleanup_failure_retains_reports_without_success(
     assert "cleanup-secret" not in stderr
     if not valid:
         assert "secondary verifier stop_processes failure (DriverError)" in stderr
+
+
+@pytest.mark.parametrize("mode", ["shared", "separate"])
+async def test_verifier_cannot_reuse_stale_report_when_script_writes_nothing(tmp_path, monkeypatch, mode):
+    from pydantic import ValidationError
+
+    from loom import service_execution_sandbox_task as module
+
+    task, trial, _ = _inputs()
+    trial = trial.model_copy(update={"verifier_env_mode": mode})
+    driver = Sandbox()
+    driver.filesystem[PurePosixPath("/app/.loom/verifier/output.json")] = b'{"rewards":{"passed":1}}'
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+
+    async def noop(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(module, "materialize_workspace", noop)
+    monkeypatch.setattr(module, "_import_workspace_archive", noop)
+    (tmp_path / ".loom").mkdir()
+    (tmp_path / ".loom/workspace.tar").write_bytes(b"workspace")
+    with pytest.raises(ValidationError):
+        await run_verifier(tmp_path, task, trial)
+    assert not (tmp_path / ".loom/verifier/output.json").read_bytes()
+    assert driver.quiesced and driver.state == "stopped"
+
+
+async def test_verifier_report_preparation_failure_still_cleans_up(tmp_path, monkeypatch):
+    from loom import service_execution_sandbox_task as module
+    from loom.errors import DriverError
+
+    task, trial, _ = _inputs()
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    preparation_error = DriverError("report path is not writable")
+
+    class UnwritableReport(Sandbox):
+        async def upload(self, src, dst):
+            raise preparation_error
+
+    driver = UnwritableReport()
+    script_calls = []
+
+    def execute(cmd, user, cwd, env):
+        if env and "LOOM_VERIFIER_OUTPUT" in env:
+            script_calls.append(cmd)
+        return ExecResult(return_code=0, stdout=b"", stderr=b"", duration_sec=0)
+
+    driver.exec_handler = execute
+    monkeypatch.setattr(module, "sandbox_driver", lambda *_: driver)
+    with pytest.raises(DriverError) as caught:
+        await run_verifier(tmp_path, task, trial)
+    assert caught.value is preparation_error
+    assert not script_calls
+    assert driver.quiesced and driver.state == "stopped"
 
 
 @pytest.mark.asyncio

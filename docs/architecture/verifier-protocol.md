@@ -149,19 +149,39 @@ name = "script"
 script_path = "/workspace/verifier/run.sh"
 ```
 
-At runtime Loom creates `/loom/verifier/` and runs the configured script in the
-agent sandbox. Script verifiers receive these environment variables:
+At runtime Loom prepares the report directory and runs the configured script.
+Script verifiers receive these environment variables:
 
-- `LOOM_VERIFIER_OUTPUT=/loom/verifier/output.json`: the required JSON output
-  path.
+- `LOOM_VERIFIER_OUTPUT`: the required JSON output path. The legacy trial
+  runner uses `/loom/verifier/output.json`; native custom script verifiers use
+  `$LOOM_TASK_DIR/.loom/verifier/output.json` in shared and separate sandboxes.
+  In a separate sandbox, the native immutable Harbor wrapper uses
+  `/loom/verifier/output.json` with private inputs staged outside the task
+  workspace.
 - `LOOM_TASK_DIR`: the task workspace from `TaskConfig.environment.workdir`
-  during normal trial execution, usually `/workspace`.
-- `LOOM_AGENT_OUTPUT`: set only when the first task step declares exactly one
-  plain file artifact such as `answer.txt`; the value is that artifact path
-  resolved under `LOOM_TASK_DIR`.
+  during normal trial execution, usually `/workspace`. For the native
+  immutable Harbor wrapper in a separate sandbox, this points to
+  `/loom/verifier/task`; the command cwd remains the task workspace.
+- `LOOM_AGENT_OUTPUT`: the legacy trial runner sets this only when the first
+  task step declares exactly one plain file artifact such as `answer.txt`;
+  the value is that artifact path resolved under `LOOM_TASK_DIR`.
 
 Scripts should prefer these variables or explicit absolute paths. Do not infer
 the task workspace from the verifier script directory or process cwd.
+
+Before native workspace verifier execution, Loom uploads an empty report
+through the trusted sandbox file RPC. Direct-completion verifier phases run
+in the native execution container; its trusted Go runtime prepares the
+canonical `/workspace/.loom/verifier/output.json` before launching the script.
+Both mechanisms create missing parent directories under the runtime identity,
+refuse symlinks in every path component, and atomically replace stale report
+bytes without truncating hardlink targets. The script must write valid output;
+leaving the empty report is a verifier failure. Report preparation failures
+stop execution, retaining the normal phase evidence and cleanup behavior.
+The direct runtime captures a declared report only after successful preparation;
+an earlier execution or preparation failure cannot publish an existing stale
+report or reward. An authored report from a verifier that subsequently fails
+still follows the ordinary partial-evidence rules.
 
 The script must write a `VerifierResult` JSON object to
 `$LOOM_VERIFIER_OUTPUT`:
