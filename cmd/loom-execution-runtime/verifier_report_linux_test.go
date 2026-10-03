@@ -72,6 +72,39 @@ func TestDirectVerifierCannotReuseStaleReport(t *testing.T) {
 	}
 }
 
+func TestDirectVerifierCannotCaptureUnpreparedReport(t *testing.T) {
+	for _, blocked := range []string{"preparation-failed", "agent-failed"} {
+		t.Run(blocked, func(t *testing.T) {
+			workspace, output := t.TempDir(), t.TempDir()
+			p := directVerifierPlan(t, workspace, "exit 0")
+			writeWorkspaceOutput(t, workspace, ".loom/verifier/output.json", `{"rewards":{"passed":1}}`)
+			if blocked == "agent-failed" {
+				p.Main.Argv = []string{"/bin/false"}
+			} else {
+				directory := filepath.Join(workspace, ".loom/verifier")
+				if err := os.Chmod(directory, 0o500); err != nil { t.Fatal(err) }
+				t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+				// uid 0 without CAP_DAC_OVERRIDE also observes this failure in
+				// the Docker lane. Ordinary privileged root may still write.
+				probe := filepath.Join(directory, "probe")
+				if err := os.WriteFile(probe, nil, 0o600); err == nil {
+					_ = os.Remove(probe)
+					t.Skip("runtime identity can bypass directory write permission")
+				}
+			}
+			result, err := runPlan(context.Background(), p, workspace, output, nil)
+			if err == nil { t.Fatal("expected execution failure") }
+			if err := captureDeclaredOutputs(p, workspace, output, &result); err == nil {
+				t.Fatal("unprepared report accepted after execution failed before verifier launch")
+			}
+			if len(result.VerifierRewards) != 0 { t.Fatalf("stale reward reused: %#v", result.VerifierRewards) }
+			if len(result.Outputs) != 1 || result.Outputs[0].State != "missing" {
+				t.Fatalf("stale report was published: %#v", result.Outputs)
+			}
+		})
+	}
+}
+
 func TestDirectVerifierRejectsPlantedReportPaths(t *testing.T) {
 	for _, planted := range []string{"workspace-parent-link", "loom-link", "directory-link", "report-link", "loom-file", "report-directory", "report-fifo", "outside-report"} {
 		t.Run(planted, func(t *testing.T) {
