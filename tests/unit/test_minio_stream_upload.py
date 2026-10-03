@@ -28,6 +28,8 @@ class StreamS3:
         self.active_uploads = set()
         self.block_create = False
         self.aborted = threading.Event()
+        self.upload_metadata = {}
+        self.object_metadata = {}
 
     def close(self):
         pass
@@ -60,6 +62,7 @@ class StreamS3:
             assert self.release.wait(5)
         self.uploads += 1
         self.active_uploads.add(str(self.uploads))
+        self.upload_metadata[str(self.uploads)] = dict(kwargs.get("Metadata", {}))
         return {"UploadId": str(self.uploads)}
 
     def upload_part(self, *, UploadId, PartNumber, Body, **kwargs):  # noqa: N803
@@ -73,8 +76,13 @@ class StreamS3:
         assert [r["PartNumber"] for r in rows] == list(range(1, len(rows) + 1))
         assert all(len(self.parts[UploadId, r["PartNumber"]]) >= 5 * 1024**2 for r in rows[:-1])
         self.objects[Bucket, Key] = b"".join(self.parts.pop((UploadId, r["PartNumber"])) for r in rows)
+        self.object_metadata[Bucket, Key] = self.upload_metadata[UploadId]
         self.active_uploads.remove(UploadId)
         return {}
+
+    def head_object(self, *, Bucket, Key):  # noqa: N803
+        return {"ContentLength": len(self.objects[Bucket, Key]),
+                "Metadata": self.object_metadata[Bucket, Key]}
 
     def abort_multipart_upload(self, *, UploadId, **kwargs):  # noqa: N803
         self.parts = {k: v for k, v in self.parts.items() if k[0] != UploadId}

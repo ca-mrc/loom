@@ -644,9 +644,14 @@ The existing complete-file digest and destination readback checks still gate
 canonical acknowledgement.
 Canonical file, trajectory and ATIF registrations retain the object version
 returned by each successful write, including streamed multipart completion and
-accounting corrections. Unversioned stores retain a null version. Publication
-does not infer the written version from a later lookup of the current key;
-malformed version evidence fails before canonical metadata is acknowledged.
+accounting corrections. New streamed multipart uploads carry a unique creation
+identity in object metadata. If completion omits the version, a HEAD readback
+may supply it only when that same creation identity matches. An unrelated
+current-key version is rejected even when its bytes match. Explicit completion
+versions need no fallback, and legacy/resumed uploads without the creation
+binding keep their existing receipt semantics. Unversioned stores retain a null
+version; malformed evidence fails before canonical metadata is acknowledged.
+This repairs future publication, not existing null-version registrations.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
