@@ -1,5 +1,6 @@
 """Exercise the real actuator command/trigger path with its bootstrap DB role."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -11,26 +12,152 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom import nebius_platform_bootstrap as bootstrap
 from loom.db.schema import (
+    Artifact,
     ExecutionAdmissionPolicy,
     ExecutionAdmissionReservation,
     ExecutionBudgetPolicy,
     ExecutionCostReservation,
     ExecutionProvisioningAuthorization,
+    ServiceExecutionEvent,
     ServiceExecutionLease,
     TeamQuota,
     Trial,
 )
+from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom_control_plane.execution_admission import upsert_execution_admission_policy
-from loom_control_plane.service_execution import enqueue_execution_transition
+from loom_control_plane.service_execution import (
+    enqueue_execution_transition,
+    finalize_committed_service_execution,
+    record_committed_runtime_result,
+    record_execution_event,
+)
 from loom_execution_actuator.contracts import NormalizedJobState
 from loom_execution_actuator.controller import ExecutionActuator
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 from tests.integration.test_nebius_platform_bootstrap import platform_database  # noqa: F401
 from tests.integration.test_service_execution_leases import (
     _FakeKubernetesJobApi,
+    _hand_off_to_verifier,
     _reserve,
+    _runtime_result_payload,
     _seed_ready_trial,
 )
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "verifier_error"])
+async def test_restricted_actuator_finalizes_large_results_without_artifact_identity_authority(
+    platform_database: str,  # noqa: F811 -- imported shared pytest fixture
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    monkeypatch.setattr(bootstrap, "database_url", lambda _value, _namespace: platform_database)
+    monkeypatch.setenv("LOOM_DB_URL", platform_database)
+    monkeypatch.setenv("LOOM_COLLECTOR_TOKEN", "loom_ecc_" + "f" * 64)
+    monkeypatch.setenv("LOOM_BATCH_RUNNER_TOKEN", "loom_br_" + "b" * 64)
+    password = "restricted-role-password-" + "a" * 32
+    for role in ("SERVICE", "CONTROL_PLANE", "GATEWAY", "ACTUATOR"):
+        monkeypatch.setenv("LOOM_DB_" + role + "_PASSWORD", password)
+    bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+    url = make_url(platform_database).set(drivername="postgresql+psycopg")
+    admin = create_async_engine(url)
+    actuator = create_async_engine(url.set(username="loom_actuator", password=password))
+    owners = async_sessionmaker(admin, expire_on_commit=False)
+    restricted = async_sessionmaker(actuator, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        # Seed the already committed source boundary. Finalization and replay
+        # below use the real deployed login, not the fixture database owner.
+        async with owners.begin() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await _hand_off_to_verifier(session, parent_id=lease.id, now=now)
+            lease.finalized_at = None
+            lease.observed_state = "finalizing"
+            artifact = Artifact(
+                id=uuid4(), artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
+                team_id=lease.team_id, trial_id=trial_id,
+                control_producer_kind="service_execution", control_producer_id=lease.id,
+                content_hash="sha256:" + "1" * 64,
+                artifact_upload_session_id=lease.output_upload_session_id,
+                manifest_sha256="sha256:" + "2" * 64,
+                file_count=512, stored_size_bytes=2048, unpacked_size_bytes=2048,
+                provenance={"lease_id": str(lease.id), "generation": lease.resource_generation,
+                            "runtime_contract_sha256": lease.runtime_contract_sha256},
+            )
+            session.add(artifact)
+            document = _runtime_result_payload(lease, started_at=now)
+            document.update(status=outcome, partial_evidence=outcome != "succeeded",
+                            verifier_rewards={"resolved": 0.0}, outputs=[{
+                                "source_path": f"out/part-{i:04}.json",
+                                "relative_path": f"artifacts/part-{i:04}.json",
+                                "kind": "task_artifact", "required": False,
+                                "state": "captured", "size_bytes": 4,
+                                "sha256": "sha256:" + "3" * 64,
+                            } for i in range(512)])
+            result = ExecutionRuntimeResultV1.model_validate(document)
+            reported = await record_committed_runtime_result(
+                session, lease_id=lease.id, generation=lease.generation,
+                runtime_result=result, observed_at=now,
+            )
+            assert reported.payload_json["schema_version"] == "loom.execution-event-payload-reference.v1"
+            lease_id, artifact_id, reported_id = lease.id, artifact.id, reported.id
+
+        async with restricted.begin() as session:
+            assert await session.scalar(text("SELECT current_user")) == "loom_actuator"
+            assert await finalize_committed_service_execution(
+                session, lease_id=lease_id, observed_at=now,
+            )
+        # Repeat bootstrap must preserve the required narrow grants and data.
+        bootstrap.bootstrap_database({"namespace": "loom-nebius-platform"})
+        async with restricted.begin() as session:
+            trial = await session.get(Trial, trial_id)
+            artifact = await session.get(Artifact, artifact_id)
+            assert trial is not None and artifact is not None and trial.result is not None
+            assert trial.state == ("materializing" if outcome == "succeeded" else "failed")
+            assert trial.result["aggregate_reward"] == 0
+            assert trial.result["runtime_result"] == result.model_dump(mode="json")
+            assert (await record_committed_runtime_result(
+                session, lease_id=lease_id, generation=1, runtime_result=result, observed_at=now,
+            )).id == reported_id
+            finalized = await session.scalar(select(ServiceExecutionEvent).where(
+                ServiceExecutionEvent.lease_id == lease_id,
+                ServiceExecutionEvent.event_kind == "finalized",
+            ))
+            assert finalized is not None
+            assert finalized.payload_json["schema_version"] == "loom.execution-event-payload-reference.v1"
+            payload = json.loads(artifact.artifact_metadata["execution_event_payloads"][
+                finalized.payload_json["payload_key"]
+            ])
+            replay, duplicate = await record_execution_event(
+                session, lease_id=lease_id, generation=finalized.generation,
+                ordinal=finalized.ordinal, event_kind="finalized", payload=payload, observed_at=now,
+            )
+            assert replay.id == finalized.id and duplicate
+        with psycopg.connect(url.set(drivername="postgresql", username="loom_actuator",
+                                    password=password).render_as_string(hide_password=False)) as db:
+            for statement in (
+                "INSERT INTO artifacts DEFAULT VALUES",
+                "DELETE FROM artifacts",
+                "UPDATE artifacts SET team_id=team_id",
+                "UPDATE artifacts SET trial_id=trial_id",
+                "UPDATE artifacts SET provenance=provenance",
+                "UPDATE artifacts SET storage=storage",
+                "UPDATE artifacts SET control_producer_id=control_producer_id",
+                "UPDATE artifact_lineage_edges SET parent_artifact_id=parent_artifact_id",
+                "DELETE FROM users",
+                "UPDATE execution_admission_policies SET max_concurrent=99",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    db.execute(statement)
+                db.rollback()
+        with psycopg.connect(url.set(drivername="postgresql", username="loom_gateway",
+                                    password=password).render_as_string(hide_password=False)) as db:
+            assert db.execute("SELECT has_table_privilege(current_user,'artifacts','INSERT')").fetchone() == (True,)
+            assert db.execute("SELECT has_table_privilege(current_user,'artifacts','UPDATE')").fetchone() == (True,)
+            assert db.execute("SELECT has_table_privilege(current_user,'artifacts','DELETE')").fetchone() == (True,)
+    finally:
+        await actuator.dispose()
+        await admin.dispose()
 
 
 @pytest.fixture
