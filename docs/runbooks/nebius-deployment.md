@@ -1564,7 +1564,7 @@ against changed templates is invalid. A restarted producer, effective extra
 writer grant, changed UID or missing evidence stops further mutation. Do not
 interpret an idle activity count as an empty future queue. The fixed database
 readiness pages also inspect delayed native work and batches awaiting fan-out,
-require schema `0172` and reject live application access even with no connected
+require schema `0173` and reject live application access even with no connected
 session. Preserve unknown queued origins: drain through the existing execution
 path before cutover instead of rewriting provenance or cancelling unrelated work.
 The protected parent still must qualify retained personal origin history in the

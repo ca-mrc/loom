@@ -2578,7 +2578,7 @@ replacement. Targets are generated from the retained manager, complete shared
 API/actuator roster and one development collector; arbitrary manifests are not
 inputs. Producer Pod drain is followed by independent application-access,
 schema-readiness and queued-origin qualification. It cannot manufacture provenance
-for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
+for a legacy queue. The fixed live adapter now reads schema `0173`, idle guard/
 work state and personal-access quiescence through each retained database Pod,
 qualifying its StatefulSet, Service, Secret version and Pod identity before and
 after every read-only page. Complete EndpointSlice readback also binds the Service
