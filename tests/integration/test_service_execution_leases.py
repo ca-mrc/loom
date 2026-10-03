@@ -1384,8 +1384,9 @@ async def test_scheduler_capacity_scan_is_bounded(postgres_url: str) -> None:
         await engine.dispose()
 
 
+@pytest.mark.parametrize("many_artifacts", [False, True])
 async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
-    postgres_url: str,
+    postgres_url: str, many_artifacts: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -1398,6 +1399,7 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
         runtime_image_ref=plan.runtime_image_ref,
         runtime_binary_sha256=plan.runtime_binary_sha256,
         image_admission=plan.image_admission,
+        supports_task_artifact_inputs=many_artifacts,
     )
     try:
         async with sessions() as session:
@@ -1464,7 +1466,8 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
                     {
                         "name": "main",
                         "instruction_file": "instruction.md",
-                        "artifacts": ["answer.txt"],
+                        "artifacts": ([f"out/part-{index:04}.json" for index in range(515)]
+                                      if many_artifacts else ["answer.txt"]),
                     }
                 ],
             }
@@ -1500,6 +1503,10 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
         assert persisted_plan.task_input.file_count == 3
         assert persisted_plan.main.environment["LOOM_TASK_MODEL"] == "openai/gpt-5"
         assert persisted_plan.main.argv[-1] == "direct-completion"
+        if many_artifacts:
+            assert persisted_plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
+            assert "LOOM_TASK_ARTIFACTS_JSON" not in persisted_plan.main.environment
+            assert sum(item.kind == "task_artifact" for item in persisted_plan.output_declarations) == 515
     finally:
         await engine.dispose()
 

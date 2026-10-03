@@ -14,6 +14,49 @@ from loom.service_execution_sandbox_task import run_agent, run_verifier
 from tests.unit.test_service_execution_terminus_plan import _inputs
 
 
+@pytest.mark.parametrize("agent_error", [False, True])
+async def test_collects_many_immutable_input_artifacts_after_agent_exit(
+    tmp_path, monkeypatch, agent_error,
+):
+    task, trial, _ = _inputs()
+    paths = [f"out/part-{index:04}.json" for index in range(515)]
+    task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+        "artifacts": paths, "required_artifacts": [paths[-1], "required.txt"],
+    })]})
+    (tmp_path / "instruction.md").write_text("Produce declared output")
+    agent = Sandbox()
+    monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
+    monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON", raising=False)
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda role, task: agent)
+
+    async def identity(gateway):
+        return uuid4(), uuid4()
+
+    async def terminus(**kwargs):
+        # The agent can replace its public task.toml, but declarations belong
+        # to the controller's frozen input, never the returned workspace.
+        agent.filesystem[PurePosixPath("/app/task.toml")] = b'[[steps]]\nartifacts = ["forged.txt"]\n'
+        agent.filesystem[PurePosixPath("/app/forged.txt")] = b"untrusted"
+        for path in (*paths, "required.txt"):
+            agent.filesystem[PurePosixPath("/app") / path] = path.encode()
+        (kwargs["workspace"] / "trajectory.jsonl").write_bytes(b"")
+        if agent_error:
+            raise RuntimeError("controlled agent failure")
+
+    monkeypatch.setattr("loom.service_execution_sandbox_task._execution_identity", identity)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.run_terminus2", terminus)
+    if agent_error:
+        with pytest.raises(RuntimeError, match="controlled agent failure"):
+            await run_agent(tmp_path, task, trial)
+    else:
+        await run_agent(tmp_path, task, trial)
+    for path in (*paths, "required.txt"):
+        assert (tmp_path / ".loom/collected" / path).read_bytes() == path.encode()
+    assert not (tmp_path / ".loom/collected/forged.txt").exists()
+    assert agent.state == "stopped"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("snapshot_fails", [False, True])
 async def test_deadline_timeout_handoff_requires_completed_snapshot(

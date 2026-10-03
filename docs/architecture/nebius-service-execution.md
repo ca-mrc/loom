@@ -193,6 +193,26 @@ All declared and required artifact paths are frozen into the runtime plan with
 the lossless model-call trajectory, attributed usage and structured verifier
 output. Multiple artifacts are supported within those path constraints.
 
+Process environment values remain limited to 4096 UTF-8 bytes. Small artifact
+lists retain `LOOM_TASK_ARTIFACTS_JSON`. A deployment profile advertising
+`supports_task_artifact_inputs=true` permits larger lists to use
+`LOOM_TASK_ARTIFACTS_FROM_INPUT=1` instead. The trusted controller reads the
+normalized immutable task input and deduplicates the declared and required
+paths; it never takes declarations from the agent's returned workspace. Output
+declarations and command identity still bind the complete list. The capability
+is omitted when false, preserving older frozen profiles and their controller
+images. A version-pinned agent release uses this capability only when its exact
+controller image matches the profile's qualified default controller. New
+candidate publication advertises it explicitly; queued batches are not silently
+upgraded.
+
+The environment-local scheduler isolates runtime-contract validation failures
+per queued trial. It records `service_execution_configuration_invalid`, clears
+stale scheduling progress, and proceeds to the next candidate without creating
+an attempt, capacity reservation, or spend. The public diagnostic identifies the
+configuration boundary without exposing validation input values. Temporary
+capacity and image-readiness waits retain their existing retry behavior.
+
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public

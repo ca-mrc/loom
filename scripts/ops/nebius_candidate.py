@@ -304,6 +304,7 @@ def create_candidate(
         runtime_binary_sha256=document["runtime_binary_sha256"],
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
+        supports_task_artifact_inputs=True,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,

@@ -8,7 +8,35 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from loom.service_execution_task import run_direct_completion
+import pytest
+
+from loom.service_execution_task import (
+    ServiceExecutionTaskError,
+    run_direct_completion,
+    task_artifact_paths,
+)
+
+
+@pytest.mark.parametrize(("selector", "legacy"), [("0", None), ("", None), ("1", "[]"), (None, '[1]')])
+def test_artifact_paths_reject_ambiguous_or_malformed_transport(tmp_path, monkeypatch, selector, legacy):
+    for name, value in (("LOOM_TASK_ARTIFACTS_FROM_INPUT", selector), ("LOOM_TASK_ARTIFACTS_JSON", legacy)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    with pytest.raises(ServiceExecutionTaskError):
+        task_artifact_paths(tmp_path)
+
+
+def test_artifact_input_rejects_multiple_steps(tmp_path, monkeypatch):
+    from tests.unit.test_service_execution_materialization import _task
+
+    task = _task()
+    task = task.model_copy(update={"steps": [*task.steps, task.steps[0].model_copy(update={"name": "second"})]})
+    monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")
+    monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON", raising=False)
+    with pytest.raises(ServiceExecutionTaskError, match="one task step"):
+        task_artifact_paths(tmp_path, task)
 
 
 def test_direct_completion_waits_for_slow_loopback_model_response(tmp_path, monkeypatch):
@@ -153,13 +181,30 @@ def test_direct_completion_uses_provider_native_model_and_writes_artifact(
     assert usage["totals"]["cost_usd"] == 0.01
 
 
+@pytest.mark.parametrize("from_input", [False, True])
 def test_direct_completion_writes_every_declared_artifact(
     tmp_path: Path,
     monkeypatch: Any,
+    from_input: bool,
 ) -> None:
     (tmp_path / "instruction.md").write_text("End with ACCEPTED", encoding="utf-8")
     monkeypatch.setenv("LOOM_TASK_INSTRUCTION_FILE", "instruction.md")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", '["answer.txt","nested/reasoning.md"]')
+    paths = ["answer.txt", "nested/reasoning.md"]
+    if from_input:
+        import tomli_w
+
+        from tests.unit.test_service_execution_materialization import _task
+
+        task = _task()
+        paths += [f"out/part-{index:04}.json" for index in range(513)]
+        task = task.model_copy(update={"steps": [task.steps[0].model_copy(update={
+            "artifacts": paths, "required_artifacts": [paths[-1], "required.txt"],
+        })]})
+        (tmp_path / "task.toml").write_text(tomli_w.dumps(task.model_dump(mode="json", exclude_none=True)))
+        monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON")
+        monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")
+        paths = [*paths, "required.txt"]
     monkeypatch.setenv("LOOM_TASK_REQUEST_PARAMS_JSON", "{}")
     monkeypatch.setenv("LOOM_TASK_MODEL", "openai/gpt-5")
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://gateway-proxy")
@@ -203,3 +248,5 @@ def test_direct_completion_writes_every_declared_artifact(
     assert (tmp_path / "nested/reasoning.md").read_text() == "evidence ACCEPTED"
     assert (tmp_path / ".loom/agent/trajectory.jsonl").is_file()
     assert (tmp_path / ".loom/agent/usage.json").is_file()
+    for path in paths:
+        assert (tmp_path / path).read_text() == "evidence ACCEPTED"

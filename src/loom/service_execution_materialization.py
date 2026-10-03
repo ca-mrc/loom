@@ -181,6 +181,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
+    supports_task_artifact_inputs: bool = Field(default=False, exclude_if=lambda value: not value)
     controller_resources: ControllerComputeResourcesV1 | None = None
     resource_allocation_policy: Literal["node-share-v1"] | None = None
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
@@ -269,6 +270,7 @@ def build_nebius_runtime_profile(
     agent_image_ref: str | None = None,
     controller_resources: ControllerComputeResourcesV1 | None = None,
     supports_task_web_egress: bool = False,
+    supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
@@ -297,6 +299,7 @@ def build_nebius_runtime_profile(
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
+        supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
@@ -690,6 +693,10 @@ def compile_service_execution_plan(
         ),
         "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": effective_network_policy_json,
     }
+    if (profile.supports_task_artifact_inputs
+            and len(main_environment["LOOM_TASK_ARTIFACTS_JSON"].encode("utf-8")) > ProcessPhaseV1.MAX_ENV_VALUE_BYTES):
+        del main_environment["LOOM_TASK_ARTIFACTS_JSON"]
+        main_environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] = "1"
     verifier_path = str(task.verifier.args.get("script_path", ""))
     verifier = ProcessPhaseV1(
         role="verifier",
