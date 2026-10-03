@@ -482,6 +482,25 @@ def test_blocked_report_rejects_unqualified_diagnostic(tmp_path, stage):
         module().safe_report(json.dumps(report).encode(), metadata)
 
 
+@pytest.mark.parametrize(('detail', 'valid'), [
+    ('tls_api', True), ('tls_kubelet', True), ('tls_api_verify_20', True),
+    ('tls_kubelet_verify_64', True), ('tls_unknown_verify_10', True),
+    ('tls_unknown_verify_0', True), ('tls_api_verify_255', True),
+    ('tls_kubelet_verify_256', False), ('tls_api_verify_-1', False),
+    ('tls_unknown_verify_True', False), ('tls_api_verify_20_private', False),
+])
+def test_pool_tls_report_preserves_only_bounded_transport_and_verification_code(tmp_path, detail, valid):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage='pool_runtime_telemetry_' + detail)
+    if valid:
+        assert gateway.safe_report(json.dumps(report | {'error': 'private-certificate-and-token'}).encode(), metadata) == report
+    else:
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report).encode(), metadata)
+
+
 def test_upgrade_bundle_uses_separate_private_recovery_and_fixed_existing_actions(tmp_path, monkeypatch):
     metadata = upgrade_operation(tmp_path)
     (tmp_path / 'nebius-management').mkdir(mode=0o700)

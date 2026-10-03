@@ -578,7 +578,12 @@ def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
     *(('pool cutover runtime telemetry ' + detail + ' unqualified', 'pool_runtime_telemetry_' + detail)
         for detail in ('binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client',
             'tls', 'authorization', 'network', 'http', 'reader', 'counters', 'close',
-            'identity', 'address', 'authority', 'payload')),
+            'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
+            'tls_api_verify_20', 'tls_kubelet_verify_64', 'tls_unknown_verify_10',
+            'tls_kubelet_verify_0', 'tls_kubelet_verify_255')),
+    ('pool cutover runtime telemetry tls_kubelet_verify_256 unqualified', 'pool_connection'),
+    ('pool cutover runtime telemetry tls_api_verify_-1 unqualified', 'pool_connection'),
+    ('pool cutover runtime telemetry tls_private-marker unqualified', 'pool_connection'),
     ('pool cutover management database unqualified', 'pool_management_database'),
     ('pool cutover provider unqualified', 'pool_provider'),
     ('pool cutover connected scope unqualified', 'pool_connected_scope'),
@@ -757,7 +762,7 @@ def test_reader_context_preserves_parent_diagnostics_and_erases_credentials_on_f
 
 
 @pytest.mark.parametrize("damage", [None, "controller", "service", "actuator", "unrecorded_stop", "manager", "provider", "telemetry",
-    "telemetry_tls", "telemetry_unknown"])
+    "telemetry_tls", "telemetry_tls_detail", "telemetry_unknown"])
 def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operator_access(private_cutover, publication_http, monkeypatch, damage):
     from contextlib import contextmanager
     from types import SimpleNamespace
@@ -819,6 +824,8 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
             raise PoolMigrationError('runtime_telemetry')
         if damage in {'telemetry_tls', 'telemetry_unknown'}:
             raise PoolMigrationError('runtime_telemetry_' + ('tls' if damage == 'telemetry_tls' else 'private-token'))
+        if damage == 'telemetry_tls_detail':
+            raise PoolMigrationError('runtime_telemetry_tls_kubelet_verify_20')
 
     monkeypatch.setattr(entry, 'connected_checks', connect)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, '_get', get)
@@ -830,7 +837,8 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
         with pytest.raises(PoolOperationError) as error:
             entry.execute_pool_cutover(context, 'preflight')
         expected_stage = {'manager': 'pool_management_database', 'provider': 'pool_provider',
-            'telemetry': 'pool_runtime_telemetry', 'telemetry_tls': 'pool_runtime_telemetry_tls'}.get(damage, 'pool_runtime_databases')
+            'telemetry': 'pool_runtime_telemetry', 'telemetry_tls': 'pool_runtime_telemetry_tls',
+            'telemetry_tls_detail': 'pool_runtime_telemetry_tls_kubelet_verify_20'}.get(damage, 'pool_runtime_databases')
         assert error.value.stage == expected_stage
     else:
         with entry.connected_pool_readers(context):
