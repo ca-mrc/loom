@@ -92,7 +92,8 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
         *('runtime_telemetry_' + detail for detail in {
             'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
             'authorization', 'network', 'http', 'reader', 'counters', 'close',
-            'identity', 'address', 'authority', 'payload'}),
+            'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
+            *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256))}),
         'management_database', 'provider', 'connected_scope', 'private_inputs'})})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 

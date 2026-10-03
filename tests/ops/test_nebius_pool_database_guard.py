@@ -683,7 +683,7 @@ def test_each_running_database_consumer_is_qualified_without_sql_or_credential_o
 
 @pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
     'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target', 'service_account',
-    'probe_tls', 'probe_extra', 'probe_unknown'])
+    'probe_tls', 'probe_tls_detail', 'probe_tls_invalid', 'probe_extra', 'probe_unknown'])
 @pytest.mark.parametrize('successor', [False, True])
 def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage, successor):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
@@ -738,6 +738,8 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
             state.commands.append(args)
             if damage == 'denied':
                 raise ValueError('private-telemetry-marker')
+            if damage in {'probe_tls_detail', 'probe_tls_invalid'}:
+                return {'status': 'blocked', 'stage': 'tls_kubelet_verify_' + ('20' if damage == 'probe_tls_detail' else '256')}
             if damage in {'probe_tls', 'probe_extra', 'probe_unknown'}:
                 return {'status': 'blocked', 'stage': 'private-telemetry-marker' if damage == 'probe_unknown' else 'tls',
                     **({'private-token': 'never expose'} if damage == 'probe_extra' else {})}
@@ -753,7 +755,7 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
         phase = ('binding' if not actuator or damage in {'unknown_target', 'service_account'} else
             'nodes' if damage in {'missing_host', 'partial', 'duplicate', 'deleted'} else
             'recheck' if damage in {'late_node', 'late_pod'} else
-            'tls' if damage == 'probe_tls' else 'probe')
+            'tls' if damage == 'probe_tls' else 'tls_kubelet_verify_20' if damage == 'probe_tls_detail' else 'probe')
         assert error.value.stage == 'runtime_telemetry_' + phase
         assert 'private-' not in str(error.value)
     else:
@@ -769,11 +771,19 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     (None, None), ('namespace', 'settings'), ('target', 'settings'), ('remote', 'settings'),
     ('node_uid', 'identity'), ('denied', 'authorization'), ('node_api_denied', 'authorization'),
     ('missing_counter', 'counters'), ('boolean_counter', 'counters'), ('negative_counter', 'counters'),
-    ('old_image', 'reader'), ('tls', 'tls'), ('timeout', 'network'), ('connect', 'network'),
+    ('old_image', 'reader'), ('tls', 'tls_kubelet'), ('timeout', 'network'), ('connect', 'network'),
     ('http_failure', 'http'), ('payload', 'payload'), ('close', 'close'),
     ('node_address', 'address'), ('bearer', 'authority'), ('summary_identity', 'payload'),
-    ('client', 'client'), ('tls_close', 'tls'),
+    ('client', 'client'), ('tls_close', 'tls_kubelet'),
     ('missing_ca', 'authority'), ('unreadable_ca', 'authority'),
+    ('node_api_tls', 'tls_api'), ('node_api_tls_verify', 'tls_api_verify_20'),
+    ('tls_unknown', 'tls_unknown_verify_10'), ('tls_trust', 'tls_kubelet_verify_20'),
+    ('tls_name', 'tls_kubelet_verify_64'), ('tls_expired', 'tls_kubelet_verify_10'),
+    ('tls_zero', 'tls_kubelet_verify_0'), ('tls_max', 'tls_kubelet_verify_255'),
+    ('tls_large', 'tls_kubelet'), ('tls_negative', 'tls_kubelet'),
+    ('tls_bool', 'tls_kubelet'), ('tls_string', 'tls_kubelet'),
+    ('tls_cycle', 'tls_kubelet'), ('tls_deep', 'tls_kubelet'),
+    ('tls_unknown_plain', 'tls'),
 ])
 def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, tmp_path, damage, stage):
     import json
@@ -815,11 +825,26 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         client.Configuration.set_default(configuration)
     monkeypatch.setattr(config, 'load_incluster_config', load_config)
     requests, closed = [], []
+    tls_codes = {'tls_trust': 20, 'tls_name': 64, 'tls_expired': 10,
+        'tls_zero': 0, 'tls_max': 255, 'tls_large': 256, 'tls_negative': -1,
+        'tls_bool': True, 'tls_string': '20'}
     def node_read(_self, method, url, *args, **kwargs):
         assert (method, url) == ('GET', 'https://kubernetes.default.svc/api/v1/nodes/node-1')
         if damage == 'node_api_denied':
             from kubernetes.client.exceptions import ApiException
             raise ApiException(status=403, reason='private-runtime-token')
+        if damage in {'node_api_tls', 'node_api_tls_verify'}:
+            from urllib3.exceptions import MaxRetryError, SSLError
+            try:
+                verification = ssl.SSLCertVerificationError('private-runtime-token')
+                if damage == 'node_api_tls_verify':
+                    verification.verify_code = 20
+                raise verification
+            except ssl.SSLError as error:
+                try:
+                    raise SSLError(error)
+                except SSLError as wrapped:
+                    raise MaxRetryError(None, 'private-node-api-url', wrapped) from wrapped
         return HTTPResponse(body=json.dumps({'apiVersion': 'v1', 'kind': 'Node',
             'metadata': {'name': 'node-1', 'uid': str(uuid4()) if damage == 'node_uid' else uid},
             'status': {'addresses': [{'type': 'InternalIP',
@@ -828,11 +853,32 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         assert url == 'https://10.20.0.2:10250/stats/summary'
         assert kwargs['headers'] == {'Authorization': 'bearer private-runtime-token'}
         requests.append(url)
-        if damage in {'tls', 'tls_close'}:
+        if damage in {'tls_cycle', 'tls_deep'}:
+            wrapped = ssl.SSLError('private-runtime-token')
+            if damage == 'tls_cycle':
+                wrapped.__cause__ = wrapped
+            else:
+                verification = ssl.SSLCertVerificationError('private-runtime-token')
+                verification.verify_code = 20
+                cause = verification
+                for _ in range(8):
+                    outer = RuntimeError('private-runtime-token')
+                    outer.__cause__ = cause
+                    cause = outer
+                wrapped.__cause__ = cause
+            raise httpx.ConnectError('private-runtime-token') from wrapped
+        if damage in {'tls', 'tls_close'} or damage in tls_codes:
+            import httpcore
             try:
-                raise ssl.SSLCertVerificationError('private-runtime-token')
+                verification = ssl.SSLCertVerificationError('private-runtime-token')
+                if damage in tls_codes:
+                    verification.verify_code = tls_codes[damage]
+                raise verification
             except ssl.SSLError as error:
-                raise httpx.ConnectError('private-runtime-token') from error
+                try:
+                    raise httpcore.ConnectError('private-runtime-token') from error
+                except httpcore.ConnectError as wrapped:
+                    raise httpx.ConnectError('private-runtime-token') from wrapped
         if damage in {'timeout', 'connect'}:
             raise (httpx.ReadTimeout if damage == 'timeout' else httpx.ConnectError)('private-runtime-token')
         if damage == 'payload':
@@ -857,6 +903,12 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         pytest.fail('legacy unpinned reader executed')
     actual_create_context = ssl.create_default_context
     def create_context(**kwargs):
+        if damage == 'tls_unknown_plain':
+            raise ssl.SSLError('private-runtime-token')
+        if damage == 'tls_unknown':
+            verification = ssl.SSLCertVerificationError('private-runtime-token')
+            verification.verify_code = 10
+            raise verification
         if damage == 'missing_ca':
             return actual_create_context(cafile=str(tmp_path / 'private-missing-ca.crt'))
         if damage == 'unreadable_ca':
@@ -881,7 +933,7 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         assert not requests and not closed
     else:
         assert closed == [True]
-    if damage in {'missing_ca', 'unreadable_ca'}:
+    if damage in {'missing_ca', 'unreadable_ca', 'node_api_tls', 'node_api_tls_verify', 'tls_unknown', 'tls_unknown_plain'}:
         assert not requests
 
 
