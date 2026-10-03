@@ -1294,6 +1294,14 @@ qualifies runtime/capacity and permissions, then opens global admission and
 releases local guards. Each mutating pass shares one operation lock, while child
 journals retain their original locks and uncertain-write observation rules.
 
+Connection failures retain fixed diagnostic stages for publication, operator
+readers, runtime databases, runtime telemetry, management database, provider,
+connected scope and changed private inputs (each prefixed `pool_`). Unknown
+failures remain `pool_connection`. These codes contain no exception text,
+credential, resource payload or retry authority; investigate the identified
+prerequisite before another operation. They do not change installation ordering
+or relax any qualification.
+
 `pending` means reconcile the same operation and named phase; it does not permit
 recreating an uncertain resource or resetting evidence. Replays select the newest
 recorded phase. Explicit rollback requires the completed closed cutover, fences
