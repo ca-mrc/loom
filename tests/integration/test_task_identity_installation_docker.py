@@ -284,6 +284,119 @@ echo '{}' > /logs/verifier/ctrf.json
     assert result["rewards"] == {"resolved": 1, "passed": 1}
 
 
+@pytest.mark.parametrize("mode", ["shared", "separate"])
+@pytest.mark.parametrize("uid", [0, 65532], ids=["root", "nonroot"])
+async def test_native_script_can_write_report_without_creating_its_directory(
+    sandboxes, tmp_path, monkeypatch, mode, uid,
+):
+    import tarfile
+
+    from loom.service_execution_sandbox_task import run_verifier
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    _, root, nonroot = sandboxes
+    driver = root if uid == 0 else nonroot
+    role = "verifier" if uid == 0 else "default"
+    task, trial, _ = _inputs()
+    workdir = PurePosixPath("/tmp/task-workspace")
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={
+        "workdir": workdir, "user": str(uid),
+    })})
+    task.verifier.args["script_path"] = "verifier/check.sh"
+    trial = trial.model_copy(update={"verifier_env_mode": mode})
+    controller = tmp_path / "controller"
+    (controller / "tests").mkdir(parents=True)
+    (controller / "tests/private-marker").write_text("trusted private input")
+    (controller / "verifier").mkdir()
+    (controller / "verifier/check.sh").write_text(f"""set -eu
+test "$(id -u)" = {uid}
+test "$PWD" = {workdir}
+test "$(cat "$LOOM_TASK_DIR/tests/private-marker")" = 'trusted private input'
+test "$(cat answer.txt)" = 'public answer'
+python - <<'REPORT'
+import json, os
+from pathlib import Path
+output = Path(os.environ['LOOM_VERIFIER_OUTPUT'])
+output.write_text(json.dumps({{'rewards': {{'passed': 0}}}}))
+assert output.stat().st_uid == {uid}
+assert output.parent.stat().st_uid == {uid}
+REPORT
+""")
+    answer = controller / "answer.txt"
+    answer.write_text("public answer")
+    if mode == "shared":
+        await driver.upload(answer, workdir / "answer.txt")
+    else:
+        (controller / ".loom").mkdir()
+        with tarfile.open(controller / ".loom/workspace.tar", "w") as archive:
+            archive.add(answer, arcname="answer.txt")
+    absent = await driver.exec(f"test ! -e {workdir}/.loom && test ! -e {workdir}/tests")
+    assert absent.return_code == 0, absent.stderr
+    await driver.stop()
+    connection = ServiceSandboxDriver(tmp_path / role / "sandbox.sock",
+                                      capabilities=driver.capabilities, network_policy=NoNetwork())
+
+    def select_driver(actual_role, _task):
+        assert actual_role == ("task-sandbox" if mode == "shared" else "verifier-sandbox")
+        return connection
+
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", select_driver)
+    await run_verifier(controller, task, trial)
+    report = json.loads((controller / ".loom/verifier/output.json").read_bytes())
+    assert report["rewards"] == {"passed": 0}
+
+
+@pytest.mark.parametrize("planted", ["loom-link", "directory-link", "report-link", "loom-file", "tests-link"])
+async def test_native_verifier_rejects_planted_report_paths_before_running_script(
+    sandboxes, tmp_path, monkeypatch, planted,
+):
+    from loom.errors import DriverError
+    from loom.service_execution_sandbox_task import ServiceExecutionTaskError, run_verifier
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    _, driver, _ = sandboxes
+    task, trial, _ = _inputs()
+    task.verifier.args["script_path"] = "verifier/check.sh"
+    trial = trial.model_copy(update={"verifier_env_mode": "shared"})
+    controller = tmp_path / "controller"
+    (controller / "verifier").mkdir(parents=True)
+    (controller / "verifier/check.sh").write_text("""set -eu
+printf entered > /tmp/verifier-entered
+printf '{"rewards":{"passed":1}}' > "$LOOM_VERIFIER_OUTPUT"
+""")
+    commands = {
+        "loom-link": "ln -s /tmp/protected /app/.loom",
+        "directory-link": "mkdir /app/.loom; ln -s /tmp/protected/verifier /app/.loom/verifier",
+        "report-link": "mkdir -p /app/.loom/verifier; ln -s /tmp/protected/verifier/output.json /app/.loom/verifier/output.json",
+        "loom-file": "printf blocked > /app/.loom",
+        "tests-link": "ln -s /tmp/protected /app/tests",
+    }
+    planted_result = await driver.exec(
+        "mkdir -p /app /tmp/protected/verifier; "
+        "printf protected > /tmp/protected/verifier/output.json; " + commands[planted],
+    )
+    assert planted_result.return_code == 0, planted_result.stderr
+    await driver.stop()
+    connection = ServiceSandboxDriver(tmp_path / "verifier/sandbox.sock",
+                                      capabilities=driver.capabilities, network_policy=NoNetwork())
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda *_: connection)
+    expected = ServiceExecutionTaskError if planted == "tests-link" else DriverError
+    with pytest.raises(expected):
+        await run_verifier(controller, task, trial)
+    inspection = ServiceSandboxDriver(tmp_path / "verifier/sandbox.sock",
+                                      capabilities=driver.capabilities, network_policy=NoNetwork())
+    await inspection.start()
+    try:
+        intact = await inspection.exec(
+            "test ! -e /tmp/verifier-entered && "
+            "test \"$(cat /tmp/protected/verifier/output.json)\" = protected",
+        )
+        assert intact.return_code == 0, intact.stderr
+    finally:
+        await inspection.stop()
+    assert not (controller / ".loom/verifier/output.json").exists()
+
+
 async def test_native_virtualenv_handoff_preserves_external_interpreter_and_aliases(sandboxes, tmp_path):
     agent, verifier, _ = sandboxes
     for driver in (agent, verifier):
