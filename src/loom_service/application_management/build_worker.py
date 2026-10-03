@@ -104,29 +104,61 @@ class ApplicationBuildWorker:
             await self.management.stop(PoolStopV1.model_validate(state.settlement["stop"]))
             await self.management.drain(PoolDrainV1.model_validate(state.settlement["drain"]))
 
-    async def reconcile_once(self, build_id: UUID, *, attempt: int) -> None:
+    async def _claim(self, build_id: UUID, *, attempt: int) -> ApplicationBuildLease | None:
         async with asyncio.timeout(min(5, self.lease_seconds / 6)):
-            lease = await self.journal.claim(build_id, attempt=attempt, lease_seconds=self.lease_seconds)
-        if lease is None:
-            return
-        heartbeat = asyncio.create_task(self._heartbeat(lease))
-        work = asyncio.create_task(self._advance(lease))
-        try:
-            async with asyncio.timeout(self.reconcile_timeout):
-                done, _ = await asyncio.wait({heartbeat, work}, return_when=asyncio.FIRST_COMPLETED)
-                (work if work in done else heartbeat).result()
-        finally:
-            # Drain in-flight I/O BEFORE releasing our lease. Cancellation does
-            # not undo remote writes; their immutable messages survive this task.
-            heartbeat.cancel()
-            work.cancel()
-            await asyncio.gather(heartbeat, work, return_exceptions=True)
+            return await self.journal.claim(build_id, attempt=attempt, lease_seconds=self.lease_seconds)
+
+    async def _release(self, claim: asyncio.Task[ApplicationBuildLease | None],
+                       children: list[asyncio.Task[None]]) -> None:
+        # Drain in-flight I/O BEFORE releasing our lease. Cancellation does
+        # not undo remote writes; their immutable messages survive this task.
+        for task in children:
+            task.cancel()
+        await asyncio.gather(*children, return_exceptions=True)
+        await asyncio.gather(claim, return_exceptions=True)
+        if claim.cancelled() or claim.exception() is not None:
+            return  # The caller already observes the claim failure.
+        lease = claim.result()
+        if lease is not None:
             try:
                 async with asyncio.timeout(min(5, self.lease_seconds / 6)):
                     await self.journal.release(lease)
             except ManagementError as error:
                 if error.code != "stale_application_build_lease":
                     raise
+
+    async def reconcile_once(self, build_id: UUID, *, attempt: int) -> None:
+        claim = asyncio.create_task(self._claim(build_id, attempt=attempt))
+        children: list[asyncio.Task[None]] = []
+        try:
+            # A committed claim must reach cleanup even if shutdown arrives
+            # before its result. The claim has its own bounded timeout.
+            lease = await asyncio.shield(claim)
+            if lease is None:
+                return
+            heartbeat = asyncio.create_task(self._heartbeat(lease))
+            work = asyncio.create_task(self._advance(lease))
+            children.extend((heartbeat, work))
+            async with asyncio.timeout(self.reconcile_timeout):
+                done, _ = await asyncio.wait({heartbeat, work}, return_when=asyncio.FIRST_COMPLETED)
+                (work if work in done else heartbeat).result()
+        finally:
+            cleanup = asyncio.create_task(self._release(claim, children))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Repeated shutdown signals must not interrupt cleanup or leave
+                # an unowned task using a closed database/HTTP client.
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not cleanup.cancelled() and (error := cleanup.exception()) is not None:
+                    _LOG.warning("application_build_cleanup_failed error=%s", type(error).__name__)
+                raise
 
     async def run(self, *, concurrency: int = 4, poll_seconds: float = 5) -> None:
         if type(concurrency) is not int or not 1 <= concurrency <= 16 or not 1 <= poll_seconds <= 60:

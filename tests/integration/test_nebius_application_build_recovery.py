@@ -273,6 +273,7 @@ async def test_shutdown_drains_committed_claim_and_lease_release(
     async with setup_worker(environment_registry, build_inputs, tmp_path) as (factory, _, requests, journal, worker, _):
         request = requests[0]
         entered, proceed = asyncio.Event(), asyncio.Event()
+        initial = await saved(factory, request)
         original = getattr(journal, boundary)
 
         async def delayed(*args, **kwargs):
@@ -302,7 +303,7 @@ async def test_shutdown_drains_committed_claim_and_lease_release(
         row = await saved(factory, request)
         assert row.lease_token is None and row.lease_expires_at is None
         if boundary == "claim":
-            assert row.phase == "queued" and row.pool_request_json is None
+            assert row.phase == "queued" and row.pool_request_json == initial.pool_request_json
             async with factory() as session:
                 assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 0
 
