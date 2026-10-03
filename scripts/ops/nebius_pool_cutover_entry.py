@@ -59,6 +59,7 @@ from scripts.ops.nebius_pool_migration import (
     PoolMigrationRequest,
 )
 from scripts.ops.nebius_pool_migration_guard import (
+    TELEMETRY_FAILURE_STAGES,
     KubectlPoolGuardAPI,
     qualify_database_destination,
 )
@@ -101,6 +102,8 @@ _CONNECTION_ERRORS = {
     'pool cutover connected scope unqualified': 'connected_scope',
     'pool cutover context changed before connection': 'private_inputs',
     'pool cutover context changed during publication': 'private_inputs',
+    **{'pool cutover runtime telemetry ' + stage + ' unqualified': 'runtime_telemetry_' + stage
+        for stage in TELEMETRY_FAILURE_STAGES},
 }
 
 if TYPE_CHECKING:
@@ -409,6 +412,9 @@ def qualify_pool_runtime_databases(context: PoolCutoverContext, guards: KubectlP
                 or load_pool_cutover_inputs(context.operation) != context):
             raise ValueError
     except PoolMigrationError as error:
+        if error.stage in {'runtime_telemetry_' + stage for stage in TELEMETRY_FAILURE_STAGES}:
+            detail = error.stage.removeprefix('runtime_telemetry_')
+            raise EntryError('pool cutover runtime telemetry ' + detail + ' unqualified') from None
         surface = "telemetry" if error.stage == "runtime_telemetry" else "databases"
         raise EntryError("pool cutover runtime " + surface + " unqualified") from None
     except Exception:

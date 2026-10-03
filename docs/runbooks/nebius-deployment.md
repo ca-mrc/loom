@@ -1302,6 +1302,16 @@ credential, resource payload or retry authority; investigate the identified
 prerequisite before another operation. They do not change installation ordering
 or relax any qualification.
 
+Telemetry failures further identify fixed `pool_runtime_telemetry_...` categories:
+binding, Pod, node inventory, probe delivery, identity recheck, settings, client
+construction, TLS, authorization, network, HTTP, reader, counters, cleanup,
+node identity/address, bearer or local trust authority, or response payload. These
+are bounded diagnostics, not raw exceptions or statistics. The fixed in-Pod probe can exit
+zero to deliver a `blocked` diagnostic; the protected preflight still rejects it
+and exits nonzero. A successful diagnostic exchange does not qualify telemetry.
+Keep the same TLS, node-identity and statistics checks when investigating; no
+node-proxy fallback, additional permissions or automatic retries are introduced.
+
 `pending` means reconcile the same operation and named phase; it does not permit
 recreating an uncertain resource or resetting evidence. Replays select the newest
 recorded phase. Explicit rollback requires the completed closed cutover, fences

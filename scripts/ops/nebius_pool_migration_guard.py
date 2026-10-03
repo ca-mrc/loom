@@ -126,29 +126,85 @@ except Exception:
 # The optional UID-aware production reader is an ordinary-rollout prerequisite.
 # Old images fail here before downtime; never fall back to nodes/proxy, operator
 # credentials or another endpoint to make a retained actuator appear ready.
+TELEMETRY_FAILURE_STAGES = frozenset({
+    'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
+    'authorization', 'network', 'http', 'reader', 'counters', 'close',
+    'identity', 'address', 'authority', 'payload',
+})
 _BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
 
+def reader_failure(error):
+    import ssl
+    import httpx
+    from urllib3.exceptions import SSLError, TimeoutError
+    seen, network = set(), False
+    for _ in range(8):
+        if error is None or id(error) in seen:
+            break
+        seen.add(id(error))
+        if isinstance(error, (ssl.SSLError, SSLError)):
+            return "tls"
+        if isinstance(error, json.JSONDecodeError):
+            return "payload"
+        if isinstance(error, (FileNotFoundError, PermissionError)):
+            return "authority"
+        status = (error.response.status_code if isinstance(error, httpx.HTTPStatusError)
+                  else getattr(error, "status_code", getattr(error, "status", None)))
+        if type(status) is int and status > 0:
+            return "authorization" if status in {401, 403} else "http"
+        if isinstance(error, (httpx.NetworkError, httpx.TimeoutException, TimeoutError, OSError)):
+            network = True
+        if isinstance(error, ValueError):
+            code = {
+                "unqualified kubelet node": "identity",
+                "unqualified expected kubelet node identity": "identity",
+                "unqualified kubelet node identity": "identity",
+                "unqualified kubelet address": "address",
+                "unqualified kubelet TLS or bearer authority": "authority",
+                "kubelet summary exceeds its bound": "payload",
+                "kubelet summary node identity differs": "payload",
+            }.get(str(error))
+            if code is not None:
+                return code
+        error = error.__cause__ or error.__context__
+    return "network" if network else "reader"
+
 async def run():
-    from loom_execution_actuator.config import ExecutionActuatorSettings
-    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
-    if len(sys.argv) != 5:
-        raise ValueError()
-    settings = ExecutionActuatorSettings()
-    if (settings.namespace != sys.argv[1] or settings.target_id != sys.argv[2]
-            or settings.kubernetes_connection is not None):
-        raise ValueError()
-    api = InClusterKubernetesJobApi()
+    api, stage = None, "settings"
+    report = {"status": "blocked", "stage": stage}
     try:
+        from loom_execution_actuator.config import ExecutionActuatorSettings
+        from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+        if len(sys.argv) != 5:
+            raise ValueError()
+        settings = ExecutionActuatorSettings()
+        if (settings.namespace != sys.argv[1] or settings.target_id != sys.argv[2]
+                or settings.kubernetes_connection is not None):
+            raise ValueError()
+        stage = "client"
+        api = InClusterKubernetesJobApi()
+        stage = "reader"
         summary = await api.resource_summary(node_name=sys.argv[3], expected_node_uid=sys.argv[4])
+        stage = "counters"
         for field, counter in (("cpu", "usageCoreNanoSeconds"), ("memory", "workingSetBytes"), ("fs", "usedBytes")):
             value = summary["node"][field][counter]
             if type(value) is not int or value < 0:
                 raise ValueError()
-        return {"status": "qualified", "node_name": sys.argv[3], "node_uid": sys.argv[4]}
+        report = {"status": "qualified", "node_name": sys.argv[3], "node_uid": sys.argv[4]}
+    except Exception as error:
+        report = {"status": "blocked", "stage": reader_failure(error) if stage == "reader" else stage}
     finally:
-        await api.close()
+        if api is not None:
+            try:
+                await api.close()
+            except Exception:
+                if report["status"] == "qualified":
+                    report = {"status": "blocked", "stage": "close"}
+    return report
 
 try:
+    # Exit zero acknowledges this bounded diagnostic, never qualification.
+    # The parent rejects every report other than the exact qualified identity.
     print(json.dumps(asyncio.run(run())))
 except Exception:
     print("Pool runtime telemetry unqualified", file=sys.stderr)
@@ -779,6 +835,7 @@ class KubectlPoolGuardAPI:
         command or operator-credential forwarding. Recheck Pod and Node identity
         after all reads; a stale success cannot approve a replacement runtime.
         """
+        stage = 'binding'
         try:
             if (target not in self.request.guards
                     or digest(migration_contract(self.request)) != self.contract_sha256
@@ -796,21 +853,29 @@ class KubectlPoolGuardAPI:
                     or len(settings) != len(container["env"])
                     or settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != namespace):
                 raise ValueError
+            stage = 'pod'
             before = self._runtime(target, original=original, expected=expected)
             host = before["spec"]["nodeName"]
+            stage = 'nodes'
             nodes = self._telemetry_nodes(host)
             for node_name, uid in nodes.items():
+                stage = 'probe'
                 report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", "actuator", "--",
                     "python", "-c", _BOUND_TELEMETRY_COMMAND, namespace, target_id, node_name, uid])
+                if (set(report) == {'status', 'stage'} and report['status'] == 'blocked'
+                        and isinstance(report['stage'], str) and report['stage'] in TELEMETRY_FAILURE_STAGES):
+                    stage = report['stage']
+                    raise ValueError
                 if report != {"status": "qualified", "node_name": node_name, "node_uid": uid}:
                     raise ValueError
+            stage = 'recheck'
             after = self._runtime(target, original=original, expected=expected)
             if (_uid(after) != _uid(before) or after["spec"]["nodeName"] != host or self._telemetry_nodes(host) != nodes
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
         except Exception:
-            raise PoolMigrationError("runtime_telemetry") from None
+            raise PoolMigrationError('runtime_telemetry_' + stage) from None
 
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,

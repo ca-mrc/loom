@@ -89,6 +89,10 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     *('pool_' + stage.replace('-', '_') for stage in POOL_PHASES | {
         'operation', 'connection', 'preflight', 'cancellation', 'completion',
         'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
+        *('runtime_telemetry_' + detail for detail in {
+            'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
+            'authorization', 'network', 'http', 'reader', 'counters', 'close',
+            'identity', 'address', 'authority', 'payload'}),
         'management_database', 'provider', 'connected_scope', 'private_inputs'})})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
