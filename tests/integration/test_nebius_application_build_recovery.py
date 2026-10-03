@@ -264,6 +264,49 @@ async def test_automatic_loop_reaches_second_owner_and_shutdown_leaves_no_lease(
         assert all(row.lease_token is None for row in stopped)
 
 
+@pytest.mark.parametrize("boundary", ["claim", "release"])
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_shutdown_drains_committed_claim_and_lease_release(
+    environment_registry, build_inputs, tmp_path, monkeypatch, boundary, cancel_count,
+):
+    """Shutdown cannot abandon a committed lease, even during its cleanup."""
+    async with setup_worker(environment_registry, build_inputs, tmp_path) as (factory, _, requests, journal, worker, _):
+        request = requests[0]
+        entered, proceed = asyncio.Event(), asyncio.Event()
+        original = getattr(journal, boundary)
+
+        async def delayed(*args, **kwargs):
+            if boundary == "claim":
+                result = await original(*args, **kwargs)
+                entered.set()
+                await proceed.wait()
+                return result
+            entered.set()
+            await proceed.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(journal, boundary, delayed)
+        task = asyncio.create_task(worker.reconcile_once(request.build.build_id, attempt=1))
+        try:
+            async with asyncio.timeout(10):
+                await entered.wait()
+                assert (await saved(factory, request)).lease_token is not None
+                for _ in range(cancel_count):
+                    task.cancel()
+                    await asyncio.sleep(0)
+        finally:
+            proceed.set()
+            async with asyncio.timeout(10):
+                results = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        row = await saved(factory, request)
+        assert row.lease_token is None and row.lease_expires_at is None
+        if boundary == "claim":
+            assert row.phase == "queued" and row.pool_request_json is None
+            async with factory() as session:
+                assert await session.scalar(select(func.count()).select_from(NebiusPoolRequest)) == 0
+
+
 async def test_explicit_concurrent_retry_runs_new_pool_generation_after_old_cleanup(environment_registry, build_inputs, tmp_path):
     async with setup_worker(environment_registry, build_inputs, tmp_path) as (factory, registry, requests, _, worker, _):
         request = requests[0]
