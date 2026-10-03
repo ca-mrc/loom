@@ -1306,7 +1306,14 @@ Telemetry failures further identify fixed `pool_runtime_telemetry_...` categorie
 binding, Pod, node inventory, probe delivery, identity recheck, settings, client
 construction, TLS, authorization, network, HTTP, reader, counters, cleanup,
 node identity/address, bearer or local trust authority, or response payload. These
-are bounded diagnostics, not raw exceptions or statistics. The fixed in-Pod probe can exit
+are bounded diagnostics, not raw exceptions or statistics. TLS diagnostics identify
+the Kubernetes API (`tls_api`) or direct kubelet (`tls_kubelet`) transport when the
+bounded exception chain establishes it. Certificate-verification failures retain
+only an integer OpenSSL verification code in 0–255, for example
+`pool_runtime_telemetry_tls_kubelet_verify_20`; `tls_unknown_verify_<code>` means
+the transport was not established. Without qualified details, the diagnostic stays
+at the transport category or legacy `tls`. No exception text, URLs or certificate
+contents are returned. The fixed in-Pod probe can exit
 zero to deliver a `blocked` diagnostic; the protected preflight still rejects it
 and exits nonzero. A successful diagnostic exchange does not qualify telemetry.
 Keep the same TLS, node-identity and statistics checks when investigating; no

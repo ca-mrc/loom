@@ -130,20 +130,31 @@ TELEMETRY_FAILURE_STAGES = frozenset({
     'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
     'authorization', 'network', 'http', 'reader', 'counters', 'close',
     'identity', 'address', 'authority', 'payload',
+    'tls_api', 'tls_kubelet',
+    *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256)),
 })
 _BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
 
 def reader_failure(error):
     import ssl
     import httpx
-    from urllib3.exceptions import SSLError, TimeoutError
-    seen, network = set(), False
+    from urllib3.exceptions import HTTPError, SSLError, TimeoutError
+    seen, network, tls = set(), False, False
+    transport, verification = "unknown", None
     for _ in range(8):
         if error is None or id(error) in seen:
             break
         seen.add(id(error))
+        if isinstance(error, HTTPError):
+            transport = "api"
+        elif isinstance(error, httpx.HTTPError):
+            transport = "kubelet"
         if isinstance(error, (ssl.SSLError, SSLError)):
-            return "tls"
+            tls = True
+        if isinstance(error, ssl.SSLCertVerificationError):
+            code = getattr(error, "verify_code", None)
+            if type(code) is int and 0 <= code <= 255:
+                verification = code
         if isinstance(error, json.JSONDecodeError):
             return "payload"
         if isinstance(error, (FileNotFoundError, PermissionError)):
@@ -167,6 +178,10 @@ def reader_failure(error):
             if code is not None:
                 return code
         error = error.__cause__ or error.__context__
+    if tls:
+        if verification is not None:
+            return f"tls_{transport}_verify_{verification}"
+        return "tls" if transport == "unknown" else f"tls_{transport}"
     return "network" if network else "reader"
 
 async def run():
