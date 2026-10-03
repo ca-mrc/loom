@@ -85,6 +85,28 @@ def test_planner_source_has_no_harness_name_branches() -> None:
     assert "hosted_harness(" not in code  # the caller resolves the spec
 
 
+@pytest.mark.parametrize("name", ["direct-completion", "oracle-shared", "terminus-2-separate"])
+def test_many_artifact_paths_compile_without_oversized_environment(name: str) -> None:
+    from loom.service_execution_materialization import compile_service_execution_plan
+
+    task, trial, profile = _CASES[name]()
+    paths = [f"out/part-{index:04}.json" for index in range(515)]
+    task.steps[0].artifacts = paths
+    task.steps[0].required_artifacts = [paths[-1]]
+    profile = profile.model_copy(update={"supports_task_artifact_inputs": True})
+
+    plan = compile_service_execution_plan(
+        task=task, trial=trial, profile=profile, source_provenance=_provenance(),
+        task_revision_sha256=_REVISION,
+    )
+
+    assert {"artifacts/" + path for path in paths} <= {o.relative_path for o in plan.output_declarations}
+    assert all(len(value.encode("utf-8")) <= 4096 for value in plan.main.environment.values())
+    assert plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
+    assert "LOOM_TASK_ARTIFACTS_JSON" not in plan.main.environment
+    assert task.steps[0].artifacts == paths
+
+
 @pytest.mark.parametrize("shared", [False, True])
 def test_test_only_harness_compiles_through_the_planner(shared: bool) -> None:
     task, trial, request = _request(shared=shared)

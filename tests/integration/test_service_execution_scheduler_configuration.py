@@ -29,6 +29,54 @@ from tests.integration.test_service_execution_leases import (
 from tests.support.execution_image_admission import IMAGE_ADMISSION_KEYRING
 
 
+async def test_invalid_runtime_contract_does_not_block_next_trial_or_leak_input(
+    postgres_url: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    private_input = "private-configuration-sentinel-" * 200
+    try:
+        async with sessions() as session:
+            invalid_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=invalid_id, now=now)
+            invalid = await session.get(Trial, invalid_id)
+            assert invalid is not None
+            invalid.submit_priority = 200
+            invalid.scheduling_observation = {"reason": "task_image_preparation_pending", "observed_at": now.isoformat()}
+            team_id = invalid.team_id
+            task = await session.get(Task, invalid.task_id)
+            assert task is not None
+            config = deepcopy(task.config)
+            config["service_execution"]["runtime_template"]["main"]["environment"] = {"LOOM_TASK_ARTIFACTS_JSON": private_input}
+            task.config = config
+            next_id, _ = await _seed_ready_trial(session, now=now)
+            await _configure_scheduler_trial(session, trial_id=next_id, now=now)
+            await session.commit()
+        async with sessions() as session:
+            lease = await reserve_next_service_execution(
+                session, environment="staging", pool_id="nebius-cpu",
+                image_admission_keyring=IMAGE_ADMISSION_KEYRING, now=now,
+            )
+            assert lease is not None and lease.trial_id == next_id
+            await session.commit()
+        async with sessions() as session:
+            invalid = await session.get(Trial, invalid_id)
+            assert invalid is not None and invalid.state == "failed"
+            assert invalid.failure_reason == "service_execution_configuration_invalid"
+            assert "runtime contract" in invalid.failure_message
+            assert "private-configuration-sentinel" not in invalid.failure_message + caplog.text
+            assert invalid.attempt_count == 0 and invalid.started_at is None and invalid.claimed_at is None
+            assert invalid.finished_at == now and invalid.next_attempt_at is None
+            assert invalid.scheduling_observation is None
+            quota = await session.get(TeamQuota, team_id)
+            assert quota is not None and quota.in_flight_count == 0
+            for model in (ServiceExecutionLease, ExecutionCostReservation, ExecutionAdmissionReservation):
+                assert await session.scalar(select(func.count()).select_from(model).where(model.trial_id == invalid_id)) == 0
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.parametrize("maximum_seconds", [7200, 14400])
 async def test_scheduler_isolates_unsupported_deadline_and_respects_configured_bound(
     postgres_url: str, maximum_seconds: int,
