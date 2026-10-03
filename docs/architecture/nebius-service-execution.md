@@ -736,6 +736,29 @@ Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
 operator projections also return at most 500 event and 500 history rows. These
 limits are contract errors, not invitations to discard older authority.
+Runtime results can legitimately contain up to 10,000 output entries. When a
+validated `result_reported` or `finalized` payload exceeds the database's JSONB
+text bound, its owning output Artifact retains the complete JSON text
+under `metadata.execution_event_payloads`. The lifecycle event stores a compact
+`loom.execution-event-payload-reference.v1` document binding the Artifact,
+generation/ordinal/kind key and full-payload digest. The event's own digest hashes
+that stored reference. The finalization failure reason remains available to
+bounded diagnosis readers. Other event kinds and command limits are unchanged.
+
+Commit replay and finalization resolve the full payload only after verifying
+the reference digest and exact lease, team, trial, upload-session, resource
+generation and runtime-contract ownership. Changed, missing or foreign payloads
+fail closed. JSON text preserves integer/float types across JSONB
+round trips. Small and historical inline events keep their existing behavior.
+Trial results, rewards, source `result.json` and normal API/download semantics
+retain the complete runtime result; no output inventory is truncated. Artifact
+metadata survives canonical materialization and source-spool cleanup, so replay
+does not depend on retained temporary objects. Existing lifecycle deletion order
+removes execution events before deleting their owning Artifact.
+Artifact listing responses omit this internal payload store rather than repeating
+the full lifecycle documents for every published file. Ordinary artifact metadata
+and the full Trial result remain available through their existing projections.
+
 Prometheus service-execution metrics aggregate by command type or surface and
 never use trial, lease, Job, namespace, or team identifiers as labels. The
 materializer additionally reports pending count, bytes, oldest age, retries,
