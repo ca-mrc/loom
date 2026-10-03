@@ -570,6 +570,51 @@ def test_private_cutover_requires_a_bound_collector_credential(private_cutover):
     assert not Path(metadata['state_dir']).exists()
 
 
+@pytest.mark.parametrize(('message', 'stage'), [
+    ('pool cutover publication unqualified', 'pool_publication'),
+    ('pool cutover operator readers unqualified', 'pool_operator_readers'),
+    ('pool cutover runtime databases unqualified', 'pool_runtime_databases'),
+    ('pool cutover runtime telemetry unqualified', 'pool_runtime_telemetry'),
+    ('pool cutover management database unqualified', 'pool_management_database'),
+    ('pool cutover provider unqualified', 'pool_provider'),
+    ('pool cutover connected scope unqualified', 'pool_connected_scope'),
+    ('pool cutover context changed before connection', 'pool_private_inputs'),
+    ('pool cutover context changed during publication', 'pool_private_inputs'),
+    ('private-token: https://private.invalid/secret', 'pool_connection'),
+    ('pool cutover publication unqualified private-token', 'pool_connection'),
+])
+def test_pool_prerequisite_failure_reports_only_closed_stage_without_installing(
+    private_cutover, monkeypatch, capsys, message, stage,
+):
+    """Discarding a known prerequisite code must not turn it into an opaque connection failure."""
+    from contextlib import contextmanager
+
+    from scripts.ops import nebius_management_entry as management
+    from scripts.ops import nebius_pool_cutover_entry as entry
+
+    metadata, _, _ = private_cutover
+    selected = entry.load_pool_cutover_inputs(metadata)
+    path = Path(metadata['inputs_path']).with_name('operation.json')
+    path.write_text(json.dumps(metadata))
+    path.chmod(0o600)
+
+    @contextmanager
+    def connect(context):
+        assert context == selected
+        raise management.EntryError(message)
+        yield  # pragma: no cover - context manager protocol, never entered
+
+    monkeypatch.setattr(entry, 'connected_pool_api', connect)
+    monkeypatch.setattr(entry, 'run_pool_operation', lambda **kwargs: pytest.fail('operation entered after failed prerequisites'))
+    # The inner protocol acknowledges delivery; the existing outer CLI rejects blocked.
+    assert management.main(str(path), 'preflight') == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {'status': 'blocked', 'stage': stage,
+        **{key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
+    assert not output.err and 'private-token' not in output.out
+    assert not Path(metadata['state_dir']).exists() and not Path(metadata['anchor_dir']).exists()
+
+
 @pytest.mark.parametrize("damage", ["hash", "extra_manager", "source", "installation", "cluster", "pool",
     "missing_database", "missing_actuator_credential", "partial_actuator_credential",
     "token_hash", "token_alias", "token_symlink", "token_public", "path", "publication",
@@ -715,6 +760,7 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_management_entry import EntryError
     from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_operation import PoolOperationError
 
     metadata, _, root = private_cutover
     context = entry.load_pool_cutover_inputs(metadata)
@@ -774,11 +820,11 @@ def test_connected_entry_qualifies_all_runtime_consumers_before_returning_operat
     monkeypatch.setattr(entry, 'qualify_pool_provider', provider_probe, raising=False)
     monkeypatch.setattr(entry.KubectlPoolGuardAPI, 'qualify_runtime_telemetry', telemetry_probe, raising=False)
     if damage:
-        with pytest.raises(EntryError) as error:
-            with entry.connected_pool_readers(context):
-                pytest.fail('unqualified runtime received operator access')
-        if damage == 'telemetry':
-            assert str(error.value) == 'pool cutover runtime telemetry unqualified'
+        with pytest.raises(PoolOperationError) as error:
+            entry.execute_pool_cutover(context, 'preflight')
+        expected_stage = {'manager': 'pool_management_database', 'provider': 'pool_provider',
+            'telemetry': 'pool_runtime_telemetry'}.get(damage, 'pool_runtime_databases')
+        assert error.value.stage == expected_stage
     else:
         with entry.connected_pool_readers(context):
             assert set(checked) == set(by_name)
