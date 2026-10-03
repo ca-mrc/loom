@@ -104,6 +104,9 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
 
         async with restricted.begin() as session:
             assert await session.scalar(text("SELECT current_user")) == "loom_actuator"
+            assert (await record_committed_runtime_result(
+                session, lease_id=lease_id, generation=1, runtime_result=result, observed_at=now,
+            )).id == reported_id
             assert await finalize_committed_service_execution(
                 session, lease_id=lease_id, observed_at=now,
             )
@@ -116,9 +119,12 @@ async def test_restricted_actuator_finalizes_large_results_without_artifact_iden
             assert trial.state == ("materializing" if outcome == "succeeded" else "failed")
             assert trial.result["aggregate_reward"] == 0
             assert trial.result["runtime_result"] == result.model_dump(mode="json")
-            assert (await record_committed_runtime_result(
-                session, lease_id=lease_id, generation=1, runtime_result=result, observed_at=now,
-            )).id == reported_id
+            replay, duplicate = await record_execution_event(
+                session, lease_id=lease_id, generation=reported.generation,
+                ordinal=reported.ordinal, event_kind="result_reported",
+                payload=result.model_dump(mode="json"), observed_at=now,
+            )
+            assert replay.id == reported_id and duplicate
             finalized = await session.scalar(select(ServiceExecutionEvent).where(
                 ServiceExecutionEvent.lease_id == lease_id,
                 ServiceExecutionEvent.event_kind == "finalized",

@@ -62,6 +62,7 @@ ACTUATOR_TASK_IMAGE_WRITES = {
 ACTUATOR_TABLES = (
     "nebius_rollout_guard",
     "trial_resource_usage",
+    "artifacts",
     *COMMON_EXECUTION_TABLES,
     "batches",
     "trial_task_image_materializations",
@@ -266,6 +267,8 @@ def _bootstrap_database(
                         "execution_price_snapshots",
                         "execution_target_price_bindings",
                     }
+                    if role == "loom_actuator":
+                        read_only.add("artifacts")
                     writable = sql.SQL(", ").join(
                         sql.Identifier(table) for table in inventory if table not in read_only
                     )
@@ -288,6 +291,10 @@ def _bootstrap_database(
                             "GRANT UPDATE (last_used_at, last_seen_at) ON tokens TO loom_gateway"
                         )
                     if role == "loom_actuator":
+                        # Large lifecycle events retain their payloads in the
+                        # exact owning Artifact. Finalization reads that identity
+                        # and changes metadata only, never storage or ownership.
+                        cursor.execute("GRANT UPDATE (metadata) ON artifacts TO loom_actuator")
                         cursor.execute("GRANT INSERT, UPDATE ON trial_resource_usage TO loom_actuator")
                         for table, privileges in ACTUATOR_TASK_IMAGE_WRITES.items():
                             cursor.execute(
