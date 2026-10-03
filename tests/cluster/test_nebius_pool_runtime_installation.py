@@ -100,7 +100,7 @@ def test_fixed_preflight_reads_kubelet_inside_production_actuator_image_without_
         api._runtime(target, original=original)  # Real Pod lineage and token defaults qualify.
         with pytest.raises(PoolMigrationError) as denied:
             api.qualify_runtime_telemetry(target, original=original)
-        assert denied.value.stage == 'runtime_telemetry' and len(commands) == 1
+        assert denied.value.stage == 'runtime_telemetry_authorization' and len(commands) == 1
         role['rules'].append({'apiGroups': [''], 'resources': ['nodes/stats'], 'verbs': ['get']})
         rbac.patch_cluster_role('pool-telemetry-reader', role)
         # Kubelet caches webhook authorization denials. Repeated fixed reads,
