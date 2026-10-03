@@ -758,6 +758,10 @@ removes execution events before deleting their owning Artifact.
 Artifact listing responses omit this internal payload store rather than repeating
 the full lifecycle documents for every published file. Ordinary artifact metadata
 and the full Trial result remain available through their existing projections.
+The restricted actuator database role can read Artifact identity and payloads and
+update only the Artifact's `metadata` column for finalization. It cannot insert or
+delete Artifacts or rewrite their storage, ownership, provenance or lineage.
+Bootstrap installs these explicit grants; Gateway artifact permissions are unchanged.
 
 Prometheus service-execution metrics aggregate by command type or surface and
 never use trial, lease, Job, namespace, or team identifiers as labels. The
