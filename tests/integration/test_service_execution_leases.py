@@ -4772,7 +4772,7 @@ async def test_large_runtime_result_survives_canonical_publication_and_download(
 
 @pytest.mark.parametrize("tamper", [
     "payload", "missing", "foreign_artifact", "foreign_lease", "foreign_trial",
-    "foreign_team", "upload", "generation", "event_digest",
+    "foreign_team", "upload", "generation", "event_digest", "invalid_number",
 ])
 async def test_large_runtime_event_reference_rejects_identity_drift(
     postgres_url: str, tamper: str,
@@ -4803,6 +4803,12 @@ async def test_large_runtime_event_reference_rejects_identity_drift(
             # Python's compact number representation fits; PostgreSQL's JSONB
             # representation expands the same valid finite numbers past 64 KiB.
             document["verifier_rewards"] = {f"score-{i}": 1e300 for i in range(256)}
+            # JCS emits these valid floats as integer tokens. Storing JCS text
+            # would parse them back as unsafe Python integers on replay.
+            document["verifier_rewards"].update({
+                "positive": 1e20, "negative": -1e20, "safe_boundary": float(2**53),
+                "fractional_origin": 1.0000000000000001e18,
+            })
             result = ExecutionRuntimeResultV1.model_validate(document)
             payload = result.model_dump(mode="json")
             assert len(canonical_document(payload)) < 65_536
@@ -4848,6 +4854,23 @@ async def test_large_runtime_event_reference_rejects_identity_drift(
             assert ExecutionRuntimeResultV1.model_validate(
                 trial.result["runtime_result"],
             ).model_dump(mode="json") == payload
+            finalized = await session.scalar(select(ServiceExecutionEvent).where(
+                ServiceExecutionEvent.lease_id == lease_id,
+                ServiceExecutionEvent.event_kind == "finalized",
+            ))
+            assert finalized is not None
+            assert finalized.payload_json["schema_version"] == "loom.execution-event-payload-reference.v1"
+            artifact = await session.get(Artifact, artifact_id)
+            assert artifact is not None
+            finalized_payload = json.loads(artifact.artifact_metadata["execution_event_payloads"][
+                finalized.payload_json["payload_key"]
+            ])
+            replay, duplicate = await record_execution_event(
+                session, lease_id=lease_id, generation=finalized.generation,
+                ordinal=finalized.ordinal, event_kind="finalized",
+                payload=finalized_payload, observed_at=now,
+            )
+            assert replay.id == finalized.id and duplicate
             await session.commit()
 
         async with sessions() as session:
@@ -4884,6 +4907,12 @@ async def test_large_runtime_event_reference_rejects_identity_drift(
                 artifact.provenance = {**artifact.provenance, "generation": 999}
             elif tamper == "event_digest":
                 event.payload_sha256 = "sha256:" + "f" * 64
+            elif tamper == "invalid_number":
+                artifact.artifact_metadata = {"execution_event_payloads": {
+                    event.payload_json["payload_key"]: json.dumps({
+                        **payload, "verifier_rewards": {"positive": 100000000000000000001},
+                    }),
+                }}
             await session.commit()
         async with sessions() as session:
             with pytest.raises(ServiceExecutionConflict, match="execution event payload"):
