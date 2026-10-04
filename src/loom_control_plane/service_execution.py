@@ -111,6 +111,8 @@ _RESOURCE_RELEASE_DEADLINE = timedelta(minutes=5)
 _NATIVE_TERMINAL_FAILURES = frozenset(
     {"failed", "oom_killed", "evicted", "node_lost", "deadline_exceeded"}
 )
+# Deferred verifier leases a handoff may spend after the first one fails natively.
+MAX_VERIFIER_RETRIES = 2
 _ALLOWED_DESIRED_TRANSITIONS = {
     "create": frozenset({"start", "cancel", "timeout", "retry", "delete_pending"}),
     "start": frozenset({"finalize", "cancel", "timeout", "retry", "delete_pending"}),
@@ -250,19 +252,23 @@ def _execution_identity(
     execution_role: str,
     namespace_name: str,
     target_id: str,
+    verifier_retry: int = 0,
 ) -> tuple[str, str, str, UUID]:
     role_suffix = "a" if execution_role == "attempt" else "v"
+    # Retry 0 keeps the pre-retry identity of existing verifier leases.
+    if verifier_retry:
+        role_suffix += f"r{verifier_retry}"
     job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}-{role_suffix}"
-    execution_unit_key = canonical_uuid5(
-        _EXECUTION_UNIT_NAMESPACE,
-        {
-            "schema_version": "loom.execution-unit-key.v1",
-            "trial_id": str(trial_id),
-            "attempt": attempt,
-            "generation": generation,
-            "execution_role": execution_role,
-        },
-    )
+    unit: dict[str, object] = {
+        "schema_version": "loom.execution-unit-key.v1",
+        "trial_id": str(trial_id),
+        "attempt": attempt,
+        "generation": generation,
+        "execution_role": execution_role,
+    }
+    if verifier_retry:
+        unit["verifier_retry"] = verifier_retry
+    execution_unit_key = canonical_uuid5(_EXECUTION_UNIT_NAMESPACE, unit)
     provider_scope_key = canonical_digest(
         {
             "schema_version": "loom.provider-scope-key.v1",
@@ -566,6 +572,7 @@ async def reserve_trial_execution(
     image_admission_keyring: ImageAdmissionKeyring,
     routing_reason: ExecutionRoutingReason = ExecutionRoutingReason.ADMIN_TARGET_BINDING,
     parent_lease_id: UUID | None = None,
+    verifier_retry: int = 0,
     deadline_at: datetime,
     now: datetime | None = None,
     pool_handoff_id: UUID | None = None,
@@ -592,6 +599,7 @@ async def reserve_trial_execution(
             or existing.runtime_contract_sha256 != runtime_contract_digest
             or existing.execution_role != execution_role
             or existing.parent_lease_id != parent_lease_id
+            or existing.verifier_retry != verifier_retry
             or existing.deadline_at != deadline_at
         ):
             raise ServiceExecutionConflict("reservation request_id changed immutable identity")
@@ -616,7 +624,7 @@ async def reserve_trial_execution(
     parent_lease: ServiceExecutionLease | None = None
     previous_lease: ServiceExecutionLease | None = None
     if execution_role == "attempt":
-        if parent_lease_id is not None:
+        if parent_lease_id is not None or verifier_retry:
             raise ServiceExecutionConflict("attempt execution cannot have a parent lease")
         if trial.state != "queued":
             raise ServiceExecutionConflict("trial is not reservable")
@@ -679,6 +687,8 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("trial is not awaiting its verifier")
         if runtime_contract.handoff_input is None:
             raise ServiceExecutionConflict("verifier execution requires a workspace handoff")
+        if verifier_retry != verifier_retries(trial):
+            raise ServiceExecutionConflict("verifier retry does not match the pending handoff")
         attempt = parent_lease.attempt
     if deadline_at <= current_time:
         raise ServiceExecutionConflict("execution deadline must be in the future")
@@ -806,6 +816,7 @@ async def reserve_trial_execution(
         execution_role=execution_role,
         namespace_name=str(target.spec_json["namespace_name"]),
         target_id=target.id,
+        verifier_retry=verifier_retry,
     )
     if global_identity is not None:
         job_name = global_identity[1]
@@ -817,6 +828,7 @@ async def reserve_trial_execution(
         lifecycle_authority_id=trial.lifecycle_authority_id,
         attempt=attempt,
         execution_role=execution_role,
+        verifier_retry=verifier_retry,
         parent_lease_id=parent_lease.id if parent_lease is not None else None,
         generation=generation,
         resource_generation=generation,
@@ -2380,6 +2392,40 @@ async def committed_handoff_files(
     return files, keys
 
 
+def verifier_retries(trial: Trial) -> int:
+    """Verifier leases already spent on the pending handoff (0 before any retry)."""
+    handoff = (trial.result or {}).get("verifier_execution")
+    retries = handoff.get("retries", 0) if isinstance(handoff, dict) else 0
+    return retries if isinstance(retries, int) and retries >= 0 else 0
+
+
+def _retry_verifier(trial: Trial, lease: ServiceExecutionLease, *, reason: str, now: datetime) -> bool:
+    """Return the handoff to pending for another verifier lease, if still allowed.
+
+    Only an infrastructure failure without committed output reaches here; a
+    graded verifier result, including reward 0, is never retried.
+    """
+    handoff = (trial.result or {}).get("verifier_execution")
+    if (
+        lease.verifier_retry >= MAX_VERIFIER_RETRIES
+        or trial.cancellation_requested_at is not None
+        or not isinstance(handoff, dict)
+        or handoff.get("parent_lease_id") != str(lease.parent_lease_id)
+    ):
+        return False
+    trial.result = {
+        **(trial.result or {}),
+        "verifier_execution": {
+            "state": "pending",
+            "parent_lease_id": str(lease.parent_lease_id),
+            "retries": lease.verifier_retry + 1,
+            "last_retry_reason": reason[:120],
+            "pending_since": now.isoformat(),
+        },
+    }
+    return True
+
+
 def mark_verifier_unavailable(trial: Trial, lease: ServiceExecutionLease | None, *, reason: str) -> None:
     result = dict(trial.result or {})
     handoff = dict(result.get("verifier_execution") or {})
@@ -2605,14 +2651,20 @@ async def finalize_failed_service_execution(
     lease.output_unavailable_reason = "native_execution_failed"
     lease.finalized_at = observed_at
     lease.observed_state = "finalized"
-    trial.state = "failed"
-    trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
-    trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
-    trial.finished_at = observed_at
-    if lease.execution_role == "verifier":
-        # The agent's committed attempt is still archived; only grading is lost.
-        mark_verifier_unavailable(trial, lease, reason=lease.error_code or "native_execution_failed")
-        trial.failure_message = message
+    failure_code = lease.error_code or "native_execution_failed"
+    # A retried verifier keeps the Trial running; the scheduler reserves the
+    # next verifier lease only after this pod is deleted.
+    if not (lease.execution_role == "verifier" and _retry_verifier(
+        trial, lease, reason=failure_code, now=observed_at,
+    )):
+        trial.state = "failed"
+        trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
+        trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
+        trial.finished_at = observed_at
+        if lease.execution_role == "verifier":
+            # The agent's committed attempt is still archived; only grading is lost.
+            mark_verifier_unavailable(trial, lease, reason=failure_code)
+            trial.failure_message = message
     await enqueue_execution_transition(
         session,
         lease_id=lease.id,

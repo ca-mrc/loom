@@ -89,7 +89,7 @@ def pool_management_history_sql(origins: tuple[PoolWorkOriginV1, ...]) -> str:
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_management_history$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0173'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0174'
     THEN RAISE EXCEPTION 'pool management history schema unqualified'; END IF;
 END $pool_management_history$;
 WITH origins AS (
@@ -112,7 +112,7 @@ WITH origins AS (
       LEFT JOIN public.nebius_application_operations o ON o.application_id=a.application_id
         AND o.deployment_generation=(origin->'application'->>'deployment_generation')::bigint
 )
-SELECT json_build_object('schema','loom.pool-management-history.v1','schema_revision','0173',
+SELECT json_build_object('schema','loom.pool-management-history.v1','schema_revision','0174',
     'read_only',current_setting('transaction_read_only')='on',
     'rows',COALESCE(json_agg(history ORDER BY ordinal),'[]'::json)) FROM history;
 ROLLBACK;
@@ -124,7 +124,7 @@ def qualify_management_history_page(report: Any, *, origins: tuple[PoolWorkOrigi
     """Reject incomplete/reordered/foreign projections; never manufacture origins."""
     origins = _origins(origins)
     if (not isinstance(report, dict) or set(report) != {"schema", "schema_revision", "read_only", "rows"}
-            or report["schema"] != "loom.pool-management-history.v1" or report["schema_revision"] != "0173"
+            or report["schema"] != "loom.pool-management-history.v1" or report["schema_revision"] != "0174"
             or report["read_only"] is not True or not isinstance(report["rows"], list)
             or len(report["rows"]) != len(origins)):
         raise ValueError("pool_management_history_report_unqualified")

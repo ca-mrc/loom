@@ -680,6 +680,7 @@ async def _execution_phases(
                 pod_terminated_at=lease.pod_terminated_at,
                 deleted_at=lease.deleted_at,
                 runtime_contract=lease.runtime_contract_json,
+                verifier_retry=lease.verifier_retry,
             )
             for lease in leases
         ],

@@ -447,7 +447,7 @@ async def test_upload_database_retains_immutable_identity_and_verified_receipt(e
             ).values(phase="awaiting_source", verified_at=None))
     assert await registry.status(first.upload_id, principal=alice) == verified
     async with factory() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0173"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0174"
 
 
 async def test_expiry_uses_database_clock_without_erasing_completed_source(environment_registry):

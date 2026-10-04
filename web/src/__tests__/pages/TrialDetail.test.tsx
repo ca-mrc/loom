@@ -591,6 +591,7 @@ describe("TrialDetail trajectory section", () => {
 
   it("shows the agent, unreserved wait, and verifier phases of a separate-mode trial", async () => {
     const phase = {
+      retry: 0,
       reserved_at: "2026-09-28T21:40:00Z", started_at: "2026-09-28T21:40:05Z",
       finished_at: "2026-09-28T21:41:38Z", released_at: "2026-09-28T21:41:40Z",
       estimated_cost_microusd: null, allocated_cost_microusd: null, cost_state: "reserved",
@@ -619,6 +620,8 @@ describe("TrialDetail trajectory section", () => {
             reserved_at: null, released_at: null, requested: null, cost_state: null },
           { ...phase, phase: "verifier", lease_id: "verifier-lease", state: "deleted", reserved_seconds: 60,
             requested: { cpu_millis: 500, memory_mib: 1024, ephemeral_storage_mib: 2048 } },
+          { ...phase, phase: "verifier", retry: 1, lease_id: "verifier-retry", state: "deleted",
+            reserved_seconds: 30, requested: { cpu_millis: 500, memory_mib: 1024, ephemeral_storage_mib: 2048 } },
         ],
         handoff_gap_seconds: 17,
         reservation_overlap_seconds: 0,
@@ -631,6 +634,7 @@ describe("TrialDetail trajectory section", () => {
     const section = await screen.findByRole("region", { name: "Execution phases" });
     expect(section).toHaveTextContent("Awaiting verifier: complete · nothing reserved");
     expect(section).toHaveTextContent("Verifier: deleted · reserved 60s · 0.5 CPU, 1 GiB memory");
+    expect(section).toHaveTextContent("Verifier (retry 1): deleted · reserved 30s");
     expect(section).toHaveTextContent("Handoff gap17s");
     expect(section).toHaveTextContent("Reservation overlap0s");
   });

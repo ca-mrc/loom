@@ -7796,6 +7796,8 @@ export interface components {
             reserved_at: string | null;
             /** Reserved Seconds */
             reserved_seconds: number | null;
+            /** Retry */
+            retry: number;
             /** Started At */
             started_at: string | null;
             /** State */

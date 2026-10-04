@@ -50,7 +50,7 @@ def _pool_authority_sql(spec: PoolInstallation, *, mode: Literal["closed", "glob
 SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
 DO $pool_startup_schema$
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0173'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0174'
     THEN RAISE EXCEPTION 'pool startup schema unqualified'; END IF;
 END $pool_startup_schema$;
 WITH expected AS (SELECT convert_from(decode('{encoded}','hex'),'UTF8')::jsonb AS value)

@@ -477,6 +477,7 @@ class TrialExecutionPhaseRequested(TypedDict):
 @with_config(ConfigDict(extra="allow"))
 class TrialExecutionPhase(TypedDict):
     phase: Literal["agent"] | Literal["awaiting_verifier"] | Literal["verifier"]
+    retry: int
     lease_id: str | None
     state: str
     reserved_at: str | None

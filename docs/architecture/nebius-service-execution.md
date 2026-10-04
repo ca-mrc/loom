@@ -1158,14 +1158,26 @@ materializer archives both bundles, with verifier files under
 
 - Cancellation while waiting creates no child; an existing child is cancelled
   with the attempt.
-- If the child cannot be reserved within 30 minutes of the parent's
-  `deleted_at`, or hits a permanent error, the trial fails with
-  `verifier_unavailable`. A verifier that fails before output does the same.
-- The agent is never re-run, and verifier retry is not implemented because one
-  verifier per attempt is a database constraint.
+- A verifier that fails natively before committing output (`failed`,
+  `oom_killed`, `evicted`, `node_lost`, `deadline_exceeded`) is retried on a
+  new verifier lease, up to `MAX_VERIFIER_RETRIES = 2` times. The handoff
+  returns to `pending` with `retries`, `last_retry_reason` and
+  `pending_since`, and the trial stays `running`. Each lease row carries its
+  `verifier_retry` number. One verifier per attempt and retry is a database
+  constraint, and so is the per-retry job name (`-vr{n}`) and request id. The
+  next lease is reserved only after the failed verifier's pod is deleted, so
+  retries never hold two verifier pods at once. The failed lease's output is
+  already fenced, so a late upload cannot commit. A verifier that committed a
+  graded result, including reward 0, is never retried.
+- If a child cannot be reserved within 30 minutes of the handoff becoming
+  pending (the parent's `deleted_at`, or the retry's `pending_since`), or hits
+  a permanent error, the trial fails with `verifier_unavailable`. So does a
+  verifier failure once retries are exhausted, or after cancellation.
+- The agent is never re-run.
 
-Trial detail exposes `execution_phases`: agent, awaiting verifier and verifier,
-each with reserved seconds and requests (costs for admins), plus the handoff
+Trial detail exposes `execution_phases`: agent, awaiting verifier and one
+verifier phase per try (`retry` numbers it), each with reserved seconds and
+requests (costs for admins), plus the handoff
 gap, reservation overlap and handed-off workspace size. For a modeled trial
 with a 600 s agent run and 120 s of grading, holding a colocated 2.2-CPU pod
 reserves 1584 CPU-seconds. On demand, a 1.2-CPU agent pod and a 1.2-CPU
