@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol, TypeVar, cast
+from uuid import uuid4
 
 import boto3
 import botocore.handlers
@@ -261,6 +262,7 @@ class MultipartUpload:
     key: str
     upload_id: str
     parts: list[tuple[int, str]] = field(default_factory=list)  # (part_number, etag)
+    write_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -703,7 +705,20 @@ class MinioObjectStore:
         self._operation_timeout = operation_timeout
         self._operation_attempts = max(1, operation_attempts)
         self._client_lock = threading.Lock()
+        self._closed = False
         self._client = self._build_client()
+
+    def close(self) -> None:
+        """Close the owned SDK client after callers have drained operations.
+
+        Idempotent; a timed-out operation cannot reopen this store on a late
+        retry. Threads already inside the SDK retain its network timeouts.
+        """
+        with self._client_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._client.close()
 
     def _build_client(self) -> Any:
         client = boto3.client(**self._client_kwargs)
@@ -720,6 +735,8 @@ class MinioObjectStore:
 
     def _replace_client(self, stale_client: Any) -> None:
         with self._client_lock:
+            if self._closed:
+                return
             with contextlib.suppress(Exception):
                 stale_client.close()
             if self._client is stale_client:
@@ -732,7 +749,10 @@ class MinioObjectStore:
     ) -> _T:
         last_retryable: BaseException | None = None
         for attempt in range(self._operation_attempts):
-            client = self._client
+            with self._client_lock:
+                if self._closed:
+                    raise RuntimeError("object store is closed")
+                client = self._client
             try:
                 return await asyncio.wait_for(
                     asyncio.to_thread(call, client),
@@ -880,9 +900,25 @@ class MinioObjectStore:
             )
 
         response = await self._run_client_call("complete_multipart_upload", _do)
+        version_id = _object_write_version_id(response)
+        write_identity = getattr(upload, "write_identity", None)
+        if version_id is None and write_identity is not None:
+            # Some S3-compatible backends omit the completion version. A
+            # current HEAD is safe only when its creation metadata binds it
+            # to this exact upload; identical content/ETags alone are not a
+            # write identity. Existing/resumed uploads without this binding
+            # retain their original receipt semantics.
+            def read_owned_version(client: Any) -> str | None:
+                head = client.head_object(Bucket=upload.bucket, Key=upload.key)
+                metadata = head.get("Metadata")
+                if not isinstance(metadata, Mapping) or metadata.get("loom-write-id") != write_identity:
+                    raise ValueError("multipart object readback identity mismatch")
+                return _object_write_version_id(head)
+
+            version_id = await self._run_client_call("multipart_version_readback", read_owned_version)
         return ObjectWriteResult(
             uri=f"s3://{upload.bucket}/{upload.key}",
-            version_id=_object_write_version_id(response),
+            version_id=version_id,
         )
 
     async def complete_multipart_upload(self, upload: MultipartUpload) -> str:
@@ -988,7 +1024,11 @@ class MinioObjectStore:
         lock = threading.Lock()
         abandoned = False
         allocated: MultipartUpload | None = None
-        client_kwargs = dict(self._client_kwargs)
+        write_identity = uuid4().hex
+        with self._client_lock:
+            if self._closed:
+                raise RuntimeError("object store is closed")
+            client_kwargs = dict(self._client_kwargs)
         client_kwargs["config"] = self._client_config.merge(Config(retries={"max_attempts": 0}))
 
         def create() -> MultipartUpload:
@@ -998,7 +1038,10 @@ class MinioObjectStore:
             try:
                 upload = MultipartUpload(
                     bucket=bucket, key=key,
-                    upload_id=client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"],
+                    upload_id=client.create_multipart_upload(
+                        Bucket=bucket, Key=key, Metadata={"loom-write-id": write_identity},
+                    )["UploadId"],
+                    write_identity=write_identity,
                 )
                 with lock:
                     if not abandoned:

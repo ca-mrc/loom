@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 import { frontendUpdateStatus } from "./buildVersion";
 
 describe("frontendUpdateStatus (#2009)", () => {
+  it("compares personal content without inventing a Git revision", () => {
+    const source = "sha256:" + "a".repeat(64);
+    expect(frontendUpdateStatus(null, { revision: null, sourceDigest: source }, source).hasNewerBuild).toBe(false);
+    expect(frontendUpdateStatus(null, { revision: null, sourceDigest: "sha256:" + "b".repeat(64) }, source).hasNewerBuild).toBe(true);
+    expect(frontendUpdateStatus(null, { revision: "c".repeat(40) }, source).hasNewerBuild).toBe(true);
+    expect(frontendUpdateStatus("c".repeat(40), { revision: null, sourceDigest: source }).hasNewerBuild).toBe(true);
+    expect(frontendUpdateStatus(null, { revision: null }, source).hasNewerBuild).toBe(false);
+  });
   it("reports no update when the served revision matches the loaded one", () => {
     const revision = "a".repeat(40);
     const status = frontendUpdateStatus(revision, { revision });

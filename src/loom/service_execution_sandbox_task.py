@@ -16,6 +16,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable
 from glob import escape
@@ -46,6 +47,7 @@ from loom.service_execution_task import (
     ServiceExecutionTaskError,
     _safe_workspace_path,
     _write_json_atomic,
+    task_artifact_paths,
 )
 from loom.service_execution_terminus2 import TASK_IMAGE_TOOLS_REQUIRED, run_terminus2
 from loom.service_execution_terminus_trace import parse_terminus_events, terminus_usage
@@ -352,7 +354,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                                 reference_files=task.environment.workspace_reference_files,
                                 reference_symlinks=task.environment.reference_file_symlinks,
                             )
-                        for path in json.loads(os.environ["LOOM_TASK_ARTIFACTS_JSON"]):
+                        for path in task_artifact_paths(workspace, task):
                             destination = _safe_workspace_path(workspace / ".loom/collected", path)
                             try:
                                 await driver.download(task.environment.workdir / path, destination)
@@ -490,6 +492,11 @@ async def _run_verifier(
             _PRIVATE_VERIFIER_INPUT_ROOT.parent / "output.json" if separate_private_inputs
             else task.environment.workdir / ".loom/verifier/output.json"
         )
+        # The trusted file RPC creates parents under the runtime identity and
+        # refuses symlinks in every component. Clear stale scoring bytes too;
+        # an empty report remains invalid unless the verifier writes its result.
+        with tempfile.NamedTemporaryFile() as empty_report:
+            await driver.upload(Path(empty_report.name), remote_output)
         script_path = str(task.verifier.args["script_path"])
         if separate_private_inputs:
             script_path = str(input_root / script_path)

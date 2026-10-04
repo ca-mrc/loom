@@ -18,9 +18,11 @@ from loom.db.nebius_application_operation_schema import NebiusApplicationOperati
 from loom.db.nebius_application_schema import NebiusApplication
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolParticipant
 from loom.nebius_application_contract import ApplicationRegistrationV1, ApplicationReleaseV1
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import PoolParticipantV1, PoolWorkloadKind
 from loom.nebius_pool_priority import PoolWorkOriginV1, pool_request_priority
 from loom.pipeline.keys import canonical_digest
+from loom_service.pool_management.application_history import qualify_application_build_history
 from loom_service.pool_management.auth import PoolPrincipal, authorize_pool_machine
 
 
@@ -97,7 +99,8 @@ def qualify_pool_history(origin: PoolWorkOriginV1, *, participant: PoolParticipa
 
 
 async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, origin: PoolWorkOriginV1, *,
-                              target_id: str, workload_kind: PoolWorkloadKind) -> int:
+                              target_id: str, workload_kind: PoolWorkloadKind,
+                              application_build: PoolApplicationImagePrepareV1 | None = None) -> int:
     """Return class for a new request after locked current-authority readback.
 
     Call after the pool mutation lock, before persisting the immutable request.
@@ -109,7 +112,7 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
             if principal.participant_id is None:
                 raise ValueError
             current = await authorize_pool_machine(session, principal, role="participant",
-                pool_id=principal.pool_id, participant_id=principal.participant_id)
+                pool_id=principal.pool_id, participant_id=principal.participant_id, workload_kind=workload_kind)
             if current.pool_mode != "global" or current.participant_phase != "active":
                 raise ValueError
             row = await session.get(NebiusPoolParticipant, current.participant_id)
@@ -124,14 +127,16 @@ async def qualify_pool_origin(session: AsyncSession, principal: PoolPrincipal, o
                 raise ValueError
             binding.target(target_id, workload_kind)
             return await qualify_retained_pool_origin(session, origin, participant=binding,
-                cluster_id=pool.cluster_id, workload_kind=workload_kind, lock_history=True)
+                cluster_id=pool.cluster_id, workload_kind=workload_kind, lock_history=True,
+                application_build=application_build)
     except (ValueError, KeyError, TypeError):
         raise PoolOriginError from None
 
 
 async def qualify_retained_pool_origin(session: AsyncSession, origin: PoolWorkOriginV1, *,
                                       participant: PoolParticipantV1, cluster_id: str,
-                                      workload_kind: PoolWorkloadKind, lock_history: bool = False) -> int:
+                                      workload_kind: PoolWorkloadKind, lock_history: bool = False,
+                                      application_build: PoolApplicationImagePrepareV1 | None = None) -> int:
     """Read source history without authenticating a machine or opening admission.
 
     The protected cutover uses its explicitly bound management DB and a READ ONLY
@@ -145,8 +150,9 @@ async def qualify_retained_pool_origin(session: AsyncSession, origin: PoolWorkOr
             origin = PoolWorkOriginV1.model_validate(origin.model_dump())
             priority = pool_request_priority(binding, origin, workload_kind=workload_kind)
             if origin.kind == "personal_build":
-                # No source-build registry/renderer is installed by this package.
-                raise ValueError
+                await qualify_application_build_history(session, origin, participant=binding,
+                    cluster_id=cluster_id, request=application_build, lock_history=lock_history)
+                return priority
             if origin.application is None:
                 return priority
             if any(isinstance(value, (NebiusApplication, NebiusApplicationOperation))

@@ -216,13 +216,21 @@ def test_uncertain_rules_or_direct_and_indirect_writer_authority_cannot_qualify(
     assert "private-marker" not in str(error.value)
 
 
-@pytest.mark.parametrize("failure", [None, "grant", "incomplete", "transport", "oversized", "namespace"])
-def test_https_reviews_only_retained_identities_with_real_groups_and_never_retries(fencing_inputs, failure):
+@pytest.mark.parametrize(("failure", "dormant"), [
+    (None, False), ("grant", False), ("incomplete", False), ("transport", False),
+    ("oversized", False), ("namespace", False), (None, True), ("dormant_grant", True),
+])
+def test_https_reviews_only_retained_identities_with_real_groups_and_never_retries(fencing_inputs, failure, dormant):
     from scripts.ops.nebius_pool_retirement_live import HTTPSPoolRetirementAPI
     from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
     from tests.ops.test_nebius_pool_retirement_live import Guards
 
     request = fencing_inputs
+    if dormant:
+        from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+        request = replace(request, retirement=replace(request.retirement,
+            dormant_consumers=(dormant_consumer(request.retirement),)))
     binding = request.retirement.migration.registration.binding
     namespaces = {binding.namespace: binding.namespace_uid,
         **{row.namespace: str(row.namespace_uid) for row in request.retirement.migration.guards},
@@ -231,6 +239,9 @@ def test_https_reviews_only_retained_identities_with_real_groups_and_never_retri
     identities = {f"system:serviceaccount:loom-nebius-{component}-{index}:{account}"
         for index in range(3) for component, account in (
             ("platform", "loom-platform"), ("exec", "loom-execution-actuator"), ("exec", "loom-execution-capacity-collector"))}
+    if dormant:
+        identities.update({"system:serviceaccount:loom-nebius-exec-0:nebius-retained-remote-actuator",
+            "system:serviceaccount:loom-nebius-exec-0:nebius-retained-remote-collector"})
     observed = []
 
     def respond(message):
@@ -255,7 +266,7 @@ def test_https_reviews_only_retained_identities_with_real_groups_and_never_retri
         observed.append((subject, namespace))
         review = rules_review(namespace)
         review["spec"] = {}
-        if failure == "grant":
+        if failure == "grant" or (failure == "dormant_grant" and subject.endswith(":nebius-retained-remote-actuator")):
             review["status"]["resourceRules"].append({"apiGroups": ["batch"], "resources": ["jobs"],
                 "verbs": ["patch"], "resourceNames": ["old-job"]})
         elif failure == "incomplete":
@@ -278,7 +289,11 @@ def test_https_reviews_only_retained_identities_with_real_groups_and_never_retri
                 with pytest.raises(ValueError) as error:
                     api.verify_readonly()
                 assert "private-marker" not in str(error.value)
-                assert len(observed) == (0 if failure == "namespace" else 1)
+                if failure == "dormant_grant":
+                    assert len(observed) > 1
+                    assert observed[-1][0] == "system:serviceaccount:loom-nebius-exec-0:nebius-retained-remote-actuator"
+                else:
+                    assert len(observed) == (0 if failure == "namespace" else 1)
             else:
                 api.verify_readonly()
                 assert set(observed) == {(subject, namespace) for subject in identities for namespace in namespaces}

@@ -17,6 +17,7 @@ from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_registration import PoolRegistrationRequest, registration_documents
 
 from loom.nebius_platform_render import digest
@@ -68,6 +69,7 @@ class PoolMigrationAPI(Protocol):
         ...
 
 
+@pure_projection
 def migration_contract(request: PoolMigrationRequest) -> dict[str, Any]:
     registration_documents(request.registration)
     participants = request.registration.spec.participants

@@ -72,6 +72,14 @@ def test_runtime_plan_is_immutable_bounded_and_digest_pinned() -> None:
         )
 
 
+@pytest.mark.parametrize("value", ["a" * 4096, "é" * 2048])
+def test_phase_environment_retains_utf8_value_bound(value: str) -> None:
+    raw = _phase("agent").model_dump()
+    ProcessPhaseV1.model_validate({**raw, "environment": {"LOOM_VALUE": value}})
+    with pytest.raises(ValidationError, match="process environment value is invalid"):
+        ProcessPhaseV1.model_validate({**raw, "environment": {"LOOM_VALUE": value + "a"}})
+
+
 @pytest.mark.parametrize("directory", ["/app", "/workspace", "/workspace/task"])
 def test_phase_accepts_trusted_controller_or_task_workspace(directory: str) -> None:
     ProcessPhaseV1.model_validate({**_phase("agent").model_dump(), "working_directory": directory})

@@ -1,3 +1,5 @@
+import { readSourceInfo } from "./buildInfo";
+
 export type FrontendEnvironment =
   | "local"
   | "development"
@@ -21,6 +23,7 @@ export interface FrontendConfig {
   servedBuildRevision?: string | null;
   servedSourceRef?: string | null;
   servedBuildTime?: string | null;
+  servedSourceDigest?: string | null;
 }
 
 export type FrontendConfigFailureKind = "network" | "http" | "invalid";
@@ -56,6 +59,9 @@ interface RawFrontendConfig {
   buildRevision?: unknown;
   sourceRef?: unknown;
   buildTime?: unknown;
+  buildKind?: unknown;
+  sourceDigest?: unknown;
+  sourceBaseCommit?: unknown;
 }
 
 /** Lenient: a non-string, empty, or `"unknown"` placeholder all mean "not
@@ -224,9 +230,10 @@ export function resolveFrontendConfig(
     routePath,
     apiBase,
     apiRouteBase: resolveApiRouteBase(raw, apiBase, location),
-    servedBuildRevision: optionalBuildString(raw.buildRevision),
+    servedBuildRevision: raw.buildKind === "personal" ? null : optionalBuildString(raw.buildRevision),
     servedSourceRef: optionalBuildString(raw.sourceRef),
     servedBuildTime: optionalBuildString(raw.buildTime),
+    ...(raw.buildKind === "personal" ? { servedSourceDigest: readSourceInfo(raw.buildKind, raw.sourceDigest, raw.sourceBaseCommit).sourceDigest } : {}),
   };
 }
 
@@ -326,6 +333,7 @@ export async function fetchServedBuildInfo(): Promise<{
   revision: string | null;
   sourceRef: string | null;
   buildTime: string | null;
+  sourceDigest?: string | null;
 } | null> {
   try {
     const resp = await fetch(configUrlForLocation(window.location), {
@@ -336,9 +344,10 @@ export async function fetchServedBuildInfo(): Promise<{
     if (!resp.ok) return null;
     const raw = (await resp.json()) as RawFrontendConfig;
     return {
-      revision: optionalBuildString(raw.buildRevision),
+      revision: raw.buildKind === "personal" ? null : optionalBuildString(raw.buildRevision),
       sourceRef: optionalBuildString(raw.sourceRef),
       buildTime: optionalBuildString(raw.buildTime),
+      ...(raw.buildKind === "personal" ? { sourceDigest: readSourceInfo(raw.buildKind, raw.sourceDigest, raw.sourceBaseCommit).sourceDigest } : {}),
     };
   } catch {
     return null;

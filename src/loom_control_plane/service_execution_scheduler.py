@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import Integer, Text, exists, func, or_, select, text, update
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -248,6 +249,7 @@ async def reserve_next_service_execution(
             ).values(
                 state="failed", failure_reason="service_execution_configuration_invalid",
                 failure_message=str(exc), finished_at=current_time, next_attempt_at=None,
+                scheduling_observation=None,
             ))
             _LOG.warning("service_execution_configuration_invalid", extra={
                 "trial_id": str(row["id"]), "reason": str(exc),
@@ -389,8 +391,16 @@ async def _reserve_service_candidate(
     maximum_deadline_seconds: int,
     current_time: datetime,
 ) -> ServiceExecutionLease | None:
-    compiled = await _compile_service_candidate(session, row=row, environment=environment,
-        pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    try:
+        compiled = await _compile_service_candidate(session, row=row, environment=environment,
+            pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    except ValidationError:
+        # Pydantic messages include input values. Do not persist or log them.
+        # This boundary precedes every attempt, capacity and spend reservation.
+        raise ServiceExecutionConfigurationError(
+            "Native execution configuration violates the runtime contract; review task and trial "
+            "settings and the selected runtime profile. No execution attempt was started."
+        ) from None
     if compiled is None:
         return None
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements

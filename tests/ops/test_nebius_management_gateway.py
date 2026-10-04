@@ -63,6 +63,54 @@ def refresh_operation(tmp_path):
         'inputs_path': str(root / 'inputs.json')}
 
 
+def pool_operation(tmp_path):
+    metadata = refresh_operation(tmp_path)
+    root = tmp_path / 'nebius-management/pool-cutover' / metadata['operation_id']
+    return {**metadata, 'schema': 'loom.nebius-pool-cutover-operation.v1',
+        'state_dir': str(root / 'state'), 'anchor_dir': str(root / 'anchor'), 'inputs_path': str(root / 'inputs.json')}
+
+
+@pytest.mark.parametrize('outcome', ['global', 'legacy'])
+def test_pool_authority_reports_terminal_history_but_never_installed_acceptance(tmp_path, outcome):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    gateway.validate_operation(metadata)
+    common = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    complete = {**common, 'status': 'pool_cutover_completed', 'outcome': outcome,
+        'completion_sha256': 'f' * 64, 'acceptance_verified': False}
+    assert gateway.safe_report(json.dumps(complete | {'private': 'never-export'}).encode(), metadata) == complete
+    for damage in ({'operation_id': str(uuid4())}, {'outcome': 'private-value'}, {'acceptance_verified': True},
+            {'acceptance_verified': 0}, {'completion_sha256': 'private-value'}, {'status': 'management_installed'}):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(complete | damage).encode(), metadata)
+    for phase in ('cutover', 'startup', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
+            'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'):
+        pending = {**common, 'status': 'pending', 'phase': phase}
+        assert gateway.safe_report(json.dumps(pending).encode(), metadata) == pending
+        blocked = {**common, 'status': 'blocked', 'stage': 'pool_' + phase.replace('-', '_')}
+        assert gateway.safe_report(json.dumps(blocked).encode(), metadata) == blocked
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps({**common, 'status': 'pending', 'phase': 'private-value'}).encode(), metadata)
+
+
+@pytest.mark.parametrize('damage', ['source', 'uuid', 'borrow_refresh', 'namespace', 'extra'])
+def test_pool_metadata_cannot_borrow_other_authority_or_choose_a_child_phase(tmp_path, damage):
+    metadata = pool_operation(tmp_path)
+    if damage == 'source':
+        metadata['source_sha'] = 'd' * 40
+    elif damage == 'uuid':
+        metadata['operation_id'] = str(uuid4())
+    elif damage == 'borrow_refresh':
+        other = refresh_operation(tmp_path)
+        metadata.update({key: other[key] for key in ('state_dir', 'anchor_dir', 'inputs_path')})
+    elif damage == 'namespace':
+        metadata['namespace'] = 'kube-system'
+    else:
+        metadata['phase'] = 'activation'
+    with pytest.raises(module().GatewayError):
+        module().validate_operation(metadata)
+
+
 def test_refresh_authority_binds_operation_uuid_layout_and_closed_results(tmp_path):
     gateway = module()
     metadata = refresh_operation(tmp_path)
@@ -87,7 +135,7 @@ def test_refresh_authority_binds_operation_uuid_layout_and_closed_results(tmp_pa
     'refresh_recovery', 'refresh_cluster_identity', 'refresh_resource_inventory',
     'refresh_persistent_storage', 'refresh_prerequisites', 'refresh_foundation',
     'refresh_shared_material', 'refresh_platform_capacity', 'refresh_publication',
-    'refresh_cloud_identity', 'refresh_public_route', 'refresh_supersession',
+    'refresh_cloud_identity', 'refresh_public_route', 'refresh_supersession', 'refresh_pool_authority',
 ])
 def test_refresh_preserves_closed_retained_preflight_diagnostics(tmp_path, stage):
     gateway = module()
@@ -432,6 +480,25 @@ def test_blocked_report_rejects_unqualified_diagnostic(tmp_path, stage):
     report.update(status="blocked", stage=stage)
     with pytest.raises(module().GatewayError):
         module().safe_report(json.dumps(report).encode(), metadata)
+
+
+@pytest.mark.parametrize(('detail', 'valid'), [
+    ('tls_api', True), ('tls_kubelet', True), ('tls_api_verify_20', True),
+    ('tls_kubelet_verify_64', True), ('tls_unknown_verify_10', True),
+    ('tls_unknown_verify_0', True), ('tls_api_verify_255', True),
+    ('tls_kubelet_verify_256', False), ('tls_api_verify_-1', False),
+    ('tls_unknown_verify_True', False), ('tls_api_verify_20_private', False),
+])
+def test_pool_tls_report_preserves_only_bounded_transport_and_verification_code(tmp_path, detail, valid):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage='pool_runtime_telemetry_' + detail)
+    if valid:
+        assert gateway.safe_report(json.dumps(report | {'error': 'private-certificate-and-token'}).encode(), metadata) == report
+    else:
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report).encode(), metadata)
 
 
 def test_upgrade_bundle_uses_separate_private_recovery_and_fixed_existing_actions(tmp_path, monkeypatch):

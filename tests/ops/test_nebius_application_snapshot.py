@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 from pathlib import Path
 from uuid import UUID
@@ -117,11 +118,12 @@ def test_protected_inspection_snapshot_transport_never_requests_secret_payloads_
     assert options['timeout'] <= 240
 
 
-def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(snapshot_objects, monkeypatch, tmp_path, capsys):
+def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(pool_snapshot, monkeypatch, tmp_path, capsys):
     import subprocess
 
     from scripts.ops import nebius_application_snapshot as snapshot
 
+    objects, collections, _, _, _ = pool_snapshot
     home = tmp_path / '.loom/nebius-management'
     home.mkdir(parents=True, mode=0o700)
     inputs = home / 'inputs.json'
@@ -136,12 +138,24 @@ def test_gateway_entry_uses_only_fixed_gets_and_existing_management_identity(sna
     calls = []
     def execute(command, **kwargs):
         assert command[:5] == ['kubectl', '--kubeconfig', str(tmp_path / 'kubeconfig'), '--request-timeout=30s', 'get']
-        calls.append((command[5], command[6]))
-        return subprocess.CompletedProcess(command, 0, json.dumps(snapshot_objects[calls[-1]]).encode(), b'')
+        calls.append(command[5:])
+        if command[5] == '--raw':
+            path = command[6].split('?')[0]
+            resource = path.rsplit('/', 1)[1]
+            kind = next(name for name in ('Deployment', 'StatefulSet', 'CronJob', 'Service', 'ConfigMap',
+                'Role', 'RoleBinding', 'ClusterRole', 'ClusterRoleBinding') if name.lower() + 's' == resource)
+            namespace = path.split('/namespaces/')[1].split('/')[0] if '/namespaces/' in path else None
+            row = collections[kind, namespace]
+        else:
+            namespace = command[command.index('-n') + 1] if '-n' in command else None
+            row = objects[command[5], command[6], namespace]
+        return subprocess.CompletedProcess(command, 0, json.dumps(row).encode(), b'')
     monkeypatch.setattr(snapshot.subprocess, 'run', execute)
     assert snapshot.main() == 0
-    assert set(calls) == set(snapshot_objects)
-    assert json.loads(capsys.readouterr().out)['status'] == 'shared_inputs_observed'
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == 'shared_inputs_observed'
+    assert (home / 'shared-input-observations' / result['observation_id'] / 'pool-resources.json').is_file()
+    assert sum(row[0] == '--raw' for row in calls) == 23
     inputs.chmod(0o644)
     calls.clear()
     assert snapshot.main() == 1 and not calls
@@ -169,3 +183,191 @@ def test_inspection_rejects_unqualified_remote_response(monkeypatch, tmp_path, e
         {'name': 'loom-nebius-platform', 'uid': '1' * 32}, {'name': 'kube-system', 'uid': '2' * 32}]}
     with pytest.raises((preflight.DeploymentError, ValueError)):
         preflight.prepare_shared_inputs(report, kubeconfig=Path('/private/kubeconfig'))
+
+
+@pytest.fixture
+def pool_snapshot(snapshot_objects):
+    """Only Kubernetes I/O is doubled; actual capture/validation/files are used."""
+    shared, execution = 'loom-nebius-platform', 'loom-nebius-platform-execution'
+    cm = snapshot_objects['configmap', 'loom-platform-config']
+    config = json.loads(cm['data']['environment.json'])
+    config['execution_namespace'] = execution
+    cm['data']['environment.json'] = json.dumps(config)
+    objects = {(kind, name, None if kind == 'namespace' else shared): copy.deepcopy(row)
+        for (kind, name), row in snapshot_objects.items()}
+    for (kind, _, _), row in objects.items():
+        if kind == 'namespace':
+            row['metadata'].pop('namespace')
+    for index, name in enumerate((execution, execution + '-build'), 7):
+        objects['namespace', name, None] = {'apiVersion': 'v1', 'kind': 'Namespace',
+            'metadata': {'name': name, 'uid': str(UUID(int=index)), 'resourceVersion': '13'}}
+    objects['secret', 'loom-execution-actuator-db', execution] = {'apiVersion': 'v1', 'kind': 'Secret',
+        'metadata': {'name': 'loom-execution-actuator-db', 'namespace': execution,
+            'uid': str(UUID(int=9)), 'resourceVersion': '14'}, 'data': {'db-url': 'DO-NOT-COPY'}}
+    objects['secret', 'loom-execution-capacity-collector-nebius', execution] = {
+        'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+        'metadata': {'name': 'loom-execution-capacity-collector-nebius', 'namespace': execution,
+            'uid': str(UUID(int=10)), 'resourceVersion': '15'},
+        'data': {'credentials.json': base64.b64encode(b'private-collector').decode()}}
+    objects['secret', 'loom-platform-storage', shared] = {
+        'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque',
+        'metadata': {'name': 'loom-platform-storage', 'namespace': shared,
+            'uid': str(UUID(int=12)), 'resourceVersion': '16'},
+        'data': {key: base64.b64encode(value).decode() for key, value in {
+            'source-access-key': b'private-source-access', 'source-secret-key': b'private-source-secret',
+            'secret-key': b'private-data-secret'}.items()}}
+    kinds = {'Deployment': 'apps/v1', 'StatefulSet': 'apps/v1', 'CronJob': 'batch/v1',
+        'Service': 'v1', 'ConfigMap': 'v1', 'Role': 'rbac.authorization.k8s.io/v1',
+        'RoleBinding': 'rbac.authorization.k8s.io/v1', 'ClusterRole': 'rbac.authorization.k8s.io/v1',
+        'ClusterRoleBinding': 'rbac.authorization.k8s.io/v1'}
+    collections = {(kind, ns): {'apiVersion': version, 'kind': kind + 'List',
+        'metadata': {'resourceVersion': '22'}, 'items': []}
+        for kind, version in kinds.items()
+        for ns in ((None,) if kind.startswith('Cluster') else (shared, execution, execution + '-build'))}
+    collections['Deployment', shared]['items'] = [copy.deepcopy(objects['deployment', 'loom-service', shared])]
+    collections['ConfigMap', shared]['items'] = [copy.deepcopy(cm)]
+    role = {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
+        'metadata': {'name': 'sample-native', 'uid': str(UUID(int=11)), 'resourceVersion': '23'},
+        'rules': [{'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get']}]}
+    collections['ClusterRole', None]['items'] = [role]
+    calls = []
+
+    def read(kind, name, ns):
+        calls.append(('get', kind, name, ns))
+        return copy.deepcopy(objects[kind, name, ns])
+
+    def listing(kind, ns):
+        calls.append(('list', kind, ns))
+        return copy.deepcopy(collections[kind, ns])
+
+    return objects, collections, calls, read, listing
+
+
+def capture_pool(pool_snapshot, tmp_path, **overrides):
+    from scripts.ops.nebius_application_snapshot import capture_shared_inputs
+
+    _, _, _, read, listing = pool_snapshot
+    return capture_shared_inputs(read=overrides.get('read', read), read_collection=overrides.get('read_collection', listing),
+        root=tmp_path, cluster_id='mk8scluster-test', namespace='loom-nebius-platform',
+        namespace_uid='1' * 32, kube_system_uid='2' * 32)
+
+
+def test_pool_capture_preserves_actual_private_resources_not_credential_values(pool_snapshot, tmp_path):
+    result = capture_pool(pool_snapshot, tmp_path)
+    directory = tmp_path / result['observation_id']
+    payload = json.loads((directory / 'pool-resources.json').read_bytes())
+    assert payload['schema_version'] == 'loom.nebius-pool-resource-observation.v1'
+    assert payload['cluster_id'] == 'mk8scluster-test'
+    assert payload['candidate_sha'] == 'a' * 40
+    assert payload['namespace'] == 'loom-nebius-platform'
+    resources = {(row['kind'], row['metadata'].get('namespace'), row['metadata']['name']): row
+        for row in payload['resources']}
+    assert resources['Deployment', 'loom-nebius-platform', 'loom-service']['spec'] == {'private': 'unused-pod-data'}
+    assert resources['ClusterRole', None, 'sample-native']['rules'] == [
+        {'apiGroups': ['batch'], 'resources': ['jobs'], 'verbs': ['get']}]
+    assert payload['collector_credential'] == {'uid': str(UUID(int=10)), 'resource_version': '15',
+        'sha256': '80e08e3e6e738e8067c908e490e2dd01209a038bb551805421e6219105a6a108'}
+    assert payload['actuator_credential'] == {'uid': str(UUID(int=9)), 'resource_version': '14'}
+    assert payload['database_credential'] == {'uid': '5' * 32, 'resource_version': '12'}
+    import hashlib
+
+    assert payload['application_source_credential'] == {'uid': str(UUID(int=12)), 'resource_version': '16',
+        'sha256': hashlib.sha256(b'{"access-key":"private-source-access","secret-key":"private-source-secret"}').hexdigest()}
+    assert not any(row['kind'] == 'Secret' for row in payload['resources'])
+    raw = (directory / 'pool-resources.json').read_text()
+    assert 'private-collector' not in raw and 'DO-NOT-COPY' not in raw
+    assert all(value not in raw and base64.b64encode(value.encode()).decode() not in raw
+        for value in ('private-source-access', 'private-source-secret', 'private-data-secret'))
+    assert set(result) == {'status', 'observation_id', 'candidate_sha'}
+    assert (directory / 'pool-resources.json').stat().st_mode & 0o777 == 0o600
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert len(payload['collections']) == 23
+    old = (directory / 'pool-resources.json').read_bytes()
+    assert capture_pool(pool_snapshot, tmp_path)['observation_id'] != result['observation_id']
+    assert (directory / 'pool-resources.json').read_bytes() == old
+
+
+@pytest.mark.parametrize('damage', ['missing', 'payload', 'type', 'stringData', 'whitespace', 'oversize', 'rotation'])
+def test_source_capture_rejects_unqualified_or_rotated_material_before_writing(pool_snapshot, tmp_path, damage):
+    from scripts.ops.nebius_application_snapshot import SnapshotError
+
+    objects, _, _, read, _ = pool_snapshot
+    key = 'secret', 'loom-platform-storage', 'loom-nebius-platform'
+    source = objects[key]
+    if damage == 'missing':
+        del source['data']['source-secret-key']
+    elif damage == 'payload':
+        source['data']['source-secret-key'] = 'not-base64'
+    elif damage == 'type':
+        source['type'] = 'kubernetes.io/tls'
+    elif damage == 'stringData':
+        source['stringData'] = {'source-secret-key': 'override'}
+    elif damage in {'whitespace', 'oversize'}:
+        source['data']['source-secret-key'] = base64.b64encode(b'contains space' if damage == 'whitespace' else b'x' * 4097).decode()
+
+    def changing_read(kind, name, namespace):
+        row = read(kind, name, namespace)
+        if damage == 'rotation' and (kind, name, namespace) == key:
+            source['metadata']['resourceVersion'] = '17'
+        return row
+
+    with pytest.raises(SnapshotError):
+        capture_pool(pool_snapshot, tmp_path, read=changing_read)
+    assert not list(tmp_path.iterdir())
+
+
+def test_pool_capture_inherits_missing_item_type_only_from_typed_collection(pool_snapshot, tmp_path):
+    _, collections, _, _, _ = pool_snapshot
+    for collection in collections.values():
+        for row in collection['items']:
+            row.pop('kind')
+            row.pop('apiVersion')
+    result = capture_pool(pool_snapshot, tmp_path)
+    value = json.loads((tmp_path / result['observation_id'] / 'pool-resources.json').read_bytes())
+    role, = (row for row in value['resources'] if row['kind'] == 'ClusterRole')
+    assert role['apiVersion'] == 'rbac.authorization.k8s.io/v1'
+
+
+@pytest.mark.parametrize('damage', ['foreign', 'duplicate', 'pagination', 'missing-version', 'wrong-kind',
+    'deleting', 'nil-uid', 'oversize', 'too-many', 'collector-secret', 'config-drift', 'namespace-drift', 'item-type'])
+def test_pool_capture_rejects_incomplete_or_changed_scope_without_writing(pool_snapshot, tmp_path, damage):
+    from scripts.ops.nebius_application_snapshot import SnapshotError
+
+    objects, collections, _, _, listing = pool_snapshot
+    shared = 'loom-nebius-platform'
+    collection = collections['Deployment', shared]
+    item = collection['items'][0]
+    if damage == 'foreign':
+        item['metadata']['namespace'] = 'foreign'
+    elif damage == 'duplicate':
+        collection['items'].append(copy.deepcopy(item))
+    elif damage == 'pagination':
+        collection['metadata']['continue'] = 'next-page'
+    elif damage == 'missing-version':
+        del collection['metadata']['resourceVersion']
+    elif damage == 'wrong-kind':
+        collection['kind'] = 'List'
+    elif damage == 'deleting':
+        item['metadata']['deletionTimestamp'] = '2026-10-02T00:00:00Z'
+    elif damage == 'nil-uid':
+        item['metadata']['uid'] = str(UUID(int=0))
+    elif damage == 'item-type':
+        item['kind'] = 'Secret'
+    elif damage == 'oversize':
+        item['spec']['oversize'] = 'x' * (8 * 1024**2)
+    elif damage == 'too-many':
+        collection['items'] = [copy.deepcopy(item) for _ in range(1025)]
+    elif damage == 'collector-secret':
+        objects['secret', 'loom-execution-capacity-collector-nebius', shared + '-execution']['data']['extra'] = 'secret'
+
+    def changed(kind, namespace):
+        result = listing(kind, namespace)
+        if damage == 'config-drift':
+            objects['configmap', 'loom-platform-config', shared]['metadata']['resourceVersion'] = '99'
+        elif damage == 'namespace-drift':
+            objects['namespace', shared + '-execution', None]['metadata']['uid'] = str(UUID(int=99))
+        return result
+
+    with pytest.raises(SnapshotError) as error:
+        capture_pool(pool_snapshot, tmp_path, read_collection=changed)
+    assert 'private-' not in str(error.value) and not list(tmp_path.iterdir())

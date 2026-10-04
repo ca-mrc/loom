@@ -27,7 +27,7 @@ def install(resources_request, tmp_path):
     return install_case(resources_request, tmp_path)
 
 
-def install_case(resources_request, tmp_path, *, history=None, installation_anchor=None):
+def install_case(resources_request, tmp_path, *, history=None, installation_anchor=None, pool_baseline=None):
     from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallRequest
 
     if history is None:
@@ -38,8 +38,9 @@ def install_case(resources_request, tmp_path, *, history=None, installation_anch
     original_anchor = installation_anchor or tmp_path / 'original-anchor'
     if installation_anchor is None:
         original_anchor.mkdir(mode=0o700)
+    options = {} if pool_baseline is None else {'pool_baseline': pool_baseline}
     request = ManagementRefreshInstallRequest(resources_request,
-        history, original_anchor)
+        history, original_anchor, **options)
 
     class API:
         def __init__(self):

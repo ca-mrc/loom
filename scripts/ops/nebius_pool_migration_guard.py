@@ -1,8 +1,9 @@
-"""Fixed idle-guard commands bound to retained controller and database Pods.
+"""Fixed guard commands bound to retained controller and database Pods.
 
 Callable only by the protected migration, not an operator CLI. The parent owns
-publication/predecessor qualification. This adapter neither releases intake nor
-changes controller or Kubernetes authority. Ambiguous exec outcomes only read back.
+publication/predecessor qualification and durable write intents. Activation can
+release or fence only the exact operation's intake; it cannot change controller
+or Kubernetes authority. Ambiguous exec outcomes only read back.
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import copy
 import hashlib
 import hmac
 import ipaddress
+import json
 import os
 import re
 import secrets
@@ -26,12 +28,29 @@ from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
+from scripts.ops.nebius_pool_legacy_settings import (
+    BOUND_LEGACY_SETTINGS_COMMAND,
+    LegacySettingsComponent,
+    expected_legacy_runtime_settings,
+)
 from scripts.ops.nebius_pool_migration import (
     PoolGuardDatabase,
     PoolGuardTarget,
     PoolMigrationError,
     PoolMigrationRequest,
     migration_contract,
+)
+from scripts.ops.nebius_pool_recovery_database import (
+    participant_recovery_drain_sql,
+    qualify_participant_recovery_drain,
+)
+from scripts.ops.nebius_pool_recovery_release import pool_guard_recovery_release_sql
+from scripts.ops.nebius_pool_runtime_settings import (
+    BOUND_POOL_SETTINGS_COMMAND,
+    PoolSettingsComponent,
+    expected_pool_runtime_settings,
 )
 from sqlalchemy.engine import make_url
 
@@ -89,6 +108,9 @@ try:
     elif sys.argv[1] == "actuator":
         from loom_execution_actuator.config import ExecutionActuatorSettings
         value = ExecutionActuatorSettings().db_url
+    elif sys.argv[1] == "gateway":
+        from loom_service.pool_management.__main__ import PoolGatewaySettings
+        value = PoolGatewaySettings().db_url
     else:
         raise ValueError()
     actual = hmac.new(bytes.fromhex(sys.argv[2]), value.encode(), "sha256").hexdigest()
@@ -104,29 +126,100 @@ except Exception:
 # The optional UID-aware production reader is an ordinary-rollout prerequisite.
 # Old images fail here before downtime; never fall back to nodes/proxy, operator
 # credentials or another endpoint to make a retained actuator appear ready.
+TELEMETRY_FAILURE_STAGES = frozenset({
+    'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
+    'authorization', 'network', 'http', 'reader', 'counters', 'close',
+    'identity', 'address', 'authority', 'payload',
+    'tls_api', 'tls_kubelet',
+    *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256)),
+})
 _BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
 
+def reader_failure(error):
+    import ssl
+    import httpx
+    from urllib3.exceptions import HTTPError, SSLError, TimeoutError
+    seen, network, tls = set(), False, False
+    transport, verification = "unknown", None
+    for _ in range(8):
+        if error is None or id(error) in seen:
+            break
+        seen.add(id(error))
+        if isinstance(error, HTTPError):
+            transport = "api"
+        elif isinstance(error, httpx.HTTPError):
+            transport = "kubelet"
+        if isinstance(error, (ssl.SSLError, SSLError)):
+            tls = True
+        if isinstance(error, ssl.SSLCertVerificationError):
+            code = getattr(error, "verify_code", None)
+            if type(code) is int and 0 <= code <= 255:
+                verification = code
+        if isinstance(error, json.JSONDecodeError):
+            return "payload"
+        if isinstance(error, (FileNotFoundError, PermissionError)):
+            return "authority"
+        status = (error.response.status_code if isinstance(error, httpx.HTTPStatusError)
+                  else getattr(error, "status_code", getattr(error, "status", None)))
+        if type(status) is int and status > 0:
+            return "authorization" if status in {401, 403} else "http"
+        if isinstance(error, (httpx.NetworkError, httpx.TimeoutException, TimeoutError, OSError)):
+            network = True
+        if isinstance(error, ValueError):
+            code = {
+                "unqualified kubelet node": "identity",
+                "unqualified expected kubelet node identity": "identity",
+                "unqualified kubelet node identity": "identity",
+                "unqualified kubelet address": "address",
+                "unqualified kubelet TLS or bearer authority": "authority",
+                "kubelet summary exceeds its bound": "payload",
+                "kubelet summary node identity differs": "payload",
+            }.get(str(error))
+            if code is not None:
+                return code
+        error = error.__cause__ or error.__context__
+    if tls:
+        if verification is not None:
+            return f"tls_{transport}_verify_{verification}"
+        return "tls" if transport == "unknown" else f"tls_{transport}"
+    return "network" if network else "reader"
+
 async def run():
-    from loom_execution_actuator.config import ExecutionActuatorSettings
-    from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
-    if len(sys.argv) != 5:
-        raise ValueError()
-    settings = ExecutionActuatorSettings()
-    if (settings.namespace != sys.argv[1] or settings.target_id != sys.argv[2]
-            or settings.kubernetes_connection is not None):
-        raise ValueError()
-    api = InClusterKubernetesJobApi()
+    api, stage = None, "settings"
+    report = {"status": "blocked", "stage": stage}
     try:
+        from loom_execution_actuator.config import ExecutionActuatorSettings
+        from loom_execution_actuator.kubernetes_api import InClusterKubernetesJobApi
+        if len(sys.argv) != 5:
+            raise ValueError()
+        settings = ExecutionActuatorSettings()
+        if (settings.namespace != sys.argv[1] or settings.target_id != sys.argv[2]
+                or settings.kubernetes_connection is not None):
+            raise ValueError()
+        stage = "client"
+        api = InClusterKubernetesJobApi()
+        stage = "reader"
         summary = await api.resource_summary(node_name=sys.argv[3], expected_node_uid=sys.argv[4])
+        stage = "counters"
         for field, counter in (("cpu", "usageCoreNanoSeconds"), ("memory", "workingSetBytes"), ("fs", "usedBytes")):
             value = summary["node"][field][counter]
             if type(value) is not int or value < 0:
                 raise ValueError()
-        return {"status": "qualified", "node_name": sys.argv[3], "node_uid": sys.argv[4]}
+        report = {"status": "qualified", "node_name": sys.argv[3], "node_uid": sys.argv[4]}
+    except Exception as error:
+        report = {"status": "blocked", "stage": reader_failure(error) if stage == "reader" else stage}
     finally:
-        await api.close()
+        if api is not None:
+            try:
+                await api.close()
+            except Exception:
+                if report["status"] == "qualified":
+                    report = {"status": "blocked", "stage": "close"}
+    return report
 
 try:
+    # Exit zero acknowledges this bounded diagnostic, never qualification.
+    # The parent rejects every report other than the exact qualified identity.
     print(json.dumps(asyncio.run(run())))
 except Exception:
     print("Pool runtime telemetry unqualified", file=sys.stderr)
@@ -224,7 +317,7 @@ SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search
 DO $pool_cutover_readiness$
 DECLARE access_ready BOOLEAN;
 BEGIN
-    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0173'
+    IF (SELECT version_num FROM public.alembic_version) IS DISTINCT FROM '0174'
     THEN RAISE EXCEPTION 'pool cutover schema unqualified'; END IF;
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR EXISTS (
         SELECT 1 FROM public.nebius_rollout_guard
@@ -269,7 +362,7 @@ WITH pending AS (
     SELECT key,origin,source_matches FROM pending WHERE key COLLATE "C">'{cursor}' COLLATE "C"
      ORDER BY key COLLATE "C" LIMIT 128
 )
-SELECT json_build_object('status','observed','schema_revision','0173',
+SELECT json_build_object('status','observed','schema_revision','0174',
     'rows',COALESCE(json_agg(page ORDER BY key COLLATE "C"),'[]'::json)) FROM page;
 ROLLBACK;
 """
@@ -283,7 +376,7 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
     """
     cursor = _backlog_cursor(after)
     if (not isinstance(report, dict) or set(report) != {"status", "schema_revision", "rows"}
-            or report["status"] != "observed" or report["schema_revision"] != "0173"
+            or report["status"] != "observed" or report["schema_revision"] != "0174"
             or not isinstance(report["rows"], list) or len(report["rows"]) > 128):
         raise ValueError("pool_cutover_database_report_unqualified")
     origins = []
@@ -306,13 +399,15 @@ def qualify_cutover_readiness_page(report: Any, *, participant: PoolParticipantV
 def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
     """Fixed participant ACL transition, never a general SQL or bootstrap flag.
 
-    Both actions require the exact durable idle guard. Staging adds only the
+    Stage and observe require the exact durable idle guard. Staging adds only the
     actuator's local journals and source-lock columns; it cannot open intake or
     grant access to management capacity/credential state. Unknown exec results
-    are recovered with observation, not an automatic repeated write.
+    are recovered with observation, not an automatic repeated write. Inspect is
+    read-only ACL/schema qualification for active or fenced recovery; it cannot
+    establish initial closure or stage missing grants.
     """
     if (str(UUID(owner)) != owner or re.fullmatch(r"[0-9a-f]{40}", candidate) is None
-            or action not in {"stage", "observe"}):
+            or action not in {"stage", "observe", "inspect"}):
         raise ValueError("pool_runtime_role_scope_unqualified")
     grants = """
         GRANT SELECT, INSERT, UPDATE ON nebius_pool_execution_outbox, nebius_pool_build_outbox TO loom_actuator;
@@ -328,19 +423,24 @@ def pool_runtime_role_sql(*, owner: str, candidate: str, action: str) -> str:
     # its registration timestamp is the only non-content lock column. Registered
     # source rows are immutable (including created_at); source refs may be pinned,
     # never published, retired or unpinned by this execution/build login.
-    return f"""BEGIN {'READ ONLY' if action == 'observe' else ''};
-SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
-DO $pool_runtime_role$
-DECLARE item RECORD;
-BEGIN
+    closure = f"""
     IF NOT pg_try_advisory_xact_lock({LOCK_KEY}) OR NOT EXISTS (
         SELECT 1 FROM nebius_rollout_guard WHERE id=1 AND owner='{owner}' AND candidate_sha='{candidate}'
     ) THEN RAISE EXCEPTION 'pool runtime role guard unqualified'; END IF;
-    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0173' OR EXISTS (
+    IF EXISTS (
         SELECT 1 FROM ({ACTIVITY_SQL}) activity
         WHERE trials<>0 OR executions<>0 OR builds<>0 OR build_cleanup<>0
     ) OR EXISTS (SELECT 1 FROM nebius_pool_execution_outbox WHERE phase NOT IN ('cancelled','released'))
       OR EXISTS (SELECT 1 FROM nebius_pool_build_outbox WHERE phase NOT IN ('cancelled','released'))
+    THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
+    """ if action != "inspect" else ""
+    return f"""BEGIN {'READ ONLY' if action != 'stage' else ''};
+SET LOCAL statement_timeout='10s'; SET LOCAL lock_timeout='2s'; SET LOCAL search_path=pg_catalog,public,pg_temp;
+DO $pool_runtime_role$
+DECLARE item RECORD;
+BEGIN
+    {closure}
+    IF (SELECT version_num FROM alembic_version) IS DISTINCT FROM '0174'
     THEN RAISE EXCEPTION 'pool runtime role database is not closed and idle'; END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='loom_actuator' AND rolcanlogin
         AND NOT (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls))
@@ -454,9 +554,24 @@ class KubectlPoolGuardAPI:
         if actual != {"apiVersion": "apps/v1", "kind": kind, "name": name, "uid": uid, "controller": True}:
             raise ValueError
 
-    def _runtime(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _runtime(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any] | None = None,
+                 expected: dict[str, Any] | None = None) -> dict[str, Any]:
         self._namespaces(target)
         original = target.controller if original is None else original
+        workload = original if expected is None else expected
+        # Only the protected caller can select a journal-qualified successor.
+        # Its template does not replace the retained workload's identity/scope.
+        if (any(workload.get(field) != original.get(field) for field in ('apiVersion', 'kind'))
+                or _uid(workload) != _uid(original)
+                or any(workload['metadata'].get(field) != original['metadata'].get(field) for field in ('namespace', 'name'))
+                or workload['spec']['selector'] != original['spec']['selector']
+                or type(workload['spec'].get('replicas')) is not int or workload['spec']['replicas'] != 1):
+            raise ValueError
+        retained, replacement = original['spec']['template']['spec'], workload['spec']['template']['spec']
+        if (len(retained['containers']) != 1 or len(replacement['containers']) != 1
+                or replacement['containers'][0]['name'] != retained['containers'][0]['name']
+                or replacement.get('serviceAccountName', 'default') != retained.get('serviceAccountName', 'default')):
+            raise ValueError
         namespace, name = original["metadata"]["namespace"], original["metadata"]["name"]
         if namespace != target.namespace:
             if not isinstance(target, PoolGuardTarget):
@@ -470,15 +585,26 @@ class KubectlPoolGuardAPI:
                 raise ValueError
             _snapshot(current)
         selector = original["spec"]["selector"]
+        original_replicas = original['spec'].get('replicas')
+        if original_replicas == 0:
+            # Only the newly created closed gateway has no running predecessor.
+            # Its journal-selected start may change replicas, never its template.
+            started = copy.deepcopy(original)
+            started['spec']['replicas'] = 1
+            if (expected is None or isinstance(target, PoolGuardTarget)
+                    or namespace != self.request.registration.binding.namespace or name != 'loom-pool-gateway'
+                    or retained.get('serviceAccountName') != 'loom-pool-gateway'
+                    or retained['containers'][0]['name'] != 'gateway' or not _matches(workload, started, _uid(original))):
+                raise ValueError
         if (original.get("apiVersion") != "apps/v1" or original.get("kind") != "Deployment"
                 or set(selector) != {"matchLabels"} or len(selector["matchLabels"]) != 1
-                or type(original["spec"].get("replicas")) is not int or original["spec"]["replicas"] != 1):
+                or type(original_replicas) is not int or original_replicas not in (0, 1)):
             raise ValueError
         label, = selector["matchLabels"]
         if label not in {"app", "app.kubernetes.io/name"} or selector["matchLabels"][label] != name:
             raise ValueError
         controller = self._get("deployment", name, namespace)
-        if _uid(controller) != _uid(original) or _snapshot(controller) != _snapshot(original):
+        if not _matches(controller, workload, _uid(original)):
             raise ValueError
         status = controller.get("status", {})
         if (status.get("observedGeneration", 0) < controller["metadata"].get("generation", 1)
@@ -576,12 +702,14 @@ class KubectlPoolGuardAPI:
         return base64.b64decode(secret["data"][reference["key"]], validate=True).decode()
 
     def qualify_runtime_database(self, target: PoolGuardTarget, *, original: dict[str, Any],
-                                 credential_uid: UUID, credential_resource_version: str) -> None:
+                                 credential_uid: UUID, credential_resource_version: str,
+                                 expected: dict[str, Any] | None = None) -> None:
         """Prove one retained running consumer uses this participant's backend.
 
         The protected parent supplies the original workload and pinned credential
-        identity. Stopped/journaled replacement workloads are a different phase;
-        zero replicas are never accepted as runtime correspondence here.
+        identity. A protected caller may pass its anchored successor template;
+        this read-only probe does not authorize that template or start workloads.
+        Zero replicas are never accepted as runtime correspondence here.
         """
         try:
             if (target not in self.request.guards or target.database is None
@@ -604,7 +732,7 @@ class KubectlPoolGuardAPI:
             else:
                 raise ValueError
             self._qualify_runtime_binding(target, original=original, component=component, url_variable=variable,
-                credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+                credential_uid=credential_uid, credential_resource_version=credential_resource_version, expected=expected)
         except Exception:
             raise PoolMigrationError("runtime_database") from None
 
@@ -633,13 +761,96 @@ class KubectlPoolGuardAPI:
             selected[name] = _uid(node)
         return dict(sorted(selected.items()))
 
-    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any]) -> None:
+    def qualify_runtime_pool_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                      expected: dict[str, Any]) -> None:
+        """Read effective settings and the exact registered participant token."""
+        try:
+            if (target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original['metadata']['namespace'], original['metadata']['name']
+            container, = original['spec']['template']['spec']['containers']
+            component: PoolSettingsComponent
+            if namespace == target.namespace and name in {'loom-control-plane', 'loom-service'}:
+                if container['name'] != name or (name == 'loom-control-plane' and original != target.controller):
+                    raise ValueError
+                component = 'controller' if name == 'loom-control-plane' else 'service'
+            elif (namespace == participant.execution_namespace.name and container['name'] == 'actuator'
+                    and name in {'loom-execution-actuator', *(row.target_id + '-actuator' for row in participant.targets)}):
+                component = 'actuator'
+            else:
+                raise ValueError
+            machine, = (row for row in self.request.registration.spec.machines if row.participant_id == target.participant_id)
+            wanted = expected_pool_runtime_settings(component, expected,
+                token_sha256=None if component == 'service' else machine.token_sha256)
+            if component == 'service':
+                if wanted['submission_source']['data_environment_id'] != str(participant.environment_id):
+                    raise ValueError
+            elif wanted['global_pool']['participant'] != participant.model_dump(mode='json'):
+                raise ValueError
+            self._qualify_runtime_settings(target, original=original, expected=expected, component=component, wanted=wanted)
+            if (digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+        except Exception:
+            raise PoolMigrationError('runtime_pool_settings') from None
+
+    def qualify_runtime_legacy_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                        expected: dict[str, Any]) -> None:
+        """Prove exact original settings, never accept a successor as legacy."""
+        try:
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256
+                        or _stable(expected)['spec'] != _stable(original)['spec']):
+                    raise ValueError
+
+            scope()
+            participant, = (row for row in self.request.registration.spec.participants if row.participant_id == target.participant_id)
+            namespace, name = original['metadata']['namespace'], original['metadata']['name']
+            container, = original['spec']['template']['spec']['containers']
+            component: LegacySettingsComponent
+            if namespace == target.namespace and name in {'loom-control-plane', 'loom-service'}:
+                if container['name'] != name or (name == 'loom-control-plane' and original != target.controller):
+                    raise ValueError
+                component = 'controller' if name == 'loom-control-plane' else 'service'
+            elif (namespace == participant.execution_namespace.name and container['name'] == 'actuator'
+                    and name in {'loom-execution-actuator', *(row.target_id + '-actuator' for row in participant.targets)}):
+                component = 'actuator'
+            else:
+                raise ValueError
+            wanted = expected_legacy_runtime_settings(component, original)
+            self._qualify_runtime_settings(target, original=original, expected=expected, component=component, wanted=wanted, legacy=True)
+            scope()
+        except Exception:
+            raise PoolMigrationError('runtime_legacy_settings') from None
+
+    def _qualify_runtime_settings(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
+                                  expected: dict[str, Any], component: PoolSettingsComponent,
+                                  wanted: dict[str, Any], legacy: bool = False) -> None:
+        """Fixed challenge inside the same qualified Pod before and after reads."""
+        before = self._runtime(target, original=original, expected=expected)
+        container, = original['spec']['template']['spec']['containers']
+        nonce = secrets.token_hex(32)
+        response = hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest()
+        report = self._run(['exec', '-n', original['metadata']['namespace'], 'pod/' + before['metadata']['name'],
+            '-c', container['name'], '--', 'python', '-c',
+            BOUND_LEGACY_SETTINGS_COMMAND if legacy else BOUND_POOL_SETTINGS_COMMAND, component, nonce, response])
+        if report != {'status': 'qualified'} or _uid(self._runtime(target, original=original, expected=expected)) != _uid(before):
+            raise ValueError
+
+    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                  expected: dict[str, Any] | None = None) -> None:
         """Read direct statistics inside the exact retained actuator Pod.
 
         No token issuance, permission changes, database connection, arbitrary
         command or operator-credential forwarding. Recheck Pod and Node identity
         after all reads; a stale success cannot approve a replacement runtime.
         """
+        stage = 'binding'
         try:
             if (target not in self.request.guards
                     or digest(migration_contract(self.request)) != self.contract_sha256
@@ -657,42 +868,59 @@ class KubectlPoolGuardAPI:
                     or len(settings) != len(container["env"])
                     or settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != namespace):
                 raise ValueError
-            before = self._runtime(target, original=original)
+            stage = 'pod'
+            before = self._runtime(target, original=original, expected=expected)
             host = before["spec"]["nodeName"]
+            stage = 'nodes'
             nodes = self._telemetry_nodes(host)
             for node_name, uid in nodes.items():
+                stage = 'probe'
                 report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", "actuator", "--",
                     "python", "-c", _BOUND_TELEMETRY_COMMAND, namespace, target_id, node_name, uid])
+                if (set(report) == {'status', 'stage'} and report['status'] == 'blocked'
+                        and isinstance(report['stage'], str) and report['stage'] in TELEMETRY_FAILURE_STAGES):
+                    stage = report['stage']
+                    raise ValueError
                 if report != {"status": "qualified", "node_name": node_name, "node_uid": uid}:
                     raise ValueError
-            after = self._runtime(target, original=original)
+            stage = 'recheck'
+            after = self._runtime(target, original=original, expected=expected)
             if (_uid(after) != _uid(before) or after["spec"]["nodeName"] != host or self._telemetry_nodes(host) != nodes
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
         except Exception:
-            raise PoolMigrationError("runtime_telemetry") from None
+            raise PoolMigrationError('runtime_telemetry_' + stage) from None
 
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,
                                  credential_resource_version: str,
-                                 database_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL") -> None:
+                                 database_variable: Literal["LOOM_CP_DB_URL", "LOOM_SVC_DB_URL"] = "LOOM_CP_DB_URL",
+                                 expected: dict[str, Any] | None = None) -> None:
         """Shared read-only probe; callers first qualify their fixed target scope."""
         namespace = original["metadata"]["namespace"]
         container, = original["spec"]["template"]["spec"]["containers"]
         before_database = self._database(target, url_variable=database_variable)
-        before = self._runtime(target, original=original)
+        before = self._runtime(target, original=original, expected=expected)
         url = self._workload_database_url(original, url_variable=url_variable,
             credential_uid=credential_uid, credential_resource_version=credential_resource_version)
+        if expected is not None:
+            replacement, = expected['spec']['template']['spec']['containers']
+            retained_entry, = (row for row in container['env'] if row['name'] == url_variable)
+            replacement_entry, = (row for row in replacement['env'] if row['name'] == url_variable)
+            if (retained_entry != replacement_entry
+                    or self._workload_database_url(expected, url_variable=url_variable,
+                        credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url):
+                raise ValueError
         qualify_database_destination(url, target.namespace)
-        # CP/API use PostgresDsn; the actuator intentionally retains a str.
-        expected_url = url if component == "actuator" else str(PostgresDsn(url))
+        # CP/API use PostgresDsn; actuator/gateway intentionally retain a str.
+        expected_url = url if component in {"actuator", "gateway"} else str(PostgresDsn(url))
         nonce = secrets.token_hex(32)
         response = hmac.new(bytes.fromhex(nonce), expected_url.encode(), "sha256").hexdigest()
         report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", container["name"], "--",
             "python", "-c", _BOUND_DATABASE_COMMAND, component, nonce, response])
         if (report != {"status": "qualified"}
-                or _uid(self._runtime(target, original=original)) != _uid(before)
+                or _uid(self._runtime(target, original=original, expected=expected)) != _uid(before)
                 or self._workload_database_url(original, url_variable=url_variable,
                     credential_uid=credential_uid, credential_resource_version=credential_resource_version) != url
                 or _uid(self._database(target, url_variable=database_variable)) != _uid(before_database)):
@@ -870,9 +1098,9 @@ class KubectlPoolGuardAPI:
             raise PoolMigrationError("guard_" + action if action in {"observe", "acquire"} else "guard_scope") from None
 
     def runtime_role(self, target: PoolGuardTarget, action: str) -> dict[str, Any]:
-        """Stage/qualify one exact participant DB; leave its intake closed."""
+        """Stage/qualify one exact participant DB without changing intake."""
         try:
-            if (action not in {"stage", "observe"} or target not in self.request.guards or target.database is None
+            if (action not in {"stage", "observe", "inspect"} or target not in self.request.guards or target.database is None
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
@@ -882,11 +1110,90 @@ class KubectlPoolGuardAPI:
             report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
                 "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
             if (report != {"status": "staged" if action == "stage" else "qualified"}
-                    or _uid(self._database(target)) != _uid(before)):
+                    or _uid(self._database(target)) != _uid(before)
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
             return report
         except Exception:
-            raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe"} else "runtime_role_scope") from None
+            raise PoolMigrationError("runtime_role_" + action if action in {"stage", "observe", "inspect"} else "runtime_role_scope") from None
+
+    def activation_guard(self, target: PoolGuardTarget, action: Literal["observe", "release", "fence"]) -> str:
+        """One bound DB dispatch; the anchored parent owns intent and recovery."""
+        try:
+            if (action not in {"observe", "release", "fence"} or target not in self.request.guards or target.database is None
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            operation = self.request.registration.spec.operation_id
+            query = pool_guard_activation_sql(operation, target.participant_id,
+                self.request.registration.candidate["candidate_sha"], action=action)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            status = report.get("status")
+            allowed = {"observe": {"held", "open", "fenced", "foreign"}, "release": {"open"}, "fence": {"fenced"}}
+            if (not isinstance(status, str) or status not in allowed[action]
+                    or report != {"schema": "loom.pool-local-guard.v1", "operation_id": str(operation),
+                        "participant_id": str(target.participant_id), "status": status}
+                    or _uid(self._database(target)) != _uid(before)
+                    or target not in self.request.guards
+                    or digest(migration_contract(self.request)) != self.contract_sha256
+                    or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                raise ValueError
+            return status
+        except Exception:
+            raise PoolMigrationError("activation_guard") from None
+
+    def recovery_participant_drained(self, target: PoolGuardTarget) -> bool:
+        """Include unclaimed outboxes and result cleanup in one guarded snapshot."""
+        try:
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            operation, candidate = self.request.registration.spec.operation_id, self.request.registration.candidate['candidate_sha']
+            query = participant_recovery_drain_sql(operation, target.participant_id, candidate)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            drained = qualify_participant_recovery_drain(operation, target.participant_id, candidate, report)
+            if _uid(self._database(target)) != _uid(before):
+                raise ValueError
+            scope()
+            return drained
+        except Exception:
+            raise PoolMigrationError("recovery_participant_drain") from None
+
+    def release_recovery_guard(self, target: PoolGuardTarget) -> str:
+        """One exact recovery-owner release; the rollback parent owns intent.
+
+        This is not the original activation release, and never retries. Runtime
+        restoration barriers belong to the anchored parent; the fixed SQL also
+        freshly enforces local drain under the admission lock.
+        """
+        try:
+            def scope() -> None:
+                if (target not in self.request.guards or target.database is None
+                        or digest(migration_contract(self.request)) != self.contract_sha256
+                        or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
+                    raise ValueError
+            scope()
+            operation, candidate = self.request.registration.spec.operation_id, self.request.registration.candidate['candidate_sha']
+            query = pool_guard_recovery_release_sql(operation, target.participant_id, candidate)
+            before = self._database(target)
+            report = self._run(["exec", "-n", target.namespace, "pod/" + before["metadata"]["name"], "-c", "loom-postgres", "--",
+                "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "loom", "-c", query])
+            if (report != {'schema': 'loom.pool-recovery-release.v1', 'operation_id': str(operation),
+                    'participant_id': str(target.participant_id), 'candidate_sha': candidate, 'status': 'open'}
+                    or _uid(self._database(target)) != _uid(before)):
+                raise ValueError
+            scope()
+            return 'open'
+        except Exception:
+            raise PoolMigrationError('recovery_guard_release') from None
 
     def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]:
         """Read frozen schema/access/backlog through the exact retained DB Pod.

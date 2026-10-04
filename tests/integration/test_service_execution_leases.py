@@ -50,6 +50,7 @@ from loom.db.schema import (
     Trial,
     TrialEvent,
     TrialResourceUsage,
+    Worker,
 )
 from loom.execution_contract import (
     NEBIUS_CPU_EXECUTION_CLASS_V1,
@@ -114,6 +115,7 @@ from loom_control_plane.service_execution import (
     execution_lease_projection,
     finalize_committed_service_execution,
     persist_execution_catalog,
+    record_committed_runtime_result,
     record_execution_event,
     recover_execution_node_attribution,
     refresh_execution_target_health,
@@ -807,6 +809,51 @@ async def _reserve(
     )
 
 
+@pytest.mark.parametrize("state", ["claimed", "running", "queued"])
+async def test_worker_reclaim_preserves_native_attempt_with_stale_worker_pointer(
+    postgres_url: str, state: str,
+) -> None:
+    """Legacy worker recovery must never requeue a native current attempt."""
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    worker_id = uuid4()
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            session.add(Worker(
+                id=worker_id, hostname="stale-native-pointer", version="test",
+                capabilities=[], registered_at=now - timedelta(minutes=10),
+                last_seen_at=now - timedelta(minutes=5), status="active",
+            ))
+            await session.flush()
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None
+            trial.state = state
+            trial.started_at = now - timedelta(minutes=1)
+            trial.worker_id = worker_id
+            await session.commit()
+            generation = lease.generation
+        async with sessions() as session, session.begin():
+            assert await reclaim_expired_workers(session, expiry_sec=15) == 0
+        async with sessions() as session:
+            trial = await session.get(Trial, trial_id)
+            lease = await session.get(ServiceExecutionLease, lease.id)
+            assert trial is not None and lease is not None
+            assert trial.state == state
+            assert trial.worker_id == worker_id
+            assert trial.failure_reason is None
+            assert trial.failure_message is None
+            assert trial.next_attempt_at is None
+            assert lease.generation == generation
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(update(Trial).where(Trial.worker_id == worker_id).values(worker_id=None))
+            await session.execute(delete(Worker).where(Worker.id == worker_id))
+        await engine.dispose()
+
+
 async def test_default_catalog_upgrade_preserves_existing_class_identity(postgres_url: str) -> None:
     """A deployment must not add capabilities under the already persisted V1 ID."""
     from loom.execution_contract import ExecutionClassV1
@@ -1385,8 +1432,9 @@ async def test_scheduler_capacity_scan_is_bounded(postgres_url: str) -> None:
         await engine.dispose()
 
 
+@pytest.mark.parametrize("many_artifacts", [False, True])
 async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
-    postgres_url: str,
+    postgres_url: str, many_artifacts: bool,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -1399,6 +1447,7 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
         runtime_image_ref=plan.runtime_image_ref,
         runtime_binary_sha256=plan.runtime_binary_sha256,
         image_admission=plan.image_admission,
+        supports_task_artifact_inputs=many_artifacts,
     )
     try:
         async with sessions() as session:
@@ -1465,7 +1514,8 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
                     {
                         "name": "main",
                         "instruction_file": "instruction.md",
-                        "artifacts": ["answer.txt"],
+                        "artifacts": ([f"out/part-{index:04}.json" for index in range(515)]
+                                      if many_artifacts else ["answer.txt"]),
                     }
                 ],
             }
@@ -1501,6 +1551,10 @@ async def test_scheduler_compiles_ordinary_task_from_deployment_profile(
         assert persisted_plan.task_input.file_count == 3
         assert persisted_plan.main.environment["LOOM_TASK_MODEL"] == "openai/gpt-5"
         assert persisted_plan.main.argv[-1] == "direct-completion"
+        if many_artifacts:
+            assert persisted_plan.main.environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] == "1"
+            assert "LOOM_TASK_ARTIFACTS_JSON" not in persisted_plan.main.environment
+            assert sum(item.kind == "task_artifact" for item in persisted_plan.output_declarations) == 515
     finally:
         await engine.dispose()
 
@@ -3876,9 +3930,16 @@ async def test_service_step_token_freezes_identity_and_persists_audit(
     "terminal_state",
     [NormalizedJobState.SUCCEEDED, NormalizedJobState.FAILED],
 )
+@pytest.mark.parametrize("extra_artifacts", [
+    0,
+    # This case performs hundreds of real prepare/upload/complete transactions.
+    # Keep the normal case's 60-second cap; allow the full inventory on CI CPUs.
+    pytest.param(512, marks=pytest.mark.timeout(300)),
+])
 async def test_observed_pod_broker_commits_semantic_runtime_output(
     postgres_url: str,
     terminal_state: NormalizedJobState,
+    extra_artifacts: int,
 ) -> None:
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -3886,6 +3947,17 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
     signing_key = "b" * 64
     pod_ip = "10.24.7.19"
     runtime_contract = _complete_output_contract(now=now)
+    extra_outputs = tuple(
+        RuntimeOutputDeclarationV1(
+            source_path=f"artifacts/part-{index:04}.json",
+            relative_path=f"artifacts/part-{index:04}.json",
+            kind="task_artifact", required=False,
+        )
+        for index in range(extra_artifacts)
+    )
+    runtime_contract = runtime_contract.model_copy(update={
+        "output_declarations": (*runtime_contract.output_declarations, *extra_outputs),
+    })
     try:
         async with sessions() as session:
             trial_id, target = await _seed_ready_trial(session, now=now)
@@ -3951,6 +4023,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             "accounting/usage.json": b'{"call_count":1}\n',
             "verifier/output.json": b'{"rewards":{"passed":1}}\n',
         }
+        bundle_payloads.update({item.relative_path: b"{}" for item in extra_outputs})
         result_document = _runtime_result_payload(authorized, started_at=now)
         result_document.update(
             status="runtime_error",
@@ -3968,6 +4041,8 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             verifier_rewards={"passed": 1.0},
         )
         result_payload = canonical_document(result_document)
+        if extra_artifacts:
+            assert len(result_payload) > 65_536
         store = FakeObjectStore()
         repository = SqlArtifactCommitRepository(
             session_factory=sessions,
@@ -4067,7 +4142,7 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert artifact.content_hash == digest_bytes(result_payload)
             assert artifact.name == "trial_bundle"
             assert artifact.artifact_type == "loom.trial-artifact-bundle.v1"
-            assert artifact.file_count == 5
+            assert artifact.file_count == 5 + extra_artifacts
             trial = await session.get(Trial, trial_id)
             assert trial is not None
             assert trial.trajectory_index is not None
@@ -4083,6 +4158,9 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
                 == 1
             )
 
+        # Hundreds of real upload transactions can outlast the original clock.
+        # Include the newly created finalize command in this actuator poll.
+        now = datetime.now(UTC)
         terminal_observation = KubernetesJobObservation(
             namespace=target.namespace_name,
             job_name=lease.job_name,
@@ -4123,7 +4201,14 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             ),
             controller_id="output-finalization-test",
         )
-        assert await actuator.run_commands_once(now=now + timedelta(seconds=4)) == 3
+        completed = await actuator.run_commands_once(now=now + timedelta(seconds=4))
+        async with sessions() as session:
+            commands = (await session.scalars(select(ServiceExecutionCommand).where(
+                ServiceExecutionCommand.lease_id == lease.id,
+            ))).all()
+            assert completed == 3, [
+                (c.command_type, c.state, c.last_error_code, c.last_error_message) for c in commands
+            ]
 
         async with sessions() as session:
             persisted = await session.get(ServiceExecutionLease, lease.id)
@@ -4134,6 +4219,10 @@ async def test_observed_pod_broker_commits_semantic_runtime_output(
             assert persisted.observed_state == "finalized"
             assert trial.state == "failed"
             assert trial.failure_reason == "runtime_error"
+            assert trial.result is not None
+            assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                result_document,
+            ).model_dump(mode="json")
             assert (
                 await session.scalar(
                     select(func.count(ServiceExecutionCommand.id)).where(
@@ -4192,6 +4281,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     runtime_status: str = "succeeded",
     late_cancellation: str | None = None,
     cancel_before_commit: bool = False,
+    extra_artifacts: int = 0,
 ) -> None:
     class FailOnceSourceStore(FakeObjectStore):
         fail_next_delete: bool = True
@@ -4215,6 +4305,14 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     runtime_contract = _complete_output_contract(now=now)
+    extra_outputs = tuple(RuntimeOutputDeclarationV1(
+        source_path=f"artifacts/extra-{index:04}.txt",
+        relative_path=f"artifacts/extra-{index:04}.txt",
+        kind="task_artifact", required=False,
+    ) for index in range(extra_artifacts))
+    runtime_contract = runtime_contract.model_copy(update={
+        "output_declarations": (*runtime_contract.output_declarations, *extra_outputs),
+    })
     store = FailOnceSourceStore()
     canonical_store = FailOnceCanonicalStore()
     try:
@@ -4344,6 +4442,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             ),
             "verifier/output.json": canonical_document({"rewards": rewards}),
         }
+        bundle_payloads.update({item.relative_path: b"extra\n" for item in extra_outputs})
         if cancel_before_commit:
             bundle_payloads.pop("verifier/output.json")
         result_document = _runtime_result_payload(lease, started_at=now)
@@ -4643,6 +4742,31 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             assert trial.state == ("succeeded" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
             assert trial.failure_reason == ("cancelled" if cancel_before_commit else None if runtime_status == "succeeded" else runtime_status)
             assert trial.result == projected_result
+            if extra_artifacts:
+                # References remain resolvable after canonical storage replaced
+                # the source registry and source-spool objects were deleted.
+                stored_events = (await session.scalars(select(ServiceExecutionEvent).where(
+                    ServiceExecutionEvent.lease_id == lease.id,
+                    ServiceExecutionEvent.event_kind.in_(("result_reported", "finalized")),
+                ))).all()
+                assert stored_events
+                for stored_event in stored_events:
+                    assert stored_event.payload_json["schema_version"] == (
+                        "loom.execution-event-payload-reference.v1"
+                    )
+                    full = json.loads(artifact.artifact_metadata["execution_event_payloads"][
+                        stored_event.payload_json["payload_key"]
+                    ])
+                    replay, duplicate = await record_execution_event(
+                        session, lease_id=lease.id, generation=stored_event.generation,
+                        ordinal=stored_event.ordinal, event_kind=stored_event.event_kind,
+                        payload=full, observed_at=now,
+                    )
+                    assert replay.id == stored_event.id and duplicate
+                assert trial.result is not None
+                assert trial.result["runtime_result"] == ExecutionRuntimeResultV1.model_validate(
+                    result_document,
+                ).model_dump(mode="json")
             from loom_service.routes.batches import _rollup_from_trials
 
             assert _rollup_from_trials([trial]) == aggregate_reward
@@ -4727,7 +4851,7 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
                 )
 
         app.dependency_overrides[authed_session] = fixture_session
-        if cancel_before_commit:
+        if cancel_before_commit or extra_artifacts:
             class CanonicalClient:
                 def get_object(self, *, Bucket, Key):  # type: ignore[no-untyped-def]  # noqa: N803
                     payload = canonical_store.objects[(Bucket, Key)]
@@ -4737,20 +4861,190 @@ async def test_materializer_commits_complete_bundle_after_execution_cleanup(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
             response = await client.get("/api/v1/trials")
-            if cancel_before_commit:
+            if cancel_before_commit or extra_artifacts:
                 downloaded = await client.get(f"/api/v1/trials/{trial_id}/bundle/download")
                 assert downloaded.status_code == 200, downloaded.text
                 with tarfile.open(fileobj=io.BytesIO(downloaded.content), mode="r:gz") as archive:
                     raw = archive.extractfile("files/result.json")
                     assert raw is not None and json.load(raw)["status"] == runtime_status
                     assert "files/artifacts/answer.txt" in archive.getnames()
+                    assert len([name for name in archive.getnames()
+                                if name.startswith("files/artifacts/extra-")]) == extra_artifacts
                 atif = json.loads(canonical_store.objects[("trajectories", atif_key)])
-                assert atif["metadata"]["final_state"] == "cancelled"
-                assert atif["metadata"].get("reward") is None
+                if cancel_before_commit:
+                    assert atif["metadata"]["final_state"] == "cancelled"
+                    assert atif["metadata"].get("reward") is None
         assert response.status_code == 200, response.text
         item = next(item for item in response.json()["items"] if item["id"] == str(trial_id))
         assert item["aggregate_reward"] == aggregate_reward
         assert item["state"] == ("succeeded" if runtime_status == "succeeded" else "cancelled" if cancel_before_commit else "failed")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("outcome", ["succeeded", "timed_out", "cancelled"])
+async def test_large_runtime_result_survives_canonical_publication_and_download(
+    postgres_url: str, outcome: str,
+) -> None:
+    await test_materializer_commits_complete_bundle_after_execution_cleanup(
+        postgres_url=postgres_url, source_task_id=None,
+        rewards=None if outcome == "cancelled" else {"passed": 0.0},
+        aggregate_reward=None if outcome == "cancelled" else 0.0,
+        runtime_status="timed_out" if outcome == "cancelled" else outcome,
+        cancel_before_commit=outcome == "cancelled", extra_artifacts=256,
+    )
+
+
+@pytest.mark.parametrize("tamper", [
+    "payload", "missing", "foreign_artifact", "foreign_lease", "foreign_trial",
+    "foreign_team", "upload", "generation", "event_digest", "invalid_number",
+])
+async def test_large_runtime_event_reference_rejects_identity_drift(
+    postgres_url: str, tamper: str,
+) -> None:
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session:
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await _hand_off_to_verifier(session, parent_id=lease.id, now=now)
+            lease.finalized_at = None
+            lease.observed_state = "finalizing"
+            artifact = Artifact(
+                id=uuid4(), artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
+                team_id=lease.team_id, trial_id=trial_id,
+                control_producer_kind="service_execution", control_producer_id=lease.id,
+                content_hash="sha256:" + "1" * 64,
+                artifact_upload_session_id=lease.output_upload_session_id,
+                manifest_sha256="sha256:" + "2" * 64,
+                file_count=1, stored_size_bytes=1, unpacked_size_bytes=1,
+                provenance={"lease_id": str(lease.id), "generation": lease.resource_generation,
+                            "runtime_contract_sha256": lease.runtime_contract_sha256},
+            )
+            session.add(artifact)
+            document = _runtime_result_payload(lease, started_at=now)
+            # Python's compact number representation fits; PostgreSQL's JSONB
+            # representation expands the same valid finite numbers past 64 KiB.
+            document["verifier_rewards"] = {f"score-{i}": 1e300 for i in range(256)}
+            # JCS emits these valid floats as integer tokens. Storing JCS text
+            # would parse them back as unsafe Python integers on replay.
+            document["verifier_rewards"].update({
+                "positive": 1e20, "negative": -1e20, "safe_boundary": float(2**53),
+                "fractional_origin": 1.0000000000000001e18,
+            })
+            result = ExecutionRuntimeResultV1.model_validate(document)
+            payload = result.model_dump(mode="json")
+            assert len(canonical_document(payload)) < 65_536
+            event = await record_committed_runtime_result(
+                session, lease_id=lease.id, generation=lease.generation,
+                runtime_result=result, observed_at=now,
+            )
+            await session.commit()
+            event_id, artifact_id, lease_id = event.id, artifact.id, lease.id
+
+        async with sessions() as session:
+            event = await session.get(ServiceExecutionEvent, event_id)
+            assert event is not None
+            assert event.payload_json["schema_version"] == "loom.execution-event-payload-reference.v1"
+            assert event.payload_sha256 == canonical_digest(event.payload_json)
+            assert await session.scalar(text(
+                "SELECT octet_length(payload_json::text) FROM execution_events WHERE id = :id",
+            ), {"id": event_id}) < 65_536
+            replay, duplicate = await record_execution_event(
+                session, lease_id=lease_id, generation=event.generation, ordinal=event.ordinal,
+                event_kind="result_reported", payload=payload, observed_at=now,
+            )
+            assert replay.id == event_id and duplicate
+            assert (await record_committed_runtime_result(
+                session, lease_id=lease_id, generation=event.generation,
+                runtime_result=result, observed_at=now,
+            )).id == event_id
+            with pytest.raises(ServiceExecutionConflict, match="replay changed"):
+                await record_execution_event(
+                    session, lease_id=lease_id, generation=event.generation, ordinal=event.ordinal,
+                    event_kind="result_reported", payload={**payload, "verifier_rewards": {"x": 0}},
+                    observed_at=now,
+                )
+            with pytest.raises(ServiceExecutionFenceError):
+                await record_execution_event(
+                    session, lease_id=lease_id, generation=999, ordinal=event.ordinal + 1,
+                    event_kind="result_reported", payload=payload, observed_at=now,
+                )
+            assert await finalize_committed_service_execution(session, lease_id=lease_id, observed_at=now)
+            trial = await session.get(Trial, trial_id)
+            assert trial is not None and trial.state == "materializing"
+            assert trial.result is not None
+            assert ExecutionRuntimeResultV1.model_validate(
+                trial.result["runtime_result"],
+            ).model_dump(mode="json") == payload
+            finalized = await session.scalar(select(ServiceExecutionEvent).where(
+                ServiceExecutionEvent.lease_id == lease_id,
+                ServiceExecutionEvent.event_kind == "finalized",
+            ))
+            assert finalized is not None
+            assert finalized.payload_json["schema_version"] == "loom.execution-event-payload-reference.v1"
+            artifact = await session.get(Artifact, artifact_id)
+            assert artifact is not None
+            finalized_payload = json.loads(artifact.artifact_metadata["execution_event_payloads"][
+                finalized.payload_json["payload_key"]
+            ])
+            replay, duplicate = await record_execution_event(
+                session, lease_id=lease_id, generation=finalized.generation,
+                ordinal=finalized.ordinal, event_kind="finalized",
+                payload=finalized_payload, observed_at=now,
+            )
+            assert replay.id == finalized.id and duplicate
+            await session.commit()
+
+        async with sessions() as session:
+            artifact = await session.get(Artifact, artifact_id)
+            event = await session.get(ServiceExecutionEvent, event_id)
+            assert artifact is not None and event is not None
+            if tamper == "payload":
+                artifact.artifact_metadata = {"execution_event_payloads": {
+                    event.payload_json["payload_key"]: json.dumps({**payload, "verifier_rewards": {"x": 0}}),
+                }}
+            elif tamper == "missing":
+                artifact.artifact_metadata = {}
+            elif tamper == "foreign_artifact":
+                event.payload_json = {**event.payload_json, "artifact_id": str(uuid4())}
+                event.payload_sha256 = canonical_digest(event.payload_json)
+            elif tamper == "foreign_lease":
+                artifact.control_producer_id = uuid4()
+            elif tamper in {"foreign_trial", "foreign_team"}:
+                foreign_id, _ = await _seed_ready_trial(session, now=now)
+                foreign = await session.get(Trial, foreign_id)
+                assert foreign is not None
+                if tamper == "foreign_trial":
+                    artifact.trial_id = foreign.id
+                else:
+                    artifact.team_id = foreign.team_id
+            elif tamper == "upload":
+                foreign_id, foreign_target = await _seed_ready_trial(session, now=now)
+                foreign_lease = await _reserve(
+                    session, trial_id=foreign_id, target=foreign_target, now=now,
+                )
+                await _hand_off_to_verifier(session, parent_id=foreign_lease.id, now=now)
+                artifact.artifact_upload_session_id = foreign_lease.output_upload_session_id
+            elif tamper == "generation":
+                artifact.provenance = {**artifact.provenance, "generation": 999}
+            elif tamper == "event_digest":
+                event.payload_sha256 = "sha256:" + "f" * 64
+            elif tamper == "invalid_number":
+                artifact.artifact_metadata = {"execution_event_payloads": {
+                    event.payload_json["payload_key"]: json.dumps({
+                        **payload, "verifier_rewards": {"positive": 100000000000000000001},
+                    }),
+                }}
+            await session.commit()
+        async with sessions() as session:
+            with pytest.raises(ServiceExecutionConflict, match="execution event payload"):
+                await record_execution_event(
+                    session, lease_id=lease_id, generation=event.generation, ordinal=event.ordinal,
+                    event_kind="result_reported", payload=payload, observed_at=now,
+                )
     finally:
         await engine.dispose()
 

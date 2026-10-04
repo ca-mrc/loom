@@ -11,7 +11,7 @@ import json
 import ssl
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlencode
 from uuid import UUID
 
@@ -32,9 +32,10 @@ from scripts.ops.nebius_pool_cutover import (
     PoolCutoverRequest,
     _contract,
     cutover_documents,
+    cutover_material_documents,
+    qualify_cutover_image_admission,
     retained_cutover_workloads,
 )
-from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolGuardTarget,
     PoolMigrationAPI,
@@ -43,6 +44,7 @@ from scripts.ops.nebius_pool_migration import (
 )
 from scripts.ops.nebius_pool_migration_guard import qualify_cutover_readiness_page
 from scripts.ops.nebius_pool_platform_authority import platform_controller_subjects
+from scripts.ops.nebius_pool_projection import _snapshot as _input_snapshot
 from scripts.ops.nebius_pool_retirement import (
     _closed,
     qualify_closed_workload_drain,
@@ -60,14 +62,30 @@ from scripts.ops.nebius_pool_role_fencing_live import HTTPSPoolRoleFenceAPI
 from loom.nebius_platform_render import digest
 from loom.nebius_pool_priority import PoolWorkOriginV1
 
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
 
 class PoolCutoverChecks(Protocol):
     def preflight(self, request: PoolCutoverRequest) -> None: ...
+    def qualify_initial_capacity(self, request: PoolCutoverRequest) -> None: ...
     def qualify_quiescence(self) -> None: ...
 
 
 class PoolCutoverHistory(Protocol):
     def qualify_binding(self, request: PoolMigrationRequest, manager: dict[str, Any]) -> None: ...
+    def qualify_active_pool(self) -> None: ...
+    def qualify_manager_database(self, *, expected: dict[str, Any] | None = None) -> None: ...
+    def qualify_manager_pool_settings(self, *, expected: dict[str, Any]) -> None: ...
+    def qualify_manager_legacy_settings(self, *, expected: dict[str, Any]) -> None: ...
+    def qualify_gateway_runtime(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None: ...
+    def open_pool(self, *, original: dict[str, Any], expected: dict[str, Any]) -> None: ...
+    def activation_pool(self, action: Literal["observe", "fence"]) -> str: ...
+    def recovery_pool_drained(self) -> bool: ...
+    def machine_retirement(self, action: Literal["observe", "revoke"]) -> Literal["active", "revoked"]: ...
+    def qualify_closed_pool(self) -> None:
+        """Read current closed registration and dedicated credentials, never replay it."""
+        ...
     def qualify_pending_origins(self, target: PoolGuardTarget, origins: tuple[PoolWorkOriginV1, ...]) -> None:
         """Qualify retained management registration/history, not just JSON shape."""
         ...
@@ -77,14 +95,28 @@ class PoolCutoverGuards(Protocol):
     request: PoolMigrationRequest
     def guard(self, target: PoolGuardTarget, action: str) -> dict[str, Any]: ...
     def runtime_role(self, target: PoolGuardTarget, action: str) -> dict[str, Any]: ...
+    def activation_guard(self, target: PoolGuardTarget, action: Literal["observe", "release", "fence"]) -> str: ...
+    def recovery_participant_drained(self, target: PoolGuardTarget) -> bool: ...
+    def release_recovery_guard(self, target: PoolGuardTarget) -> str: ...
     def cutover_readiness_page(self, target: PoolGuardTarget, *, after: str | None) -> dict[str, Any]: ...
+    def qualify_runtime_database(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                 credential_uid: UUID, credential_resource_version: str,
+                                 expected: dict[str, Any] | None = None) -> None: ...
+    def qualify_runtime_telemetry(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                  expected: dict[str, Any] | None = None) -> None: ...
+    def qualify_runtime_pool_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                      expected: dict[str, Any]) -> None: ...
+    def qualify_runtime_legacy_settings(self, target: PoolGuardTarget, *, original: dict[str, Any],
+                                        expected: dict[str, Any]) -> None: ...
 
 
 class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
     def __init__(self, *, request: PoolCutoverRequest, tokens: dict[UUID, str], migration: PoolMigrationAPI,
                  guards: PoolCutoverGuards, checks: PoolCutoverChecks, history: PoolCutoverHistory, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
-                 state_dir: Path | None = None, anchor_dir: Path | None = None):
+                 state_dir: Path | None = None, anchor_dir: Path | None = None,
+                 refresh: PoolManagerRefresh | None = None,
+                 source_credentials: dict[str, str] | None = None):
         registration = request.fencing.retirement.migration.registration
         if guards.request != request.fencing.retirement.migration:
             raise ValueError("pool cutover guard binding differs")
@@ -95,13 +127,28 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                     or state_dir == anchor_dir or state_dir in anchor_dir.parents or anchor_dir in state_dir.parents))):
             raise ValueError("pool cutover journal binding differs")
         self.state_dir, self.anchor_dir = state_dir, anchor_dir
+        self.refresh = refresh
+        if refresh is not None:
+            from scripts.ops.nebius_pool_refresh import PoolManagerRefresh
+
+            if type(refresh) is not PoolManagerRefresh:
+                raise ValueError("pool refresh projection type differs")
+            context = refresh.qualify().context
+            if (context.request != request or state_dir != Path(context.operation['state_dir'])
+                    or anchor_dir != Path(context.operation['anchor_dir'])):
+                raise ValueError("pool refresh projection scope differs")
         self.request, self.migration, self.guards, self.checks = request, migration, guards, checks
         self.history = history
         self.binding = registration.binding
+        try:
+            self._input_snapshot: object = _input_snapshot(request)
+        except TypeError:
+            self._input_snapshot = None
         self.catalog = cutover_documents(request)
         self.contract_sha256 = digest(_contract(request, self.catalog))
         self.originals = {**retirement_documents(request.fencing.retirement), **self.catalog["producers"]}
-        self.documents = {**machine_documents(request.fencing.retirement.migration, tokens),
+        self._source_credentials = copy.deepcopy(source_credentials)
+        self.documents = {**cutover_material_documents(request, tokens, self._source_credentials),
             **{_key(row): row for phase in ("configuration", "authority", "workload") for row in self.catalog[phase]}}
         self.namespaces = {row.namespace: str(row.namespace_uid) for row in guards.request.guards}
         self.namespaces.update({ns.name: str(ns.uid) for row in registration.spec.participants
@@ -128,8 +175,19 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             _snapshot(namespace)
 
     def _scope(self) -> None:
-        if self.contract_sha256 != digest(_contract(self.request, cutover_documents(self.request))):
+        # The contract is pure in these complete typed inputs. Comparing them
+        # avoids rendering every workload for each individual live GET. Never
+        # reuse the identity observation below or any journal/runtime evidence.
+        if self._input_snapshot is None:
+            unchanged = self.contract_sha256 == digest(_contract(self.request, cutover_documents(self.request)))
+        else:
+            try:
+                unchanged = self._input_snapshot == _input_snapshot(self.request)
+            except TypeError:
+                unchanged = False
+        if not unchanged:
             raise ValueError("pool cutover inputs changed")
+        qualify_cutover_image_admission(self.request)
         self.verify_identity(self.binding)
 
     def _approved(self, document: dict[str, Any], *, writing: bool = False) -> str:
@@ -166,6 +224,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         self._scope()
         self.qualify_writer_bindings()
         self.checks.preflight(request)
+        if request.application_delivery is not None:
+            self.checks.qualify_initial_capacity(request)
         self._qualify_database_readiness()
         self.qualify_writer_bindings()
 
@@ -176,6 +236,8 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         Parent anchor, retained closed/fenced receipts and authority-stage intent
         must correspond. No journal update, CREATE retry or resource adoption.
         """
+        from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
+
         state, anchor = self.state_dir, self.anchor_dir
         if state is None or anchor is None:
             return {}
@@ -216,6 +278,7 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         stage = json.loads(private_state._private_read(path, limit=4 * 1024**2))
         _validate_record(stage, {"schema": "loom.nebius-management-stage.v1", "binding": asdict(self.binding),
             "revision": digest(documents), "phase": "pool-cutover-authority"}, documents)
+        options = gateway_retirement_options(self.request, state=state, anchor=anchor)
         live = {_key(row): row for rows in inventory.values() for row in rows}
         approved = {}
         for key, item in stage["resources"].items():
@@ -234,12 +297,31 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
             # stage's contains-oriented dry-run record cannot approve it.
             if "aggregationRule" in actual:
                 raise ValueError
-            if (_comparison_snapshot(actual) != item["expected"]
+            if options is not None:
+                if (checksum is None or item['status'] != 'created' or _uid(actual) != item['uid']
+                        or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options[key])):
+                    raise ValueError
+            elif (_comparison_snapshot(actual) != item["expected"]
                     or (item["status"] == "created" and (
                         _uid(actual) != item["uid"] or _snapshot(actual) != item["observed"]))):
                 raise ValueError
             approved[key] = actual
         return approved
+
+    def _retained_workload_projection(self, observed: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        if self.refresh is None:
+            return (self.originals if self.state_dir is None or self.anchor_dir is None else
+                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir, observed=observed))
+        context = self.refresh.qualify().context
+        if (context.request != self.request or self.state_dir != Path(context.operation['state_dir'])
+                or self.anchor_dir != Path(context.operation['anchor_dir'])):
+            raise ValueError("pool refresh projection scope changed")
+        options = self.refresh.workload_options()
+        expected = {}
+        for key, original in self.originals.items():
+            desired, = (row for row in options[key] if _matches(observed[key], row, _uid(original)))
+            expected[key] = desired
+        return expected
 
     def qualify_writer_bindings(self) -> None:
         """Discover retained grants and consumers at one API-server revision."""
@@ -268,14 +350,13 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
         except Exception:
             raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
         try:
-            expected = (self.originals if self.state_dir is None or self.anchor_dir is None else
-                retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir))
             workloads = {resource: inventory_resources(read, api, resource, kind, include_terminal_pods=True)
                 for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+            observed = {_key(row): row for resource in ("deployments", "cronjobs") for row in workloads[resource]}
+            expected = self._retained_workload_projection(observed)
             qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected,
                 platform_subjects=platform_controller_subjects(self.request.platform_authority))
-            if (self.state_dir is not None and self.anchor_dir is not None
-                    and retained_cutover_workloads(self.request, state_dir=self.state_dir, anchor_dir=self.anchor_dir) != expected):
+            if self._retained_workload_projection(observed) != expected:
                 raise ValueError
         except Exception:
             raise ValueError("pool_retained_writer_workload_inventory_unqualified") from None

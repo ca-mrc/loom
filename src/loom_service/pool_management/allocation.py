@@ -23,7 +23,7 @@ async def node_allocation(session: AsyncSession, principal: PoolPrincipal,
     pool = await session.scalar(select(NebiusPoolBinding).where(NebiusPoolBinding.pool_id == request.pool_id)
         .with_for_update().execution_options(populate_existing=True))
     await authorize_pool_machine(session, principal, role="participant", pool_id=request.pool_id,
-        participant_id=request.participant_id)
+        participant_id=request.participant_id, workload_kind=request.workload_kind)
     if pool is None or pool.mode != "global" or pool.admission_epoch != request.admission_epoch:
         raise ValueError("pool_allocation_scope_unavailable")
     now = (await session.execute(select(func.clock_timestamp()))).scalar_one()

@@ -12,6 +12,7 @@ from uuid import UUID
 import pytest
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
+from tests.ops.test_nebius_pool_dormant import dormant_consumer
 from tests.ops.test_nebius_pool_retirement import initialize, retire
 from tests.ops.test_nebius_pool_retirement import retirement_inputs as retirement_inputs
 from tests.ops.test_nebius_pool_retirement_live import Guards
@@ -37,6 +38,8 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
 
     migration, actuators, _, _, guest = guest_runtime_inputs
     request = replace(retirement_inputs, migration=migration, actuators=(*actuators.values(), guest))
+    dormant = dormant_consumer(request)
+    request = replace(request, dormant_consumers=(dormant,))
     container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
     try:
         _, core, batch = await asyncio.to_thread(_load_client, container)
@@ -66,16 +69,17 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
             for field in ("uid", "resourceVersion"):
                 document["metadata"].pop(field)
             namespace = document["metadata"]["namespace"]
+            pod_spec = (document["spec"]["template"]["spec"] if document["kind"] == "Deployment"
+                else document["spec"]["jobTemplate"]["spec"]["template"]["spec"])
+            service_account = (namespace, pod_spec["serviceAccountName"])
+            if service_account not in service_accounts:
+                await asyncio.to_thread(core.create_namespaced_service_account, namespace, {
+                    "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": service_account[1]}})
+                service_accounts.add(service_account)
             if document["kind"] == "Deployment":
-                pod_spec = document["spec"]["template"]["spec"]
                 # Original Nebius node selectors keep fake candidate images
                 # unschedulable; real ReplicaSets and pending Pods still exist.
                 assert pod_spec["nodeSelector"]
-                service_account = (namespace, pod_spec["serviceAccountName"])
-                if service_account not in service_accounts:
-                    await asyncio.to_thread(core.create_namespaced_service_account, namespace, {
-                        "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": service_account[1]}})
-                    service_accounts.add(service_account)
                 result = await asyncio.to_thread(apps.create_namespaced_deployment, namespace, document)
             else:
                 document["spec"]["suspend"] = True
@@ -88,7 +92,10 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 controller=by_identity[guard.namespace, "loom-control-plane"]) for guard in request.migration.guards))
         request = replace(request, migration=migration,
             actuators=tuple(by_identity[row["metadata"]["namespace"], row["metadata"]["name"]] for row in request.actuators),
-            collectors=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-capacity-collector"] for row in request.collectors))
+            collectors=tuple(by_identity[row["metadata"]["namespace"], "loom-execution-capacity-collector"] for row in request.collectors),
+            dormant_consumers=(replace(dormant,
+                actuator=by_identity[dormant.actuator["metadata"]["namespace"], dormant.actuator["metadata"]["name"]],
+                collector=by_identity[dormant.collector["metadata"]["namespace"], dormant.collector["metadata"]["name"]]),))
         roles = []
         for original in fencing_inputs.originals:
             document = copy.deepcopy(original)
@@ -151,7 +158,7 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                                 for pod in pods.items]}
                     pytest.fail("controller drain stalled: " + repr(diagnostics))
                 await asyncio.sleep(0.5)
-            assert methods.count("PATCH") == 10
+            assert methods.count("PATCH") == 12
             methods.clear()
             assert await asyncio.to_thread(retire, request, api, tmp_path) == result
             assert set(methods) == {"GET"}
@@ -201,6 +208,9 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
                 assert await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
                     state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor") == result
                 assert set(methods) == {"GET", "POST"}  # Nonpersisted authorization reviews only.
+                # Dormancy never excuses an extra grant on this exact identity.
+                extra_binding["subjects"] = [{"kind": "ServiceAccount", "namespace": source_namespace,
+                    "name": "nebius-retained-remote-actuator"}]
                 await asyncio.to_thread(rbac.create_namespaced_role_binding, extra_namespace, extra_binding)
                 with pytest.raises(ValueError):
                     await asyncio.to_thread(fence_pool_roles, request=fencing, api=roles_api,
@@ -211,14 +221,18 @@ async def test_actual_controller_retirement_preserves_templates_waits_for_pods_a
         # inspection of rendered rules. No probe Job is persisted.
         import httpx
 
-        for participant in migration.registration.spec.participants:
-            issued = await asyncio.to_thread(core.create_namespaced_service_account_token, "loom-execution-actuator",
+        token_subjects = [(participant, "loom-execution-actuator", 404)
+            for participant in migration.registration.spec.participants]
+        token_subjects.extend((migration.registration.spec.participants[0], name, 403)
+            for name in ("nebius-retained-remote-actuator", "nebius-retained-remote-collector"))
+        for participant, account, missing_status in token_subjects:
+            issued = await asyncio.to_thread(core.create_namespaced_service_account_token, account,
                 participant.execution_namespace.name, client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
             async with httpx.AsyncClient(base_url=configuration.host,
                     verify=ssl.create_default_context(cafile=configuration.ssl_ca_cert),
                     headers={"Authorization": "Bearer " + issued.status.token}, timeout=20, trust_env=False) as http:
                 for namespace in (participant.execution_namespace.name, participant.build_namespace.name):
-                    assert (await http.get("/apis/batch/v1/namespaces/" + namespace + "/jobs/missing")).status_code == 404
+                    assert (await http.get("/apis/batch/v1/namespaces/" + namespace + "/jobs/missing")).status_code == missing_status
                     for verb in ("create", "update", "patch", "delete", "deletecollection"):
                         response = await http.post("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", json={
                             "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview", "spec": {

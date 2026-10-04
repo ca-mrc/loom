@@ -113,15 +113,25 @@ attestation_owners = [
 
 [[test_sharding]]
 lane = "tests-root"
-shard_count = 2
+shard_count = 8
 strategy = "stable-hash"
-# 2026-09-02 collection snapshot: 15,260 tests split 7,630 / 7,630.
-# Keep salt changes measurement-backed because existing path assignments are stable.
+# PR2305 run37027112403: both two-shard jobs exhausted 40m at 35-36%.
+# Retain the salt and complete files; eight runners divide the expanded lane.
+# This is a capacity correction, not a measured claim about the new balance.
 salt = "tests-root-v2-8275"
 pins = [
   # Pair measured hotspots across shards; see #1680 and PR #1731 telemetry.
   { path = "tests/ops/test_ci_secret_isolation.py", shard_index = 0 },
   { path = "tests/ops/test_component_ownership_manifest.py", shard_index = 1 },
+  # Gateway retirement has a 1,200s deadline. Keep the two 600s restoration
+  # cases on separate runners, not one 40m job with no remaining headroom.
+  { path = "tests/ops/test_nebius_pool_role_restoration_live.py", shard_index = 4 },
+  { path = "tests/ops/test_nebius_pool_template_restoration_live.py", shard_index = 5 },
+  # Run37047482162: the old predecessor module, legacy restart and machine
+  # retirement exhausted root1's 40m limit at38%. Preserve all cases, but run
+  # live refresh and connected refresh separately on the shorter root8/root4.
+  { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 3 },
 ]
 
 [[test_sharding]]
@@ -276,6 +286,11 @@ source_paths = [
   "database/migrations/**",
   "src/loom/__init__.py",
   "src/loom/agent_runtime.py",
+  "src/loom/application_image_build.py",
+  "src/loom/application_session.py",
+  "src/loom/application_source.py",
+  "src/loom/application_source_archive.py",
+  "src/loom/application_source_upload.py",
   "src/loom/db/**",
   "src/loom/driver/__init__.py",
   "src/loom/driver/task_image.py",
@@ -300,8 +315,13 @@ source_paths = [
   "src/loom/models/trial.py",
   "src/loom/models/types.py",
   "src/loom/mutable_paths.py",
+  "src/loom/native_image_build.py",
+  "src/loom/nebius_application_contract.py",
+  "src/loom/nebius_environment_contract.py",
   "src/loom/nebius_kubernetes.py",
+  "src/loom/nebius_management_authority.py",
   "src/loom/nebius_pool_allocation.py",
+  "src/loom/nebius_pool_application_image.py",
   "src/loom/nebius_pool_contract.py",
   "src/loom/nebius_pool_execution_runtime.py",
   "src/loom/nebius_pool_lifecycle.py",
@@ -890,6 +910,7 @@ exclude_paths = [
   "tests/integration/test_guest_sandbox_runtime.py",
   "tests/integration/test_guest_emulated_auth.py",
   "tests/integration/test_subprocess_agent_e2e.py",
+  "tests/integration/test_worker_process_death.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
   "tests/integration/test_harbor_native_publish.py",
@@ -957,6 +978,7 @@ include_paths = [
   "tests/integration/test_guest_sandbox_runtime.py",
   "tests/integration/test_guest_emulated_auth.py",
   "tests/integration/test_subprocess_agent_e2e.py",
+  "tests/integration/test_worker_process_death.py",
   "tests/integration/test_task_bundle_source_storage.py",
   "tests/integration/test_task_bundle_source_publisher.py",
   "tests/integration/test_harbor_native_publish.py",

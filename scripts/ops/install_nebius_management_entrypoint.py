@@ -83,13 +83,14 @@ def _key(value: str) -> str:
     return "ssh-ed25519 " + base64.b64encode(raw).decode()
 
 
-def _entrypoint(source_hashes: dict[str, str], bundle_digest: str) -> bytes:
+def _entrypoint(source_hashes: dict[str, str], bundle_digest: str, *, pool: bool = False) -> bytes:
     # Both the management bootstrap and unchanged certificate supervisor are
     # reviewed local source. Never resolve either from caller-controlled imports.
+    commands = (*COMMANDS, 'loom-nebius-pool-rollback-v1') if pool else COMMANDS
     return f'''import hashlib, os, stat, sys
 from pathlib import Path
 try:
-    if os.environ.get("SSH_ORIGINAL_COMMAND") not in {COMMANDS!r}:
+    if os.environ.get("SSH_ORIGINAL_COMMAND") not in {commands!r}:
         raise ValueError()
     root = Path(__file__).resolve().parent
     for name, expected in {source_hashes!r}.items():
@@ -119,7 +120,7 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             names = archive.namelist()
-            if len(names) > 64 or len(set(names)) != len(names):
+            if len(names) > 128 or len(set(names)) != len(names):
                 raise InstallError("invalid tooling archive")
             for name, maximum in (("operation.json", 16384), *((name, 262144) for name in SOURCES)):
                 if archive.getinfo(name).file_size > maximum:
@@ -138,10 +139,11 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
                      "loom.nebius-management-retirement-operation.v1": "retirement",
                      "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
                      "loom.nebius-management-retirement-recovery-operation.v1": "retirement-recovery"}
-        if config["schema"] == "loom.nebius-management-refresh-operation.v1":
+        pool = config['schema'] == 'loom.nebius-pool-cutover-operation.v1'
+        if config["schema"] == "loom.nebius-management-refresh-operation.v1" or pool:
             operation_id = UUID(config["operation_id"])
             if (not operation_id.int or str(operation_id) != config["operation_id"]
-                    or root.name != str(operation_id) or root.parent.name != "refresh"
+                    or root.name != str(operation_id) or root.parent.name != ('pool-cutover' if pool else 'refresh')
                     or config["source_sha"] != config["candidate"]):
                 raise ValueError()
             root = root.parent.parent
@@ -193,7 +195,7 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
         for directory in (root, root / "authority", destination, destination / "scripts", destination / "scripts/ops"):
             _directory(directory, create=True)
             _sync(directory.parent)
-        files = {**source_files, "entrypoint.py": _entrypoint(source_hashes, expected_sha256),
+        files = {**source_files, "entrypoint.py": _entrypoint(source_hashes, expected_sha256, pool=pool),
                  "receipt.json": json.dumps(report, sort_keys=True).encode()}
         for name, value in files.items():
             path = destination / name

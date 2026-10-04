@@ -54,6 +54,67 @@ def platform_writer_authority(kube_system_uid):
         resources=tuple(resources))
 
 
+def test_cutover_projection_reuses_only_exact_inputs_and_detaches_outputs(cutover_inputs, monkeypatch):
+    from scripts.ops import nebius_pool_cutover as cutover
+
+    request, _ = cutover_inputs
+    render = cutover.wire_manager
+    calls = []
+
+    def counted(**kwargs):
+        calls.append(None)
+        return render(**kwargs)
+
+    monkeypatch.setattr(cutover, "wire_manager", counted)
+    first = cutover.cutover_documents(request)
+    original = copy.deepcopy(first)
+    key = _key(request.manager)
+    first["runtime"][key]["spec"]["replicas"] = 100
+    assert cutover.cutover_documents(request) == original
+    assert len(calls) == 1
+
+    request.manager["spec"]["template"]["metadata"].setdefault("annotations", {})["example.com/revision"] = "next"
+    changed = cutover.cutover_documents(request)
+    assert changed["runtime"][key]["spec"]["template"]["metadata"]["annotations"]["example.com/revision"] == "next"
+    assert len(calls) == 2
+    # Equality alone would alias True and 1, bypassing the original validator.
+    request.manager["spec"]["replicas"] = True
+    with pytest.raises(ValueError):
+        cutover.cutover_documents(request)
+
+
+def test_pure_projection_never_reuses_mutated_model_inputs(cutover_inputs):
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+
+    request, _ = cutover_inputs
+    cutover_documents(request)
+    changed = replace(request, collector_credential=request.collector_credential.model_copy(update={"uid": UUID(int=0)}))
+    with pytest.raises(ValueError):
+        cutover_documents(changed)
+
+
+def test_reused_cutover_projection_rechecks_current_image_admission_clock(cutover_inputs, monkeypatch):
+    from datetime import datetime, timedelta
+
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+
+    from loom import execution_image_admission as admission
+
+    request, _ = cutover_inputs
+    cutover_documents(request)
+    before_issuance = min(row.statement.issued_at for profile in request.profiles.values()
+        for row in profile.image_admission.admissions) - timedelta(hours=1)
+
+    class EarlierClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return before_issuance
+
+    monkeypatch.setattr(admission, "datetime", EarlierClock)
+    with pytest.raises(ValueError):
+        cutover_documents(request)
+
+
 @pytest.fixture
 def cutover_inputs(collector_inputs, retirement_inputs, fencing_inputs, runtime_inputs):
     from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
@@ -207,6 +268,33 @@ def test_recovery_qualifies_wired_templates_instead_of_replaying_original_retire
     assert (len(api.patches), len(api.retirement.patches), len(api.fencing.patches), len(api.resources.creates)) == before
     assert len([row for row in api.events if row.startswith("acl-stage:")]) == 3
     assert len([row for row in api.events if row.startswith("acl-observe:")]) >= 6
+
+
+def test_connected_cutover_preserves_closed_dormant_consumers_and_rejects_respawn(cutover_inputs, tmp_path):
+    from scripts.ops.nebius_pool_cutover import cutover_documents, retained_cutover_workloads
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    request, tokens = cutover_inputs
+    consumer = dormant_consumer(request.fencing.retirement)
+    request = replace(request, fencing=replace(request.fencing,
+        retirement=replace(request.fencing.retirement, dormant_consumers=(consumer,))))
+    api = CutoverAPI(request)
+    result = run(request, tokens, api, tmp_path)
+    assert result["status"] == "pool_runtime_staged_closed"
+    assert len(api.retirement.patches) == 11 and len(api.migration.guards) == 3
+    runtime = cutover_documents(request)["runtime"]
+    retained = retained_cutover_workloads(request, state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "cutover-anchor")
+    for original in (consumer.actuator, consumer.collector):
+        key = _key(original)
+        field = "template" if original["kind"] == "Deployment" else "jobTemplate"
+        assert key not in runtime and key in retained
+        assert api.documents[key]["spec"][field] == original["spec"][field]
+    before = (len(api.patches), len(api.retirement.patches), len(api.resources.creates))
+    assert run(request, tokens, api, tmp_path) == result
+    api.documents[_key(consumer.collector)]["spec"]["suspend"] = False
+    with pytest.raises(ValueError):
+        run(request, tokens, api, tmp_path)
+    assert (len(api.patches), len(api.retirement.patches), len(api.resources.creates)) == before
 
 
 @pytest.mark.parametrize('field,value', [('uid', UUID('aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa')),
@@ -574,7 +662,7 @@ def test_https_quiescence_requires_bound_database_pages_and_registered_origin_hi
         assert target in migration.guards and after is None
         participant = next(row for row in migration.registration.spec.participants
             if row.participant_id == target.participant_id)
-        return {'status': 'observed', 'schema_revision': '0171' if damage == 'schema' else '0173', 'rows': [{
+        return {'status': 'observed', 'schema_revision': '0171' if damage == 'schema' else '0174', 'rows': [{
             'key': 'batch:' + str(participant.participant_id), 'source_matches': True,
             'origin': None if damage == 'unknown_origin' else {
                 'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
@@ -736,7 +824,7 @@ def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified
     external = CutoverAPI(request)
     def empty_page(target, *, after):
         assert target in migration.guards and after is None
-        return {"status": "observed", "schema_revision": "0173", "rows": []}
+        return {"status": "observed", "schema_revision": "0174", "rows": []}
     def empty_history(target, origins):
         assert target in migration.guards and origins == ()
     external.qualify_pending_origins = history_read or empty_history
@@ -766,7 +854,7 @@ def test_preflight_qualifies_every_database_before_producer_downtime(cutover_inp
         if damage == "active_access":
             raise ValueError("pool cutover application access active")
         rows = [{"key": "batch:" + str(uuid4()), "source_matches": True, "origin": None}] if damage == "unknown_origin" else []
-        return {"status": "observed", "schema_revision": "0171" if damage == "schema" else "0173", "rows": rows}
+        return {"status": "observed", "schema_revision": "0171" if damage == "schema" else "0174", "rows": rows}
     def history(target, origins):
         assert target in migration.guards and origins == ()
         seen.append(("history", target.participant_id))
@@ -927,6 +1015,26 @@ def test_existing_foreign_cronjob_cannot_create_pool_jobs_through_native_control
     else:
         binding_preflight(request, tokens, cutover_binding_inventory, workloads=inventories)
     assert inventories == before  # Never adopt, suspend or delete unknown producers.
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_writer_inventory_requires_explicit_dormant_roster(cutover_inputs, cutover_binding_inventory, declared):
+    from tests.ops.test_nebius_pool_dormant import dormant_consumer
+
+    request, tokens = cutover_inputs
+    consumer = dormant_consumer(request.fencing.retirement)
+    workloads = writer_workload_inventory(request)
+    workloads["deployments"].append(copy.deepcopy(consumer.actuator))
+    workloads["cronjobs"].append(copy.deepcopy(consumer.collector))
+    before = copy.deepcopy(workloads)
+    if declared:
+        request = replace(request, fencing=replace(request.fencing,
+            retirement=replace(request.fencing.retirement, dormant_consumers=(consumer,))))
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=workloads)
+    else:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=workloads)
+    assert workloads == before
 
 
 @pytest.mark.parametrize("boundary", ["foreign_owner", "management_producer"])

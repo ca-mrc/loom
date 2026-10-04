@@ -193,6 +193,26 @@ All declared and required artifact paths are frozen into the runtime plan with
 the lossless model-call trajectory, attributed usage and structured verifier
 output. Multiple artifacts are supported within those path constraints.
 
+Process environment values remain limited to 4096 UTF-8 bytes. Small artifact
+lists retain `LOOM_TASK_ARTIFACTS_JSON`. A deployment profile advertising
+`supports_task_artifact_inputs=true` permits larger lists to use
+`LOOM_TASK_ARTIFACTS_FROM_INPUT=1` instead. The trusted controller reads the
+normalized immutable task input and deduplicates the declared and required
+paths; it never takes declarations from the agent's returned workspace. Output
+declarations and command identity still bind the complete list. The capability
+is omitted when false, preserving older frozen profiles and their controller
+images. A version-pinned agent release uses this capability only when its exact
+controller image matches the profile's qualified default controller. New
+candidate publication advertises it explicitly; queued batches are not silently
+upgraded.
+
+The environment-local scheduler isolates runtime-contract validation failures
+per queued trial. It records `service_execution_configuration_invalid`, clears
+stale scheduling progress, and proceeds to the next candidate without creating
+an attempt, capacity reservation, or spend. The public diagnostic identifies the
+configuration boundary without exposing validation input values. Temporary
+capacity and image-readiness waits retain their existing retry behavior.
+
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public
@@ -624,9 +644,14 @@ The existing complete-file digest and destination readback checks still gate
 canonical acknowledgement.
 Canonical file, trajectory and ATIF registrations retain the object version
 returned by each successful write, including streamed multipart completion and
-accounting corrections. Unversioned stores retain a null version. Publication
-does not infer the written version from a later lookup of the current key;
-malformed version evidence fails before canonical metadata is acknowledged.
+accounting corrections. New streamed multipart uploads carry a unique creation
+identity in object metadata. If completion omits the version, a HEAD readback
+may supply it only when that same creation identity matches. An unrelated
+current-key version is rejected even when its bytes match. Explicit completion
+versions need no fallback, and legacy/resumed uploads without the creation
+binding keep their existing receipt semantics. Unversioned stores retain a null
+version; malformed evidence fails before canonical metadata is acknowledged.
+This repairs future publication, not existing null-version registrations.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
@@ -716,6 +741,33 @@ Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
 operator projections also return at most 500 event and 500 history rows. These
 limits are contract errors, not invitations to discard older authority.
+Runtime results can legitimately contain up to 10,000 output entries. When a
+validated `result_reported` or `finalized` payload exceeds the database's JSONB
+text bound, its owning output Artifact retains the complete JSON text
+under `metadata.execution_event_payloads`. The lifecycle event stores a compact
+`loom.execution-event-payload-reference.v1` document binding the Artifact,
+generation/ordinal/kind key and full-payload digest. The event's own digest hashes
+that stored reference. The finalization failure reason remains available to
+bounded diagnosis readers. Other event kinds and command limits are unchanged.
+
+Commit replay and finalization resolve the full payload only after verifying
+the reference digest and exact lease, team, trial, upload-session, resource
+generation and runtime-contract ownership. Changed, missing or foreign payloads
+fail closed. JSON text preserves integer/float types across JSONB
+round trips. Small and historical inline events keep their existing behavior.
+Trial results, rewards, source `result.json` and normal API/download semantics
+retain the complete runtime result; no output inventory is truncated. Artifact
+metadata survives canonical materialization and source-spool cleanup, so replay
+does not depend on retained temporary objects. Existing lifecycle deletion order
+removes execution events before deleting their owning Artifact.
+Artifact listing responses omit this internal payload store rather than repeating
+the full lifecycle documents for every published file. Ordinary artifact metadata
+and the full Trial result remain available through their existing projections.
+The restricted actuator database role can read Artifact identity and payloads and
+update only the Artifact's `metadata` column for finalization. It cannot insert or
+delete Artifacts or rewrite their storage, ownership, provenance or lineage.
+Bootstrap installs these explicit grants; Gateway artifact permissions are unchanged.
+
 Prometheus service-execution metrics aggregate by command type or surface and
 never use trial, lease, Job, namespace, or team identifiers as labels. The
 materializer additionally reports pending count, bytes, oldest age, retries,

@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -130,6 +130,8 @@ class NodeResourceAllocationV1(_Strict):
 
 
 class ProcessPhaseV1(_Strict):
+    # Shared by plan validation and compiler transport selection.
+    MAX_ENV_VALUE_BYTES: ClassVar[int] = 4096
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
     working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
@@ -160,7 +162,7 @@ class ProcessPhaseV1(_Strict):
         for name, item in value.items():
             if _ENV_NAME.fullmatch(name) is None or _SECRET_ENV.search(name):
                 raise ValueError("process environment contains a forbidden name")
-            if "\x00" in item or len(item.encode("utf-8")) > 4096:
+            if "\x00" in item or len(item.encode("utf-8")) > cls.MAX_ENV_VALUE_BYTES:
                 raise ValueError("process environment value is invalid")
         return value
 

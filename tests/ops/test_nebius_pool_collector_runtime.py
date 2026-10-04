@@ -88,6 +88,28 @@ def test_single_collector_consumes_pool_mode_and_preserves_cloud_authority(colle
     assert "loom-execution-capacity-collector-control-plane" not in serialized
 
 
+@pytest.mark.parametrize("field", ["NEBIUS_NODE_GROUP_ID", "NEBIUS_PROJECT_ID", "QUOTA_VCPU_NAME", "NEBIUS_REGION"])
+def test_collector_cannot_borrow_missing_retained_authority_from_operator_environment(collector_inputs, monkeypatch, field):
+    from scripts.ops.nebius_pool_runtime import wire_collector
+
+    request, original, configmap = collector_inputs
+    key = "LOOM_EXECUTION_CAPACITY_COLLECTOR_" + field
+    monkeypatch.setenv(key, configmap["data"].pop(key))
+    with pytest.raises(ValueError, match="pool_collector_runtime_unqualified"):
+        wire_collector(request=request, original=original, config_map=configmap, management_origin="https://manage.example.com")
+
+
+def test_collector_projection_ignores_operator_settings_with_complete_retained_inputs(collector_inputs, monkeypatch):
+    from scripts.ops.nebius_pool_runtime import wire_collector
+
+    request, original, configmap = collector_inputs
+    expected = wire_collector(request=request, original=original, config_map=configmap, management_origin="https://manage.example.com")
+    for key in configmap["data"]:
+        monkeypatch.setenv(key, "foreign-operator-value")
+    assert wire_collector(request=request, original=original, config_map=configmap,
+        management_origin="https://manage.example.com") == expected
+
+
 @pytest.mark.parametrize("damage", ["namespace", "cloud_group", "quota_parent", "quota_unit", "plain_http",
     "credential_url", "config_reference", "old_token", "extra_container", "already_pool"])
 def test_collector_rejects_unqualified_source_or_legacy_binding(collector_inputs, damage):

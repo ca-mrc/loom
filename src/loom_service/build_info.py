@@ -33,6 +33,8 @@ def _read_stripped(env_var: str, default_path: str) -> str | None:
 def read_build_revision() -> str | None:
     """The full 40-character commit SHA this image was built from, or
     `None` when unavailable or malformed (never partially trusted)."""
+    if _read_stripped("LOOM_BUILD_KIND_PATH", "/opt/loom/build-kind") == "personal":
+        return None
     value = _read_stripped("LOOM_BUILD_SHA_PATH", "/opt/loom/build-sha")
     if value is None or not _SHA_RE.fullmatch(value):
         return None
@@ -44,3 +46,17 @@ def read_build_time() -> str | None:
     Not validated beyond non-empty — display-only, never used for
     ordering or trust decisions."""
     return _read_stripped("LOOM_BUILD_TIME_PATH", "/opt/loom/build-time")
+
+
+def read_build_source() -> dict[str, str | None]:
+    """Informational image-stamped source identity, never CI/rollout authority."""
+    kind = _read_stripped("LOOM_BUILD_KIND_PATH", "/opt/loom/build-kind")
+    if kind not in {"personal", "commit"}:
+        return {}  # Preserve the legacy unstamped response.
+    if kind == "commit":
+        return {"buildKind": kind}
+    digest = _read_stripped("LOOM_BUILD_SOURCE_DIGEST_PATH", "/opt/loom/source-digest")
+    base = _read_stripped("LOOM_BUILD_SOURCE_BASE_COMMIT_PATH", "/opt/loom/source-base-commit")
+    return {"buildKind": kind,
+        "sourceDigest": digest if digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None,
+        "sourceBaseCommit": base if base is not None and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", base) else None}

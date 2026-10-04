@@ -342,6 +342,7 @@ def test_profile_and_independent_signer_binding(tmp_path: Path) -> None:
 
     parsed = ServiceExecutionRuntimeProfileV1.model_validate(profile)
     assert parsed.candidate_sha == manifest["candidate_sha"]
+    assert parsed.supports_task_artifact_inputs is True
     assert parsed.controller_resources is not None
     assert parsed.controller_resources.cpu_millis == 1000
     assert parsed.controller_resources.memory_mib == 2048

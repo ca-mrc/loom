@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,8 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -1504,6 +1506,125 @@ async def recover_execution_node_attribution(
     return result
 
 
+_EVENT_PAYLOAD_REFERENCE = "loom.execution-event-payload-reference.v1"
+_EVENT_PAYLOAD_METADATA = "execution_event_payloads"
+
+
+async def _execution_event_artifact(
+    session: AsyncSession, *, lease: ServiceExecutionLease, for_update: bool = False,
+) -> Artifact:
+    """Resolve the immutable output owner, including after source-spool cleanup."""
+    statement = select(Artifact).where(
+        Artifact.control_producer_kind == "service_execution",
+        Artifact.control_producer_id == lease.id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    artifact = await session.scalar(statement.execution_options(populate_existing=True))
+    if (
+        artifact is None
+        or lease.output_commit_state != "committed"
+        or lease.output_upload_session_id is None
+        or lease.output_generation != lease.resource_generation
+        or artifact.team_id != lease.team_id
+        or artifact.trial_id != lease.trial_id
+        or artifact.artifact_upload_session_id != lease.output_upload_session_id
+        or artifact.provenance.get("lease_id") != str(lease.id)
+        or artifact.provenance.get("generation") != lease.resource_generation
+        or artifact.provenance.get("runtime_contract_sha256") != lease.runtime_contract_sha256
+    ):
+        raise ServiceExecutionConflict("execution event payload artifact identity drift")
+    return artifact
+
+
+def _event_payload_reference(
+    *, artifact: Artifact, generation: int, ordinal: int, event_kind: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    reference: dict[str, Any] = {
+        "schema_version": _EVENT_PAYLOAD_REFERENCE,
+        "artifact_id": str(artifact.id),
+        "payload_key": f"{generation}:{ordinal}:{event_kind}",
+        "payload_sha256": canonical_digest(payload),
+    }
+    # Keep the bounded failure reason visible to lifecycle diagnosis readers.
+    if event_kind == "finalized" and isinstance(payload.get("failure_reason"), str):
+        reference["failure_reason"] = payload["failure_reason"][:120]
+    return reference
+
+
+async def _stored_execution_event_payload(
+    session: AsyncSession, *, lease: ServiceExecutionLease, generation: int,
+    ordinal: int, event_kind: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    if event_kind not in {"result_reported", "finalized"}:
+        return payload
+    # Use the database's representation: JSONB expands exponent-form numbers,
+    # so even a small Python JSON document can exceed the actual constraint.
+    size = await session.scalar(select(func.octet_length(cast(literal(payload, JSONB), Text))))
+    if size is not None and size <= 65_536:
+        return payload
+    artifact = await _execution_event_artifact(session, lease=lease, for_update=True)
+    reference = _event_payload_reference(
+        artifact=artifact, generation=generation, ordinal=ordinal,
+        event_kind=event_kind, payload=payload,
+    )
+    metadata = artifact.artifact_metadata or {}
+    payloads = metadata.get(_EVENT_PAYLOAD_METADATA, {})
+    if not isinstance(payloads, dict):
+        raise ServiceExecutionConflict("execution event payload metadata is invalid")
+    key = reference["payload_key"]
+    # Preserve numeric types as JSON text. Both JSONB and JCS can turn valid
+    # floats into integer tokens outside the canonicalizer's safe integer range.
+    # The reference still binds the full payload's canonical digest.
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if key in payloads and payloads[key] != serialized:
+        raise ServiceExecutionConflict("execution event payload identity drift")
+    artifact.artifact_metadata = {
+        **metadata, _EVENT_PAYLOAD_METADATA: {**payloads, key: serialized},
+    }
+    return reference
+
+
+async def _resolve_execution_event_payload(
+    session: AsyncSession, event: ServiceExecutionEvent,
+) -> dict[str, Any]:
+    """Verify both the stored event and its full, lease-owned payload on replay."""
+    reference = event.payload_json
+    if reference.get("schema_version") != _EVENT_PAYLOAD_REFERENCE:
+        return reference
+    if canonical_digest(reference) != event.payload_sha256:
+        raise ServiceExecutionConflict("execution event payload digest drift")
+    lease = await session.get(ServiceExecutionLease, event.lease_id)
+    if lease is None or event.event_kind not in {"result_reported", "finalized"}:
+        raise ServiceExecutionConflict("execution event payload reference is invalid")
+    artifact = await _execution_event_artifact(session, lease=lease)
+    payloads = (artifact.artifact_metadata or {}).get(_EVENT_PAYLOAD_METADATA, {})
+    key = f"{event.generation}:{event.ordinal}:{event.event_kind}"
+    serialized = payloads.get(key) if isinstance(payloads, dict) else None
+    try:
+        payload = json.loads(serialized) if isinstance(serialized, str) else None
+        expected = _event_payload_reference(
+            artifact=artifact, generation=event.generation, ordinal=event.ordinal,
+            event_kind=event.event_kind, payload=payload,
+        ) if isinstance(payload, dict) else None
+    except ValueError as exc:
+        raise ServiceExecutionConflict("execution event payload is invalid") from exc
+    if not isinstance(payload, dict) or reference != expected:
+        raise ServiceExecutionConflict("execution event payload reference identity drift")
+    return payload
+
+
+async def _execution_event_full_digest(
+    session: AsyncSession, event: ServiceExecutionEvent,
+) -> str:
+    if event.payload_json.get("schema_version") != _EVENT_PAYLOAD_REFERENCE:
+        # Preserve legacy inline replay semantics, including JSONB numeric
+        # normalization: this digest was computed before the database round trip.
+        return event.payload_sha256
+    return canonical_digest(await _resolve_execution_event_payload(session, event))
+
+
 async def record_execution_event(
     session: AsyncSession,
     *,
@@ -1547,7 +1668,7 @@ async def record_execution_event(
             or existing.generation != generation
             or existing.ordinal != ordinal
             or existing.event_kind != event_kind
-            or existing.payload_sha256 != payload_digest
+            or await _execution_event_full_digest(session, existing) != payload_digest
         ):
             raise ServiceExecutionConflict("execution event replay changed")
         SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL.labels(command_type="event").inc()
@@ -1672,6 +1793,10 @@ async def record_execution_event(
             raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
         committed_cleanup_payload = await _committed_result_finalization_payload(session, lease=lease)
         finalized_projection = (trial, committed_cleanup_payload["trial_state"])
+    stored_payload = await _stored_execution_event_payload(
+        session, lease=lease, generation=generation, ordinal=ordinal,
+        event_kind=event_kind, payload=payload,
+    )
     event = ServiceExecutionEvent(
         id=uuid4(),
         lease_id=lease_id,
@@ -1679,8 +1804,8 @@ async def record_execution_event(
         ordinal=ordinal,
         event_kind=event_kind,
         idempotency_key=key,
-        payload_json=payload,
-        payload_sha256=payload_digest,
+        payload_json=stored_payload,
+        payload_sha256=canonical_digest(stored_payload),
         observed_at=observed_at,
     )
     session.add(event)
@@ -2117,7 +2242,7 @@ async def record_committed_runtime_result(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        if existing.payload_sha256 != canonical_digest(result_payload):
+        if await _execution_event_full_digest(session, existing) != canonical_digest(result_payload):
             raise ServiceExecutionConflict("committed runtime result identity drift")
         return existing
     if lease.desired_state == "create":
@@ -2171,7 +2296,9 @@ async def _committed_result_finalization_payload(
     ).scalar_one_or_none()
     if result_event is None:
         raise ServiceExecutionConflict("finalizing execution has no committed runtime result")
-    runtime_result = ExecutionRuntimeResultV1.model_validate(result_event.payload_json)
+    runtime_result = ExecutionRuntimeResultV1.model_validate(
+        await _resolve_execution_event_payload(session, result_event),
+    )
     if lease.execution_role == "verifier":
         return await _verifier_finalization_payload(session, lease=lease, runtime_result=runtime_result)
     result: dict[str, Any] = {

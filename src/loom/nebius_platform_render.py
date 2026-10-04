@@ -1405,7 +1405,8 @@ def _build_platform(
         raise NebiusPlatformError("emulated authentication readiness requires its distinct guest target")
     if auth_id is not None and profile.get("guest_runtime") != "qemu-tcg-v1":
         raise NebiusPlatformError("emulated authentication requires the explicit guest runtime")
-    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity", "supports_emulated_pkcs11"):
+    for capability in ("supports_task_web_egress", "service_lifecycle_ready", "supports_task_identity",
+                       "supports_emulated_pkcs11", "supports_task_artifact_inputs"):
         if type(profile.get(capability, False)) is not bool:
             raise NebiusPlatformError(f"runtime profile {capability} must be a boolean")
     if profile.get("supports_task_web_egress", False) != ("task_egress" in config):

@@ -176,7 +176,8 @@ class PoolGatewayJournal:
         participant = (await session.scalars(select(NebiusPoolParticipant).where(
             NebiusPoolParticipant.participant_id == request.participant_id).with_for_update(read=True))).one()
         binding = PoolParticipantV1.model_validate(participant.binding_json)
-        namespace = binding.build_namespace if request.workload_kind == "task_image_build" else binding.execution_namespace
+        namespace = (binding.build_namespace if request.workload_kind in {"task_image_build", "application_image_build"}
+                     else binding.execution_namespace)
         if (request.phase != "create_intent" or pool.mode != "global" or request.deadline_at <= now
                 or request.admission_epoch != pool.admission_epoch or participant.phase != "active"
                 or participant.admission_epoch != pool.admission_epoch or binding.admission_epoch != pool.admission_epoch

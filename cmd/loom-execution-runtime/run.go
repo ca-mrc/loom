@@ -28,15 +28,16 @@ type streamEvidence struct {
 }
 
 type phaseEvidence struct {
-	Role       string         `json:"role"`
-	Ordinal    int            `json:"ordinal"`
-	StartedAt  time.Time      `json:"started_at"`
-	FinishedAt time.Time      `json:"finished_at"`
-	ExitCode   int            `json:"exit_code"`
-	Signal     string         `json:"signal,omitempty"`
-	TimedOut   bool           `json:"timed_out"`
-	Stdout     streamEvidence `json:"stdout"`
-	Stderr     streamEvidence `json:"stderr"`
+	verifierReportPrepared bool
+	Role                   string         `json:"role"`
+	Ordinal                int            `json:"ordinal"`
+	StartedAt              time.Time      `json:"started_at"`
+	FinishedAt             time.Time      `json:"finished_at"`
+	ExitCode               int            `json:"exit_code"`
+	Signal                 string         `json:"signal,omitempty"`
+	TimedOut               bool           `json:"timed_out"`
+	Stdout                 streamEvidence `json:"stdout"`
+	Stderr                 streamEvidence `json:"stderr"`
 }
 
 type outputEvidence struct {
@@ -50,25 +51,26 @@ type outputEvidence struct {
 }
 
 type resultManifest struct {
-	SchemaVersion         string             `json:"schema_version"`
-	RuntimeContractSHA256 string             `json:"runtime_contract_sha256"`
-	CandidateSHA          string             `json:"candidate_sha"`
-	TaskRevisionSHA256    string             `json:"task_revision_sha256"`
-	CommandIdentitySHA256 string             `json:"command_identity_sha256"`
-	ExecutionRole         string             `json:"execution_role"`
-	ContainerRoles        []string           `json:"container_roles"`
-	TaskImageRef          string             `json:"task_image_ref"`
-	RuntimeImageRef       string             `json:"runtime_image_ref"`
-	RuntimeBinarySHA256   string             `json:"runtime_binary_sha256"`
-	ExecutionClassID      string             `json:"execution_class_id"`
-	Status                string             `json:"status"`
-	FailureReason         string             `json:"failure_reason,omitempty"`
-	StartedAt             time.Time          `json:"started_at"`
-	FinishedAt            time.Time          `json:"finished_at"`
-	Phases                []phaseEvidence    `json:"phases"`
-	Outputs               []outputEvidence   `json:"outputs"`
-	VerifierRewards       map[string]float64 `json:"verifier_rewards,omitempty"`
-	PartialEvidence       bool               `json:"partial_evidence"`
+	verifierReportPrepared bool
+	SchemaVersion          string             `json:"schema_version"`
+	RuntimeContractSHA256  string             `json:"runtime_contract_sha256"`
+	CandidateSHA           string             `json:"candidate_sha"`
+	TaskRevisionSHA256     string             `json:"task_revision_sha256"`
+	CommandIdentitySHA256  string             `json:"command_identity_sha256"`
+	ExecutionRole          string             `json:"execution_role"`
+	ContainerRoles         []string           `json:"container_roles"`
+	TaskImageRef           string             `json:"task_image_ref"`
+	RuntimeImageRef        string             `json:"runtime_image_ref"`
+	RuntimeBinarySHA256    string             `json:"runtime_binary_sha256"`
+	ExecutionClassID       string             `json:"execution_class_id"`
+	Status                 string             `json:"status"`
+	FailureReason          string             `json:"failure_reason,omitempty"`
+	StartedAt              time.Time          `json:"started_at"`
+	FinishedAt             time.Time          `json:"finished_at"`
+	Phases                 []phaseEvidence    `json:"phases"`
+	Outputs                []outputEvidence   `json:"outputs"`
+	VerifierRewards        map[string]float64 `json:"verifier_rewards,omitempty"`
+	PartialEvidence        bool               `json:"partial_evidence"`
 }
 
 type terminationSummary struct {
@@ -186,6 +188,9 @@ func runPlan(
 			trustedEnvironment, phaseBoundary...,
 		)
 		result.Phases = append(result.Phases, evidence)
+		if evidence.verifierReportPrepared {
+			result.verifierReportPrepared = true
+		}
 		if errors.Is(context.Cause(ctx), errSandboxLost) {
 			err = context.Cause(ctx)
 		}
@@ -300,7 +305,16 @@ func runPhase(
 	command.Stdout, command.Stderr = stdout, stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	started := time.Now().UTC()
-	err = command.Start()
+	// Direct script phases declare their report here. Workspace controllers
+	// prepare reports in the private sandbox instead, through its trusted RPC.
+	reportPrepared := false
+	if declaresVerifierReport(item) {
+		err = prepareVerifierReport(workspace, item.Environment["LOOM_VERIFIER_OUTPUT"])
+		reportPrepared = err == nil
+	}
+	if err == nil {
+		err = command.Start()
+	}
 	if err == nil {
 		waited := make(chan error, 1)
 		go func() { waited <- command.Wait() }()
@@ -323,7 +337,8 @@ func runPhase(
 	}
 	finished := time.Now().UTC()
 	evidence := phaseEvidence{
-		Role: item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
+		verifierReportPrepared: reportPrepared,
+		Role:                   item.Role, Ordinal: ordinal, StartedAt: started, FinishedAt: finished,
 		ExitCode: 0, TimedOut: errors.Is(phaseCtx.Err(), context.DeadlineExceeded) || !finished.Before(deadline),
 		Stdout: stdout.evidence(filepath.Base(stdoutPath)), Stderr: stderr.evidence(filepath.Base(stderrPath)),
 	}
@@ -341,6 +356,11 @@ func runPhase(
 		}
 	}
 	return evidence, err
+}
+
+func declaresVerifierReport(item phase) bool {
+	_, declared := item.Environment["LOOM_VERIFIER_OUTPUT"]
+	return item.Role == "verifier" && declared
 }
 
 var cleanupDiagnosticSuffix = regexp.MustCompile(

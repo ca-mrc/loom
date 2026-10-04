@@ -206,11 +206,13 @@ async def test_output_commit_during_native_failure_grace_keeps_authority(
                 await test_observed_pod_broker_commits_semantic_runtime_output(
                     postgres_url,
                     NormalizedJobState.FAILED,
+                    extra_artifacts=0,
                 )
         else:
             await test_observed_pod_broker_commits_semantic_runtime_output(
                 postgres_url,
                 NormalizedJobState.FAILED,
+                extra_artifacts=0,
             )
     finally:
         await engine.dispose()

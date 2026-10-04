@@ -10,19 +10,69 @@ import time
 from dataclasses import replace
 from uuid import uuid4
 
+import httpx
 import pytest
 import yaml
 
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.ops.test_nebius_application_setup import application_material as application_material
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
+from tests.unit.test_nebius_management_render import (
+    builder_management_inputs as builder_management_inputs,
+)
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
+from tests.unit.test_nebius_management_render import (
+    source_management_inputs as source_management_inputs,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(os.environ.get('LOOM_RUN_DISPOSABLE_K3S') != '1',
                                 reason='requires explicitly disposable Kubernetes')
+
+
+@pytest.mark.timeout(180)
+def test_build_observer_can_read_only_its_build_namespace(builder_management_inputs):
+    from kubernetes import client
+
+    from tests.unit.test_nebius_management_render import documents, render
+
+    docs = documents(render(builder_management_inputs))
+    role, = [row for row in docs if row['kind'] == 'Role']
+    binding, = [row for row in docs if row['kind'] == 'RoleBinding']
+    build_namespace = role['metadata']['namespace']
+    subject, = binding['subjects']
+    container = _start_k3s()
+    try:
+        _, core, _ = _load_client(container)
+        for namespace in (build_namespace, subject['namespace'], 'unrelated-builds'):
+            core.create_namespace({'metadata': {'name': namespace}})
+        core.create_namespaced_service_account(subject['namespace'], {'metadata': {'name': subject['name']}})
+        rbac = client.RbacAuthorizationV1Api(core.api_client)
+        rbac.create_namespaced_role(build_namespace, role)
+        rbac.create_namespaced_role_binding(build_namespace, binding)
+        issued = core.create_namespaced_service_account_token(subject['name'], subject['namespace'],
+            client.AuthenticationV1TokenRequest(spec=client.V1TokenRequestSpec(audiences=[])))
+        # A trust-only client authenticates as the actual provisioner, never admin.
+        config = core.api_client.configuration
+        with httpx.Client(base_url=config.host, verify=ssl.create_default_context(cafile=config.ssl_ca_cert),
+                trust_env=False, headers={'Authorization': 'Bearer ' + issued.status.token}, timeout=10) as http:
+            deadline = time.monotonic() + 20
+            while http.get('/api/v1/namespaces/' + build_namespace + '/pods').status_code != 200:
+                assert time.monotonic() < deadline, 'build observer read permission did not become effective'
+                time.sleep(0.1)
+            job = '/apis/batch/v1/namespaces/' + build_namespace + '/jobs/missing'
+            assert http.get(job).status_code == 404  # Authorized, absent; not a forbidden read.
+            assert http.get('/api/v1/namespaces/' + build_namespace + '/pods/missing/log').status_code == 404
+            for method, path in [('POST', job.rsplit('/', 1)[0]), ('PATCH', job), ('DELETE', job),
+                    ('GET', '/api/v1/namespaces/' + build_namespace + '/secrets'),
+                    ('GET', '/api/v1/namespaces/unrelated-builds/pods'),
+                    ('POST', '/api/v1/namespaces/' + build_namespace + '/pods/missing/exec')]:
+                assert http.request(method, path, json={}).status_code == 403, (method, path)
+    finally:
+        container.stop()
 
 
 @pytest.mark.timeout(180)

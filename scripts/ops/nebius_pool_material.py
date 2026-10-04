@@ -49,7 +49,7 @@ def machine_documents(request: PoolMigrationRequest, tokens: dict[UUID, str]) ->
             if machine.role == "observer":
                 development, = (row for row in spec.participants if row.environment_class == "development")
                 destinations = [development.execution_namespace.name]
-            elif machine.participant_id is not None:
+            elif machine.participant_id is not None and machine.workload_scope == "environment":
                 destinations = [platforms[machine.participant_id], participants[machine.participant_id].execution_namespace.name]
             for namespace in destinations:
                 document = {"apiVersion": "v1", "kind": "Secret", "immutable": True, "type": "Opaque",

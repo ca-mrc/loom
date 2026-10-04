@@ -37,10 +37,29 @@ export interface LoadedBuildInfo {
   sourceRef: string | null;
   /** Informational only — never used for ordering or trust decisions. */
   buildTime: string | null;
+  kind: "personal" | "commit" | null;
+  sourceDigest: string | null;
+  baseCommit: string | null;
 }
 
+export function readSourceInfo(kind: unknown, digest: unknown, base: unknown): Pick<LoadedBuildInfo, "kind" | "sourceDigest" | "baseCommit"> {
+  const personal = kind === "personal";
+  return {
+    kind: personal ? "personal" : kind === "commit" ? "commit" : null,
+    sourceDigest: personal && typeof digest === "string" && /^sha256:[0-9a-f]{64}$/.test(digest) ? digest : null,
+    baseCommit: personal && typeof base === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(base) ? base : null,
+  };
+}
+
+const SOURCE_INFO = readSourceInfo(
+  typeof __LOOM_BUILD_KIND__ === "string" ? __LOOM_BUILD_KIND__ : "",
+  typeof __LOOM_SOURCE_DIGEST__ === "string" ? __LOOM_SOURCE_DIGEST__ : "",
+  typeof __LOOM_SOURCE_BASE_COMMIT__ === "string" ? __LOOM_SOURCE_BASE_COMMIT__ : "",
+);
+
 export const LOADED_BUILD_INFO: LoadedBuildInfo = {
-  revision: readDefine(
+  ...SOURCE_INFO,
+  revision: SOURCE_INFO.kind === "personal" ? null : readDefine(
     typeof __LOOM_BUILD_REVISION__ === "string" ? __LOOM_BUILD_REVISION__ : "",
   ),
   sourceRef: readDefine(

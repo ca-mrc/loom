@@ -9,6 +9,7 @@ import copy
 import json
 import re
 import ssl
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -117,13 +118,23 @@ class HTTPSManagementRefreshResourcesAPI(HTTPSApplicationSetupAPI):
     """Reuse exact-document HTTPS create and both namespace UID checks."""
 
     def __init__(self, *, request: ManagementRefreshResourcesRequest, phase: str, api_server: str,
-                 ssl_context: ssl.SSLContext, token: str | None = None):
+                 ssl_context: ssl.SSLContext, token: str | None = None,
+                 before_write: Callable[[], None] | None = None):
         documents = refresh_documents(request, phase)
         render = request.switch.render
         setup = ApplicationSetupRequest(render.after, render.candidate, render.profile, request.binding,
             request.shared_namespace_uid, render.repo_root)
         super().__init__(request=setup, phase='config', api_server=api_server, ssl_context=ssl_context, token=token)
         self.documents = documents
+        self.before_write = before_write
+
+    def create_resource(self, document: dict[str, Any]) -> None:
+        # The stage has persisted its create intent by this point. Dry-run and
+        # identity reads happen earlier and must not require a child journal.
+        self._approved(document, writing=True)
+        if self.before_write is not None:
+            self.before_write()
+        super().create_resource(document)
 
 
 def stage_refresh_resources(*, request: ManagementRefreshResourcesRequest, phase: str,

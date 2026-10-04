@@ -302,6 +302,24 @@ Workers can never both think they own a trial.
 `False` return (the Worker logs + abandons the trial). The trial
 stays in whatever state the new owner has put it in.
 
+For local workers whose heartbeat expires, the crash detector clears the dead
+owner and applies the existing 30-second retry backoff. It preserves an
+actionable `worker_lost_claim` diagnostic for claimed/running trials and
+historical rows that are queued despite having `started_at`. The diagnostic
+identifies the expired worker, previous state and start time; the existing
+pre-start and capacity-pressure messages retain their meanings. If the team
+attempt ceiling is exhausted, the normal sweeper fails the trial while keeping
+that diagnostic visible in user detail/list responses. A current native
+execution-attempt lease excludes the trial from local-worker recovery, even
+if a stale worker pointer remains.
+
+Local startup orphan cleanup removes terminal/unknown trial containers only
+within the worker's sandbox identity. Fresh nonterminal containers and other
+sandbox identities are preserved; the existing age fallback bounds abandoned
+nonterminal resources. These are local-worker contracts, separate from native
+execution-controller cleanup. An injected SIGKILL verifies recovery but does
+not establish an OOM diagnosis.
+
 Worker-side cancellation preserves its source in the trial lifecycle. A
 Control Plane or operator cancellation remains a `cancelled` trial. A worker
 watchdog hard-deadline cancellation, or the Control Plane stale-running reclaim

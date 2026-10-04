@@ -20,6 +20,7 @@ from loom.db.nebius_pool_schema import (
     NebiusPoolParticipant,
     NebiusPoolRequest,
 )
+from loom.nebius_pool_application_image import PoolApplicationImagePrepareV1
 from loom.nebius_pool_contract import (
     PoolActivationV1,
     PoolParticipantV1,
@@ -67,7 +68,8 @@ async def _locked_request(session: AsyncSession, principal: PoolPrincipal, actio
                 NebiusPoolBinding.pool_id == action.pool_id,
             ).with_for_update().execution_options(populate_existing=True))).one_or_none()
             await authorize_pool_machine(session, principal, role="participant", pool_id=action.pool_id,
-                                         participant_id=action.request_key.participant_id)
+                                         participant_id=action.request_key.participant_id,
+                                         workload_kind=action.request_key.workload_kind)
             key = action.request_key
             row = (await session.scalars(select(NebiusPoolRequest).where(
                 NebiusPoolRequest.participant_id == key.participant_id,
@@ -150,7 +152,8 @@ async def activate_pool_request(session: AsyncSession, principal: PoolPrincipal,
             raise PoolControlError
         request = _WORKLOAD.validate_python(row.request_json)
         priority = await qualify_pool_origin(session, principal, request.origin,
-            target_id=request.target_id, workload_kind=request.key.workload_kind)
+            target_id=request.target_id, workload_kind=request.key.workload_kind,
+            application_build=request if isinstance(request, PoolApplicationImagePrepareV1) else None)
         registered = await session.get(NebiusPoolParticipant, row.participant_id)
         if registered is None or priority != row.priority:
             raise PoolControlError

@@ -1,6 +1,7 @@
 """Capture authored Git worktree bytes, never Git HEAD or owner credentials."""
 from __future__ import annotations
 
+import hashlib
 import os
 import selectors
 import stat
@@ -9,8 +10,9 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 
 from loom.application_source import (
     MAX_SOURCE_BYTES,
@@ -21,6 +23,7 @@ from loom.application_source import (
     source_parent,
     source_path,
 )
+from loom.application_source_archive import write_application_source_archive
 
 _EXCLUDED_DIRECTORIES = frozenset({
     ".git", ".loom", ".codex", ".claude", ".worktrees", "worktrees", ".venv",
@@ -35,6 +38,31 @@ class CapturedApplicationSource:
     root: Path
     manifest: ApplicationSourceManifestV1
     base_commit: str | None
+
+
+@dataclass(frozen=True)
+class PackagedApplicationSource:
+    manifest: ApplicationSourceManifestV1
+    base_commit: str | None
+    archive: BinaryIO = field(repr=False)
+    archive_sha256: str
+    archive_size_bytes: int
+
+
+@contextmanager
+def package_application_source(root: Path) -> Iterator[PackagedApplicationSource]:
+    """Yield a private upload stream; neither digest asserts CI approval."""
+    with tempfile.TemporaryFile(mode="w+b") as archive:
+        with capture_application_source(root) as source:
+            write_application_source_archive(source.root, source.manifest, archive)
+        length = archive.tell()
+        archive.seek(0)
+        checksum = hashlib.sha256()
+        while chunk := archive.read(1024 * 1024):
+            checksum.update(chunk)
+        archive.seek(0)
+        yield PackagedApplicationSource(source.manifest, source.base_commit, archive,
+                                        "sha256:" + checksum.hexdigest(), length)
 
 
 @dataclass(frozen=True)

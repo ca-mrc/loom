@@ -407,6 +407,7 @@ async def publish_if_current(
                 config=row.config,
                 source=row.source,
                 source_provenance=row.source_provenance,
+                tags=row.tags,
                 task_set_id=task_set_id,
                 benchmark_id=None,
             )

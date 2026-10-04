@@ -41,7 +41,8 @@ def test_source_rejects_noncanonical_or_unbounded_paths(path):
 
 
 @pytest.mark.parametrize("files", [[], [entry("z"), entry("a")], [entry("a"), entry("a")],
-                                    [entry("a"), entry("a/b")]])
+                                    [entry("a"), entry("a/b")],
+                                    [entry("a"), entry("a-"), entry("a/b")]])
 def test_source_inventory_is_sorted_unique_and_has_no_file_directory_collision(files):
     with pytest.raises(ValueError):
         manifest(*files)
@@ -61,6 +62,29 @@ def test_source_total_bytes_and_entry_count_are_bounded():
         manifest(entry("a") | {"size_bytes": 300 * 1024**2}, entry("b") | {"size_bytes": 300 * 1024**2})
     with pytest.raises(ValueError):
         manifest(*(entry(f"file-{index:05}", b"") for index in range(25_001)))
+
+
+def test_deep_source_manifest_validation_does_not_expand_every_ancestor():
+    import tracemalloc
+
+    from loom.application_source import parse_application_source_manifest
+
+    files = [entry(f"r{index:05}/" + "aa/" * 60 + "a/" * 2 + "f", b"")
+             for index in range(1000)]
+    body = rfc8785.dumps({"schema_version": "loom.application-source.v1", "files": files})
+    digest = "sha256:" + hashlib.sha256(body).hexdigest()
+    tracemalloc.start()
+    try:
+        source = parse_application_source_manifest(body, expected_digest=digest)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(source.files) == 1000
+    assert source.files[-1].path == files[-1]["path"]
+    # This is a ~335KiB, zero-content upload. Expanding all 63,000 ancestors
+    # takes tens of MiB before extraction and multiplies across active owners.
+    # Keep generous headroom for the parser/model/canonicalization allocations.
+    assert peak < 8 * 1024**2
 
 
 def test_relative_file_and_directory_links_bind_target_bytes_without_dereference():

@@ -1,7 +1,7 @@
 """Number deferred verifier retries so a failed verifier can be re-reserved (#2312).
 
-Revision ID: 0173
-Revises: 0172
+Revision ID: 0174
+Revises: 0173
 
 Each retry is a new lease and cost reservation; released rows stay immutable
 history. Admission reservations keep their protected reserve function: only a
@@ -10,8 +10,8 @@ is ever active.
 """
 from alembic import op
 
-revision = "0173"
-down_revision = "0172"
+revision = "0174"
+down_revision = "0173"
 branch_labels = None
 depends_on = None
 
@@ -69,7 +69,7 @@ def downgrade() -> None:
     )
     op.execute("""DO $block$ BEGIN
         IF EXISTS (SELECT 1 FROM execution_leases WHERE verifier_retry > 0) THEN
-          RAISE EXCEPTION 'cannot downgrade 0173 with retained verifier retries';
+          RAISE EXCEPTION 'cannot downgrade 0174 with retained verifier retries';
         END IF;
         END $block$""")
     op.execute(f"""

@@ -116,10 +116,15 @@ def _owned_pods(observation: dict[str, Any], uid: str | None) -> list[dict[str, 
 
 
 class NativeBuildKubernetesApi:
-    def __init__(self, *, connection: NebiusKubernetesConnection | None = None) -> None:
+    def __init__(self, *, connection: NebiusKubernetesConnection | None = None, api_client: Any | None = None) -> None:
+        """Own one SDK client, optionally transferred by an explicit credential owner."""
         from kubernetes import client, config
         self._credentials = None
-        if connection is None:
+        if connection is not None and api_client is not None:
+            raise ValueError("ambiguous_native_build_client")
+        if api_client is not None:
+            self._api = api_client
+        elif connection is None:
             config.load_incluster_config()
             self._api = client.ApiClient()
         else:

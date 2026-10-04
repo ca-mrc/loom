@@ -90,6 +90,23 @@ def _ctx(team_id: UUID, *, admin: bool = False) -> AuthContext:
     )
 
 
+def test_native_artifact_listing_omits_internal_execution_payloads() -> None:
+    team_id = uuid4()
+    artifact = _artifact(
+        artifact_id=uuid4(), team_id=team_id, trial_id=uuid4(), batch_id=uuid4(),
+        key="trials/example/artifacts/answer.txt",
+    )
+    artifact.control_producer_kind = "service_execution"
+    internal = {"1:2:result_reported": "x" * 100_000}
+    artifact.artifact_metadata = {
+        "materialization_state": "committed", "execution_event_payloads": internal,
+    }
+    entry = _serialize_typed_artifact(None, artifact, _team(team_id), ctx=_ctx(team_id))
+    assert entry is not None
+    assert entry["metadata"] == {"materialization_state": "committed"}
+    assert artifact.artifact_metadata["execution_event_payloads"] == internal
+
+
 def _team(team_id: UUID) -> Team:
     return Team(id=team_id, name="Alpha Research")
 

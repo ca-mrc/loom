@@ -137,6 +137,16 @@ def _profile() -> ServiceExecutionRuntimeProfileV1:
     )
 
 
+def test_artifact_input_capability_preserves_frozen_profile_serialization() -> None:
+    original = _profile().model_dump(mode="json")
+    assert "supports_task_artifact_inputs" not in original
+    loaded = load_service_execution_runtime_profile(json.dumps(original))
+    assert loaded is not None and not loaded.supports_task_artifact_inputs
+    assert loaded.model_dump(mode="json") == original
+    enabled = loaded.model_copy(update={"supports_task_artifact_inputs": True})
+    assert enabled.model_dump(mode="json") == {**original, "supports_task_artifact_inputs": True}
+
+
 @pytest.mark.parametrize(("class_id", "web_egress"), [
     ("linux-amd64-cpu-pod-v1", True),
     ("linux-amd64-cpu-web-pod-v1", False),
