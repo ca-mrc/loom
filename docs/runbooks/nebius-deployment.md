@@ -1302,6 +1302,13 @@ credential, resource payload or retry authority; investigate the identified
 prerequisite before another operation. They do not change installation ordering
 or authorize retries of uncertain writes.
 
+After connection, known preflight failures retain `pool_preflight_` categories:
+`writer_bindings`, `writer_workloads`, `connected_prerequisites`, `capacity`,
+`scope`, `database_report`, `pending_source`, `pending_page`, `origin_history`,
+or `database_readiness`. These classify existing checks, not additional authority
+or successful qualification of earlier checks. Unknown failures remain
+`pool_preflight`; install and rollback failures keep their journaled phase.
+
 Telemetry failures further identify fixed `pool_runtime_telemetry_...` categories:
 binding, Pod, node inventory, probe delivery, identity recheck, settings, client
 construction, TLS, authorization, network, HTTP, reader, counters, cleanup,
