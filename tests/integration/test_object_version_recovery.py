@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -12,7 +14,8 @@ from uuid import UUID, uuid4
 import boto3
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from loom.db.schema import (
@@ -20,7 +23,12 @@ from loom.db.schema import (
     Artifact,
     ArtifactUploadSession,
     DataLifecycleAuthority,
+    DataLifecycleGcAuthority,
+    DataLifecycleGcItem,
+    DataLifecycleGcRun,
     DataLifecycleObject,
+    ServiceExecutionLease,
+    Token,
     Trial,
 )
 from loom_control_plane.app import _load_admin_secret_verifier, create_app
@@ -39,7 +47,7 @@ def digest(value):
 
 
 @pytest.fixture
-async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, shared_minio):
+async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, shared_minio, request):
     cfg = shared_minio.get_config()
     bucket = "recovery-" + uuid4().hex
     s3 = boto3.client("s3", endpoint_url=f"http://{cfg['endpoint']}",
@@ -101,7 +109,9 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             index.update({f"{name}_uri": f"s3://{bucket}/{obj.object_key}",
                           f"{name}_sha256": obj.content_sha256,
                           f"{name}_size_bytes": obj.size_bytes, f"{name}_version_id": None})
-        trial.state, trial.failure_reason, trial.result = "failed", "verifier_error", {"reward": 0}
+        state = "running" if getattr(request.node, "callspec", SimpleNamespace(params={})).params.get(
+            "change") == "nonterminal" else "failed"
+        trial.state, trial.failure_reason, trial.result = state, "verifier_error", {"reward": 0}
         trial.trajectory_index = index
         lease.output_commit_state = lease.materialization_state = "committed"
         lease.output_upload_session_id, lease.output_generation = upload_id, 1
@@ -143,7 +153,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
                            for obj, version in zip(objects, versions, strict=True)]}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://cp") as client:
         yield SimpleNamespace(client=client, app=app, sessions=sessions, s3=s3, bucket=bucket,
-            payload=payload, storage=storage, index=index, objects=objects, versions=versions,
+            payload=payload, engine=engine, storage=storage, index=index, objects=objects, versions=versions,
             bodies=bodies, lease_id=lease.id, upload_id=upload_id, authority_id=authority_id)
     await engine.dispose()
 
@@ -168,6 +178,7 @@ async def test_preview_apply_and_replay_repair_every_published_mirror(recovery):
     assert preview["status"] == "preview"
     assert len(preview["plan"]["objects"]) == 4
     assert await snapshot(r) == before
+
     payload = {**r.payload, "apply": True, "plan_sha256": preview["plan_sha256"]}
     response = await r.client.post(URL, headers=HEADERS, json=payload)
     assert response.status_code == 200, response.text
@@ -188,12 +199,234 @@ async def test_preview_apply_and_replay_repair_every_published_mirror(recovery):
     assert await snapshot(r) == after
 
 
+async def applying(r):
+    preview = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert preview.status_code == 200, preview.text
+    return {**r.payload, "apply": True, "plan_sha256": preview.json()["plan_sha256"]}
+
+
+@pytest.mark.parametrize("change", ["attempt", "nonterminal", "upload", "unpinned", "foreign_scope",
+                                   "registry_hash", "oversized", "competing", "gc_object", "gc_authority"])
+async def test_owner_retention_registry_and_gc_guards(recovery, change):
+    r = recovery
+    async with r.sessions() as session:
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        authority = await session.get(DataLifecycleAuthority, r.authority_id)
+        obj = await session.get(DataLifecycleObject, r.objects[0].id)
+        if change == "attempt":
+            trial.attempt_count += 1
+        elif change == "nonterminal":
+            assert trial.state == "running"
+        elif change == "upload":
+            upload = await session.get(ArtifactUploadSession, r.upload_id)
+            upload.service_execution_generation += 1
+        elif change == "unpinned":
+            authority.pinned, authority.expires_at = False, datetime.now(UTC) + timedelta(days=1)
+        elif change == "foreign_scope":
+            authority.namespace = "other"
+        elif change == "registry_hash":
+            obj.content_sha256 = "0" * 64
+        elif change == "oversized":
+            obj.size_bytes = 256 * 1024 * 1024 + 1
+        elif change == "competing":
+            session.add(DataLifecycleObject(authority_id=authority.id, environment="development",
+                namespace="foreign", bucket=obj.bucket, object_key=obj.object_key, version_id="other",
+                content_sha256=obj.content_sha256, size_bytes=obj.size_bytes, created_at=obj.created_at))
+        else:
+            run = DataLifecycleGcRun(id=uuid4(), environment="staging", namespace="loom",
+                mutation_epoch_before=0, dry_run=False, requested_by="test", policy={}, inventory={})
+            session.add(run)
+            await session.flush()
+            session.add(DataLifecycleGcItem(gc_run_id=run.id, object_id=obj.id, deletion_token=uuid4())
+                if change == "gc_object" else DataLifecycleGcAuthority(
+                    gc_run_id=run.id, authority_id=authority.id, deletion_token=uuid4()))
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("credential,status", [(None, 401), ("worker", 403), ("team", 403), ("rate_card", 401)])
+async def test_only_singleton_administrator_can_recover(recovery, credential, status):
+    r = recovery
+    headers = {}
+    if credential:
+        token = "loom_w_" + uuid4().hex
+        async with r.sessions() as session:
+            trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+            session.add(Token(token_hash=hashlib.sha256(token.encode()).digest(),
+                type="team" if credential == "team" else "worker",
+                team_id=trial.team_id if credential == "team" else None,
+                scopes=["admin:rate_cards"] if credential == "rate_card" else ["read:own"],
+                issued_at=datetime.now(UTC)))
+            await session.commit()
+        headers = {"Authorization": f"Bearer {token}"}
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=headers, json=r.payload)
+    assert response.status_code == status, response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("change", ["duplicates", "null", "empty", "too_many", "no_plan", "extra"])
+async def test_request_is_bounded_and_explicit(recovery, change):
+    r = recovery
+    payload = copy.deepcopy(r.payload)
+    if change == "duplicates":
+        payload["objects"].append(payload["objects"][0])
+    elif change == "null":
+        payload["objects"][0]["version_id"] = "null"
+    elif change == "empty":
+        payload["objects"] = []
+    elif change == "too_many":
+        payload["objects"] *= 9
+    elif change == "no_plan":
+        payload["apply"] = True
+    else:
+        payload["force"] = True
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 422, response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("change", ["metadata", "registration"])
+async def test_apply_rechecks_state_after_storage_verification(recovery, monkeypatch, change):
+    r = recovery
+    payload = await applying(r)
+    recovery_service = r.app.state.object_version_recovery
+    verify = recovery_service._verify
+
+    async def change_after_verify(client, plan):
+        await verify(client, plan)
+        async with r.sessions() as session:
+            if change == "metadata":
+                trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+                trial.result = {"concurrent_update": True}
+            else:
+                obj = r.objects[0]
+                session.add(DataLifecycleObject(authority_id=r.authority_id, environment="development",
+                    namespace="loom", bucket=obj.bucket, object_key=obj.object_key,
+                    version_id=r.versions[0], content_sha256=obj.content_sha256,
+                    size_bytes=obj.size_bytes, created_at=obj.created_at))
+            await session.commit()
+
+    monkeypatch.setattr(recovery_service, "_verify", change_after_verify)
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 409, response.text
+    after = await snapshot(r)
+    assert after[:4] == before[:4]
+
+
+async def test_audit_failure_rolls_back_all_published_and_registry_changes(recovery):
+    r = recovery
+    payload = await applying(r)
+    before = await snapshot(r)
+
+    def reject_audit(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO admin_audit_events"):
+            raise IntegrityError("injected audit failure", {}, ValueError("secret must not escape"))
+
+    event.listen(r.engine.sync_engine, "before_cursor_execute", reject_audit)
+    try:
+        response = await r.client.post(URL, headers=HEADERS, json=payload)
+    finally:
+        event.remove(r.engine.sync_engine, "before_cursor_execute", reject_audit)
+    assert response.status_code == 409, response.text
+    assert "secret" not in response.text
+    assert await snapshot(r) == before
+
+
+async def test_concurrent_apply_is_audited_once_and_replay_rejects_drift(recovery):
+    r = recovery
+    payload = await applying(r)
+    responses = await asyncio.gather(*(r.client.post(URL, headers=HEADERS, json=payload) for _ in range(2)))
+    assert {response.status_code for response in responses} == {200}
+    assert {response.json()["status"] for response in responses} == {"applied", "replayed"}
+    assert len((await snapshot(r))[3]) == 1
+    changed = copy.deepcopy(payload)
+    changed["objects"][0]["version_id"] = "different"
+    collision = await r.client.post(URL, headers=HEADERS, json=changed)
+    assert collision.status_code == 409, collision.text
+    async with r.sessions() as session:
+        lease = await session.get(ServiceExecutionLease, r.lease_id)
+        lease.updated_at += timedelta(seconds=1)
+        await session.commit()
+    before = await snapshot(r)
+    drift = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert drift.status_code == 409, drift.text
+    assert drift.json()["detail"] == "replay_state_drift"
+    assert await snapshot(r) == before
+
+
+async def test_lock_fences_conflicting_registry_inserts(recovery, monkeypatch):
+    from loom_control_plane import object_version_recovery as module
+
+    r = recovery
+    payload = await applying(r)
+    load = module._load
+    fenced = []
+
+    async def insert_under_fence(session, request, *, locked):
+        state = await load(session, request, locked=locked)
+        if locked:
+            async with r.sessions() as other:
+                await other.execute(text("SET LOCAL lock_timeout = '50ms'"))
+                obj = r.objects[0]
+                other.add(DataLifecycleObject(authority_id=r.authority_id, environment="development",
+                    namespace="loom", bucket=obj.bucket, object_key=obj.object_key,
+                    version_id=r.versions[0], content_sha256=obj.content_sha256,
+                    size_bytes=obj.size_bytes, created_at=obj.created_at))
+                with pytest.raises(DBAPIError) as exc:
+                    await other.flush()
+                assert exc.value.orig.sqlstate == "55P03"
+                fenced.append(True)
+        return state
+
+    monkeypatch.setattr(module, "_load", insert_under_fence)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    assert fenced == [True]
+
+
+async def test_cancelled_verification_cannot_apply_later(recovery, monkeypatch):
+    from loom_control_plane import object_version_recovery as module
+
+    r = recovery
+    payload = await applying(r)
+    before = await snapshot(r)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    verify = module._verify_objects
+
+    def delayed(client, plan):
+        started.set()
+        try:
+            assert release.wait(10)
+            verify(client, plan)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(module, "_verify_objects", delayed)
+    task = asyncio.create_task(r.client.post(URL, headers=HEADERS, json=payload))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        assert await asyncio.to_thread(finished.wait, 10)
+    assert await snapshot(r) == before
+
+
 @pytest.mark.parametrize("change", ["bytes", "version", "delete_marker", "mirror", "gc", "owner", "stale"])
 async def test_conflicting_evidence_never_partially_repairs(recovery, change):
     r = recovery
     if change in {"bytes", "version"}:
         obj = r.objects[0]
-        new = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"wrong")
+        # Same length: metadata-only verification would incorrectly accept it.
+        new = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"x" * len(r.bodies[0]))
         if change == "bytes":
             r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key, VersionId=r.versions[0])
             r.payload["objects"][0]["version_id"] = new["VersionId"]
@@ -220,3 +453,51 @@ async def test_conflicting_evidence_never_partially_repairs(recovery, change):
     response = await r.client.post(URL, headers=HEADERS, json=r.payload)
     assert response.status_code == 409, response.text
     assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("fault", ["missing_version_receipt", "incomplete_inventory", "sdk_error"])
+async def test_storage_receipts_fail_closed_without_leaking_sdk_details(recovery, monkeypatch, fault):
+    r = recovery
+    payload = await applying(r)
+    before = await snapshot(r)
+    if fault == "incomplete_inventory":
+        original = r.s3.list_object_versions
+
+        def broken_inventory(**kwargs):
+            result = original(**kwargs)
+            result["IsTruncated"] = True
+            result.pop("NextKeyMarker", None)
+            result.pop("NextVersionIdMarker", None)
+            return result
+
+        monkeypatch.setattr(r.s3, "list_object_versions", broken_inventory)
+    else:
+        original = r.s3.get_object
+
+        def broken_receipt(**kwargs):
+            if fault == "sdk_error":
+                raise ValueError("sensitive signed URL or credential")
+            result = original(**kwargs)
+            result.pop("VersionId")
+            return result
+
+        monkeypatch.setattr(r.s3, "get_object", broken_receipt)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 409, response.text
+    assert "sensitive" not in response.text
+    assert await snapshot(r) == before
+
+
+async def test_inventory_pagination_does_not_confuse_prefix_neighbors_with_exact_key(recovery, monkeypatch):
+    r = recovery
+    r.s3.put_object(Bucket=r.bucket, Key=r.objects[0].object_key + ".neighbor", Body=b"unrelated")
+    original = r.s3.list_object_versions
+
+    def paginated(**kwargs):
+        return original(**{**kwargs, "MaxKeys": 1})
+
+    monkeypatch.setattr(r.s3, "list_object_versions", paginated)
+    payload = await applying(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "applied"

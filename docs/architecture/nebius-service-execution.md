@@ -651,7 +651,20 @@ current-key version is rejected even when its bytes match. Explicit completion
 versions need no fallback, and legacy/resumed uploads without the creation
 binding keep their existing receipt semantics. Unversioned stores retain a null
 version; malformed evidence fails before canonical metadata is acknowledged.
-This repairs future publication, not existing null-version registrations.
+This repairs future publication. Existing null-version registrations have a
+separate [admin recovery operation](../runbooks/operator-runbook.md#historical-canonical-object-version-metadata).
+It is bounded to one terminal Trial's committed canonical Artifact, 32 exact
+objects and 256 MiB. Preview binds the complete published metadata and ownership
+state to a plan digest. Apply independently verifies the surviving versions'
+full bytes and exact-key inventories before acquiring bounded database locks.
+It then rechecks ownership, pinned retention, GC claims, competing registrations
+and the preview state, and atomically fills only null versions in the registry,
+Artifact storage and every existing Trial index mirror, with one admin audit.
+Replay requires an identical request and unchanged recorded post-state. This
+adopts verified surviving versions without inventing original write receipts,
+changing Trial outcomes or retention, or restarting execution. The storage
+observation and database transaction are separate; no storage IO occurs while
+the repair holds database locks.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store

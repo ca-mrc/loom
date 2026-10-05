@@ -244,6 +244,66 @@ materialization has started. A failed provider
 cleanup remains `pending`, `in_progress`, or `blocked`; it is operational debt,
 not permission to purge its authority record.
 
+#### Historical canonical object-version metadata
+
+`POST /admin/object-version-recovery` on the internal Control Plane offers a
+preview by default and an explicit, audited apply. Authenticate with the external
+singleton admin credential. Browser sessions, team/worker tokens and specialized
+admin scopes do not grant this operation. Keep credentials in the
+existing operator credential mechanism, never in an issue or saved manifest.
+
+Use this only for an existing terminal native Trial whose current attempt has a
+committed canonical Artifact. The owning lifecycle authority must be active,
+pinned, in the Control Plane's environment and namespace, and free of deletion
+tokens or GC journal membership. This operation adopts a **verified surviving
+version**; it cannot prove the original upload's missing version receipt.
+
+1. Read the complete Artifact `storage`, Trial `trajectory_index`, owning lease,
+   source upload identity and exact lifecycle registry IDs using authorized
+   inspection. Preserve the original outcome and retention evidence. Select at
+   most 32 null-version registry rows totaling at most 256 MiB for one Artifact.
+2. Save a JSON request with a fresh UUID `operation_id`, UUID `trial_id` and
+   `artifact_id`, `expected_storage_sha256`, `expected_index_sha256`, and an
+   `objects` array of `{ "registry_id": "<uuid>", "version_id": "<exact version>" }`.
+   The two metadata hashes are `sha256:` plus the hex SHA-256 of the entire
+   document encoded as UTF-8 sorted compact JSON, without a trailing newline or
+   ASCII escaping (`json.dumps(value, sort_keys=True, separators=(",", ":"),
+   ensure_ascii=False, allow_nan=False)`). Omit `apply` for preview.
+3. Submit the preview and retain its complete `plan` and `plan_sha256`. The server
+   derives all published locations, including the mirrored Trial artifact list,
+   and verifies each version's full bytes against the published and registered
+   size and hash. The bucket must have versioning enabled. Exactly one surviving
+   version and no delete marker may exist at each exact key; a prefix match does
+   not establish identity. Conflicting registrations, even in other namespaces,
+   are rejected. Metadata is bounded to 4 MiB and inventory traversal to 16 pages
+   per object; exceeding a bound requires diagnosis, never a force flag.
+4. Review the exact plan within the issue's recovery authority. Send the same
+   request with `apply: true` and the returned `plan_sha256`. Apply re-verifies
+   storage, acquires bounded database locks and checks the entire state again.
+   It fills only existing null version fields in Artifact storage, the Trial
+   index and registry, then adds one `AdminAuditEvent` atomically. It writes no
+   object, changes no retention, and replays no execution or materialization.
+5. Retain the receipt and read back the published metadata, registry and audit.
+   Verify ordinary downloads and unchanged Trial outcome/attempts. A repeated
+   identical apply returns `replayed` only while the complete recorded post-state
+   is unchanged. Replay confirms the database receipt; it is not a fresh storage
+   health probe. A changed request with the same operation UUID is rejected.
+
+Verification is serialized per Control Plane process, with a 90-second request
+budget. Cancellation can leave a read-only SDK call finishing in the background;
+it cannot apply later. The database phase has a 15-second overall budget,
+2-second lock timeout and 5-second statement timeout. Its brief lifecycle/GC
+table locks also fence competing registration inserts. A conflict or timeout
+rolls back the entire repair; retain the reason and investigate before obtaining
+a fresh preview. Never replace this path with manual SQL or replay an old repair
+migration. Source-spool retention remains independent and may already be complete.
+
+The database commit is atomic; object storage and PostgreSQL do not share a
+transaction. Full content verification and a second complete version inventory
+precede the database fence. The active pinned authority prevents supported GC
+from removing these canonical objects; out-of-band storage mutation remains an
+operator incident and must not run concurrently with recovery.
+
 #### Kubernetes execution actuator
 
 The checked manifest at `deploy/k8s/nebius-execution-actuator.yaml` is the
