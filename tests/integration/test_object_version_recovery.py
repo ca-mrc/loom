@@ -1,0 +1,222 @@
+"""Historical metadata repair uses real versioned S3, PostgreSQL and admin HTTP."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from uuid import UUID, uuid4
+
+import boto3
+import httpx
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from loom.db.schema import (
+    AdminAuditEvent,
+    Artifact,
+    ArtifactUploadSession,
+    DataLifecycleAuthority,
+    DataLifecycleObject,
+    Trial,
+)
+from loom_control_plane.app import _load_admin_secret_verifier, create_app
+from loom_control_plane.config import ControlPlaneSettings
+from tests.integration.test_service_execution_leases import _reserve, _seed_ready_trial
+from tests.integration.test_token_admin import RAW_ADMIN_TOKEN, _write_admin_secret
+
+URL = "/admin/object-version-recovery"
+HEADERS = {"Authorization": f"Bearer {RAW_ADMIN_TOKEN}"}
+
+
+def digest(value):
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    ).hexdigest()
+
+
+@pytest.fixture
+async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, shared_minio):
+    cfg = shared_minio.get_config()
+    bucket = "recovery-" + uuid4().hex
+    s3 = boto3.client("s3", endpoint_url=f"http://{cfg['endpoint']}",
+        aws_access_key_id=cfg["access_key"], aws_secret_access_key=cfg["secret_key"])
+    s3.create_bucket(Bucket=bucket)
+    s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+    secret = tmp_path / "admin.toml"
+    _write_admin_secret(secret)
+    for key, value in {
+        "LOOM_ENV": "development", "LOOM_NAMESPACE": "loom",
+        "LOOM_CP_DB_URL": isolated_migration_postgres_url,
+        "LOOM_CP_MINIO_ENDPOINT": f"http://{cfg['endpoint']}",
+        "LOOM_CP_MINIO_ACCESS_KEY": cfg["access_key"],
+        "LOOM_CP_MINIO_SECRET_KEY": cfg["secret_key"],
+        "LOOM_CP_LLM_GATEWAY_URL": "http://gateway.test/",
+        "LOOM_CP_ADMIN_SECRET_FILE": str(secret),
+        "LOOM_CP_ARTIFACTS_BUCKET": bucket, "LOOM_CP_TRAJECTORIES_BUCKET": bucket,
+    }.items():
+        monkeypatch.setenv(key, value)
+    settings = ControlPlaneSettings(_env_file=None)
+    app = create_app(settings)
+    engine = create_async_engine(isolated_migration_postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.settings = settings
+    app.state.session_factory = sessions
+    app.state.minio_client = s3
+    app.state.admin_secret_verifier = _load_admin_secret_verifier(settings)
+    now = datetime.now(UTC)
+    artifact_id, upload_id, authority_id = uuid4(), uuid4(), uuid4()
+    objects, versions, bodies = [], [], []
+    async with sessions() as session:
+        trial_id, target = await _seed_ready_trial(session, now=now)
+        lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+        trial = await session.get(Trial, trial_id)
+        prefix = f"trials/{trial.team_id}/{trial_id}/attempts/1/bundles/{artifact_id}/"
+        trajectory_prefix = f"{trial.team_id}/{trial_id}/attempts/1/"
+        for key, body in [(prefix + "files/result.json", b'{"reward":0}'),
+                          (prefix + "source/_manifest.json", b'{"original":true}'),
+                          (trajectory_prefix + "events.jsonl", b'{"seq":1}\n'),
+                          (trajectory_prefix + "atif.json", b'{"steps":[]}')]:
+            version = s3.put_object(Bucket=bucket, Key=key, Body=body)["VersionId"]
+            objects.append(DataLifecycleObject(id=uuid4(), authority_id=authority_id,
+                environment="development", namespace="loom", bucket=bucket, object_key=key,
+                version_id=None, content_sha256=hashlib.sha256(body).hexdigest(),
+                size_bytes=len(body), created_at=now))
+            versions.append(version)
+            bodies.append(body)
+        file_rows = [{"relative_path": name, "media_type": "application/json",
+                      "bucket": bucket, "key": obj.object_key, "version_id": None,
+                      "sha256": "sha256:" + obj.content_sha256, "size_bytes": obj.size_bytes}
+                     for name, obj in zip(("result.json", "_manifest.json"), objects[:2], strict=True)]
+        storage = {"schema_version": "loom.canonical-trial-bundle-storage.v1", "attempt": 1,
+                   "source_upload_session_id": str(upload_id),
+                   "files": file_rows[:1], "source_evidence": file_rows[1:]}
+        index = {"schema_version": "1", "trial_id": str(trial_id),
+                 "team_id": str(trial.team_id), "task_id": trial.task_id, "attempt": 1,
+                 "artifacts": copy.deepcopy(file_rows[:1])}
+        for name, obj in zip(("trajectory", "atif"), objects[2:], strict=True):
+            index.update({f"{name}_uri": f"s3://{bucket}/{obj.object_key}",
+                          f"{name}_sha256": obj.content_sha256,
+                          f"{name}_size_bytes": obj.size_bytes, f"{name}_version_id": None})
+        trial.state, trial.failure_reason, trial.result = "failed", "verifier_error", {"reward": 0}
+        trial.trajectory_index = index
+        lease.output_commit_state = lease.materialization_state = "committed"
+        lease.output_upload_session_id, lease.output_generation = upload_id, 1
+        lease.output_manifest_sha256 = lease.output_marker_sha256 = "sha256:" + "a" * 64
+        lease.output_committed_at = lease.materialization_committed_at = now
+        lease.materialization_attempts = 1
+        lease.canonical_trajectory_sha256 = "sha256:" + objects[2].content_sha256
+        lease.canonical_atif_sha256 = "sha256:" + objects[3].content_sha256
+        session.add(ArtifactUploadSession(id=upload_id, team_id=trial.team_id,
+            commit_kind="service_execution_output", service_execution_lease_id=lease.id,
+            service_execution_generation=1, service_execution_role="attempt",
+            service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
+            service_execution_candidate_sha="b" * 40,
+            service_execution_task_revision_sha256="sha256:" + "c" * 64,
+            service_execution_command_identity_sha256="sha256:" + "d" * 64,
+            idempotency_key=str(upload_id), request_digest="sha256:" + "e" * 64,
+            prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=1024,
+            expires_at=now + timedelta(days=1), committed_at=now, canonical_manifest_json={},
+            manifest_sha256=lease.output_manifest_sha256,
+            committed_marker_sha256=lease.output_marker_sha256))
+        session.add(DataLifecycleAuthority(id=authority_id, environment="development",
+            namespace="loom", team_id=trial.team_id, data_class="artifact", owner_kind="artifact",
+            owner_id=str(artifact_id), pinned=True, created_at=now))
+        await session.flush()
+        session.add(Artifact(id=artifact_id, team_id=trial.team_id, trial_id=trial_id,
+            artifact_type="loom.trial-artifact-bundle.v1", name="trial-bundle",
+            control_producer_kind="service_execution", control_producer_id=lease.id,
+            artifact_upload_session_id=upload_id, manifest_sha256="sha256:" + "f" * 64,
+            stored_size_bytes=100, unpacked_size_bytes=100, file_count=2,
+            content_hash="sha256:" + "a" * 64, storage=storage,
+            artifact_metadata={"materialization_state": "committed"},
+            lifecycle_authority_id=authority_id, created_at=now))
+        session.add_all(objects)
+        await session.commit()
+    payload = {"operation_id": str(uuid4()), "trial_id": str(trial_id),
+               "artifact_id": str(artifact_id), "expected_storage_sha256": digest(storage),
+               "expected_index_sha256": digest(index),
+               "objects": [{"registry_id": str(obj.id), "version_id": version}
+                           for obj, version in zip(objects, versions, strict=True)]}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://cp") as client:
+        yield SimpleNamespace(client=client, app=app, sessions=sessions, s3=s3, bucket=bucket,
+            payload=payload, storage=storage, index=index, objects=objects, versions=versions,
+            bodies=bodies, lease_id=lease.id, upload_id=upload_id, authority_id=authority_id)
+    await engine.dispose()
+
+
+async def snapshot(r):
+    async with r.sessions() as session:
+        artifact = await session.get(Artifact, UUID(r.payload["artifact_id"]))
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        rows = [await session.get(DataLifecycleObject, obj.id) for obj in r.objects]
+        audits = list((await session.scalars(select(AdminAuditEvent))).all())
+        return (artifact.storage, trial.trajectory_index, [row.version_id for row in rows],
+                [(row.id, row.event_metadata) for row in audits],
+                (trial.state, trial.failure_reason, trial.result, trial.attempt_count))
+
+
+async def test_preview_apply_and_replay_repair_every_published_mirror(recovery):
+    r = recovery
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 200, response.text
+    preview = response.json()
+    assert preview["status"] == "preview"
+    assert len(preview["plan"]["objects"]) == 4
+    assert await snapshot(r) == before
+    payload = {**r.payload, "apply": True, "plan_sha256": preview["plan_sha256"]}
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "applied"
+    after = await snapshot(r)
+    assert after[0]["files"][0]["version_id"] == r.versions[0]
+    assert after[0]["source_evidence"][0]["version_id"] == r.versions[1]
+    assert after[1]["artifacts"][0]["version_id"] == r.versions[0]
+    assert after[1]["trajectory_version_id"] == r.versions[2]
+    assert after[1]["atif_version_id"] == r.versions[3]
+    assert after[2] == r.versions
+    assert len(after[3]) == 1
+    assert str(after[3][0][0]) == r.payload["operation_id"]
+    assert after[4] == before[4] == ("failed", "verifier_error", {"reward": 0}, 1)
+    replay = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["status"] == "replayed"
+    assert await snapshot(r) == after
+
+
+@pytest.mark.parametrize("change", ["bytes", "version", "delete_marker", "mirror", "gc", "owner", "stale"])
+async def test_conflicting_evidence_never_partially_repairs(recovery, change):
+    r = recovery
+    if change in {"bytes", "version"}:
+        obj = r.objects[0]
+        new = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"wrong")
+        if change == "bytes":
+            r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key, VersionId=r.versions[0])
+            r.payload["objects"][0]["version_id"] = new["VersionId"]
+    elif change == "delete_marker":
+        r.s3.delete_object(Bucket=r.bucket, Key=r.objects[0].object_key)
+    else:
+        async with r.sessions() as session:
+            artifact = await session.get(Artifact, UUID(r.payload["artifact_id"]))
+            trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+            authority = await session.get(DataLifecycleAuthority, r.authority_id)
+            if change == "mirror":
+                index = copy.deepcopy(trial.trajectory_index)
+                index["artifacts"][0]["version_id"] = r.versions[0]
+                trial.trajectory_index = index
+                r.payload["expected_index_sha256"] = digest(index)
+            elif change == "gc":
+                authority.state, authority.deletion_token = "deleting", uuid4()
+            elif change == "owner":
+                authority.owner_id = str(uuid4())
+            else:
+                artifact.storage = {**artifact.storage, "drift": True}
+            await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
