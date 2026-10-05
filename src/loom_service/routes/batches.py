@@ -110,6 +110,7 @@ from loom_service.effective_combination import (
 from loom_service.execution_admission import (
     admit_execution_backend,
     freeze_task_resource_requests,
+    preview_execution_selection,
     reject_submission,
     reject_unsupported_hosted_backend,
 )
@@ -1032,6 +1033,7 @@ async def _create_batch_record(
     submitted_by_user_id: UUID | None,
     usage_attributed_user_id: UUID | None,
     usage_attributed_actor: str | None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     reject_unsupported_hosted_backend(payload.backend)
     submission_team_id = await _resolve_submission_team_id(
@@ -1424,6 +1426,18 @@ async def _create_batch_record(
             detail=str(exc.detail),
         )
 
+    if dry_run:
+        return {
+            "dry_run": True,
+            "accepted": True,
+            "backend": payload.backend,
+            "rejected_task_ids": [],
+            "rejection_reasons": {},
+            "tasks": await preview_execution_selection(
+                s, task_ids=valid_task_ids, trial_config=trial_config, combinations=payload.combinations,
+            ),
+        }
+
     token_prefix = ctx.token_hash.hex()[:8] if ctx.token_hash else "00000000"
 
     # expected_trial_count = sum over combinations × tasks.
@@ -1796,6 +1810,48 @@ async def create_batch(
     )
     await s.commit()
     return response
+
+
+@router.post("/batches/dry-run", response_model=wire.PostBatchesDryRunResponse)
+async def dry_run_batch(
+    request: Request,
+    sc: SessionAndCtx,
+    payload: _CreateBatch,
+) -> dict[str, Any]:
+    """Run batch admission and resolve every axis without writing anything."""
+    s, ctx = sc
+    require_scope(ctx, "submit")
+    require_submitting_user(ctx)
+    try:
+        raw_body = await request.json()
+    except Exception:
+        raw_body = None
+    _reject_required_worker_pools_on_user_batch(raw_body)
+    try:
+        return await _create_batch_record(
+            request,
+            s,
+            ctx,
+            payload,
+            submitted_by_user_id=ctx.user_id,
+            usage_attributed_user_id=ctx.user_id,
+            usage_attributed_actor=(f"user:{ctx.user_id}" if ctx.user_id is not None else None),
+            dry_run=True,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else None
+        if detail is None or detail.get("reason") != "nebius_task_incompatible":
+            raise
+        return {
+            "dry_run": True,
+            "accepted": False,
+            "backend": payload.backend,
+            "rejected_task_ids": list(detail.get("task_ids") or []),
+            "rejection_reasons": dict(detail.get("rejection_reasons") or {}),
+            "tasks": [],
+        }
+    finally:
+        await s.rollback()
 
 
 @router.post("/admin/batches/on-behalf", status_code=201)

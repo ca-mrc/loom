@@ -40,8 +40,7 @@ from loom.service_execution_backend import (
 )
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
-    automatic_service_execution_rejections,
-    runtime_profile_rejections,
+    execution_selection_rejections,
 )
 from loom.submission_identity import require_submitting_user
 from loom.task_image_materialization import (
@@ -434,18 +433,12 @@ async def submit_trial(
             if batch_runtime_profile is not None
             else None
         )
-        automatic_compatible = (
-            profile is not None
-            and not runtime_profile_rejections(
-                task_config, trial_config, profile, allow_task_image_preparation=True,
-            )
-            and not automatic_service_execution_rejections(
-                task_config,
-                trial_config,
-                source_provenance=dict(task_row.source_provenance or {}),
-                allow_task_image_preparation=True,
-                supported_capabilities=profile.supported_guest_capabilities,
-            )
+        automatic_compatible = profile is not None and not execution_selection_rejections(
+            task_config,
+            trial_config,
+            profile,
+            source_provenance=dict(task_row.source_provenance or {}),
+            allow_task_image_preparation=True,
         )
     required_worker_pool = _resolve_required_worker_pool_for_backend(
         batch_backend=batch_backend,

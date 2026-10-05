@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "HarnessSelectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "HarnessSelectionV1",
+      "type": "object"
+    },
+    "NetworkPolicySelectionV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allow",
+          "type": "array"
+        },
+        "mode": {
+          "enum": [
+            "gateway-only",
+            "web-allowlist",
+            "public-web"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "title": "NetworkPolicySelectionV1",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Omitted fields keep that axis's default path.",
+  "properties": {
+    "harness": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HarnessSelectionV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "isolation": {
+      "anyOf": [
+        {
+          "enum": [
+            "auto",
+            "container",
+            "guest"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Isolation"
+    },
+    "network_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NetworkPolicySelectionV1"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "const": "loom.execution-selection.v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "verification": {
+      "anyOf": [
+        {
+          "enum": [
+            "shared",
+            "separate"
+          ],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Verification"
+    }
+  },
+  "required": [
+    "schema_version"
+  ],
+  "title": "ExecutionSelectionV1",
+  "type": "object"
+}

@@ -24,6 +24,7 @@ from loom.execution_contract import (  # noqa: E402
     PoolCapacityV1,
     WorkloadRequirementsV1,
 )
+from loom.execution_selection import ExecutionSelectionV1  # noqa: E402
 
 POLICY_PATH = ROOT / "config" / "service-execution-compatibility.toml"
 REPORT_PATH = ROOT / "docs" / "evidence" / "service-workload-compatibility-v2.json"
@@ -43,6 +44,7 @@ SCHEMA_OUTPUTS = {
         ExecutionRoutingDecisionV1
     ),
     ROOT / "docs" / "evidence" / "loom.execution-topology.v1.schema.json": (ExecutionTopologyV1),
+    ROOT / "docs" / "evidence" / "loom.execution-selection.v1.schema.json": ExecutionSelectionV1,
     ROOT / "docs" / "evidence" / "loom.pool-capacity.v1.schema.json": PoolCapacityV1,
     ROOT / "docs" / "evidence" / "loom.workload-requirements.v1.schema.json": (
         WorkloadRequirementsV1

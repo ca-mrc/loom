@@ -48,6 +48,36 @@ class PostBatchesResponse(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class ResolvedHarness(TypedDict):
+    name: str
+    version: str | None
+
+
+@with_config(ConfigDict(extra="allow"))
+class ResolvedExecutionSelection(TypedDict):
+    harness: ResolvedHarness
+    network_policy: dict[str, Any] | None
+    verification: Literal["shared", "separate"]
+    isolation: Literal["container", "guest"]
+
+
+@with_config(ConfigDict(extra="allow"))
+class DryRunTaskSelection(TypedDict):
+    task_id: str
+    trials: list[ResolvedExecutionSelection]
+
+
+@with_config(ConfigDict(extra="allow"))
+class PostBatchesDryRunResponse(TypedDict):
+    dry_run: bool
+    accepted: bool
+    backend: str
+    rejected_task_ids: list[str]
+    rejection_reasons: dict[str, list[str]]
+    tasks: list[DryRunTaskSelection]
+
+
+@with_config(ConfigDict(extra="allow"))
 class GetBackendsResponseItemsItem(TypedDict):
     name: str
     description: str

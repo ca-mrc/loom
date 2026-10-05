@@ -196,11 +196,14 @@ class ProbeV1(_Strict):
 
 
 class GuestExecutionV1(_Strict):
-    """Exact task-declared capabilities implemented inside one private guest."""
+    """Exact task-declared capabilities implemented inside one private guest.
+
+    Empty capabilities describe a plain guest selected by ``isolation=guest``.
+    """
 
     schema_version: Literal["loom.guest-execution.v1"] = "loom.guest-execution.v1"
     runtime: Literal["qemu-tcg-v1"] = "qemu-tcg-v1"
-    capabilities: tuple[GuestExecutionCapability, ...] = Field(min_length=1, max_length=4)
+    capabilities: tuple[GuestExecutionCapability, ...] = Field(max_length=4)
 
     @field_validator("capabilities")
     @classmethod
@@ -792,8 +795,10 @@ def validate_runtime_plan_requirements(
                              if requirements.execution_requirements else ())
     expected_guest = ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared_capabilities)
     guests = [sidecar.guest_execution for sidecar in plan.sidecars if sidecar.guest_execution is not None]
-    if bool(guests) != bool(expected_guest) or bool(guests) != (
-        requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
+    # A forced plain guest has a guest kernel without declared capabilities;
+    # declared capabilities always require one.
+    if bool(guests) != (requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL) or (
+        expected_guest and not guests
     ):
         raise ValueError("runtime guest plan does not match workload isolation and capabilities")
     if guests:

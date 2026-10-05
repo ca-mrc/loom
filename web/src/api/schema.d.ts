@@ -805,6 +805,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/batches/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry Run Batch
+         * @description Run batch admission and resolve every axis without writing anything.
+         */
+        post: operations["dry_run_batch_api_v1_batches_dry_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/batches/{batch_id}": {
         parameters: {
             query?: never;
@@ -4083,6 +4103,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** DryRunTaskSelection */
+        DryRunTaskSelection: {
+            /** Task Id */
+            task_id: string;
+            /** Trials */
+            trials: components["schemas"]["ResolvedExecutionSelection"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** ExecutionContainerAllocation */
         ExecutionContainerAllocation: {
             limits: components["schemas"]["ExecutionResourceValues"];
@@ -5839,6 +5868,25 @@ export interface components {
              */
             vla_interface_version: "behavior_b1k_websocket_v1";
         };
+        /** PostBatchesDryRunResponse */
+        PostBatchesDryRunResponse: {
+            /** Accepted */
+            accepted: boolean;
+            /** Backend */
+            backend: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Rejected Task Ids */
+            rejected_task_ids: string[];
+            /** Rejection Reasons */
+            rejection_reasons: {
+                [key: string]: string[];
+            };
+            /** Tasks */
+            tasks: components["schemas"]["DryRunTaskSelection"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** PostBatchesIdCancelResponse */
         PostBatchesIdCancelResponse: {
             /** Batch Id */
@@ -6402,6 +6450,35 @@ export interface components {
             score_outcome: string;
             /** Task Id */
             task_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ResolvedExecutionSelection */
+        ResolvedExecutionSelection: {
+            harness: components["schemas"]["ResolvedHarness"];
+            /**
+             * Isolation
+             * @enum {string}
+             */
+            isolation: "container" | "guest";
+            /** Network Policy */
+            network_policy: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Verification
+             * @enum {string}
+             */
+            verification: "shared" | "separate";
+        } & {
+            [key: string]: unknown;
+        };
+        /** ResolvedHarness */
+        ResolvedHarness: {
+            /** Name */
+            name: string;
+            /** Version */
+            version: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -10360,6 +10437,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PostBatchesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dry_run_batch_api_v1_batches_dry_run_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_CreateBatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostBatchesDryRunResponse"];
                 };
             };
             /** @description Validation Error */

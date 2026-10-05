@@ -19,6 +19,8 @@ RequiredCPUArch = Literal["x86_64", "arm64", "any"]
 
 # Verifier semantics.
 VerifierEnvMode = Literal["shared", "separate"]
+# Hosted execution isolation selection (#2314).
+IsolationSelection = Literal["auto", "container", "guest"]
 
 # Multi-step aggregation strategy.
 MultiStepRewardStrategy = Literal["mean", "min", "weighted", "final"]

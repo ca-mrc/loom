@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from loom.agent_runtime_registry import resolve_agent_runtimes
 from loom.db.schema import Task
+from loom.execution_selection import resolved_execution_selection
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.task import TaskConfig
@@ -28,10 +29,9 @@ from loom.service_execution_backend import (
 from loom.service_execution_materialization import (
     ServiceExecutionRuntimeProfileV1,
     TaskExecutionResourceRequestsV1,
-    automatic_service_execution_rejections,
+    execution_selection_rejections,
     freeze_agent_runtime_releases,
     load_service_execution_runtime_profile,
-    runtime_profile_rejections,
     validate_task_resource_requests,
 )
 from loom.verifier_runtime import apply_legacy_verifier_default
@@ -169,6 +169,76 @@ async def freeze_task_resource_requests(
 
 
 
+def submission_trials(
+    trial_config: dict[str, Any], combinations: Sequence[Combination | dict[str, Any]],
+) -> tuple[TrialConfig, ...]:
+    """One trial per combination (or the bare trial config); raises ``ValidationError``."""
+    if not combinations:
+        return (TrialConfig.model_validate(trial_config),)
+    return tuple(
+        TrialConfig.model_validate(
+            {
+                **trial_config,
+                "agent_name": combination.agent_name,
+                "agent_version": combination.agent_version,
+                "agent_model": (
+                    combination.agent_model.model_dump(mode="json")
+                    if combination.agent_model is not None
+                    else None
+                ),
+            }
+        )
+        for raw_combination in combinations
+        for combination in (
+            raw_combination
+            if isinstance(raw_combination, Combination)
+            else Combination.model_validate(raw_combination),
+        )
+    )
+
+
+async def preview_execution_selection(
+    session: Any,
+    *,
+    task_ids: Sequence[str],
+    trial_config: dict[str, Any],
+    combinations: Sequence[Combination | dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per task, the axes each submitted trial resolves to; nothing is written."""
+    trials = submission_trials(trial_config, combinations)
+    rows = (
+        await session.execute(
+            select(
+                Task.id, Task.config, Task.source_provenance, Task.checksum,
+                Task.legacy_separate_verifier_checksum,
+            ).where(Task.id.in_(list(task_ids))),
+        )
+    ).all()
+    by_id = {str(row[0]): row for row in rows}
+    preview: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        row = by_id.get(task_id)
+        if row is None:
+            continue
+        _, config, provenance, checksum, legacy_checksum = row
+        task = TaskConfig.model_validate(config)
+        preview.append({
+            "task_id": task_id,
+            "trials": [
+                resolved_execution_selection(
+                    task,
+                    apply_legacy_verifier_default(
+                        task, trial, task_checksum=checksum,
+                        legacy_separate_verifier_checksum=legacy_checksum,
+                        source_provenance=dict(provenance or {}),
+                    ),
+                )
+                for trial in trials
+            ],
+        })
+    return preview
+
+
 async def admit_execution_backend(
     session: Any,
     *,
@@ -244,29 +314,7 @@ async def admit_execution_backend(
                 automatic_profile_used = True
                 if parsed_trials is None:
                     try:
-                        if combinations:
-                            parsed_trials = tuple(
-                                TrialConfig.model_validate(
-                                    {
-                                        **trial_config,
-                                        "agent_name": combination.agent_name,
-                                        "agent_version": combination.agent_version,
-                                        "agent_model": (
-                                            combination.agent_model.model_dump(mode="json")
-                                            if combination.agent_model is not None
-                                            else None
-                                        ),
-                                    }
-                                )
-                                for raw_combination in combinations
-                                for combination in (
-                                    raw_combination
-                                    if isinstance(raw_combination, Combination)
-                                    else Combination.model_validate(raw_combination),
-                                )
-                            )
-                        else:
-                            parsed_trials = (TrialConfig.model_validate(trial_config),)
+                        parsed_trials = submission_trials(trial_config, combinations)
                     except ValidationError:
                         parsed_trials = ()
                         parsed_trial_error = True
@@ -286,26 +334,17 @@ async def admit_execution_backend(
                         dict.fromkeys(
                             reason
                             for parsed_trial in effective_trials
-                            for reason in automatic_service_execution_rejections(
+                            for reason in execution_selection_rejections(
                                 task_config,
                                 parsed_trial,
+                                profile,
                                 source_provenance=provenance,
                                 allow_task_image_preparation=True,
-                                supported_capabilities=(profile.supported_guest_capabilities
-                                                        if profile is not None else frozenset()),
                             )
                         )
                     )
                 if profile is None:
                     reasons = (*reasons, "runtime_profile_unavailable")
-                elif parsed_trials:
-                    reasons = (*reasons, *(
-                        reason for parsed_trial in effective_trials
-                        for reason in runtime_profile_rejections(
-                            task_config, parsed_trial, profile,
-                            allow_task_image_preparation=True,
-                        )
-                    ))
             if (
                 task_config is None
                 or (binding is not None and binding.logical_pool_id != NEBIUS_LOGICAL_POOL_ID)

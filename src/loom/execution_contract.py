@@ -534,6 +534,26 @@ def _task_declares_guest_execution(task: TaskConfig) -> bool:
     return bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
 
 
+def effective_guest_capabilities(
+    task: TaskConfig, trial: TrialConfig | None,
+) -> frozenset[GuestExecutionCapability] | None:
+    """Guest capabilities of the selected isolation class, or ``None`` for the ordinary class.
+
+    A forced guest without declared capabilities is a plain guest (empty set).
+    ``container`` resolves to the ordinary class even when the task declares
+    guest capabilities; admission rejects that combination before compile.
+    """
+
+    declared = task.environment.execution_requirements
+    capabilities = ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ())
+    isolation = trial.isolation if trial is not None else None
+    if isolation == "container":
+        return None
+    if isolation == "guest" or capabilities:
+        return capabilities
+    return None
+
+
 def workload_requirements_from_task(
     task: TaskConfig, trial: TrialConfig | None = None,
 ) -> WorkloadRequirementsV1:
@@ -547,7 +567,7 @@ def workload_requirements_from_task(
 
     env = task.environment
     capabilities = env.execution_requirements.capabilities if env.execution_requirements else ()
-    needs_guest_kernel = bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(capabilities))
+    needs_guest_kernel = effective_guest_capabilities(task, trial) is not None
     if env.dockerfile is not None:
         materialization = ImageMaterialization.TASK_DOCKERFILE
         image_ref: str | None = None
@@ -591,7 +611,7 @@ def workload_requirements_from_task(
         separate = (
             is_workspace_harness(trial.agent_name)
             and resolve_verifier_env_mode(task, trial) == "separate"
-            and not _task_declares_guest_execution(task)
+            and not needs_guest_kernel
             and task.environment.service_lifecycle is None
         )
     verifier_topology = (
