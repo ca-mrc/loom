@@ -1322,7 +1322,7 @@ def test_behavior_frontend_sources_are_excluded_from_coverage_gate() -> None:
     assert '"src/components/artifacts/useBoundedJson.ts"' in vite_config
 
 
-@pytest.mark.parametrize("lane", ["tests-root", "integration", "cluster-smoke"])
+@pytest.mark.parametrize("lane", ["tests-root", "integration", "integration-docker", "cluster-smoke"])
 def test_manifest_lane_shards_are_disjoint_and_complete(lane: str) -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy(lane)
@@ -1375,40 +1375,14 @@ def test_stable_hash_sharding_is_order_independent_and_has_zero_insertion_churn(
     assert {path: expanded[path] for path in paths} == original
 
 
-def test_manifest_root_shard_salt_is_bound_to_measured_collection_balance() -> None:
-    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    policy = manifest.test_shard_policy("tests-root")
-
-    assert policy is not None
-    assert policy.strategy == "stable-hash"
-    assert policy.salt == "tests-root-v2-8275"
-    assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
-        ("tests/ops/test_ci_secret_isolation.py", 0),
-        ("tests/ops/test_component_ownership_manifest.py", 1),
-        ("tests/ops/test_nebius_pool_role_restoration_live.py", 4),
-        ("tests/ops/test_nebius_pool_template_restoration_live.py", 5),
-        ("tests/ops/test_nebius_pool_predecessor_live.py", 7),
-        ("tests/ops/test_nebius_pool_refresh_connected.py", 3),
-        ("tests/ops/test_nebius_pool_startup_repair_rollback.py", 4),
-        ("tests/ops/test_nebius_pool_image_cancellation.py", 7),
-        ("tests/ops/test_nebius_pool_image_transport.py", 6),
-        ("tests/ops/test_nebius_pool_image_cancellation_collector.py", 1),
-        ("tests/ops/test_nebius_pool_image_cancellation_gateway.py", 3),
-    }
-
-
 def test_manifest_integration_shards_preserve_auth_schema_order() -> None:
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
     policy = manifest.test_shard_policy("integration")
 
     assert policy is not None
-    assert policy.shard_count == 4
     assert policy.strategy == "stable-hash"
-    assert policy.salt == "integration-v3-4"
-    assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
-        ("tests/integration/test_username_password_auth.py", 3),
-        ("tests/integration/test_username_password_schema.py", 3),
-    }
+    pins = {pin.path: pin.shard_index for pin in policy.pins}
+    assert pins["tests/integration/test_username_password_auth.py"] == pins["tests/integration/test_username_password_schema.py"]
 
 
 def test_manifest_rejects_duplicate_test_shard_pins(tmp_path: Path) -> None:

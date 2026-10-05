@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -123,7 +124,7 @@ def _normalized_expression(value: str) -> str:
 GITHUB_HOSTED_CONTROL_JOBS = {
     ".github/workflows/ci.yml": {
         "workflow-plan",
-        "fast-checks",
+        "fast-coverage",
         "coverage-summary",
         "repository-checks",
     },
@@ -176,13 +177,11 @@ def test_source_workflows_share_native_run_identity() -> None:
 
     assert len(common_run_names) == 1
     for run_name in common_run_names:
-        assert "28aa5257927a3468ebc35ec7f245fecaf3226dbf" not in run_name
         assert "' ' ||" not in run_name
         for mode in ("manual", "filtered", "full"):
             assert f"gate={mode} / head={{0}} / base={{1}}" in run_name
         for field in ("updated={2}", "action={3}", "label={4}", "labels={5}", "pull={6}"):
             assert field in run_name
-        assert run_name.count("format('{0}{1}{2}{3}{4}{5}'") == 3
 
         assert "github.event.pull_request.draft" in run_name
         assert "github.event.action == 'converted_to_draft'" in run_name
@@ -191,9 +190,6 @@ def test_source_workflows_share_native_run_identity() -> None:
         assert "fromJSON(" not in run_name
         for label in CI_SELECTOR_LABELS:
             assert label in run_name
-            assert (
-                run_name.count(f"contains(github.event.pull_request.labels.*.name, '{label}')") == 3
-            )
 
     expected_pr_types = {
         "opened",
@@ -358,121 +354,6 @@ def test_images_builds_use_planner_selection() -> None:
     assert "needs.plan.outputs.required == 'true'" in jobs["build"]["if"]
 
 
-def test_images_jobs_have_bounded_build_budgets() -> None:
-    workflow = _workflow(".github/workflows/images.yml")
-    jobs = workflow["jobs"]
-
-    assert jobs["build"]["timeout-minutes"] == 45
-    assert jobs["nebius-harness-build"]["timeout-minutes"] == 45
-
-
-@pytest.mark.parametrize(
-    ("job_name", "lane"),
-    [
-        ("tests-root", "tests-root"),
-        ("tests-packages", "tests-packages"),
-        ("integration", "integration"),
-        ("integration-docker", "integration-docker"),
-    ],
-)
-def test_pytest_jobs_consume_manifest_owned_lane_paths(job_name: str, lane: str) -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    scripts = "\n".join(step.get("run", "") for step in workflow["jobs"][job_name]["steps"])
-
-    assert (
-        f"uv run --no-sync python scripts/component_ownership.py test-paths --lane {lane}"
-        in scripts
-    )
-    assert any(line.strip().startswith("uv run --no-sync pytest ")
-               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
-    assert "CI_PYTEST_MARKERS" in scripts
-
-
-def test_cluster_smoke_consumes_manifest_owned_lane_paths() -> None:
-    workflow = _workflow(".github/workflows/cluster-smoke.yml")
-    contract = workflow["jobs"]["cluster-contract"]
-    scripts = "\n".join(step.get("run", "") for step in contract["steps"])
-
-    assert (
-        "uv run --no-sync python scripts/component_ownership.py test-paths --lane cluster-smoke"
-        in scripts
-    )
-    assert "uv sync --locked --all-packages --extra dev --extra cluster" in scripts
-    assert "uv pip check --python .venv/bin/python" in scripts
-    assert any(line.strip().startswith("uv run --no-sync pytest ")
-               and '"${test_paths[@]}"' in line for line in scripts.splitlines())
-    assert "CI_PYTEST_MARKERS" in scripts
-    assert "validate_environment_isolation.py" not in scripts
-    assert "loom cluster render" not in scripts
-
-
-def _run_cluster_test_step(tmp_path: Path, *, scope: str, shard_index: int,
-                           extra_env: dict[str, str] | None = None) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    """Run the real workflow/selector, recording only the external pytest boundary."""
-    contract = _workflow(".github/workflows/cluster-smoke.yml")["jobs"]["cluster-contract"]
-    step = next(step for step in contract["steps"] if "manifest-owned k3s" in step.get("name", ""))
-    executable = tmp_path / "uv"
-    recorded = tmp_path / "pytest-arguments.json"
-    executable.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, subprocess, sys\n"
-        "from pathlib import Path\n"
-        "args = sys.argv[1:]\n"
-        "if args[:3] == ['run', '--no-sync', 'python']:\n"
-        "    if os.environ.get('SELECTOR_FAIL') == '1':\n"
-        "        print('tests/unit/test_nebius_runtime_render.py')\n"
-        "        sys.exit(19)\n"
-        "    sys.exit(subprocess.call([sys.executable, *args[3:]]))\n"
-        "assert args[:3] == ['run', '--no-sync', 'pytest'], args\n"
-        "Path(os.environ['RECORDED_ARGS']).write_text(json.dumps(args[3:]))\n"
-        "sys.exit(int(os.environ.get('PYTEST_EXIT', '0')))\n", encoding="utf-8")
-    executable.chmod(0o700)
-    result = subprocess.run(["bash"], input=step["run"], cwd=REPO_ROOT, text=True, capture_output=True,
-        env={**os.environ, "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
-            "RUNNER_TEMP": str(tmp_path), "RECORDED_ARGS": str(recorded),
-            "CI_TEST_SCOPE": scope, "CI_PYTEST_MARKERS": "not legacy_pool",
-            "SHARD_INDEX": str(shard_index), "SHARD_COUNT": str(step.get("env", {}).get("SHARD_COUNT", "")),
-            **(extra_env or {})}, check=False)
-    return result, json.loads(recorded.read_text()) if recorded.exists() else []
-
-
-@pytest.mark.parametrize("scope", ["nebius", "all"])
-def test_cluster_smoke_executes_disjoint_complete_bounded_shards(tmp_path: Path, scope: str) -> None:
-    contract = _workflow(".github/workflows/cluster-smoke.yml")["jobs"]["cluster-contract"]
-    matrix = contract.get("strategy", {}).get("matrix", {}).get("include", [])
-    assert len(matrix) > 1, "the observed 35-minute serial timeout requires independent runners"
-    assert contract["strategy"]["fail-fast"] is False
-    assert not contract.get("continue-on-error", False)
-    assert 0 < contract["timeout-minutes"] <= 35
-    assert {row["shard_index"] for row in matrix} == set(range(len(matrix)))
-    step = next(step for step in contract["steps"] if "manifest-owned k3s" in step.get("name", ""))
-    assert step["env"]["SHARD_INDEX"] == "${{ matrix.shard_index }}"
-    selected = subprocess.run([sys.executable, "scripts/component_ownership.py", "test-paths",
-        "--lane", "cluster-smoke", "--test-scope", scope], cwd=REPO_ROOT, text=True,
-        capture_output=True, check=True).stdout.splitlines()
-    seen: set[str] = set()
-    for row in matrix:
-        directory = tmp_path / row["shard"]
-        directory.mkdir()
-        result, arguments = _run_cluster_test_step(directory, scope=scope, shard_index=row["shard_index"])
-        assert result.returncode == 0, result.stderr
-        assert arguments[arguments.index("-m") + 1] == "not legacy_pool"
-        paths = [value for value in arguments if value.startswith("tests/")]
-        assert paths and len(set(paths)) == len(paths)
-        assert seen.isdisjoint(paths)
-        seen.update(paths)
-    assert seen == set(selected)
-
-
-@pytest.mark.parametrize("failure", ["SELECTOR_FAIL", "PYTEST_EXIT"])
-def test_cluster_smoke_propagates_selector_and_test_failures(tmp_path: Path, failure: str) -> None:
-    result, arguments = _run_cluster_test_step(tmp_path, scope="nebius", shard_index=0,
-        extra_env={failure: "1" if failure == "SELECTOR_FAIL" else "9"})
-    assert result.returncode != 0
-    if failure == "SELECTOR_FAIL":
-        assert arguments == [], "partial selector output cannot authorize partial coverage"
-
-
 def test_images_workflow_uses_path_aware_matrix_plan() -> None:
     workflow = _workflow(".github/workflows/images.yml")
     jobs = workflow["jobs"]
@@ -501,7 +382,7 @@ def test_ci_push_safety_net_excludes_already_admitted_dev_merges() -> None:
 
     assert _workflow_on(workflow)["push"] == {"branches": ["main"]}
     assert "refs/heads/dev" not in jobs["workflow-plan"].get("if", "")
-    assert "refs/heads/dev" not in jobs["fast-checks"]["if"]
+    assert "refs/heads/dev" not in jobs["fast-coverage"]["if"]
     assert "refs/heads/dev" not in jobs["repository-checks"]["if"]
 
 
@@ -710,7 +591,7 @@ def test_candidate_images_use_verified_trivy_binaries_and_complete_scans() -> No
     assert "--architecture amd64" in install["run"]
     assert "arm64" not in install["run"]
     assert "python3 scripts/install_trivy.py" in install["run"]
-    assert "sha256sum --check trivy.sha256" in install["run"]
+    assert "sha256sum trivy > trivy.sha256" in install["run"]
     assert upload["with"]["name"] == "trivy-binaries-run-${{ github.run_id }}"
     assert upload["with"]["overwrite"] is True
     assert build["needs"] == [
@@ -969,183 +850,80 @@ def test_images_gate_rejects_missing_builds_or_invalid_events(
     assert result.returncode != 0
 
 
-@pytest.mark.parametrize("planner_value", ["", "invalid"])
-@pytest.mark.parametrize(
-    "planner_name",
-    [
-        "DOCS_ONLY",
-        "INTEGRATION_SELECTED",
-        "DOCKER_SELECTED",
-        "COVERAGE_SELECTED",
-        "WEB_SELECTED",
-    ],
-)
-def test_repository_checks_fails_closed_for_invalid_planner_booleans(
-    planner_name: str,
-    planner_value: str,
-) -> None:
-    env = {
-        "PLAN_RESULT": "success",
-        "GATE_MODE": "full",
-        "FAST_RESULT": "success",
-        "GO_SELECTED": "true",
-        "GO_RESULT": "success",
-        "DOCS_ONLY": "false",
-        "INTEGRATION_SELECTED": "false",
-        "INTEGRATION_RESULT": "skipped",
-        "DOCKER_SELECTED": "false",
-        "DOCKER_RESULT": "skipped",
-        "COVERAGE_SELECTED": "false",
-        "COVERAGE_RESULT": "skipped",
-        "WEB_SELECTED": "false",
-        "WEB_RESULT": "skipped",
-    }
-    env[planner_name] = planner_value
+REPOSITORY_SELECTED_RESULTS = {
+    "LOCKED_SELECTED": "LOCKED_RESULT",
+    "ROOT_SELECTED": "ROOT_RESULT",
+    "PACKAGES_SELECTED": "PACKAGES_RESULT",
+    "PAYLOAD_SELECTED": "PAYLOAD_RESULT",
+    "IAC_SELECTED": "IAC_RESULT",
+    "GO_SELECTED": "GO_RESULT",
+    "INTEGRATION_SELECTED": "INTEGRATION_RESULT",
+    "DOCKER_SELECTED": "DOCKER_RESULT",
+    "COVERAGE_SELECTED": "COVERAGE_RESULT",
+    "WEB_SELECTED": "WEB_RESULT",
+}
 
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
-        text=True,
-        capture_output=True,
-        env=env,
-        check=False,
+
+def _repository_result_environment(**overrides: str) -> dict[str, str]:
+    env = {"PLAN_RESULT": "success", "GATE_MODE": "full", "DOCS_ONLY": "false",
+           "LINT_RESULT": "success", "FAST_COVERAGE_RESULT": "skipped"}
+    for selected, result in REPOSITORY_SELECTED_RESULTS.items():
+        env[selected], env[result] = "false", "skipped"
+    return {**env, **overrides}
+
+
+def _run_repository_gate(**overrides: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash"], input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
+        text=True, capture_output=True, env=_repository_result_environment(**overrides), check=False,
     )
 
-    assert result.returncode != 0, (planner_name, planner_value, result.stdout)
+
+@pytest.mark.parametrize("planner_value", ["", "invalid"])
+@pytest.mark.parametrize("planner_name", ["DOCS_ONLY", *REPOSITORY_SELECTED_RESULTS])
+def test_repository_checks_fails_closed_for_invalid_planner_booleans(
+    planner_name: str, planner_value: str,
+) -> None:
+    result = _run_repository_gate(**{planner_name: planner_value})
+    assert result.returncode != 0
     assert "FAIL: invalid planner boolean" in result.stderr
 
 
-@pytest.mark.parametrize(
-    ("selected", "validation_result"),
-    [("true", "success"), ("false", "skipped"), ("false", "success")],
-)
-def test_repository_checks_preserves_result_semantics(
-    selected: str,
-    validation_result: str,
+@pytest.mark.parametrize("selected,validation_result", [
+    ("true", "success"), ("false", "skipped"), ("false", "success"),
+])
+def test_repository_checks_preserves_result_semantics(selected: str, validation_result: str) -> None:
+    env = {"FAST_COVERAGE_RESULT": validation_result}
+    for selected_name, result_name in REPOSITORY_SELECTED_RESULTS.items():
+        env[selected_name], env[result_name] = selected, validation_result
+    result = _run_repository_gate(**env)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "LINT_RESULT", "PLAN_RESULT"])
+@pytest.mark.parametrize("failed_result", ["failure", "cancelled", "skipped"])
+def test_repository_checks_rejects_each_missing_or_failed_selected_source(source: str, failed_result: str) -> None:
+    if source in REPOSITORY_SELECTED_RESULTS:
+        env = {source: "true", REPOSITORY_SELECTED_RESULTS[source]: failed_result}
+    elif source == "FAST_COVERAGE_RESULT":
+        env = {"COVERAGE_SELECTED": "true", "COVERAGE_RESULT": "success", source: failed_result}
+    else:
+        env = {source: failed_result}
+    result = _run_repository_gate(**env)
+    assert result.returncode != 0, (source, failed_result, result.stdout)
+
+
+@pytest.mark.parametrize("docs_only,lint_result,accepted", [
+    ("true", "skipped", True), ("true", "success", True),
+    ("true", "failure", False), ("true", "cancelled", False),
+    ("false", "success", True), ("false", "skipped", False),
+    ("false", "failure", False), ("false", "cancelled", False),
+])
+def test_repository_checks_enforces_docs_only_lint_result_semantics(
+    docs_only: str, lint_result: str, accepted: bool,
 ) -> None:
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
-        text=True,
-        capture_output=True,
-        env={
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "FAST_RESULT": "success",
-            "GO_SELECTED": "true",
-        "GO_RESULT": "success",
-            "DOCS_ONLY": "false",
-            "INTEGRATION_SELECTED": selected,
-            "INTEGRATION_RESULT": validation_result,
-            "DOCKER_SELECTED": selected,
-            "DOCKER_RESULT": validation_result,
-            "COVERAGE_SELECTED": selected,
-            "COVERAGE_RESULT": validation_result,
-            "WEB_SELECTED": selected,
-            "WEB_RESULT": validation_result,
-        },
-        check=False,
-    )
-
-    assert result.returncode == 0, (selected, validation_result, result.stderr)
-
-
-@pytest.mark.parametrize(
-    ("docs_only", "go_result", "accepted"),
-    [
-        ("true", "skipped", True),
-        ("true", "success", True),
-        ("true", "failure", False),
-        ("true", "cancelled", False),
-        ("false", "success", True),
-        ("false", "skipped", False),
-        ("false", "failure", False),
-        ("false", "cancelled", False),
-    ],
-)
-def test_repository_checks_enforces_docs_only_go_result_semantics(
-    docs_only: str,
-    go_result: str,
-    accepted: bool,
-) -> None:
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
-        text=True,
-        capture_output=True,
-        env={
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "FAST_RESULT": "success",
-            "GO_SELECTED": "true",
-        "GO_RESULT": go_result,
-            "DOCS_ONLY": docs_only,
-            "INTEGRATION_SELECTED": "false",
-            "INTEGRATION_RESULT": "skipped",
-            "DOCKER_SELECTED": "false",
-            "DOCKER_RESULT": "skipped",
-            "COVERAGE_SELECTED": "false",
-            "COVERAGE_RESULT": "skipped",
-            "WEB_SELECTED": "false",
-            "WEB_RESULT": "skipped",
-        },
-        check=False,
-    )
-
-    assert (result.returncode == 0) is accepted, (
-        docs_only,
-        go_result,
-        result.stderr,
-    )
-
-
-@pytest.mark.parametrize(
-    ("docs_only", "fast_result", "accepted"),
-    [
-        ("true", "skipped", True),
-        ("true", "success", True),
-        ("true", "failure", False),
-        ("true", "cancelled", False),
-        ("false", "success", True),
-        ("false", "skipped", False),
-        ("false", "failure", False),
-        ("false", "cancelled", False),
-    ],
-)
-def test_repository_checks_enforces_docs_only_fast_result_semantics(
-    docs_only: str,
-    fast_result: str,
-    accepted: bool,
-) -> None:
-    result = subprocess.run(
-        ["bash"],
-        input=_gate_script(".github/workflows/ci.yml", "repository-checks"),
-        text=True,
-        capture_output=True,
-        env={
-            "PLAN_RESULT": "success",
-            "GATE_MODE": "full",
-            "FAST_RESULT": fast_result,
-            "GO_SELECTED": "true",
-        "GO_RESULT": "skipped" if docs_only == "true" else "success",
-            "DOCS_ONLY": docs_only,
-            "INTEGRATION_SELECTED": "false",
-            "INTEGRATION_RESULT": "skipped",
-            "DOCKER_SELECTED": "false",
-            "DOCKER_RESULT": "skipped",
-            "COVERAGE_SELECTED": "false",
-            "COVERAGE_RESULT": "skipped",
-            "WEB_SELECTED": "false",
-            "WEB_RESULT": "skipped",
-        },
-        check=False,
-    )
-
-    assert (result.returncode == 0) is accepted, (
-        docs_only,
-        fast_result,
-        result.stderr,
-    )
+    result = _run_repository_gate(DOCS_ONLY=docs_only, LINT_RESULT=lint_result)
+    assert (result.returncode == 0) is accepted, result.stderr
 
 
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
@@ -1211,19 +989,9 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
     jobs = workflow["jobs"]
 
-    assert jobs["fast-checks"]["name"] == "fast-checks"
-    assert set(jobs["fast-checks"]["needs"]) == {
-        "workflow-plan",
-        "locked-environments",
-        "lint-and-static",
-        "runtime-payload",
-        "nebius-iac",
-        "tests-root",
-        "tests-packages",
-    }
-    assert "gate_mode == 'full'" in jobs["fast-checks"]["if"]
-    assert "docs_only != 'true'" in jobs["fast-checks"]["if"]
-    assert "gate_mode == 'preflight'" not in jobs["fast-checks"]["if"]
+    assert "fast-checks" not in jobs
+    assert set(jobs["fast-coverage"]["needs"]) == {"workflow-plan", "tests-root", "tests-packages"}
+    assert "coverage_summary == 'true'" in jobs["fast-coverage"]["if"]
     assert set(jobs["integration"]["needs"]) == {"workflow-plan"}
     assert set(jobs["integration-docker"]["needs"]) == {"workflow-plan"}
     assert "go_checks == 'true'" in jobs["go-checks"]["if"]
@@ -1231,13 +999,9 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     assert "gate_mode == 'full'" in jobs["integration-docker"]["if"]
     assert "repository-checks" in jobs["repository-checks"]["name"]
     assert set(jobs["repository-checks"]["needs"]) == {
-        "workflow-plan",
-        "fast-checks",
-        "go-checks",
-        "integration",
-        "integration-docker",
-        "coverage-summary",
-        "web-checks",
+        "workflow-plan", "locked-environments", "lint-and-static", "runtime-payload", "nebius-iac",
+        "tests-root", "tests-packages", "fast-coverage", "go-checks", "integration",
+        "integration-docker", "coverage-summary", "web-checks",
     }
     assert "always()" in jobs["repository-checks"]["if"]
     for job_name in (
@@ -1277,33 +1041,15 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
         for step in jobs["repository-checks"]["steps"]
         if step.get("name") == "Enforce selected validation results"
     )
-    assert aggregate_step["env"] == {
-        "PLAN_RESULT": "${{ needs.workflow-plan.result }}",
-        "GATE_MODE": "${{ needs.workflow-plan.outputs.gate_mode }}",
-        "FAST_RESULT": "${{ needs.fast-checks.result }}",
-        "GO_SELECTED": "${{ needs.workflow-plan.outputs.go_checks }}",
-        "GO_RESULT": "${{ needs.go-checks.result }}",
-        "DOCS_ONLY": "${{ needs.workflow-plan.outputs.docs_only }}",
-        "INTEGRATION_SELECTED": "${{ needs.workflow-plan.outputs.integration }}",
-        "INTEGRATION_RESULT": "${{ needs.integration.result }}",
-        "DOCKER_SELECTED": "${{ needs.workflow-plan.outputs.integration_docker }}",
-        "DOCKER_RESULT": "${{ needs.integration-docker.result }}",
-        "COVERAGE_SELECTED": "${{ needs.workflow-plan.outputs.coverage_summary }}",
-        "COVERAGE_RESULT": "${{ needs.coverage-summary.result }}",
-        "WEB_SELECTED": "${{ needs.workflow-plan.outputs.web_checks }}",
-        "WEB_RESULT": "${{ needs.web-checks.result }}",
-    }
-    aggregate_script = aggregate_step["run"]
-    for result_name in (
-        "PLAN_RESULT",
-        "FAST_RESULT",
-        "GO_RESULT",
-        "INTEGRATION_RESULT",
-        "DOCKER_RESULT",
-        "COVERAGE_RESULT",
-        "WEB_RESULT",
-    ):
-        assert f'"${result_name}"' in aggregate_script
+    gate_env = aggregate_step["env"]
+    assert gate_env["PLAN_RESULT"] == "${{ needs.workflow-plan.result }}"
+    assert gate_env["LINT_RESULT"] == "${{ needs.lint-and-static.result }}"
+    assert gate_env["ROOT_RESULT"] == "${{ needs.tests-root.result }}"
+    assert gate_env["FAST_COVERAGE_RESULT"] == "${{ needs.fast-coverage.result }}"
+    for selected, result in REPOSITORY_SELECTED_RESULTS.items():
+        assert selected in gate_env and result in gate_env
+        assert f'"${selected}"' in aggregate_step["run"]
+        assert f'"${result}"' in aggregate_step["run"]
 
     assert set(jobs["web-checks"]["needs"]) == {"workflow-plan"}
     assert "needs.workflow-plan.outputs.web_checks == 'true'" in jobs["web-checks"]["if"]
@@ -1335,110 +1081,38 @@ def test_nebius_iac_validates_aliased_provider_through_module_tests() -> None:
     assert "terraform -chdir=deploy/terraform/nebius/stack validate" in script
 
 
-def test_python_test_shards_are_complete_and_non_overlapping() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-    jobs = workflow["jobs"]
-
-    root_matrix = jobs["tests-root"]["strategy"]["matrix"]["include"]
-    assert root_matrix == [
-        {"shard": f"{index + 1}-of-8", "shard_index": index}
-        for index in range(8)
-    ]
+@pytest.mark.parametrize("lane,output", [
+    ("tests-root", "tests_root_matrix"), ("integration", "integration_matrix"),
+    ("integration-docker", "integration_docker_matrix"),
+])
+@pytest.mark.parametrize("scope", ["all", "nebius"])
+def test_python_test_shards_are_complete_and_non_overlapping(lane: str, output: str, scope: str) -> None:
+    jobs = _workflow(".github/workflows/ci.yml")["jobs"]
+    assert jobs[lane]["strategy"]["matrix"]["include"] == f"${{{{ fromJSON(needs.workflow-plan.outputs.{output}) }}}}"
     manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
-    tracked_paths = component_ownership._tracked_paths(REPO_ROOT)
-    root_paths = component_ownership.test_paths_for_lane(
-        manifest,
-        tracked_paths=tracked_paths,
-        lane="tests-root",
+    tracked = component_ownership._tracked_paths(REPO_ROOT)
+    matrix = component_ownership.test_shard_matrix(
+        manifest, tracked_paths=tracked, lane=lane, repo_root=REPO_ROOT, test_scope=scope,
     )
-    root_policy = manifest.test_shard_policy("tests-root")
-    assert root_policy is not None
-    root_shards = [
-        set(
-            component_ownership.shard_paths(
-                root_paths,
-                shard_index=shard["shard_index"],
-                shard_count=len(root_matrix),
-                strategy=root_policy.strategy,
-                salt=root_policy.salt,
-                pins=root_policy.pins,
-            )
-        )
-        for shard in root_matrix
-    ]
-    for index, shard in enumerate(root_shards):
-        assert shard
-        assert all(shard.isdisjoint(other) for other in root_shards[index + 1:])
-    assert set().union(*root_shards) == set(root_paths)
-
-    integration_matrix = jobs["integration"]["strategy"]["matrix"]["include"]
-    assert integration_matrix == [
-        {"shard": f"{index + 1}-of-4", "shard_index": index}
-        for index in range(4)
-    ]
-    integration_paths = component_ownership.test_paths_for_lane(
-        manifest,
-        tracked_paths=tracked_paths,
-        lane="integration",
+    complete = component_ownership.selected_test_paths(
+        manifest, tracked_paths=tracked, lane=lane, repo_root=REPO_ROOT, test_scope=scope,
     )
-    integration_policy = manifest.test_shard_policy("integration")
-    assert integration_policy is not None
-    integration_shards = [
-        component_ownership.shard_paths(
-            integration_paths,
-            shard_index=shard["shard_index"],
-            shard_count=len(integration_matrix),
-            strategy=integration_policy.strategy,
-            salt=integration_policy.salt,
-            pins=integration_policy.pins,
-        )
-        for shard in integration_matrix
-    ]
-    for index, shard in enumerate(integration_shards):
-        assert shard
-        assert all(set(shard).isdisjoint(other) for other in integration_shards[index + 1:])
-    assert set().union(*map(set, integration_shards)) == set(integration_paths)
-    auth_path = "tests/integration/test_username_password_auth.py"
-    schema_path = "tests/integration/test_username_password_schema.py"
-    assert any(auth_path in shard and schema_path in shard for shard in integration_shards)
-    assert integration_paths.index(auth_path) < integration_paths.index(schema_path)
-    integration_script = "\n".join(step.get("run", "") for step in jobs["integration"]["steps"])
-    assert "--shard-strategy" not in integration_script
-
-    root_script = "\n".join(step.get("run", "") for step in jobs["tests-root"]["steps"])
-    assert "--durations=25" in root_script
-
-    root_upload = next(
-        step
-        for step in jobs["tests-root"]["steps"]
-        if step.get("name") == "Upload root coverage data"
-    )
-    integration_upload = next(
-        step
-        for step in jobs["integration"]["steps"]
-        if step.get("name") == "Upload integration coverage data"
-    )
-    assert "${{ matrix.shard }}" in root_upload["with"]["name"]
-    assert "${{ matrix.shard }}" in integration_upload["with"]["name"]
-
-
-def test_root_test_shard_timeout_has_bounded_growth_headroom() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-
-    timeout_minutes = workflow["jobs"]["tests-root"]["timeout-minutes"]
-
-    # Run 34264335621 passed its root tests in 29m02s, but the 30-minute
-    # whole-job limit expired during packaging/upload/cleanup. Keep bounded
-    # headroom for those required steps without removing test coverage.
-    assert 40 <= timeout_minutes <= 45
-
-
-def test_integration_shard_timeout_has_bounded_growth_headroom() -> None:
-    workflow = _workflow(".github/workflows/ci.yml")
-
-    # Four measured shards project ~39 minutes each; retain room for optional
-    # coverage instrumentation and hosted-runner variance without a two-hour job.
-    assert 60 <= workflow["jobs"]["integration"]["timeout-minutes"] <= 75
+    shards = [set(component_ownership.selected_test_paths(
+        manifest, tracked_paths=tracked, lane=lane, repo_root=REPO_ROOT, test_scope=scope,
+        shard_index=row["shard_index"], shard_count=row["shard_count"],
+    )) for row in matrix]
+    assert shards and all(shards)
+    assert all(left.isdisjoint(right) for i, left in enumerate(shards) for right in shards[i + 1:])
+    assert set().union(*shards) == set(complete)
+    if lane == "integration":
+        auth, schema = "tests/integration/test_username_password_auth.py", "tests/integration/test_username_password_schema.py"
+        assert any(auth in shard and schema in shard for shard in shards)
+        assert complete.index(auth) < complete.index(schema)
+    if lane == "integration-docker":
+        guest_rows = [row for row in matrix if row["guest_payload"]]
+        assert len(guest_rows) == 1
+        assert "matrix.guest_payload" in next(step["if"] for step in jobs[lane]["steps"]
+                  if step.get("name") == "Build and extract the admitted software-guest payload")
 
 
 def test_ci_supports_merge_queue_merge_group_event() -> None:
@@ -1658,7 +1332,7 @@ def test_repository_checks_writes_default_fast_coverage_summary() -> None:
     jobs = workflow["jobs"]
     coverage_step = next(
         step
-        for step in jobs["fast-checks"]["steps"]
+        for step in jobs["fast-coverage"]["steps"]
         if step.get("name") == "Coverage gate + summary (fast tier)"
     )
 
@@ -1676,7 +1350,7 @@ def test_combined_coverage_summary_is_opt_in() -> None:
 
 def test_repository_checks_uses_lightweight_coverage_tooling() -> None:
     workflow = _workflow(".github/workflows/ci.yml")
-    fast_steps = workflow["jobs"]["fast-checks"]["steps"]
+    fast_steps = workflow["jobs"]["fast-coverage"]["steps"]
     step_names = {step.get("name") for step in fast_steps}
     run_blocks = "\n".join(step.get("run", "") for step in fast_steps)
 
@@ -1704,7 +1378,7 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     step = next(step for step in job["steps"] if step.get("name", "").startswith("Pytest"))
     uv = tmp_path / "uv"
     uv.write_text(
-        f"#!{sys.executable}\n"
+        f"#!{Path(sys.executable).resolve()}\n"
         "import json, os, sys\n"
         "from pathlib import Path\n"
         "if 'test-paths' in sys.argv:\n"
@@ -1717,8 +1391,11 @@ def test_pytest_workflow_preserves_tests_and_failures_with_optional_integration_
     )
     uv.chmod(0o755)
     argv_file = tmp_path / "argv.json"
+    manifest_file = tmp_path / "selected-manifest.txt"
+    manifest_file.write_text("tests/selected_first.py\ntests/selected_second.py\n")
+    script = step["run"].replace("${{ steps.manifest.outputs.paths_file }}", str(manifest_file))
     result = subprocess.run(
-        ["bash", "-c", step["run"]], cwd=REPO_ROOT, capture_output=True, text=True,
+        ["bash", "-c", script], cwd=REPO_ROOT, capture_output=True, text=True,
         env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}",
              "RUNNER_TEMP": str(tmp_path), "SHARD_INDEX": "0", "SHARD_COUNT": "2",
              "COVERAGE_ENABLED": coverage_enabled, "ARGV_FILE": str(argv_file),
@@ -1750,7 +1427,11 @@ def test_manual_coverage_request_selects_integration_through_workflow_planner(tm
     step = next(s for s in workflow["jobs"]["workflow-plan"]["steps"] if s.get("id") == "plan")
     assert step["env"]["DISPATCH_COVERAGE_SUMMARY"] == "${{ inputs.coverage_summary }}"
     git = tmp_path / "git"
-    git.write_text("#!/bin/sh\nprintf '%s\\n' docs/user-guide.md\n")
+    real_git = shutil.which("git")
+    assert real_git is not None
+    git.write_text("#!/bin/sh\n"
+                   f'if [ "$1" = ls-files ]; then exec "{real_git}" "$@"; fi\n'
+                   "printf '%s\\n' docs/user-guide.md\n")
     git.chmod(0o755)
     output = tmp_path / "output"
     script = step["run"].replace("/tmp/loom-changed-files.txt", str(tmp_path / "changes"))

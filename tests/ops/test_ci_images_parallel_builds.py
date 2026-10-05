@@ -33,12 +33,6 @@ def _jobs() -> dict[str, Any]:
     return yaml.safe_load((ROOT / ".github/workflows/images.yml").read_text())["jobs"]
 
 
-def test_native_builds_use_the_complete_supported_matrix() -> None:
-    jobs = _jobs()
-    assert jobs["build"]["needs"] == ["plan", "trivy-binary"]
-    assert jobs["build"]["strategy"]["matrix"]["include"] == "${{ fromJSON(needs.plan.outputs.ordinary_builds) }}"
-
-
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
 def test_docs_plan_skips_builds_except_explicit_manual_validation(
     tmp_path: Path, event: str
@@ -102,13 +96,10 @@ def test_gate_enforces_selected_build_results(
     assert (result.returncode == 0) == (fault is None), result.stderr
 
 
-@pytest.mark.parametrize("job", ["build"])
-def test_parallel_builds_keep_native_scan_and_untrusted_permissions(job: str) -> None:
-    jobs = _jobs()
-    build = jobs[job]
+def test_parallel_builds_keep_native_scan_and_untrusted_permissions() -> None:
+    build = _jobs()["build"]
     assert build["permissions"] == {"contents": "read"}
     assert build["strategy"]["fail-fast"] is False
-    assert build["steps"] == jobs["build"]["steps"]
     scripts = "\n".join(step.get("run", "") for step in build["steps"])
     assert "scripts/validate_trivy_release_report.py" in scripts
     assert "--cache-to" not in scripts
@@ -141,18 +132,11 @@ def test_gate_rejects_missing_selected_matrix_after_dependency_failure(
         check=False,
     )
     assert completed.returncode != 0
-
-
-
-
-
-
-@pytest.mark.parametrize("job", ["build"])
 @pytest.mark.parametrize("failed_dependency", ["plan", "trivy-binary"])
 def test_untrusted_builds_do_not_run_after_required_dependency_failure(
-    job: str, failed_dependency: str
+    failed_dependency: str,
 ) -> None:
-    selected = _jobs()[job]
+    selected = _jobs()["build"]
     values = {f"needs.{dependency}.result": "success" for dependency in selected["needs"]}
     values.update(
         {

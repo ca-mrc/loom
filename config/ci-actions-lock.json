@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
   "actions": {
+    "actions/cache": {
+      "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+      "version": "v4.3.0"
+    },
     "actions/checkout": {
       "sha": "93cb6efe18208431cddfb8368fd83d5badbf9bfd",
       "version": "v5"

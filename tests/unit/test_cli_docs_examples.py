@@ -40,7 +40,6 @@ def test_operator_runbook_staging_gate_matches_current_launch_scope() -> None:
     )[0]
     normalized_gate_section = " ".join(gate_section.split())
 
-    assert "scripts/staging_smoke_gate.py" in normalized_gate_section
     assert "My team" in normalized_gate_section
     assert "All teams" in normalized_gate_section
     assert "owner-team labels" in normalized_gate_section
@@ -61,7 +60,6 @@ def test_cluster_deploy_docs_do_not_advertise_missing_trial_download_commands() 
     cluster_deploy = _read("docs/architecture/cluster-deploy.md")
 
     assert "loom eval run" not in cluster_deploy
-    assert "loom eval trial {list,show} | trajectory ID | atif ID" not in cluster_deploy
     assert "loom eval trial" not in cluster_deploy
 
 

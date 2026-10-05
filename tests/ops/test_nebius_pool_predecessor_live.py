@@ -28,8 +28,8 @@ from tests.ops.test_nebius_pool_cutover_entry import platform_inputs as platform
 from tests.ops.test_nebius_pool_cutover_entry import private_cutover as private_cutover
 from tests.ops.test_nebius_pool_cutover_entry import private_upgrade as private_upgrade
 from tests.ops.test_nebius_pool_cutover_entry import retirement_inputs as retirement_inputs
-from tests.ops.test_nebius_pool_cutover_entry import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_predecessor import finish_cutover, pool_refresh_http
+from tests.support.pool_transport import runtime_inputs as runtime_inputs
 
 
 @pytest.mark.timeout(900)
@@ -55,8 +55,11 @@ def test_pool_refresh_live_preserves_open_work_and_rejects_authority_drift(priva
         assert external.reviews
         # Live DB and provider failures must propagate without leaking their
         # payload. An open global pool is deliberately not required to be idle.
-        failures = ['pool', 'credentials', 'guard', 'late_guard', 'database_role',
-            'provider', 'gateway_rights', 'legacy_rights'] + (['global_busy'] if legacy else [])
+        # Both outcomes have different pool/credential and effective-rights
+        # contracts. Provider, database-role and late guard readback use the
+        # same common reader; exercise those branches once in the global case.
+        failures = ['pool', 'credentials', 'gateway_rights', 'legacy_rights']
+        failures += ['global_busy'] if legacy else ['guard', 'late_guard', 'database_role', 'provider']
         for failure in failures:
             external.failure = failure
             with pytest.raises(ValueError, match=r'^pool_refresh_live_unqualified$'):
@@ -65,7 +68,10 @@ def test_pool_refresh_live_preserves_open_work_and_rejects_authority_drift(priva
         gateway = 'Deployment:' + context.request.fencing.retirement.migration.registration.binding.namespace + ':loom-pool-gateway'
         manager, participant = _key(context.request.manager), _key(context.request.services[0])
         material = next(key for key, row in objects.items() if row['kind'] == 'Secret')
-        for key in (manager, participant, gateway, material):
+        # All retained resource kinds are checked by the common reader. The
+        # legacy outcome additionally checks its uniquely stopped gateway.
+        identities = (gateway,) if legacy else (manager, participant, gateway, material)
+        for key in identities:
             external.objects[key]['metadata']['uid'] = str(uuid4())
             with pytest.raises(ValueError, match=r'^pool_refresh_live_unqualified$'):
                 api.qualify()

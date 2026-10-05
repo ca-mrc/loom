@@ -72,6 +72,22 @@
           "version": "v8.2.0"
         }
       }
+    },
+    {
+      "name": "fixture-cache",
+      "actions": [
+        "actions/cache"
+      ],
+      "compatibility_tests": [
+        "uv run --no-sync pytest -q tests/unit/test_minio_image_preparation.py tests/ops/test_ci_secret_isolation.py",
+        "actionlint .github/workflows/ci.yml"
+      ],
+      "rollback": {
+        "actions/cache": {
+          "sha": "0057852bfaa89a56745cba8c7296529d2fc39830",
+          "version": "v4.3.0"
+        }
+      }
     }
   ]
 }

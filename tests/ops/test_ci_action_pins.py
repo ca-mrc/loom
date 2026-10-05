@@ -82,14 +82,6 @@ def test_repository_workflows_match_the_verified_action_lock() -> None:
     assert result.errors == ()
     assert result.workflow_count > 0
     assert result.reference_count > 0
-    assert set(result.remote_actions) == {
-        "actions/checkout",
-        "actions/download-artifact",
-        "actions/setup-go",
-        "actions/setup-node",
-        "actions/upload-artifact",
-        "astral-sh/setup-uv",
-    }
 
 
 def test_repository_workflows_use_only_actions_allowed_by_github_policy() -> None:

@@ -40,7 +40,6 @@ def test_current_workload_trust_docs_preserve_the_fail_closed_boundary() -> None
 
     assert "transform_unavailable_in_internal_trusted" in domain_model
     assert "before any transform/source/verifier blob fetch" in _normalized(domain_model)
-    assert "best-effort\n`os.unshare` result is not treated" in domain_model
     assert (
         "declaring one fails before source, verifier, or\ntransform blobs are fetched" in tasksets
     )

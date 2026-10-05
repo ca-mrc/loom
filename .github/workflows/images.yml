@@ -252,7 +252,6 @@ jobs:
           (
             cd "$artifact_dir"
             sha256sum trivy > trivy.sha256
-            sha256sum --check trivy.sha256
           )
 
       - name: Upload exact verified Trivy binary

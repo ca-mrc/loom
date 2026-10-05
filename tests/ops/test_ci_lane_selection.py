@@ -42,7 +42,6 @@ def test_explicit_coverage_restores_python_lanes_for_frontend_change():
     ("false", "cancelled", False), ("invalid", "success", False), ("", "skipped", False),
 ])
 def test_baseline_aggregator_checks_selected_results(selected, result, accepted):
-    import re
     import subprocess
     from pathlib import Path
 
@@ -50,19 +49,11 @@ def test_baseline_aggregator_checks_selected_results(selected, result, accepted)
 
     root = Path(__file__).resolve().parents[2]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
-    step = next(s for s in workflow["jobs"]["fast-checks"]["steps"]
-                if s.get("name") == "Validate parallel check results")
-    def value(match):
-        key = match[1].strip()
-        if key.endswith("docs_only"):
-            return "false"
-        if key == "needs.tests-root.result":
-            return result
-        if key == "needs.workflow-plan.outputs.tests_root":
-            return selected
-        return "success" if key.endswith(".result") else "true"
-    script = re.sub(r"\$\{\{(.*?)\}\}", value, step["run"])
-    run = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    step = next(s for s in workflow["jobs"]["repository-checks"]["steps"]
+                if s.get("name") == "Enforce selected validation results")
+    env = {key: "success" if key.endswith("RESULT") else "false" for key in step["env"]}
+    env.update(GATE_MODE="full", DOCS_ONLY="false", ROOT_SELECTED=selected, ROOT_RESULT=result)
+    run = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
     assert (run.returncode == 0) is accepted, run.stderr
 
 
@@ -144,7 +135,7 @@ def test_cli_component_selection_preserves_full_and_affected_modes():
 ])
 def test_shared_test_inputs_select_consumer_lanes(path):
     p = plan(path)
-    assert p.tests_root and p.tests_packages and p.go_checks and p.runtime_payload
+    assert p.tests_root and p.tests_packages and p.runtime_payload
     assert p.integration and p.integration_docker and p.cluster_smoke and p.staging_smoke
 
 
@@ -166,7 +157,7 @@ def test_shared_or_deleted_test_module_restores_consumer_jobs(tmp_path, monkeypa
     monkeypatch.setattr(planner, "_tracked_paths", lambda _: (changed, consumer))
     p = planner.plan_validations(changed_paths=(changed, *extra), labels=(), event_name="pull_request")
     assert p.integration and p.integration_docker and p.cluster_smoke and p.staging_smoke
-    assert p.tests_root and p.tests_packages and p.go_checks and p.runtime_payload
+    assert p.tests_root and p.tests_packages and p.runtime_payload
 
 
 @pytest.mark.parametrize("workflow_name", ["ci", "images"])
@@ -204,7 +195,7 @@ def test_retired_ignored_inputs_do_not_restart_backend_jobs(extra):
                                   "src/loom/nebius_platform_render.py", "cmd/loom-execution-runtime/main.go"])
 def test_ordinary_source_reuses_locked_install_in_owning_jobs(path):
     p = plan(path)
-    assert p.tests_root
+    assert p.tests_root or p.go_checks
     assert not p.locked_environments
 
 

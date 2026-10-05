@@ -154,7 +154,7 @@ for (const role of Object.keys(routes) as BrowserRole[]) {
   }
 }
 
-test("exact prefix canonicalizes without losing the route", async ({
+test("exact prefix canonicalizes without losing the route", { tag: "@protocol" }, async ({
   apiHarness,
   browserHarness,
   page,

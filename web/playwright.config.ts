@@ -21,14 +21,17 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "chromium-tablet", use: { ...devices["Desktop Chrome"], viewport: { width: 768, height: 1024 } } },
-    { name: "chromium-laptop", use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
+    // Protocol cases exercise the built client once on desktop. Responsive,
+    // keyboard, layout, and accessibility cases still run in every viewport.
+    { name: "chromium-tablet", grepInvert: /@protocol/, use: { ...devices["Desktop Chrome"], viewport: { width: 768, height: 1024 } } },
+    { name: "chromium-laptop", grepInvert: /@protocol/, use: { ...devices["Desktop Chrome"], viewport: { width: 1280, height: 800 } } },
     {
       name: "chromium-desktop",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } },
     },
     {
       name: "chromium-mobile",
+      grepInvert: /@protocol/,
       use: { ...devices["Desktop Chrome"], viewport: { width: 390, height: 844 } },
     },
   ],

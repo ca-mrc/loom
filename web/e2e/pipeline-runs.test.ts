@@ -186,13 +186,32 @@ test("1000-stage Pipeline detail becomes interactive and keeps rows bounded", as
     await expect(page.getByText(`Cursor page ${pageNumber} · 200 StageRuns on this page`)).toBeVisible();
   }
   await expect(page.getByText("Cursor page 5 · 200 StageRuns on this page")).toBeVisible();
-  const openedAt = Date.now();
   const target = stageTable.getByRole("row", {
     name: /node-19 shard-0049/u,
   });
+  // Measure the browser's click-to-painted-details response. Playwright's
+  // scrolling/actionability work and assertion polling belong to the driver,
+  // and can consume this budget before the application receives the click.
+  await target.evaluate(row => {
+    row.addEventListener("click", () => {
+      performance.mark("loom-stage-drawer-open-start");
+      const observer = new MutationObserver(() => {
+        const heading = document.querySelector('[aria-label="Pipeline Stage details"] h3');
+        if (heading?.textContent !== "Attempts (0)" || heading.getClientRects().length === 0) return;
+        observer.disconnect();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          performance.measure("loom-stage-drawer-open", "loom-stage-drawer-open-start");
+        }));
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }, { capture: true, once: true });
+  });
   await target.click();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
-  expect(Date.now() - openedAt).toBeLessThanOrEqual(750);
+  await expect.poll(() => page.evaluate(() => performance.getEntriesByName("loom-stage-drawer-open").length)).toBe(1);
+  const drawerMs = await page.evaluate(() => performance.getEntriesByName("loom-stage-drawer-open").at(-1)?.duration
+    ?? Number.POSITIVE_INFINITY);
+  expect(drawerMs).toBeLessThanOrEqual(750);
   expect(scripts.has(`${browserHarness.routePrefix}/${chunks["src/components/artifacts/BehaviorRolloutLivePreview.tsx"].file}`)).toBe(false);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Attempts (0)" })).toBeVisible();
