@@ -31,7 +31,7 @@ HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource
 # the deployment's digest-pinned controller image (or a pinned version's).
 ControllerImage = Literal["service-runner", "harness-controller"]
 # The Gateway wire format the harness speaks; None for a model-free harness.
-GatewayProtocol = Literal["openai-chat-completions"]
+GatewayProtocol = Literal["openai-chat-completions", "openai-responses"]
 Readiness = Literal["ready", "unavailable"]
 
 # Trusted controller entry points. The sandbox module also owns the fixed

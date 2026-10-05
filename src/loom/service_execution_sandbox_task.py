@@ -193,6 +193,35 @@ def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
     return spec
 
 
+# The runtime broker replaces any caller credential with the Pod's workload
+# token, so installed agents only ever hold this fixed placeholder.
+WORKLOAD_PROXY_API_KEY = "loom_workload_proxy"
+
+
+def installed_agent_model_environment(
+    spec: HostedHarnessSpec, *, base_url_env: str, api_key_env: str,
+) -> dict[str, str]:
+    """Model access for an installed agent inside the task sandbox (#2310).
+
+    The agent reaches the Pod-local runtime broker over the shared loopback.
+    The broker forwards only canonical model routes, only during the agent
+    phase and before its deadline, with the Pod's own workload token. That
+    token is bound to the Trial's Provider Connection and never leaves the
+    trusted controller. Revocation is the end of the agent phase. Provider,
+    control-plane and grading credentials are never passed to the sandbox.
+    """
+    from urllib.parse import urlsplit
+
+    if spec.model != "required" or spec.gateway_protocol is None:
+        raise ServiceExecutionTaskError("selected harness does not use a model")
+    gateway = os.environ.get("LOOM_GATEWAY_URL", "")
+    url = urlsplit(gateway)
+    if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1"} or not url.port or url.path.strip("/"):
+        raise ServiceExecutionTaskError("installed agent model access requires the loopback broker")
+    # Both OpenAI protocols are served under /v1 (chat/completions, responses).
+    return {base_url_env: gateway.rstrip("/") + "/v1", api_key_env: WORKLOAD_PROXY_API_KEY}
+
+
 def _setup_proxy_environment() -> dict[str, str]:
     """The runtime's loopback egress proxy, which admits only install sources
     while the setup phase runs (#2310)."""

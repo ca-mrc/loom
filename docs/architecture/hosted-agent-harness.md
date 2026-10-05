@@ -235,6 +235,36 @@ phase. Egress is enforced twice:
 
 A failed install is classified `setup_error`, not an agent failure.
 
+### Model access
+
+An installed agent reaches the model through the Pod-local runtime broker.
+Containers in a Pod share one network namespace, so the task sandbox can reach
+the broker's loopback listener. `installed_agent_model_environment` gives the
+agent only that URL (`LOOM_GATEWAY_URL` + `/v1`) and the fixed placeholder key
+`loom_workload_proxy`. The authority chain:
+
+| Layer | Guarantee |
+|---|---|
+| Rendered Pod | Service-account token automount is off. The Pod identity token is projected only into the execution container. Task and verifier sandboxes mount only their socket, the read-only sandbox binary and their own network files, and receive no credential-bearing environment. |
+| Runtime broker | Forwards only canonical `POST` model routes: encoded, dot or empty path segments are rejected, so it is never a path to Gateway control endpoints. Replaces any caller `Authorization` with the Pod's workload token. Serves model calls only in the agent phase and before its deadline; setup and verifier phases cannot reopen access, and ending the agent phase cancels in-flight calls. |
+| Workload token | Minted per lease and phase, bound to the Trial's Provider Connection (`provider_connection_id_bound`). A caller-supplied `x-loom-provider-connection-id` that disagrees is rejected. |
+| Gateway | Builds upstream headers itself (decrypted connection key only). No caller header reaches the provider. |
+
+Revocation is the end of the agent phase. The token also expires with the
+lease deadline and is never present in the sandbox.
+
+Known limits, deliberate and shared with Terminus-2:
+
+- **The model is not bound in the token.** The Gateway serves any model the
+  Trial's connection offers. Materialization rejects a trace containing a call
+  under another model identity, so an off-model call fails the Trial. Its cost
+  is still incurred, within the lease deadline and the connection's limits.
+  Every installed harness's `trace_format` must keep that check.
+- **The broker's ledger route** (`/internal/loom/llm-calls`) is readable from
+  the sandbox. It returns only this Trial's own Gateway calls.
+- Guest (QEMU) sandboxes do not share the Pod loopback. Installed harnesses are
+  not admitted there.
+
 
 ## Verification is harness-independent
 
