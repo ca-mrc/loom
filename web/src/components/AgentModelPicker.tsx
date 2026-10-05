@@ -57,6 +57,9 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
     activeSource,
     availableSources,
   } = useAgentModelPicker(props);
+  const selectedVersion = selectedAgent?.versions?.find(
+    (version) => version.agent_version === value.agentVersion,
+  );
 
   const renderCatalogPanel = (): JSX.Element => (
     <div className="space-y-3">
@@ -418,12 +421,23 @@ export function AgentModelPicker(props: AgentModelPickerProps): JSX.Element {
               </option>
             ) : null}
             {selectedAgent?.versions?.map((version) => (
-              <option key={version.agent_version} value={version.agent_version}>
+              <option
+                key={version.agent_version}
+                value={version.agent_version}
+                disabled={version.readiness_status === "unavailable"}
+                title={version.readiness_message}
+              >
                 {version.agent_version} · Harbor {version.harbor_version} · bridge{" "}
                 {version.loom_bridge_revision}
+                {version.readiness_status === "unavailable" ? " (unavailable)" : ""}
               </option>
             ))}
           </select>
+          {selectedVersion?.readiness_status === "unavailable" ? (
+            <p role="alert" className="mt-1 text-xs text-amber-700">
+              {selectedVersion.readiness_message || "This agent version is unavailable; choose a compatible version."}
+            </p>
+          ) : null}
           <p className="mt-1 text-xs text-slate-500">
             Deployment default follows platform configuration. Choose an exact version to keep this
             combination on that version.

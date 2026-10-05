@@ -917,6 +917,12 @@ def runtime_profile_rejections(
         or controller_image_for_trial(profile, trial) is None
     ):
         reasons.append("agent_version_not_in_runtime_profile")
+    if trial.agent_version is not None and any(
+        binding.compatibility_error() is not None
+        for binding in profile.agent_runtime_bindings
+        if (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version)
+    ):
+        reasons.append("agent_runtime_bridge_incompatible")
     if spec is None or spec.controller_image == "service-runner":
         # A pinned image must be the deployed runner image; a task that leaves
         # it unset runs in whichever runner image the plan freezes (#2054).

@@ -6,7 +6,9 @@ Changing the controller version does not require rebuilding those images or
 redeploying the platform.
 
 `GET /api/v1/agents` includes `versions` on each catalog item. The `terminus-2`
-versions expose `agent_version`, `harbor_version`, and `loom_bridge_revision`.
+versions expose `agent_version`, `harbor_version`, `loom_bridge_revision`,
+`readiness_status`, and `readiness_message`. An unavailable version remains
+visible for historical selections but cannot start a new execution.
 Use one of these case-sensitive version labels; arbitrary image URLs are not
 accepted. Omit `agent_version` to keep the deployment default.
 
@@ -30,6 +32,23 @@ Attempts and failed-case reruns retain that profile, even if the deployment
 default or the catalog subsequently changes. A new Batch resolves the catalog
 again. The existing image-admission records are reused and deduplicated within
 the profile. No new admission scheme is introduced.
+
+Known published bridges that compare the entire sandbox `/health` response
+to `{"ready": true}` are unavailable (#2337). The response includes
+`instance_id`, which must remain available for sandbox incarnation checks.
+Compatibility is derived from immutable publisher/bridge source identity,
+not the Harbor package version, release label, or shared `1.0` bridge label.
+The catalog, submission, frozen failed-case rerun, and plan compilation use
+the same compatibility rule. API submissions and reruns reject the old bridge
+with an actionable reason before creating execution; historical bindings and
+Trial results are not rewritten, and there is no silent default substitution.
+
+Publish a replacement with the current compatible bridge using the existing
+`nebius-candidate` workflow's `harness-only` mode and a new `agent_version`.
+Register its original release JSON as described below. Qualify the replacement
+through an ordinary-member exact-version submission with real agent calls,
+independent verifier output, canonical download, and resource cleanup.
+Publishing/registering an image alone does not establish that acceptance.
 
 ## Register a release
 
