@@ -275,10 +275,12 @@ version**; it cannot prove the original upload's missing version receipt.
 3. Submit the preview and retain its complete `plan` and `plan_sha256`. The server
    derives all published locations, including the mirrored Trial artifact list,
    and verifies each version's full bytes against the published and registered
-   size and hash. The bucket must have versioning enabled. Exactly one surviving
+   size and hash. Exactly one surviving concrete, non-null
    version and no delete marker may exist at each exact key; a prefix match does
    not establish identity. Conflicting registrations, even in other namespaces,
-   are rejected. Metadata is bounded to 4 MiB and inventory traversal to 16 pages
+   are rejected. Recovery needs version-listing and exact-version read permission,
+   without bucket-configuration inspection or modification. Metadata is bounded
+   to 4 MiB and inventory traversal to 16 pages
    per object; exceeding a bound requires diagnosis, never a force flag.
 4. Review the exact plan within the issue's recovery authority. Send the same
    request with `apply: true` and the returned `plan_sha256`. Apply re-verifies

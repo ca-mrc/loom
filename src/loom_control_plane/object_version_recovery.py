@@ -408,8 +408,6 @@ def _verify_objects(client: Any, plan: dict[str, Any]) -> None:
 
     try:
         for obj in plan["objects"]:
-            _require(client.get_bucket_versioning(Bucket=obj["bucket"]).get("Status") == "Enabled",
-                "bucket_versioning_required")
             inventory(obj)
             response = client.get_object(Bucket=obj["bucket"], Key=obj["key"], VersionId=obj["version_id"])
             body = response["Body"]
