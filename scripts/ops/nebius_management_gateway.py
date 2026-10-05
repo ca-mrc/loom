@@ -92,6 +92,9 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES),
     *('pool_' + stage.replace('-', '_') for stage in POOL_PHASES | {
         'operation', 'connection', 'preflight', 'cancellation', 'completion',
+        *('preflight_' + detail for detail in {
+            'writer_bindings', 'writer_workloads', 'connected_prerequisites', 'capacity',
+            'scope', 'database_report', 'pending_source', 'pending_page', 'origin_history', 'database_readiness'}),
         'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
         *('runtime_telemetry_' + detail for detail in {
             'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',

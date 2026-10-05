@@ -19,7 +19,7 @@ from scripts.ops.nebius_pool_gateway_retirement import retire_gateway_roles
 from scripts.ops.nebius_pool_legacy_reopening import reopen_pool_legacy
 from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
 from scripts.ops.nebius_pool_machine_retirement import retire_pool_machines
-from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_migration import PoolMigrationError, _hash
 from scripts.ops.nebius_pool_role_restoration import restore_pool_roles
 from scripts.ops.nebius_pool_shutdown import stop_pool_successors
 from scripts.ops.nebius_pool_startup import stage_pool_startup, startup_workload_options
@@ -29,6 +29,25 @@ from scripts.ops.nebius_pool_template_restoration import restore_pool_templates
 
 _RECOVERY = ('startup-fence', 'shutdown', 'machine-retirement', 'gateway-retirement',
     'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening')
+
+# Exact locally authored messages only. Unknown text and adapter stages never
+# cross the protected report boundary, including a known code with extra data.
+_PREFLIGHT_ERRORS = {
+    'pool_retained_writer_binding_inventory_unqualified': 'writer_bindings',
+    'pool_retained_writer_workload_inventory_unqualified': 'writer_workloads',
+    'pool cutover connected prerequisites unqualified': 'connected_prerequisites',
+    'pool cutover initial capacity unqualified': 'capacity',
+    'pool cutover inputs changed': 'scope',
+    'pool cutover namespace differs': 'scope',
+    'pool_cutover_database_report_unqualified': 'database_report',
+    'pool_cutover_pending_source_unqualified': 'pending_source',
+    'pool_cutover_pending_page_unqualified': 'pending_page',
+    'pool_management_history_origin_unqualified': 'origin_history',
+}
+_PREFLIGHT_MIGRATION_ERRORS = {
+    'cutover_readiness': 'database_readiness',
+    'management_origin_history': 'origin_history',
+}
 
 
 class PoolOperationError(RuntimeError):
@@ -157,5 +176,10 @@ own original journal lock and validates its predecessor before any side effect.
             phase = 'completion'
             return complete_pool_cutover(request=request, api=HTTPSPoolActivationAPI(parent=parent),
                 state_dir=state, anchor_dir=anchor)
-    except Exception:
+    except Exception as error:
+        if phase == 'preflight':
+            detail = (_PREFLIGHT_MIGRATION_ERRORS.get(error.stage) if isinstance(error, PoolMigrationError)
+                else _PREFLIGHT_ERRORS.get(str(error)))
+            if detail is not None:
+                phase += '_' + detail
         raise PoolOperationError(phase) from None

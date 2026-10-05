@@ -70,6 +70,22 @@ def pool_operation(tmp_path):
         'state_dir': str(root / 'state'), 'anchor_dir': str(root / 'anchor'), 'inputs_path': str(root / 'inputs.json')}
 
 
+@pytest.mark.parametrize('detail', [
+    'writer_bindings', 'writer_workloads', 'connected_prerequisites', 'capacity',
+    'scope', 'database_report', 'pending_source', 'pending_page', 'origin_history', 'database_readiness',
+])
+def test_pool_preflight_failure_category_survives_both_protected_filters(tmp_path, detail):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage='pool_preflight_' + detail)
+    first = gateway.safe_report(json.dumps(report | {'private': 'never-export'}).encode(), metadata)
+    assert first == report
+    assert gateway.safe_report(json.dumps(first).encode(), metadata) == report
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report | {'stage': report['stage'] + '_private-value'}).encode(), metadata)
+
+
 @pytest.mark.parametrize('outcome', ['global', 'legacy'])
 def test_pool_authority_reports_terminal_history_but_never_installed_acceptance(tmp_path, outcome):
     gateway = module()
