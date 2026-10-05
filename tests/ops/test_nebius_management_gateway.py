@@ -93,6 +93,47 @@ def test_pool_authority_reports_terminal_history_but_never_installed_acceptance(
         gateway.safe_report(json.dumps({**common, 'status': 'pending', 'phase': 'private-value'}).encode(), metadata)
 
 
+@pytest.mark.parametrize('result', [
+    {'status': 'preflight_qualified'}, {'status': 'pending', 'phase': 'startup'},
+    {'status': 'pending', 'phase': 'activation'}, {'status': 'pending', 'phase': 'legacy-reopening'},
+    {'status': 'pool_cutover_completed', 'outcome': 'global', 'completion_sha256': 'f' * 64, 'acceptance_verified': False},
+    {'status': 'pool_cutover_completed', 'outcome': 'legacy', 'completion_sha256': 'f' * 64, 'acceptance_verified': False},
+])
+@pytest.mark.parametrize('telemetry', [
+    {'status': 'available', 'checks': 2, 'unavailable': 0, 'reasons': []},
+    {'status': 'unavailable', 'checks': 2, 'unavailable': 1, 'reasons': ['tls_kubelet_verify_19']},
+    {'status': 'not_observed', 'checks': 0, 'unavailable': 0, 'reasons': []},
+])
+def test_pool_telemetry_availability_survives_both_protected_filters(tmp_path, result, telemetry):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(result, telemetry=telemetry)
+    first = gateway.safe_report(json.dumps(report | {'private': 'never-export'}).encode(), metadata)
+    assert first == report
+    assert gateway.safe_report(json.dumps(first).encode(), metadata) == report
+
+
+@pytest.mark.parametrize('damage', [
+    None, [], {}, {'status': 'healthy'}, {'status': 'available'}, {'status': 'not_observed'},
+    {'checks': 0}, {'checks': -1}, {'checks': True}, {'checks': 2**31}, {'checks': '2'},
+    {'unavailable': 0}, {'unavailable': 3}, {'unavailable': True}, {'unavailable': -1},
+    {'reasons': []}, {'reasons': 'counters'}, {'reasons': ['counters', 'counters']},
+    {'reasons': ['tls_api_verify_19']}, {'reasons': ['tls_unknown_verify_19']},
+    {'reasons': ['tls_kubelet_verify_256']}, {'reasons': ['authorization']},
+    {'reasons': ['network']}, {'reasons': ['payload']}, {'reasons': ['authority']},
+    {'reasons': ['close']}, {'reasons': ['private-token']}, {'private': 'never-export'},
+])
+def test_pool_telemetry_rejects_false_health_and_unqualified_details(tmp_path, damage):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    telemetry = {'status': 'unavailable', 'checks': 2, 'unavailable': 1, 'reasons': ['tls_kubelet_verify_19']}
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='preflight_qualified', telemetry=telemetry | damage if damage else damage)
+    with pytest.raises(gateway.GatewayError):
+        gateway.safe_report(json.dumps(report).encode(), metadata)
+
+
 @pytest.mark.parametrize('damage', ['source', 'uuid', 'borrow_refresh', 'namespace', 'extra'])
 def test_pool_metadata_cannot_borrow_other_authority_or_choose_a_child_phase(tmp_path, damage):
     metadata = pool_operation(tmp_path)

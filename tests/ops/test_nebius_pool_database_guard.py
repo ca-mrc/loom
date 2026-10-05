@@ -683,7 +683,9 @@ def test_each_running_database_consumer_is_qualified_without_sql_or_credential_o
 
 @pytest.mark.parametrize('damage', [None, 'scale_zero', 'missing_host', 'partial', 'duplicate',
     'deleted', 'late_node', 'late_pod', 'denied', 'wrong_report', 'unknown_target', 'service_account',
-    'probe_tls', 'probe_tls_detail', 'probe_tls_invalid', 'probe_extra', 'probe_unknown'])
+    'probe_tls', 'probe_tls_detail', 'probe_tls_invalid', 'probe_extra', 'probe_unknown',
+    'optional_late_node', 'optional_late_pod', 'probe_kubelet_network', 'probe_kubelet_http',
+    'probe_kubelet_authorization', 'probe_counters', 'probe_api_tls'])
 @pytest.mark.parametrize('successor', [False, True])
 def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_database, monkeypatch, damage, successor):
     from scripts.ops.nebius_pool_migration import PoolMigrationError
@@ -704,7 +706,7 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
         nodes.append(copy.deepcopy(nodes[1]))
     elif damage == 'deleted':
         nodes[1]['metadata']['deletionTimestamp'] = '2026-10-01T00:00:00Z'
-    elif damage == 'late_pod':
+    elif damage in {'late_pod', 'optional_late_pod'}:
         state.runtime_after_drift = True
     elif damage == 'unknown_target':
         for row in state.original['spec']['template']['spec']['containers'][0].get('env', []):
@@ -722,7 +724,7 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     def run(args):
         if args[:2] == ['get', '--raw'] and args[2].startswith('/api/v1/nodes?'):
             items = copy.deepcopy(nodes)
-            if damage == 'late_node' and commands:
+            if damage in {'late_node', 'optional_late_node'} and commands:
                 items[1]['metadata']['uid'] = str(uuid4())
             return {'apiVersion': 'v1', 'kind': 'NodeList',
                 'metadata': {'resourceVersion': '9', **({'continue': 'same'} if damage == 'partial' else {})}, 'items': items}
@@ -738,8 +740,12 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
             state.commands.append(args)
             if damage == 'denied':
                 raise ValueError('private-telemetry-marker')
-            if damage in {'probe_tls_detail', 'probe_tls_invalid'}:
-                return {'status': 'blocked', 'stage': 'tls_kubelet_verify_' + ('20' if damage == 'probe_tls_detail' else '256')}
+            if damage in {'probe_tls_detail', 'probe_tls_invalid', 'optional_late_node', 'optional_late_pod'}:
+                return {'status': 'blocked', 'stage': 'tls_kubelet_verify_' + ('256' if damage == 'probe_tls_invalid' else '20')}
+            if damage in {'probe_kubelet_network', 'probe_kubelet_http', 'probe_kubelet_authorization', 'probe_counters'}:
+                return {'status': 'blocked', 'stage': damage.removeprefix('probe_')}
+            if damage == 'probe_api_tls':
+                return {'status': 'blocked', 'stage': 'tls_api_verify_19'}
             if damage in {'probe_tls', 'probe_extra', 'probe_unknown'}:
                 return {'status': 'blocked', 'stage': 'private-telemetry-marker' if damage == 'probe_unknown' else 'tls',
                     **({'private-token': 'never expose'} if damage == 'probe_extra' else {})}
@@ -749,32 +755,48 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
 
     monkeypatch.setattr(api, '_run', run)
     actuator = state.original['spec']['template']['spec']['containers'][0]['name'] == 'actuator'
-    if not actuator or damage not in {None, 'scale_zero'}:
+    optional = {'probe_tls_detail', 'probe_kubelet_network', 'probe_kubelet_http',
+        'probe_kubelet_authorization', 'probe_counters'}
+    if not actuator or damage not in {None, 'scale_zero', *optional}:
         with pytest.raises(PoolMigrationError) as error:
             api.qualify_runtime_telemetry(state.target, original=state.original, **options)
         phase = ('binding' if not actuator or damage in {'unknown_target', 'service_account'} else
             'nodes' if damage in {'missing_host', 'partial', 'duplicate', 'deleted'} else
-            'recheck' if damage in {'late_node', 'late_pod'} else
+            'recheck' if damage in {'late_node', 'late_pod', 'optional_late_node', 'optional_late_pod'} else
+            'tls_api_verify_19' if damage == 'probe_api_tls' else
             'tls' if damage == 'probe_tls' else 'tls_kubelet_verify_20' if damage == 'probe_tls_detail' else 'probe')
         assert error.value.stage == 'runtime_telemetry_' + phase
         assert 'private-' not in str(error.value)
+        assert api.telemetry_report() == {'status': 'not_observed', 'checks': 0, 'unavailable': 0, 'reasons': []}
     else:
         api.qualify_runtime_telemetry(state.target, original=state.original, **options)
         assert [command[12] for command in commands] == (['platform-node'] if damage == 'scale_zero' else ['platform-node', 'pool-node'])
         for command in commands:
             assert command[13] == next(row['metadata']['uid'] for row in nodes if row['metadata']['name'] == command[12])
+        assert api.telemetry_report() == {'status': 'unavailable' if damage in optional else 'available',
+            'checks': len(commands), 'unavailable': len(commands) if damage in optional else 0,
+            'reasons': ['tls_kubelet_verify_20' if damage == 'probe_tls_detail' else damage.removeprefix('probe_')]
+                if damage in optional else []}
+        # A later observation replaces this actuator's previous samples; neither
+        # a previous success nor a previous warning is permanently sticky.
+        damage = None if damage in optional else 'probe_counters'
+        commands.clear()
+        api.qualify_runtime_telemetry(state.target, original=state.original, **options)
+        assert api.telemetry_report() == {'status': 'available' if damage is None else 'unavailable',
+            'checks': len(commands), 'unavailable': 0 if damage is None else len(commands),
+            'reasons': [] if damage is None else ['counters']}
     if not actuator or damage in {'missing_host', 'partial', 'duplicate', 'deleted', 'unknown_target', 'service_account'}:
         assert not commands
 
 
 @pytest.mark.parametrize(('damage', 'stage'), [
     (None, None), ('namespace', 'settings'), ('target', 'settings'), ('remote', 'settings'),
-    ('node_uid', 'identity'), ('denied', 'authorization'), ('node_api_denied', 'authorization'),
+    ('node_uid', 'identity'), ('denied', 'kubelet_authorization'), ('node_api_denied', 'authorization'),
     ('missing_counter', 'counters'), ('boolean_counter', 'counters'), ('negative_counter', 'counters'),
-    ('old_image', 'reader'), ('tls', 'tls_kubelet'), ('timeout', 'network'), ('connect', 'network'),
-    ('http_failure', 'http'), ('payload', 'payload'), ('close', 'close'),
+    ('old_image', 'reader'), ('tls', 'tls_kubelet'), ('timeout', 'kubelet_network'), ('connect', 'kubelet_network'),
+    ('http_failure', 'kubelet_http'), ('payload', 'payload'), ('close', 'close'),
     ('node_address', 'address'), ('bearer', 'authority'), ('summary_identity', 'payload'),
-    ('client', 'client'), ('tls_close', 'tls_kubelet'),
+    ('client', 'client'), ('tls_close', 'close'),
     ('missing_ca', 'authority'), ('unreadable_ca', 'authority'),
     ('node_api_tls', 'tls_api'), ('node_api_tls_verify', 'tls_api_verify_20'),
     ('tls_unknown', 'tls_unknown_verify_10'), ('tls_trust', 'tls_kubelet_verify_20'),
@@ -782,7 +804,9 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     ('tls_zero', 'tls_kubelet_verify_0'), ('tls_max', 'tls_kubelet_verify_255'),
     ('tls_large', 'tls_kubelet'), ('tls_negative', 'tls_kubelet'),
     ('tls_bool', 'tls_kubelet'), ('tls_string', 'tls_kubelet'),
-    ('tls_cycle', 'tls_kubelet'), ('tls_deep', 'tls_kubelet'),
+    ('tls_cycle', 'reader'), ('tls_deep', 'reader'),
+    ('mixed_transport', 'reader'),
+    ('http_close', 'reader'), ('http_protocol', 'reader'),
     ('tls_unknown_plain', 'tls'),
 ])
 def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, tmp_path, damage, stage):
@@ -853,6 +877,13 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         assert url == 'https://10.20.0.2:10250/stats/summary'
         assert kwargs['headers'] == {'Authorization': 'bearer private-runtime-token'}
         requests.append(url)
+        if damage == 'mixed_transport':
+            from urllib3.exceptions import SSLError
+            raise httpx.ConnectError('private-runtime-token') from SSLError('private-api-marker')
+        if damage == 'http_protocol':
+            raise httpx.RemoteProtocolError('private-runtime-token') from OSError('private-protocol-marker')
+        if damage == 'http_close':
+            raise httpx.ReadTimeout('private-runtime-token')
         if damage in {'tls_cycle', 'tls_deep'}:
             wrapped = ssl.SSLError('private-runtime-token')
             if damage == 'tls_cycle':
@@ -916,6 +947,12 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(client.ApiClient, 'request', node_read)
     monkeypatch.setattr(httpx.Client, 'get', summary)
+    if damage == 'http_close':
+        actual_exit = httpx.Client.__exit__
+        def failed_exit(self, *args):
+            actual_exit(self, *args)
+            raise RuntimeError('private-close-marker')
+        monkeypatch.setattr(httpx.Client, '__exit__', failed_exit)
     monkeypatch.setattr(ssl, 'create_default_context', create_context)
     monkeypatch.setattr(InClusterKubernetesJobApi, 'close', close)
     if damage == 'old_image':

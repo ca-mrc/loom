@@ -27,6 +27,10 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.deploy_nebius_platform import rollout_guard_observation_sql
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_evidence import _matches_backup_template
+from scripts.ops.nebius_management_gateway import (
+    OPTIONAL_TELEMETRY_STAGES,
+    validate_telemetry_report,
+)
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
@@ -123,32 +127,38 @@ except Exception:
 """
 
 
-# The optional UID-aware production reader is an ordinary-rollout prerequisite.
-# Old images fail here before downtime; never fall back to nodes/proxy, operator
-# credentials or another endpoint to make a retained actuator appear ready.
+# The UID-aware reader contract is mandatory, not successful detailed samples.
+# Old images fail before downtime; never fall back to nodes/proxy, operator
+# credentials or another endpoint. Only known sampling failures are optional.
 TELEMETRY_FAILURE_STAGES = frozenset({
     'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
     'authorization', 'network', 'http', 'reader', 'counters', 'close',
     'identity', 'address', 'authority', 'payload',
     'tls_api', 'tls_kubelet',
+    *OPTIONAL_TELEMETRY_STAGES,
     *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256)),
 })
 _BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
 
 def reader_failure(error):
     import ssl
+    import httpcore
     import httpx
+    from kubernetes.client.exceptions import ApiException
+    from loom_execution_actuator.contracts import KubernetesApiError
     from urllib3.exceptions import HTTPError, SSLError, TimeoutError
+    primary = error.__cause__ if isinstance(error, KubernetesApiError) else error
+    direct = isinstance(primary, (httpx.NetworkError, httpx.TimeoutException, httpx.HTTPStatusError))
     seen, network, tls = set(), False, False
-    transport, verification = "unknown", None
+    transports, verification, http_failure = set(), None, None
     for _ in range(8):
         if error is None or id(error) in seen:
             break
         seen.add(id(error))
-        if isinstance(error, HTTPError):
-            transport = "api"
+        if isinstance(error, (HTTPError, ApiException)):
+            transports.add("api")
         elif isinstance(error, httpx.HTTPError):
-            transport = "kubelet"
+            transports.add("kubelet")
         if isinstance(error, (ssl.SSLError, SSLError)):
             tls = True
         if isinstance(error, ssl.SSLCertVerificationError):
@@ -162,7 +172,7 @@ def reader_failure(error):
         status = (error.response.status_code if isinstance(error, httpx.HTTPStatusError)
                   else getattr(error, "status_code", getattr(error, "status", None)))
         if type(status) is int and status > 0:
-            return "authorization" if status in {401, 403} else "http"
+            http_failure = "authorization" if status in {401, 403} else "http"
         if isinstance(error, (httpx.NetworkError, httpx.TimeoutException, TimeoutError, OSError)):
             network = True
         if isinstance(error, ValueError):
@@ -177,12 +187,23 @@ def reader_failure(error):
             }.get(str(error))
             if code is not None:
                 return code
+        if not isinstance(error, (KubernetesApiError, HTTPError, ApiException,
+                httpx.NetworkError, httpx.TimeoutException, httpx.HTTPStatusError,
+                httpcore.NetworkError, httpcore.TimeoutException, OSError)):
+            return "reader"
         error = error.__cause__ or error.__context__
+    if error is not None or len(transports) > 1:
+        return "reader"
+    transport = next(iter(transports), "unknown")
+    if transport == "kubelet" and not direct:
+        return "reader"
+    if http_failure is not None:
+        return "kubelet_" + http_failure if transport == "kubelet" else http_failure
     if tls:
         if verification is not None:
             return f"tls_{transport}_verify_{verification}"
         return "tls" if transport == "unknown" else f"tls_{transport}"
-    return "network" if network else "reader"
+    return ("kubelet_network" if transport == "kubelet" else "network") if network else "reader"
 
 async def run():
     api, stage = None, "settings"
@@ -213,13 +234,12 @@ async def run():
             try:
                 await api.close()
             except Exception:
-                if report["status"] == "qualified":
-                    report = {"status": "blocked", "stage": "close"}
+                report = {"status": "blocked", "stage": "close"}
     return report
 
 try:
     # Exit zero acknowledges this bounded diagnostic, never qualification.
-    # The parent rejects every report other than the exact qualified identity.
+    # The parent validates identity and records only allowlisted sampling failures.
     print(json.dumps(asyncio.run(run())))
 except Exception:
     print("Pool runtime telemetry unqualified", file=sys.stderr)
@@ -514,6 +534,7 @@ class KubectlPoolGuardAPI:
             cache = kubeconfig.parent / ".loom-pool-kubectl-cache"
             private_state._private_directory(cache)
             self.prefix = [str(executable), "--kubeconfig", str(kubeconfig), "--request-timeout=30s", "--cache-dir", str(cache)]
+            self._telemetry_observations: dict[str, tuple[str | None, ...]] = {}
         except Exception:
             raise PoolMigrationError("guard_configuration") from None
 
@@ -848,7 +869,7 @@ class KubectlPoolGuardAPI:
 
         No token issuance, permission changes, database connection, arbitrary
         command or operator-credential forwarding. Recheck Pod and Node identity
-        after all reads; a stale success cannot approve a replacement runtime.
+        after all reads, even unavailable samples. This is not capacity authority.
         """
         stage = 'binding'
         try:
@@ -869,10 +890,13 @@ class KubectlPoolGuardAPI:
                     or settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != namespace):
                 raise ValueError
             stage = 'pod'
+            actuator_uid = _uid(original)
+            self._telemetry_observations.pop(actuator_uid, None)
             before = self._runtime(target, original=original, expected=expected)
             host = before["spec"]["nodeName"]
             stage = 'nodes'
             nodes = self._telemetry_nodes(host)
+            observations: list[str | None] = []
             for node_name, uid in nodes.items():
                 stage = 'probe'
                 report = self._run(["exec", "-n", namespace, "pod/" + before["metadata"]["name"], "-c", "actuator", "--",
@@ -880,17 +904,31 @@ class KubectlPoolGuardAPI:
                 if (set(report) == {'status', 'stage'} and report['status'] == 'blocked'
                         and isinstance(report['stage'], str) and report['stage'] in TELEMETRY_FAILURE_STAGES):
                     stage = report['stage']
+                    if stage in OPTIONAL_TELEMETRY_STAGES:
+                        observations.append(stage)
+                        continue
                     raise ValueError
                 if report != {"status": "qualified", "node_name": node_name, "node_uid": uid}:
                     raise ValueError
+                observations.append(None)
             stage = 'recheck'
             after = self._runtime(target, original=original, expected=expected)
             if (_uid(after) != _uid(before) or after["spec"]["nodeName"] != host or self._telemetry_nodes(host) != nodes
                     or digest(migration_contract(self.request)) != self.contract_sha256
                     or hashlib.sha256(private_state._private_read(self.kubeconfig, limit=512 * 1024)).hexdigest() != self.kubeconfig_sha256):
                 raise ValueError
+            self._telemetry_observations[actuator_uid] = tuple(observations)
         except Exception:
             raise PoolMigrationError('runtime_telemetry_' + stage) from None
+
+    def telemetry_report(self) -> dict[str, Any]:
+        """Latest rechecked runtime-node observations, not unique physical Nodes."""
+        samples = [sample for rows in self._telemetry_observations.values() for sample in rows]
+        failures = [sample for sample in samples if sample is not None]
+        return validate_telemetry_report({
+            'status': 'unavailable' if failures else 'available' if samples else 'not_observed',
+            'checks': len(samples), 'unavailable': len(failures), 'reasons': sorted(set(failures)),
+        })
 
     def _qualify_runtime_binding(self, target: PoolDatabaseReadTarget, *, original: dict[str, Any],
                                  component: str, url_variable: str, credential_uid: UUID,
