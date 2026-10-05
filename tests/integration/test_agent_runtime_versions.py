@@ -121,12 +121,15 @@ async def test_registration_real_auth_idempotency_rebind_and_public_catalog(
 
 
 @pytest.mark.parametrize("combinations", [False, True])
-@pytest.mark.parametrize("runtime_mode", ["frozen", "current", "unavailable", "no_controller", "prebound", "legacy", "other_agent"])
+@pytest.mark.parametrize("runtime_mode", ["frozen", "current", "unavailable", "no_controller", "prebound", "legacy", "other_agent", "incompatible", "incompatible_frozen"])
 async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
     camp_setup, postgres_url, combinations, runtime_mode,
 ):
     app, user_token, team = camp_setup
     a, b = release("a-" + uuid4().hex), release("b-" + uuid4().hex, "9")
+    old_bridge = "44dbda72dff90fde5c29b094227db6c5ee03389b"
+    if runtime_mode == "incompatible":
+        a = a.model_copy(update={"publisher_source_revision": old_bridge})
     profile = _service_execution_runtime_profile()
     app.state.settings = app.state.settings.model_copy(
         update={
@@ -229,11 +232,36 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
                 rejected.status_code == 400 and "unknown published agent version" in rejected.text
             )
             response = await client.post("/api/v1/batches", json=payload, headers=headers)
+            if runtime_mode == "incompatible":
+                assert response.status_code == 400, response.text
+                assert a.agent_version in response.text
+                assert "instance_id" in response.text
+                assert "choose a compatible published version" in response.text
+                catalog = await client.get("/api/v1/agents", headers=headers)
+                versions = next(
+                    x["versions"] for x in catalog.json()["items"] if x["name"] == "terminus-2"
+                )
+                assert a.public_metadata() in versions
+                assert b.public_metadata() in versions
+                async with app.state.session_factory() as session:
+                    batches = (await session.scalars(select(Batch).where(
+                        Batch.resolved_task_ids.contains([task_id]),
+                    ))).all()
+                    assert batches == []
+                    trials = (await session.scalars(select(Trial).where(
+                        Trial.task_id == task_id,
+                    ))).all()
+                    assert trials == []
+                return
             assert response.status_code == 201, response.text
             batch_id = UUID(response.json()["batch_id"])
             async with app.state.session_factory() as session, session.begin():
                 batch = await session.get(Batch, batch_id)
                 frozen = deepcopy(batch.service_execution_runtime_profile)
+                if runtime_mode == "incompatible_frozen":
+                    old_profile = deepcopy(batch.service_execution_runtime_profile)
+                    old_profile["agent_runtime_bindings"][0]["publisher_source_revision"] = old_bridge
+                    batch.service_execution_runtime_profile = old_profile
                 if runtime_mode == "legacy":
                     batch.backend = "docker"
                     batch.service_execution_runtime_profile = None
@@ -301,10 +329,13 @@ async def test_public_batch_freezes_versions_and_rerun_keeps_snapshot(
                 )
             rerun = await client.post(
                 f"/api/v1/batches/{batch_id}/rerun-failed", headers=headers,
-                json={"use_current_runtime": runtime_mode != "frozen"},
+                json={"use_current_runtime": runtime_mode not in {"frozen", "incompatible_frozen"}},
             )
             if runtime_mode not in {"frozen", "current"}:
                 assert rerun.status_code == 400, rerun.text
+                if runtime_mode == "incompatible_frozen":
+                    assert "instance_id" in rerun.text
+                    assert a.agent_version in rerun.text
                 async with app.state.session_factory() as session:
                     children = (await session.scalars(select(Batch).where(
                         Batch.rerun_of_batch_id == batch_id,

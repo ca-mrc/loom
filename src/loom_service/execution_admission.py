@@ -287,6 +287,13 @@ async def admit_execution_backend(
                 profile = freeze_agent_runtime_releases(profile, releases)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if profile is not None and not resolve_versions:
+            # Failed-case reruns retain immutable bindings and bypass the catalog.
+            # Validate selected frozen versions before creating another execution.
+            for runtime_binding in profile.agent_runtime_bindings:
+                if (runtime_binding.agent_name, runtime_binding.agent_version) in selections:
+                    if reason := runtime_binding.compatibility_error():
+                        raise HTTPException(status_code=400, detail=str(reason))
         incompatible_task_ids: list[str] = []
         rejection_reasons: dict[str, list[str]] = {}
         automatic_profile_used = False

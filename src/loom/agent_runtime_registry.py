@@ -72,6 +72,8 @@ async def resolve_agent_runtimes(
         release = AgentRuntimeReleaseV1.model_validate(row.spec)
         if (release.agent_name, release.agent_version) != (name, version):
             raise ValueError("agent runtime catalog identity differs from its key")
+        if reason := release.compatibility_error():
+            raise ValueError(reason)
         releases.append(release)
     return tuple(releases)
 

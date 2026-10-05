@@ -17,6 +17,8 @@ export interface AgentVersionEntry {
   agent_version: string;
   harbor_version: string;
   loom_bridge_revision: string;
+  readiness_status?: "ready" | "unavailable";
+  readiness_message?: string;
 }
 
 export interface ModelEntry {
