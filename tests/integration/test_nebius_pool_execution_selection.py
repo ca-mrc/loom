@@ -2,17 +2,30 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.dml import Update
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
-from loom.db.schema import Task, TaskImageMaterialization, Trial, TrialTaskImageMaterialization
+from loom.db.schema import (
+    Batch,
+    Task,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
+from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
+from loom_control_plane.service_execution_scheduler import ServiceExecutionConfigurationError
 from tests.integration.test_nebius_pool_execution_controller import another_trial, connected
 from tests.integration.test_nebius_pool_execution_outbox import assert_unclaimed, setup
 from tests.integration.test_nebius_pool_observation_registry import sessions as sessions
+from tests.unit.test_service_execution_materialization import _profile, _provenance, _task, _trial
 
 
 def selector(outbox):
@@ -101,6 +114,120 @@ async def test_invalid_deadline_preserves_existing_queued_configuration_failure(
         trial = await session.get(Trial, trial_id)
         assert trial.state == "failed" and trial.failure_reason == "service_execution_configuration_invalid"
         assert trial.attempt_count == 0
+
+
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_invalid_runtime_fails_without_spend_or_private_input_and_selects_later_work(sessions, caplog, automatic):
+    outbox, following, _ = await setup(sessions)
+    async with sessions.begin() as session:
+        valid = await session.get(Trial, following)
+        task = await session.get(Task, valid.task_id)
+        config = deepcopy(task.config)
+        provenance = task.source_provenance
+        if automatic:
+            config = _task().model_dump(mode="json")
+            # Frozen older runtimes still encode declarations in the bounded
+            # process environment. Compilation must classify that rejection.
+            config["steps"][0]["artifacts"] = [f"private-configuration-sentinel-{i:04}.txt" for i in range(515)]
+            provenance = _provenance()
+            batch = await session.get(Batch, valid.batch_id)
+            batch.service_execution_runtime_profile = _profile().model_dump(mode="json")
+        else:
+            config["service_execution"]["runtime_template"]["main"]["environment"] = {
+                "LOOM_TASK_ARTIFACTS_JSON": "private-configuration-sentinel-" * 200}
+        invalid_task_id = task.id + "-invalid"
+        session.add(Task(id=invalid_task_id, checksum=task.checksum, config=config, source_provenance=provenance))
+    invalid_id = await another_trial(sessions, following, task_id=invalid_task_id, submit_priority=200,
+        config=_trial().model_dump(mode="json") if automatic else valid.config,
+        scheduling_observation={"reason": "task_image_preparation_pending"})
+    before = datetime.now(UTC)
+    selected = await selector(outbox).select_next()
+    async with sessions() as session:
+        assert (await session.get(NebiusPoolExecutionOutbox, selected.request.key.local_work_id)).trial_id == following
+        invalid = await session.get(Trial, invalid_id)
+        assert invalid.state == "failed" and invalid.failure_reason == "service_execution_configuration_invalid"
+        assert "runtime contract" in invalid.failure_message
+        assert "private-configuration-sentinel" not in invalid.failure_message + caplog.text
+        assert invalid.attempt_count == 0 and invalid.claimed_at is None and invalid.started_at is None
+        assert invalid.execution_route_generation == 0
+        assert before <= invalid.finished_at <= datetime.now(UTC)
+        assert invalid.next_attempt_at is None and invalid.scheduling_observation is None
+        assert await session.scalar(select(func.count()).select_from(NebiusPoolExecutionOutbox)) == 1
+        assert (await session.get(Task, invalid_task_id)).config == config
+    # Global proposal has not admitted even the valid candidate. This also
+    # checks all lease/command/cost/admission/provisioning tables and team quota.
+    await assert_unclaimed(sessions, following)
+    assert await selector(outbox).select_next() is None
+
+
+async def test_configuration_failure_retains_trial_task_and_profile_locks(sessions):
+    outbox, trial_id, _ = await setup(sessions)
+    outbox.maximum_deadline_seconds = 60
+    async with sessions() as session:
+        trial = await session.get(Trial, trial_id)
+        identities = ((Trial, trial_id), (Task, trial.task_id), (Batch, trial.batch_id))
+    observed = []
+
+    class InspectFailureSession(AsyncSession):
+        async def execute(self, statement, *args, **kwargs):
+            if isinstance(statement, Update) and statement.compile().params.get("failure_reason") == (
+                "service_execution_configuration_invalid"
+            ):
+                # Check at the terminal write, after the compiler savepoint has
+                # rolled back: cancellation and configuration writers must
+                # still be fenced by the transaction that selected this input.
+                for model, identity in identities:
+                    with pytest.raises(DBAPIError, match="could not obtain lock"):
+                        async with sessions.begin() as contender:
+                            await contender.get(model, identity, with_for_update={"nowait": True})
+                observed.append(True)
+            return await super().execute(statement, *args, **kwargs)
+
+    outbox.sessions = async_sessionmaker(sessions.kw["bind"], class_=InspectFailureSession, expire_on_commit=False)
+    assert await selector(outbox).select_next() is None
+    assert observed == [True]
+    async with sessions() as session:
+        assert (await session.get(Trial, trial_id)).state == "failed"
+
+
+@pytest.mark.parametrize("error", [
+    ServiceExecutionConfigurationError("unsupported configured deadline"),
+    ValueError("stale selection"),
+    ExecutionProvisioningBlockedError("task_image_preparation_pending", retry_after_seconds=15),
+    RuntimeError("transient database failure"),
+])
+async def test_compiler_writes_roll_back_and_only_known_configuration_errors_are_terminal(sessions, monkeypatch, error):
+    from loom_execution_actuator import pool_execution_outbox as module
+
+    outbox, trial_id, _ = await setup(sessions)
+    following = await another_trial(sessions, trial_id)
+    async with sessions.begin() as session:
+        trial = await session.get(Trial, trial_id)
+        trial.submit_priority = 200
+        original_config = trial.config
+    compile_candidate = module._compile_service_candidate
+
+    async def fail_after_write(session, **kwargs):
+        if kwargs["row"]["id"] == trial_id:
+            await session.execute(update(Trial).where(Trial.id == trial_id).values(config={"partial": "compile"}))
+            raise error
+        return await compile_candidate(session, **kwargs)
+
+    monkeypatch.setattr(module, "_compile_service_candidate", fail_after_write)
+    if isinstance(error, RuntimeError):
+        with pytest.raises(RuntimeError, match="transient database failure"):
+            await selector(outbox).select_next()
+    else:
+        selected = await selector(outbox).select_next()
+        async with sessions() as session:
+            assert (await session.get(NebiusPoolExecutionOutbox, selected.request.key.local_work_id)).trial_id == following
+    async with sessions() as session:
+        trial = await session.get(Trial, trial_id)
+        assert trial.config == original_config and trial.attempt_count == 0
+        assert trial.state == ("failed" if isinstance(error, ServiceExecutionConfigurationError) else "queued")
+        if trial.state == "queued":
+            assert trial.failure_reason is None and trial.finished_at is None
+    await assert_unclaimed(sessions, following)
 
 
 @pytest.mark.parametrize("image_state", ["queued", "failed"])
