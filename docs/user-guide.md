@@ -555,6 +555,40 @@ Creating a bundle requires submit/admin scope; reading or downloading an
 existing bundle only requires normal read access. These routes are team-scoped
 and never expose raw MinIO/S3 URLs.
 
+### Choosing harness, network, verification and isolation together
+
+Write the four execution axes as one document and validate it before
+submitting. Unset fields keep the task's own value:
+
+```json
+{
+  "schema_version": "loom.execution-selection.v1",
+  "harness": {"name": "terminus-2"},
+  "network_policy": {"mode": "allowlist", "allow": ["pypi.org"]},
+  "verification": "separate",
+  "isolation": "guest"
+}
+```
+
+```bash
+loom eval batch create --benchmark terminal-bench --execution-config selection.json --dry-run
+```
+
+`--dry-run` prints each task's resolved axes, or every rejection reason per task,
+and creates nothing. Drop it to submit. `--execution-config -` reads stdin. The
+file cannot be combined with `--agent`, `--agent-version`, `--network-policy`,
+`--allow-web` or `--verifier-env-mode`, and a harness cannot be combined with
+`--combinations-json`. `isolation: guest` runs ordinary tasks in a dedicated
+guest VM and needs the Terminus controller. It does not yet support
+`verification: shared`. `isolation: container` is rejected for tasks that need a
+guest kernel.
+
+In the web app, the same fields are in the **Environment** section of
+**New batch** (with an **Isolation** select and **Edit as JSON**). A rejected submission shows a
+per-task reason table. `loom eval batch show` / `loom eval trial show` and the
+detail pages report the requested axes alongside the effective class and
+verification compiled into the frozen plan.
+
 ### Cross-team submission (platform admins)
 
 `loom eval batch create` can omit `--name`; the service derives a concise

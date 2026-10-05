@@ -46,6 +46,44 @@ def execution_selection_json_schema() -> dict[str, Any]:
     return ExecutionSelectionV1.model_json_schema()
 
 
+def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[str, Any]:
+    """What a trial asked for on each axis, beside what its frozen attempt plan ran."""
+
+    from loom.execution_runtime_contract import VerifierExecution
+
+    config = trial_config if isinstance(trial_config, dict) else {}
+    agent_name = config.get("agent_name")
+    requested = {
+        "harness": {"name": agent_name, "version": config.get("agent_version")} if agent_name else None,
+        "network_policy": config.get("baseline_network_policy_override"),
+        "verification": config.get("verifier_env_mode"),
+        "isolation": config.get("isolation") or "auto",
+    }
+    if plan is None:
+        return {"requested": requested, "effective": None}
+    verification = {
+        VerifierExecution.IN_ATTEMPT: "shared",
+        VerifierExecution.SEPARATE_EXECUTION: "separate",
+        VerifierExecution.SKIPPED: "skipped",
+    }[plan.verifier_execution]
+    return {
+        "requested": requested,
+        "effective": {
+            "execution_class_id": plan.execution_class_id,
+            "network_policy": (
+                plan.effective_network_policy.model_dump(mode="json")
+                if plan.effective_network_policy is not None else None
+            ),
+            "verification": verification,
+            "fresh_sandbox_grading": verification == "separate",
+            "isolation": (
+                "guest" if any(sidecar.guest_execution is not None for sidecar in plan.sidecars)
+                else "container"
+            ),
+        },
+    }
+
+
 def resolved_execution_selection(task: TaskConfig, trial: TrialConfig) -> dict[str, Any]:
     """The four axes a trial resolves to before compile; ``None`` network means unsupported."""
 

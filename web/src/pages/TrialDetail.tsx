@@ -17,6 +17,7 @@ import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DebugEvidenceCard } from "../components/DebugEvidenceCard";
 import { DiagnosisCard } from "../components/DiagnosisCard";
+import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import ErrorState from "../components/ErrorState";
 import EventTimeline from "../components/EventTimeline";
 import LoadingState from "../components/LoadingState";
@@ -233,6 +234,12 @@ function MaterializationCard({
         }
       />
       <Card.Body className="space-y-4">
+        {trial.execution_selection ? (
+          <ExecutionSelectionSection
+            requested={trial.execution_selection.requested}
+            effective={trial.execution_selection.effective}
+          />
+        ) : null}
         {materialization.network_policy ? (
           <section aria-label="Task network policy" className="space-y-2">
             <h3 className="font-semibold">Task network access</h3>

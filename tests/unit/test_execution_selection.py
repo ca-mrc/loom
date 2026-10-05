@@ -14,6 +14,7 @@ from loom.execution_runtime_contract import (
     ExecutionRuntimePlanV1,
     validate_runtime_plan_requirements,
 )
+from loom.execution_selection import execution_selection_readback
 from loom.models.networking import PublicWeb
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
@@ -151,3 +152,30 @@ def test_combined_validator_returns_every_reason_across_axes():
         assert expected in reasons
     assert len(reasons) == len(set(reasons))
     assert "runtime_profile_unavailable" in _reasons(task, trial, None)
+
+
+def test_readback_without_a_stored_agent_requests_no_harness():
+    requested = execution_selection_readback({"isolation": "container"}, None)["requested"]
+    assert requested["harness"] is None and requested["isolation"] == "container"
+
+
+def test_readback_reports_requested_axes_beside_the_frozen_plan():
+    task, trial, profile = _inputs()
+    task, profile = _root(task), _guest_ready(profile)
+    forced = trial.model_copy(update={"isolation": "guest"})
+    config = forced.model_dump(mode="json", exclude_defaults=True)
+    assert execution_selection_readback(config, None) == {
+        "requested": {
+            "harness": {"name": forced.agent_name, "version": forced.agent_version},
+            "network_policy": None, "verification": None, "isolation": "guest",
+        },
+        "effective": None,
+    }
+    effective = execution_selection_readback(config, _compile(task, forced, profile))["effective"]
+    assert effective["isolation"] == "guest"
+    assert effective["execution_class_id"] == "linux-amd64-cpu-guest-v1"
+    assert effective["verification"] == "shared" and effective["fresh_sandbox_grading"] is False
+    ordinary = execution_selection_readback(
+        trial.model_dump(mode="json", exclude_defaults=True), _compile(*_inputs()))
+    assert ordinary["requested"]["isolation"] == "auto"
+    assert ordinary["effective"]["isolation"] == "container"

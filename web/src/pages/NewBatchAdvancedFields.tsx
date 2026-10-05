@@ -1,6 +1,7 @@
 import { Input } from "../components/Input";
 import type { AdvancedState } from "./newBatch/advancedConfig";
 import { RETRY_REASONS, clampFloat, clampInt } from "./newBatch/advancedInputs";
+import ExecutionSelectionJson from "./newBatch/ExecutionSelectionJson";
 import { FieldLabel, Help } from "./NewBatchFields";
 
 import type { NewBatchViewState } from "./useNewBatch";
@@ -71,6 +72,22 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
           </select>
         </label>
         <label className="block max-w-sm">
+          <FieldLabel hint="default: auto">Isolation</FieldLabel>
+          <select
+            className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
+            value={advanced.isolation}
+            onChange={(e) => setAdv("isolation", e.target.value as AdvancedState["isolation"])}
+          >
+            <option value="">Auto (from task requirements)</option>
+            <option value="container">Container</option>
+            <option value="guest">Dedicated guest VM</option>
+          </select>
+          <Help>
+            Guest runs each attempt in its own kernel and grades in that attempt. Container cannot
+            run tasks that declare guest capabilities.
+          </Help>
+        </label>
+        <label className="block max-w-sm">
           <FieldLabel hint="default: task setting">Task network access</FieldLabel>
           <select
             className="block w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800"
@@ -116,6 +133,7 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             {networkPolicyPreview.data.selected_incompatible_task_ids.length > 8 ? "…" : ""}
           </div>
         ) : null}
+        <ExecutionSelectionJson advanced={advanced} setAdv={setAdv} />
       </fieldset>
 
       <fieldset className="space-y-3">

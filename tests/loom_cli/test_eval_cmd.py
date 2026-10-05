@@ -4081,3 +4081,52 @@ def test_batch_create_dry_run_prints_resolved_axes(
         "tb/a: harness=terminus-2@default network=gateway-only verification=separate isolation=container"
         in out
     )
+
+
+def test_batch_show_displays_requested_and_effective_execution_selection(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/batches/{_BATCH_ID}")] = httpx.Response(200, json={
+        "id": _BATCH_ID,
+        "execution_selection": {
+            "requested": {
+                "harness": {"name": "terminus-2", "version": "2026.06.1"}, "network_policy": None,
+                "verification": None, "isolation": "guest",
+            },
+            "effective": [{
+                "execution_class_id": "linux-amd64-cpu-guest-v1", "verification": "shared",
+                "fresh_sandbox_grading": False, "isolation": "guest", "trial_count": 3,
+            }],
+        },
+    })
+    capsys.readouterr()
+    assert main(["eval", "batch", "show", _BATCH_ID]) == 0
+    out = capsys.readouterr().out
+    assert "requested_harness: terminus-2@2026.06.1" in out
+    assert "requested_verification: (task default)" in out
+    assert "requested_isolation: guest" in out
+    assert (
+        "effective: isolation=guest verification=shared (in attempt) "
+        "class=linux-amd64-cpu-guest-v1 (3 trials)"
+    ) in out
+
+
+def test_trial_show_reports_uncompiled_execution_selection(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "queued",
+        "execution_selection": {
+            "requested": {
+                "harness": {"name": "direct-completion", "version": None}, "network_policy": None,
+                "verification": "separate", "isolation": "auto",
+            },
+            "effective": None,
+        },
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "requested_harness: direct-completion@default" in out
+    assert "requested_isolation: auto" in out
+    assert "effective: (not compiled yet)" in out

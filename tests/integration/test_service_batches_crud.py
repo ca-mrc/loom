@@ -2846,6 +2846,13 @@ async def test_post_accepts_ordinary_task_from_deployment_runtime_profile(
             "candidate_sha": profile.candidate_sha,
             "sha256": canonical_digest(profile.model_dump(mode="json")),
         }
+        selection = detail.json()["execution_selection"]
+        assert selection["requested"]["isolation"] == "auto"
+        assert isinstance(selection["effective"], list)
+        if use_combinations:
+            assert selection["requested"]["harnesses"] == [{"name": agent_name, "version": None}]
+        else:
+            assert selection["requested"]["harness"] == {"name": agent_name, "version": None}
     finally:
         with sl() as s:
             s.execute(

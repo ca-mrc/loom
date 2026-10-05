@@ -534,7 +534,39 @@ class TrialExecutionPhases(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class RequestedExecutionSelection(TypedDict):
+    harness: ResolvedHarness | None
+    harnesses: NotRequired[list[ResolvedHarness]]
+    network_policy: dict[str, Any] | None
+    verification: Literal["shared", "separate"] | None
+    isolation: Literal["auto", "container", "guest"]
+
+
+@with_config(ConfigDict(extra="allow"))
+class EffectiveExecutionSelection(TypedDict):
+    execution_class_id: str
+    network_policy: NotRequired[dict[str, Any] | None]
+    verification: Literal["shared", "separate", "skipped"]
+    fresh_sandbox_grading: bool
+    isolation: Literal["container", "guest"]
+    trial_count: NotRequired[int]
+
+
+@with_config(ConfigDict(extra="allow"))
+class TrialExecutionSelection(TypedDict):
+    requested: RequestedExecutionSelection
+    effective: EffectiveExecutionSelection | None
+
+
+@with_config(ConfigDict(extra="allow"))
+class BatchExecutionSelection(TypedDict):
+    requested: RequestedExecutionSelection
+    effective: list[EffectiveExecutionSelection]
+
+
+@with_config(ConfigDict(extra="allow"))
 class TrialDetail(Trial):
+    execution_selection: NotRequired[TrialExecutionSelection]
     task_environment_preparation: NotRequired[list[TrialDetailTaskEnvironmentPreparationItem]]
     owner_team: NotRequired[TrialDetailOwnerTeam]
     team_name: NotRequired[str | None]
@@ -799,6 +831,7 @@ class Batch(TypedDict):
 @with_config(ConfigDict(extra="allow"))
 class BatchDetail(Batch):
     network_policy: NotRequired[BatchDetailNetworkPolicyEvidence]
+    execution_selection: NotRequired[BatchExecutionSelection]
     task_resource_requests: NotRequired[dict[str, TaskResourceRequests]]
     trial_summary: dict[str, int | float]
     progress: NotRequired[ProgressSummary]

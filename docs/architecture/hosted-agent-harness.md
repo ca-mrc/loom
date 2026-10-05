@@ -186,6 +186,24 @@ implementation must add a bounded process handle, stream capture, cancellation
 and exit-status contract rather than silently falling back to non-streaming
 execution.
 
+## Selecting the four axes together (#2314)
+
+A batch chooses four independent axes, all stored on `TrialConfig`: harness
+(`agent_name`/`agent_version`), network (`baseline_network_policy_override`),
+verification (`verifier_env_mode`) and isolation (`isolation`:
+`auto`/`container`/`guest`). `execution_selection_rejections` validates the
+combination as a whole and returns every reason, so a rejected batch lists all
+conflicts per task in one 400 instead of failing on the first.
+
+`loom.execution-selection.v1` (`docs/evidence/loom.execution-selection.v1.schema.json`)
+is an input document for the same fields, accepted by
+`loom eval batch create --execution-config` and the web form's Edit as JSON. It
+never forms a parallel config. `POST /api/v1/batches/dry-run` (and `--dry-run`)
+runs the same admission and reports each task's resolved axes without writing.
+Trial and batch detail return `execution_selection` with the requested axes and
+the effective class, verification, isolation and `fresh_sandbox_grading` read
+from each frozen attempt plan; it is `null`/empty until a plan is compiled.
+
 ## Verification is harness-independent
 
 `resolve_verifier_env_mode(task, trial)` selects the batch override first and
