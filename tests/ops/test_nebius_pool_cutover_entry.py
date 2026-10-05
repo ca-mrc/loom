@@ -497,6 +497,7 @@ def test_private_cutover_derives_the_manager_and_keeps_history_read_only(private
 
 def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is_readonly(private_cutover, monkeypatch):
     from contextlib import contextmanager
+    from types import SimpleNamespace
 
     from scripts.ops import nebius_pool_cutover_entry as entry
     from scripts.ops.nebius_management_entry import EntryError
@@ -506,6 +507,8 @@ def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is
     selected = entry.load_pool_cutover_inputs(metadata)
     parent = CutoverAPI(selected.request)
     parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    telemetry = {'status': 'unavailable', 'checks': 2, 'unavailable': 1, 'reasons': ['tls_kubelet_verify_19']}
+    parent.guards = SimpleNamespace(telemetry_report=lambda: telemetry)
     opened = []
 
     @contextmanager
@@ -519,7 +522,7 @@ def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is
 
     monkeypatch.setattr(entry, 'connected_pool_api', connect)
     assert entry.execute_pool_cutover(selected, 'preflight') == {
-        'status': 'preflight_qualified', 'operation_id': metadata['operation_id']}
+        'status': 'preflight_qualified', 'operation_id': metadata['operation_id'], 'telemetry': telemetry}
     assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
     assert opened == ['opened', 'closed']
     with pytest.raises(EntryError):
