@@ -52,8 +52,9 @@ def execution_selection_readback(trial_config: Any, plan: Any | None) -> dict[st
     from loom.execution_runtime_contract import VerifierExecution
 
     config = trial_config if isinstance(trial_config, dict) else {}
+    agent_name = config.get("agent_name")
     requested = {
-        "harness": {"name": config.get("agent_name"), "version": config.get("agent_version")},
+        "harness": {"name": agent_name, "version": config.get("agent_version")} if agent_name else None,
         "network_policy": config.get("baseline_network_policy_override"),
         "verification": config.get("verifier_env_mode"),
         "isolation": config.get("isolation") or "auto",

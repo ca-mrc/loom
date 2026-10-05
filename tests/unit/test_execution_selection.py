@@ -154,6 +154,11 @@ def test_combined_validator_returns_every_reason_across_axes():
     assert "runtime_profile_unavailable" in _reasons(task, trial, None)
 
 
+def test_readback_without_a_stored_agent_requests_no_harness():
+    requested = execution_selection_readback({"isolation": "container"}, None)["requested"]
+    assert requested["harness"] is None and requested["isolation"] == "container"
+
+
 def test_readback_reports_requested_axes_beside_the_frozen_plan():
     task, trial, profile = _inputs()
     task, profile = _root(task), _guest_ready(profile)
