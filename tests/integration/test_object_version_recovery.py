@@ -31,6 +31,7 @@ from loom.db.schema import (
     Token,
     Trial,
 )
+from loom.pipeline.keys import canonical_digest, canonical_document, digest_bytes
 from loom_control_plane.app import _load_admin_secret_verifier, create_app
 from loom_control_plane.config import ControlPlaneSettings
 from tests.integration.test_service_execution_leases import _reserve, _seed_ready_trial
@@ -82,10 +83,44 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
         trial_id, target = await _seed_ready_trial(session, now=now)
         lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
         trial = await session.get(Trial, trial_id)
+        result_body = b'{"reward":0}'
+        result_sha = digest_bytes(result_body)
+        stored_files = [{"file_index": 0, "relative_path": "result.json", "role": "semantic_document",
+                         "archive_format": "none", "media_type": "application/json",
+                         "size_bytes": len(result_body), "sha256": result_sha}]
+        artifact_manifest = {"schema_version": "loom.artifact-manifest.v1", "artifact_id": str(artifact_id),
+            "artifact_name": "trial_bundle", "artifact_type": "loom.trial-artifact-bundle.v1",
+            "content_sha256": result_sha, "stored_size_bytes": len(result_body),
+            "unpacked_size_bytes": len(result_body), "file_count": 1, "stored_files": stored_files,
+            "lineage_artifact_ids": [], "lineage_digests": []}
+        producer = {"commit_kind": "service_execution_output", "team_id": str(trial.team_id),
+            "service_execution_lease_id": str(lease.id), "service_execution_generation": 1,
+            "service_execution_role": "attempt", "runtime_contract_sha256": lease.runtime_contract_sha256,
+            "candidate_sha": lease.runtime_contract_json["candidate_sha"],
+            "task_revision_sha256": lease.runtime_contract_json["task_revision_sha256"],
+            "command_identity_sha256": lease.runtime_contract_json["command_identity_sha256"],
+            "input_lineage_artifact_ids": [], "input_lineage_digests": []}
+        root_manifest = {"schema_version": "loom.artifact-commit-manifest.v1", "session_id": str(upload_id),
+            "commit_kind": "service_execution_output", "producer_identity": producer,
+            "artifacts": [{"artifact_id": str(artifact_id), "artifact_name": "trial_bundle",
+                           "artifact_type": "loom.trial-artifact-bundle.v1",
+                           "manifest_sha256": canonical_digest(artifact_manifest),
+                           "content_sha256": result_sha, "stored_files": stored_files}],
+            "total_bytes": len(result_body), "input_lineage_artifact_ids": [], "input_lineage_digests": [],
+            "request_digest": "sha256:" + "e" * 64}
+        source_fault = getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("source_fault")
+        if source_fault == "manifest":
+            root_manifest = {}
+        elif source_fault == "artifact":
+            root_manifest["artifacts"][0]["artifact_id"] = str(uuid4())
+        elif source_fault == "producer":
+            producer["service_execution_lease_id"] = str(uuid4())
+        elif source_fault == "runtime":
+            producer["candidate_sha"] = "b" * 40
         prefix = f"trials/{trial.team_id}/{trial_id}/attempts/1/bundles/{artifact_id}/"
         trajectory_prefix = f"{trial.team_id}/{trial_id}/attempts/1/"
-        for key, body in [(prefix + "files/result.json", b'{"reward":0}'),
-                          (prefix + "source/_manifest.json", b'{"original":true}'),
+        for key, body in [(prefix + "files/result.json", result_body),
+                          (prefix + "source/_manifest.json", canonical_document(root_manifest)),
                           (trajectory_prefix + "events.jsonl", b'{"seq":1}\n'),
                           (trajectory_prefix + "atif.json", b'{"steps":[]}')]:
             version = s3.put_object(Bucket=bucket, Key=key, Body=body)["VersionId"]
@@ -98,7 +133,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
         file_rows = [{"relative_path": name, "media_type": "application/json",
                       "bucket": bucket, "key": obj.object_key, "version_id": None,
                       "sha256": "sha256:" + obj.content_sha256, "size_bytes": obj.size_bytes}
-                     for name, obj in zip(("result.json", "_manifest.json"), objects[:2], strict=True)]
+                     for name, obj in zip(("result.json", "source/_manifest.json"), objects[:2], strict=True)]
         storage = {"schema_version": "loom.canonical-trial-bundle-storage.v1", "attempt": 1,
                    "source_upload_session_id": str(upload_id),
                    "files": file_rows[:1], "source_evidence": file_rows[1:]}
@@ -115,7 +150,10 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
         trial.trajectory_index = index
         lease.output_commit_state = lease.materialization_state = "committed"
         lease.output_upload_session_id, lease.output_generation = upload_id, 1
-        lease.output_manifest_sha256 = lease.output_marker_sha256 = "sha256:" + "a" * 64
+        lease.output_manifest_sha256 = canonical_digest(root_manifest)
+        lease.output_marker_sha256 = canonical_digest({"schema_version": "loom.artifact-commit-marker.v1",
+            "commit_kind": "service_execution_output", "manifest_sha256": lease.output_manifest_sha256,
+            "session_id": str(upload_id)})
         lease.output_committed_at = lease.materialization_committed_at = now
         lease.materialization_attempts = 1
         lease.canonical_trajectory_sha256 = "sha256:" + objects[2].content_sha256
@@ -124,12 +162,13 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             commit_kind="service_execution_output", service_execution_lease_id=lease.id,
             service_execution_generation=1, service_execution_role="attempt",
             service_execution_runtime_contract_sha256=lease.runtime_contract_sha256,
-            service_execution_candidate_sha="b" * 40,
-            service_execution_task_revision_sha256="sha256:" + "c" * 64,
-            service_execution_command_identity_sha256="sha256:" + "d" * 64,
+            service_execution_candidate_sha=producer["candidate_sha"],
+            service_execution_task_revision_sha256=producer["task_revision_sha256"],
+            service_execution_command_identity_sha256=producer["command_identity_sha256"],
             idempotency_key=str(upload_id), request_digest="sha256:" + "e" * 64,
             prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=1024,
-            expires_at=now + timedelta(days=1), committed_at=now, canonical_manifest_json={},
+            expires_at=now + timedelta(days=1), committed_at=now, canonical_manifest_json=root_manifest,
+            actual_total_bytes=len(result_body),
             manifest_sha256=lease.output_manifest_sha256,
             committed_marker_sha256=lease.output_marker_sha256))
         session.add(DataLifecycleAuthority(id=authority_id, environment="development",
@@ -137,11 +176,11 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             owner_id=str(artifact_id), pinned=True, created_at=now))
         await session.flush()
         session.add(Artifact(id=artifact_id, team_id=trial.team_id, trial_id=trial_id,
-            artifact_type="loom.trial-artifact-bundle.v1", name="trial-bundle",
+            artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
             control_producer_kind="service_execution", control_producer_id=lease.id,
-            artifact_upload_session_id=upload_id, manifest_sha256="sha256:" + "f" * 64,
-            stored_size_bytes=100, unpacked_size_bytes=100, file_count=2,
-            content_hash="sha256:" + "a" * 64, storage=storage,
+            artifact_upload_session_id=upload_id, manifest_sha256=canonical_digest(artifact_manifest),
+            stored_size_bytes=len(result_body), unpacked_size_bytes=len(result_body), file_count=1,
+            content_hash=result_sha, storage=storage,
             artifact_metadata={"materialization_state": "committed"},
             lifecycle_authority_id=authority_id, created_at=now))
         session.add_all(objects)
@@ -501,3 +540,40 @@ async def test_inventory_pagination_does_not_confuse_prefix_neighbors_with_exact
     response = await r.client.post(URL, headers=HEADERS, json=payload)
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "applied"
+
+
+@pytest.mark.parametrize("source_fault", ["manifest", "artifact", "producer", "runtime"])
+async def test_corrupt_persisted_source_identity_is_rejected(recovery, source_fault):
+    r = recovery
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_gc_claim_under_old_registry_uuid_cannot_delete_adopted_version(recovery, legacy):
+    r = recovery
+    obj = r.objects[0]
+    old_id, old_authority, deletion_token, run_id = uuid4(), uuid4(), uuid4(), uuid4()
+    inventory = {"objects": [{"id": str(old_id), "authority_id": str(old_authority),
+        "bucket": obj.bucket, "object_key": obj.object_key, "version_id": r.versions[0],
+        "content_sha256": obj.content_sha256, "size_bytes": obj.size_bytes}]} if legacy else {"schema_version": 2}
+    async with r.sessions() as session:
+        session.add(DataLifecycleGcRun(id=run_id, environment="staging", namespace="old",
+            mutation_epoch_before=0, dry_run=False, requested_by="test", policy={}, inventory=inventory,
+            state="failed"))
+        await session.flush()
+        # Exact snapshots intentionally survive deletion of their original rows.
+        await session.execute(text("INSERT INTO data_lifecycle_gc_items "
+            "(gc_run_id, object_id, deletion_token, authority_id, bucket, object_key, version_id, size_bytes) "
+            "VALUES (:run, :object, :token, :authority, :bucket, :key, :version, :size)"),
+            {"run": run_id, "object": old_id, "token": deletion_token,
+             "authority": None if legacy else old_authority, "bucket": None if legacy else obj.bucket,
+             "key": None if legacy else obj.object_key, "version": None if legacy else r.versions[0],
+             "size": None if legacy else obj.size_bytes})
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
