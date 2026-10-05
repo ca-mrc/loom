@@ -46,6 +46,7 @@ from loom.db.schema import (
 from loom.execution_diagnosis_store import execution_failure_groups, read_trial_execution_failure
 from loom.execution_resource_allocation import resource_allocation_summary
 from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.execution_selection import execution_selection_readback
 from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_row
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
@@ -858,6 +859,7 @@ async def get_trial(
                 "committed_file_count": int(source_counts.committed_file_count or 0),
                 "committed_size_bytes": int(source_counts.committed_size_bytes or 0),
             }
+    base["execution_selection"] = execution_selection_readback(trial.config, runtime_plan)
     base["materialization"] = (
         {
             "resource_allocation": (

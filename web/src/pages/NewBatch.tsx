@@ -9,6 +9,8 @@ import { Input } from "../components/Input";
 import { agentLabel } from "../lib/agentLabel";
 import type { BatchExportResult } from "./newBatch/BatchExportDialog";
 import { clampInt } from "./newBatch/advancedInputs";
+import SubmissionRejections from "./newBatch/SubmissionRejections";
+import { parseSubmissionRejection } from "./newBatch/submissionRejection";
 import { DEFAULT_AGENT_NAME } from "./newBatch/formState";
 import { FieldLabel } from "./NewBatchFields";
 import { MAX_COMBINATIONS } from "./newBatchState";
@@ -126,6 +128,7 @@ export default function NewBatch(): JSX.Element {
     tagSelectionPending,
     submitButtonLabel,
   } = state;
+  const submissionRejection = create.isError ? parseSubmissionRejection(create.error) : null;
   return (
     <div className="space-y-6">
       <header>
@@ -388,7 +391,13 @@ export default function NewBatch(): JSX.Element {
           {localError}
         </div>
       ) : null}
-      {create.isError ? <ErrorState error={create.error} /> : null}
+      {create.isError ? (
+        submissionRejection ? (
+          <SubmissionRejections rejection={submissionRejection} />
+        ) : (
+          <ErrorState error={create.error} />
+        )
+      ) : null}
 
       <div className="flex items-center justify-end">
         <Button

@@ -390,6 +390,40 @@ def _print_network_policy(evidence: Any, *, batch: bool = False) -> None:
         print(f"  frozen_policy: {_network_policy_label(evidence.get('effective'))}")
 
 
+def _effective_selection_label(effective: dict[str, Any]) -> str:
+    grading = "fresh sandbox" if effective.get("fresh_sandbox_grading") else "in attempt"
+    label = (
+        f"isolation={effective.get('isolation')} verification={effective.get('verification')} "
+        f"({grading}) class={effective.get('execution_class_id')}"
+    )
+    if effective.get("trial_count") is not None:
+        count = effective["trial_count"]
+        label += f" ({count} trial{'' if count == 1 else 's'})"
+    return label
+
+
+def _print_execution_selection(evidence: Any) -> None:
+    """Requested axes beside what the frozen plan ran; never infer a missing plan."""
+    if not isinstance(evidence, dict):
+        return
+    requested = evidence.get("requested") or {}
+    print("execution_selection:")
+    harnesses = requested.get("harnesses") or ([requested["harness"]] if requested.get("harness") else [])
+    if harnesses:
+        print("  requested_harness: " + ", ".join(
+            f"{item.get('name')}@{item.get('version') or 'default'}" for item in harnesses))
+    print(f"  requested_verification: {requested.get('verification') or '(task default)'}")
+    print(f"  requested_isolation: {requested.get('isolation') or 'auto'}")
+    effective = evidence.get("effective")
+    if isinstance(effective, list):
+        labels = [_effective_selection_label(item) for item in effective if isinstance(item, dict)]
+        print("  effective: " + ("; ".join(labels) if labels else "(no compiled attempts yet)"))
+    elif isinstance(effective, dict):
+        print(f"  effective: {_effective_selection_label(effective)}")
+    else:
+        print("  effective: (not compiled yet)")
+
+
 def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> None:
     print(f"id:               {item.get('id') or item.get('trial_id')}")
     print(f"task_id:          {item.get('task_id', '(unknown)')}")
@@ -398,6 +432,7 @@ def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> Non
     materialization = item.get("materialization")
     if isinstance(materialization, dict):
         _print_network_policy(materialization.get("network_policy"))
+    _print_execution_selection(item.get("execution_selection"))
     if item.get("agent_name") is not None:
         print(f"agent:            {item['agent_name']}")
     if item.get("model") is not None:
@@ -641,6 +676,7 @@ def _print_batch_summary(item: dict[str, Any]) -> None:
     print(f"n_per_task:            {item.get('n_per_task', 1)}")
     print(f"backend:               {item.get('backend') or '(unknown)'}")
     _print_network_policy(item.get("network_policy"), batch=True)
+    _print_execution_selection(item.get("execution_selection"))
     required_worker_pools = item.get("required_worker_pools") or []
     if required_worker_pools:
         print(f"required_worker_pools: {', '.join(required_worker_pools)}")

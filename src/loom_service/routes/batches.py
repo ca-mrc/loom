@@ -28,7 +28,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, literal_column, or_, select, update
 
 from loom.auth import AuthContext
 from loom.data_lifecycle_registry import ensure_batch_lifecycle_authority
@@ -48,6 +48,7 @@ from loom.db.schema import (
     Worker,
 )
 from loom.execution_diagnosis_store import execution_failure_groups
+from loom.execution_selection import execution_selection_readback
 from loom.hosted_harness import harnesses_supporting, hosted_harness
 from loom.models.batch import Combination
 from loom.models.networking import (
@@ -401,6 +402,52 @@ async def _batch_network_policy_evidence(
         ),
         "resolved_effective": _network_policy_groups(resolved),
         "unavailable_task_ids": sorted(unavailable),
+    }
+
+
+async def _batch_execution_selection(
+    session: Any, *, batch: Any,
+) -> dict[str, Any]:
+    """Requested axes beside the axes each frozen attempt plan actually ran."""
+    contract = ServiceExecutionLease.runtime_contract_json
+    class_id = contract["execution_class_id"].astext
+    verifier = contract["verifier_execution"].astext
+    guest = func.jsonb_path_exists(contract, literal_column("'$.sidecars[*].guest_execution'::jsonpath"))
+    rows = (
+        await session.execute(
+            select(class_id, verifier, guest, func.count(func.distinct(ServiceExecutionLease.trial_id)))
+            .join(Trial, Trial.id == ServiceExecutionLease.trial_id)
+            .where(
+                Trial.batch_id == batch.id,
+                ServiceExecutionLease.execution_role == "attempt",
+                contract.is_not(None),
+            )
+            .group_by(class_id, verifier, guest)
+        )
+    ).all()
+    verification = {"in_attempt": "shared", "separate_execution": "separate", "skipped": "skipped"}
+    requested = execution_selection_readback(batch.trial_config, None)["requested"]
+    harnesses = [
+        {"name": combo.get("agent_name"), "version": combo.get("agent_version")}
+        for combo in (batch.combinations or [])
+        if isinstance(combo, dict)
+    ]
+    if harnesses:
+        requested = {**requested, "harness": None, "harnesses": harnesses}
+    return {
+        "requested": requested,
+        "effective": [
+            {
+                "execution_class_id": row_class,
+                "verification": verification.get(row_verifier, row_verifier),
+                "fresh_sandbox_grading": row_verifier == "separate_execution",
+                "isolation": "guest" if row_guest else "container",
+                "trial_count": int(count),
+            }
+            for row_class, row_verifier, row_guest, count in sorted(
+                rows, key=lambda row: (str(row[0]), str(row[1]), bool(row[2])),
+            )
+        ],
     }
 
 
@@ -2581,6 +2628,7 @@ async def get_batch(
     extra = {
         "service_execution_summary": service_execution_summary,
         "network_policy": network_policy,
+        "execution_selection": await _batch_execution_selection(s, batch=b),
         "progress": await progress_summary(s, select(Trial.id).where(Trial.batch_id == b.id)),
         "rerun_batches": [
             {

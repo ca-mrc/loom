@@ -13,6 +13,7 @@ import { Link, useParams, useLocation } from "react-router-dom";
 import { api } from "../api";
 import type { components } from "../api/schema";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
+import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
@@ -329,6 +330,15 @@ export default function BatchDetail(): JSX.Element {
                 </p>
               ) : null}
             </section>
+          ) : null}
+
+          {c.execution_selection ? (
+            <div className="border-b border-slate-200 pb-3">
+              <ExecutionSelectionSection
+                requested={c.execution_selection.requested}
+                effective={c.execution_selection.effective}
+              />
+            </div>
           ) : null}
 
           {c.failure_reason ? (
