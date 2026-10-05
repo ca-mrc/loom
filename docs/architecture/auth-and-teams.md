@@ -117,7 +117,13 @@ session and CSRF secrets. The CSRF secret is returned in authentication JSON
 and kept in application or CLI memory; it is sent as `X-Loom-CSRF` on unsafe
 session-authenticated requests.
 
-`GET /api/v1/auth/me` rotates the CSRF token. Switching teams also rotates it.
+`GET /api/v1/auth/me` returns a stable CSRF proof without rotating the session's
+CSRF nonce, so an identity read in another tab cannot invalidate a pending write.
+The proof is HMAC-SHA256 keyed by the raw HttpOnly session cookie over
+`loom-session-csrf-v1` followed by a NUL byte and the stored CSRF hash. Stored
+hashes alone cannot mint it. Service and Control Plane both verify this proof;
+the random token returned by login/team/refresh remains valid for compatibility.
+Switching teams rotates the CSRF nonce and invalidates both previous proofs.
 Refreshing a normal session rotates both the session and CSRF secrets. Logout
 revokes the session and clears the authentication cookies. Bearer-token
 requests do not use the browser-session CSRF check.

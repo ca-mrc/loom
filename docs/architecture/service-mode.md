@@ -617,7 +617,12 @@ Core pages include:
   paginated trajectory viewer + EventTimeline (one row per event,
   click-to-expand JSON) + ATIF download button
 - **BatchesList** + **BatchDetail** — `refetchInterval: 5000`
-  while state ∈ {submitted, running}; stops on terminal.
+  while state ∈ {submitted, running}. BatchDetail also refreshes after parent
+  cancellation while children are active, output is uploading/materializing,
+  or latest execution attempts have not reached `deleted`. The bounded summary
+  includes `service_execution_summary.execution_states` for cleanup observation.
+  Polling stops once those projections settle; cancelled trials with no output
+  do not wait for a canonical bundle. Hidden-tab pauses and blur backoff apply.
   Multi-benchmark batch detail responses include `benchmark_summary`,
   grouped server-side from trial task ids to task benchmark ids and
   benchmark display names, so the SPA can show per-benchmark score,

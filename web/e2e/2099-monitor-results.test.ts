@@ -133,3 +133,38 @@ test("Batch run plan explains TaskSet purpose, task count and state-count naviga
   expect(violations).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath("batch-run-plan.png") });
 });
+
+test("cancelled Batch observes children, canonical output and cleanup without reload", async ({ apiHarness, browserHarness, page }, testInfo) => {
+  const projection = (active: boolean, archiving: boolean, deleted: boolean) => ({
+    ...batch, state: "cancelled", expected_trial_count: 1,
+    trial_summary: active ? { running: 1 } : { cancelled: 1 },
+    service_execution_summary: {
+      lease_count: 1, lifecycle_stages: active ? { running: 1 } : { cancelled: 1 },
+      output_commit_states: archiving || active ? { uploading: 1 } : { committed: 1 },
+      materialization_states: archiving || active ? { pending: 1 } : { committed: 1 },
+      execution_states: deleted ? { deleted: 1 } : active ? { running: 1 } : { delete_pending: 1 },
+      canonical_ready_count: archiving || active ? 0 : 1,
+    },
+  });
+  const path = "/api/v1/batches/review-batch";
+  const fixture = await apiHarness.install({ role: "user", overrides: [
+    json("cancel accepted before children settle", path, projection(true, true, false)),
+    json("children cancelled while output archives", path, projection(false, true, false)),
+    json("canonical output before cleanup", path, projection(false, false, false)),
+    json("execution resources released", path, projection(false, false, true)),
+    json("no prepared delivery export", `${path}/delivery-export`, null),
+  ] });
+  await page.goto(`${browserHarness.baseURL}/batches/review-batch`);
+  await page.bringToFront();
+  await page.getByText("Trial counts by state", { exact: true }).click();
+  await expect(page.getByRole("row", { name: "running 1", exact: true })).toBeVisible();
+  await expect(page.getByRole("row", { name: "cancelled 1", exact: true })).toBeVisible();
+  const ready = page.getByText("Canonical bundles ready", { exact: true }).locator("..");
+  await expect(ready.getByText("1", { exact: true })).toBeVisible();
+  const reads = () => fixture.ledger.filter((entry) => entry.method === "GET" && entry.path === path).length;
+  await expect.poll(reads).toBe(4);
+  await page.clock.install();
+  await page.clock.runFor(15_000);
+  expect(reads()).toBe(4);
+  await page.screenshot({ path: testInfo.outputPath("cancelled-batch-converged.png") });
+});

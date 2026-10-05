@@ -130,6 +130,43 @@ async def cancel_stack(postgres_url: str, request: pytest.FixtureRequest) -> Asy
 
 
 @pytest.mark.parametrize("resource", ["trials", "batches"])
+@pytest.mark.parametrize("cancel_stack", [None, "scoped"], indirect=True)
+@pytest.mark.parametrize("token_source", ["login", "me"])
+async def test_other_tab_identity_reads_do_not_invalidate_cancel(cancel_stack, resource, token_source):
+    stack = cancel_stack
+    settings = stack.service.state.settings
+    identifier = stack.trial_id if resource == "trials" else stack.batch_id
+    async with stack.sessions() as session:
+        await session.execute(update(Trial).where(Trial.id == stack.trial_id).values(
+            state="running", batch_id=stack.batch_id if resource == "batches" else None,
+        ))
+        await session.commit()
+    client_options = dict(transport=httpx.ASGITransport(app=stack.service),
+                          base_url="https://alice.dev.example.com",
+                          cookies={settings.session_cookie_name: stack.session_cookie})
+    async with httpx.AsyncClient(**client_options) as first, httpx.AsyncClient(**client_options) as second:
+        csrf = stack.csrf
+        if token_source == "me":
+            identity = await first.get("/api/v1/auth/me")
+            assert identity.status_code == 200, identity.text
+            csrf = identity.json()["csrf_token"]
+        for _ in range(2):
+            identity = await second.get("/api/v1/auth/me")
+            assert identity.status_code == 200, identity.text
+        path = f"/api/v1/{resource}/{identifier}/cancel"
+        for headers in ({}, {"X-Test-CSRF": "wrong-token"}):
+            denied = await first.post(path, headers=headers)
+            assert denied.status_code == 403
+        assert stack.cp_requests == []
+        response = await asyncio.wait_for(first.post(path, headers={"X-Test-CSRF": csrf}), 5)
+        assert response.status_code == 200, response.text
+    assert stack.cp_requests == [f"/trials/{stack.trial_id}/cancel"]
+    async with stack.sessions() as session:
+        assert (await session.get(Trial, stack.trial_id)).cancellation_requested_at is not None
+        assert (await session.get(Trial, stack.other_trial_id)).state == "queued"
+
+
+@pytest.mark.parametrize("resource", ["trials", "batches"])
 @pytest.mark.parametrize("auth_kind", ["cookie", "bearer"])
 @pytest.mark.parametrize("trial_state", ["queued", "running"])
 async def test_cancel_crosses_real_service_cp_boundary(
