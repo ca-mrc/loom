@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 import boto3
 import httpx
 import pytest
+from botocore.exceptions import ClientError
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -582,3 +583,16 @@ async def test_gc_claim_under_old_registry_uuid_cannot_delete_adopted_version(re
     response = await r.client.post(URL, headers=HEADERS, json=r.payload)
     assert response.status_code == 409, response.text
     assert await snapshot(r) == before
+
+
+async def test_exact_version_recovery_needs_no_bucket_configuration_permission(recovery, monkeypatch):
+    r = recovery
+
+    def inaccessible_configuration(**kwargs):
+        raise ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketVersioning")
+
+    monkeypatch.setattr(r.s3, "get_bucket_versioning", inaccessible_configuration)
+    payload = await applying(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "applied"
