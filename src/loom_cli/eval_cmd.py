@@ -37,7 +37,9 @@ from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
+from pydantic import ValidationError
 
+from loom.execution_selection import ExecutionSelectionV1
 from loom.models.networking import WebDestination
 from loom.security.redaction import redact_mapping
 from loom_cli.backend_flag import add_legacy_backend_flag, warn_legacy_backend_flag
@@ -108,6 +110,66 @@ def _network_policy_override(
         for item in sorted(set(parsed), key=lambda item: (item.host, item.protocol))
     ]
     return {"kind": "web-allowlist", "destinations": destinations_json}
+
+
+def _load_execution_selection(raw: str) -> ExecutionSelectionV1:
+    try:
+        text = sys.stdin.read() if raw == "-" else Path(raw).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise argparse.ArgumentTypeError(f"cannot read {raw}: {exc}") from exc
+    try:
+        return ExecutionSelectionV1.model_validate_json(text)
+    except ValidationError as exc:
+        raise argparse.ArgumentTypeError(f"invalid execution config: {exc}") from exc
+
+
+_EXECUTION_CONFIG_CONFLICTS = (
+    ("--agent", "agent"),
+    ("--agent-version", "agent_version"),
+    ("--network-policy", "network_policy"),
+    ("--allow-web", "allow_web"),
+    ("--verifier-env-mode", "verifier_env_mode"),
+)
+
+
+def _apply_execution_selection(args: argparse.Namespace) -> str | None:
+    """Map --execution-config onto the per-axis flags; returns an error message."""
+    selection: ExecutionSelectionV1 | None = getattr(args, "execution_config", None)
+    if selection is None:
+        return None
+    conflicting = [flag for flag, dest in _EXECUTION_CONFIG_CONFLICTS if getattr(args, dest, None) is not None]
+    if conflicting:
+        return "--execution-config selects every execution axis; omit " + ", ".join(conflicting) + "."
+    if selection.harness is not None:
+        if args.combinations_json is not None:
+            return "--execution-config harness conflicts with --combinations-json; omit one."
+        args.agent = selection.harness.name
+        args.agent_version = selection.harness.version
+    if selection.network_policy is not None:
+        args.network_policy = selection.network_policy.mode
+        args.allow_web = list(selection.network_policy.allow) or None
+    args.verifier_env_mode = selection.verification
+    return None
+
+
+def _print_dry_run(body: dict[str, Any]) -> None:
+    if not body.get("accepted"):
+        print("Dry run: rejected. Nothing was created.")
+        reasons_by_task = body.get("rejection_reasons") or {}
+        for task_id in sorted({*reasons_by_task, *(body.get("rejected_task_ids") or [])}):
+            print(f"  {task_id}: {', '.join(reasons_by_task.get(task_id) or ['not runnable on this backend'])}")
+        return
+    print("Dry run: accepted. Nothing was created.")
+    for task in body.get("tasks") or []:
+        for trial in task.get("trials") or []:
+            harness = trial.get("harness") or {}
+            network = (trial.get("network_policy") or {}).get("kind", "-")
+            version = harness.get("version") or "default"
+            print(
+                f"  {task.get('task_id')}: harness={harness.get('name')}@{version} "
+                f"network={network} verification={trial.get('verification')} "
+                f"isolation={trial.get('isolation')}",
+            )
 
 
 def _build_agent_model(
@@ -638,7 +700,7 @@ def _batch_create(args: argparse.Namespace) -> int:
             conflicting = [
                 "--" + dest.replace("_", "-")
                 for dest, default in args.batch_create_defaults.items()
-                if dest != "request_json" and getattr(args, dest, default) != default
+                if dest not in {"request_json", "dry_run"} and getattr(args, dest, default) != default
             ]
             if conflicting:
                 sys.stderr.write(
@@ -647,12 +709,21 @@ def _batch_create(args: argparse.Namespace) -> int:
                 )
                 return 2
             cfg = require_logged_in()
+            if args.dry_run:
+                with authed_client(cfg) as c:
+                    response = c.post("/api/v1/batches/dry-run", json=request_json)
+                _print_dry_run(assert_2xx(response, action="dry-run batch from request JSON"))
+                return 0
             with authed_client(cfg) as c:
                 response = c.post("/api/v1/batches", json=request_json)
             body = assert_2xx(response, action="create batch from request JSON")
             print(f"Created batch {body.get('name') or '(server-generated)'}:")
             _print_batch_summary(body)
             return 0
+        selection_error = _apply_execution_selection(args)
+        if selection_error is not None:
+            sys.stderr.write(f"error: {selection_error}\n")
+            return 2
         warn_legacy_backend_flag(args.backend)
         if args.storage_preflight_evidence is not None:
             validation = validate_minio_storage_preflight_artifact(
@@ -897,6 +968,9 @@ def _batch_create(args: argparse.Namespace) -> int:
                 return 2
             if network_policy_override is not None:
                 trial_config["baseline_network_policy_override"] = network_policy_override
+            selection = getattr(args, "execution_config", None)
+            if selection is not None and selection.isolation not in {None, "auto"}:
+                trial_config["isolation"] = selection.isolation
             # --benchmark / --task-set are shortcuts for common task_filter
             # shapes. Operators wanting richer filters use --task-filter JSON
             # instead. Multiple selector forms are rejected so precedence stays
@@ -970,6 +1044,9 @@ def _batch_create(args: argparse.Namespace) -> int:
                 payload["task_resource_requests"] = resource_requests
             if args.description is not None:
                 payload["description"] = args.description
+            if args.dry_run:
+                _print_dry_run(assert_2xx(c.post("/api/v1/batches/dry-run", json=payload), action="dry-run batch"))
+                return 0
             resp = c.post("/api/v1/batches", json=payload)
         action_name = args.name if args.name is not None else "server-generated name"
         body = assert_2xx(resp, action=f"create batch {action_name!r}")
@@ -1877,6 +1954,26 @@ def dispatch(argv: list[str]) -> int:
         help=(
             "Allow one exact http(s)://hostname destination. Repeat as needed; "
             "requires --network-policy web-allowlist."
+        ),
+    )
+    p_bc.add_argument(
+        "--execution-config",
+        type=_load_execution_selection,
+        default=None,
+        metavar="FILE",
+        help=(
+            "loom.execution-selection.v1 JSON (path, or - for stdin) choosing harness, "
+            "network policy, verification and isolation together. Cannot be combined "
+            "with --agent, --agent-version, --network-policy, --allow-web or "
+            "--verifier-env-mode."
+        ),
+    )
+    p_bc.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run server admission and print what each task resolves to, "
+            "or every rejection reason; creates nothing."
         ),
     )
     p_bc.add_argument(

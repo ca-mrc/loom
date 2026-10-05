@@ -110,6 +110,8 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
+    from loom_cli.application_build_cmd import add_build_subparsers
+
     parser = commands.add_parser("app", help="Manage personal frontend/API applications sharing development data")
     sub = parser.add_subparsers(dest="application_command", required=True)
     create = sub.add_parser("create", help="Create a personal application from a qualified release")
@@ -138,3 +140,4 @@ def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # 
     wait.add_argument("operation_id")
     wait.add_argument("--timeout", type=float, default=300)
     parser.set_defaults(handler=_run)
+    add_build_subparsers(sub)

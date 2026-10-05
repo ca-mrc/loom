@@ -12,7 +12,7 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar, cast
 from uuid import UUID, uuid4
 
 from scripts.ops import nebius_certificates as private_state
@@ -125,8 +125,46 @@ def _defaulted(api: StageAPI, desired: dict[str, Any]) -> dict[str, Any]:
     return _snapshot(observed, allocation=False)
 
 
+_Document = TypeVar("_Document")
+
+
+def _copy_document(document: _Document) -> _Document:
+    """Detach JSON-shaped manifests without generic deepcopy work per scalar.
+
+    Exact builtin containers take the hot path; custom types keep the ordinary
+    deepcopy protocol. One memo preserves aliases/cycles across both paths.
+    This is a copy, not a cache or a qualification of the source document.
+    """
+    memo: dict[int, Any] = {}
+    retained: list[Any] = []  # Prevent id reuse if a custom copier mutates input.
+
+    def clone(value: Any) -> Any:
+        kind = type(value)
+        if value is None or kind in (str, int, bool, float, bytes):
+            return value
+        identity = id(value)
+        if identity in memo:
+            return memo[identity]
+        if kind is dict:
+            result: dict[Any, Any] = {}
+            memo[identity] = result
+            retained.append(value)
+            for key, item in value.items():
+                result[key if type(key) is str else copy.deepcopy(key, memo)] = clone(item)
+            return result
+        if kind is list:
+            items: list[Any] = []
+            memo[identity] = items
+            retained.append(value)
+            items.extend(clone(item) for item in value)
+            return items
+        return copy.deepcopy(value, memo)
+
+    return cast(_Document, clone(document))
+
+
 def _snapshot(document: dict[str, Any], *, allocation: bool = True) -> dict[str, Any]:
-    result = copy.deepcopy(document)
+    result = _copy_document(document)
     metadata = result["metadata"]
     if metadata.get("deletionTimestamp") is not None or metadata.get("ownerReferences"):
         raise StageError("staged resource is deleting or has a foreign owner")

@@ -8,6 +8,23 @@ function displayValue(value: string | null): string {
   return value ?? "unknown";
 }
 
+function PersonalSource({ digest, base }: { digest: string | null; base: string | null }): JSX.Element {
+  return <>
+    <div className="flex items-center justify-between gap-2">
+      <dt className="text-slate-500">Build kind</dt>
+      <dd className="text-xs text-slate-700">Personal source — not CI-approved</dd>
+    </div>
+    <div className="flex items-center justify-between gap-2">
+      <dt className="text-slate-500">Source digest</dt>
+      <dd>{digest ? <CopyableId value={digest} chars={19} /> : "unknown"}</dd>
+    </div>
+    <div className="flex items-center justify-between gap-2">
+      <dt className="text-slate-500">Base commit (informational)</dt>
+      <dd>{base ? <CopyableId value={base} chars={12} /> : "unknown"}</dd>
+    </div>
+  </>;
+}
+
 export default function VersionDetails({ onClose, hasNewerBuild }: {
   onClose: () => void;
   hasNewerBuild: boolean;
@@ -52,7 +69,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
               Frontend (this page)
             </h3>
             <dl className="mt-1 space-y-1">
-              <div className="flex items-center justify-between gap-2">
+              {LOADED_BUILD_INFO.kind === "personal" ? <PersonalSource digest={LOADED_BUILD_INFO.sourceDigest} base={LOADED_BUILD_INFO.baseCommit} /> : <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Commit</dt>
                 <dd className="flex items-center gap-2">
                   {revision ? (
@@ -75,7 +92,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
                     </span>
                   )}
                 </dd>
-              </div>
+              </div>}
               <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Source ref</dt>
                 <dd className="font-mono text-xs text-slate-700">
@@ -100,7 +117,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
               replica has finished rolling out.
             </p>
             <dl className="mt-1 space-y-1">
-              <div className="flex items-center justify-between gap-2">
+              {backend.data?.buildKind === "personal" ? <PersonalSource digest={backend.data.sourceDigest ?? null} base={backend.data.sourceBaseCommit ?? null} /> : <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Commit</dt>
                 <dd>
                   {backendRevision ? (
@@ -109,7 +126,7 @@ export default function VersionDetails({ onClose, hasNewerBuild }: {
                     <span className="text-xs text-slate-500">unknown</span>
                   )}
                 </dd>
-              </div>
+              </div>}
               <div className="flex items-center justify-between gap-2">
                 <dt className="text-slate-500">Built</dt>
                 <dd className="text-xs text-slate-700">

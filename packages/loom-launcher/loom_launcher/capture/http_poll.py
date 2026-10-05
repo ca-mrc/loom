@@ -80,6 +80,13 @@ async def poll_local_http(
             if isinstance(item, dict):
                 yield _DictEvent(item)
 
+    async def discard_stdout() -> None:
+        # Events come from HTTP; stdout still needs a bounded drain so verbose
+        # agents cannot fill their output pipe and block before process exit.
+        async for _ in handle.stdout:
+            pass
+
+    stdout_task = asyncio.create_task(discard_stdout())
     wait_task = asyncio.create_task(handle.wait())
     try:
         while not wait_task.done():
@@ -94,6 +101,10 @@ async def poll_local_http(
         # One final poll after the agent exits.
         async for event in _drain_once():
             yield event
+        await wait_task
+        await stdout_task
     finally:
-        if not wait_task.done():
-            wait_task.cancel()
+        for task in (stdout_task, wait_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(stdout_task, wait_task, return_exceptions=True)

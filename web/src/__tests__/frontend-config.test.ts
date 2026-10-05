@@ -18,6 +18,18 @@ describe("frontend runtime config", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["sha256:" + "d".repeat(64), "malformed"])("qualifies served personal source separately from commits: %s", async (digest) => {
+    const raw = { environment: "development", environmentLabel: "Personal", routePath: "/dev", apiBase: "/dev",
+      buildRevision: "a".repeat(40), buildKind: "personal", sourceDigest: digest, sourceBaseCommit: "a".repeat(40) };
+    const config = resolveFrontendConfig(raw, new URL("https://loom.test/dev"));
+    expect(config.servedBuildRevision).toBeNull();
+    expect(config.servedSourceDigest).toBe(digest === "malformed" ? null : digest);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(raw), { status: 200 }));
+    const served = await fetchServedBuildInfo();
+    expect(served?.revision).toBeNull();
+    expect(served?.sourceDigest).toBe(digest === "malformed" ? null : digest);
+  });
+
   it("validates the production route and API prefix together", () => {
     const config = resolveFrontendConfig(
       {

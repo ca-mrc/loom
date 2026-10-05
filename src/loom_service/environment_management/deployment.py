@@ -29,8 +29,16 @@ from loom.nebius_platform_render import (
     canonical,
     digest,
 )
+from loom_service.application_management.build_deployment import (
+    SOURCE_CREDENTIALS_PATH,
+    SOURCE_SPOOL_PATH,
+    mount_application_source,
+    render_application_build_reader,
+    source_spool_mib,
+)
 from loom_service.environment_management.installation import ManagementInstallation
 from loom_service.environment_management.kubernetes_credentials import ProjectedKubernetesConnection
+from loom_service.pool_management.installation_render import mount_machine_token
 
 _LABEL = "loom.nebius/management-installation"
 _CONFIG_PATH = "/var/run/loom-management"
@@ -54,6 +62,7 @@ class ManagementDeployment(BaseModel):
     # The protected pool migration supplies this reference. Omission preserves
     # historical input digests and is not permission to discover a live catalog.
     pool_catalog_operation_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    application_builder_machine_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     _public_host = field_validator("public_host")(_hostname)
 
@@ -87,6 +96,18 @@ class ManagementDeployment(BaseModel):
                 or application.runtime.database_connection_file != Path(_APPLICATION_SHARED_PATH + "/manager-dsn")
                 or application.runtime.shared_credentials_file != Path(_APPLICATION_SHARED_PATH + "/shared.json")):
             raise ValueError("application management authority or mounted credentials differ")
+        source = application.runtime.source_upload if application is not None else None
+        build = application.runtime.build if application is not None else None
+        if source is not None and (source.credentials_file != Path(SOURCE_CREDENTIALS_PATH + "/credentials.json")
+                or source.spool_directory != Path(SOURCE_SPOOL_PATH)):
+            raise ValueError("application source runtime requires fixed mounted paths")
+        if (build is None) != (self.application_builder_machine_id is None):
+            raise ValueError("application builder requires a dedicated machine binding")
+        if build is not None and (self.application_builder_machine_id is None
+                or self.application_builder_machine_id.int == 0 or self.pool_catalog_operation_id is None
+                or build.management_origin.rstrip("/") != "https://" + self.public_host
+                or build.bearer_token_file != Path("/var/run/loom-pool-token/token")):
+            raise ValueError("application builder runtime differs from protected delivery")
         cloud_path = _APPLICATION_CLOUD_PATH if application is not None else _CLOUD_PATH
         if (runtime.kubernetes.endpoint != config["kubernetes_api_server"].rstrip("/")
                 or runtime.kubernetes.ca_file != Path(_KUBERNETES_PATH + "/ca.crt")
@@ -245,6 +266,15 @@ def render_management(
     if deployment.pool_catalog_operation_id is not None:
         mount_pool_profiles(pod, operation_id=deployment.pool_catalog_operation_id)
         service["spec"]["strategy"] = {"type": "Recreate"}
+    if application is not None and application.runtime.source_upload is not None:
+        mount_application_source(pod, settings=application.runtime.source_upload,
+            secret_name="loom-applications-source-" + revision[7:19], service_image=image)
+        service["spec"]["strategy"] = {"type": "Recreate"}
+    if application is not None and application.runtime.build is not None:
+        assert deployment.application_builder_machine_id is not None
+        mount_machine_token(pod, machine_id=deployment.application_builder_machine_id, service_image=image)
+        files["10-config-network.yaml"].extend(render_application_build_reader(application.authority,
+            namespace=foundation.platform_config["execution_namespace"] + "-build"))
     migration = files["30-migrate.yaml"][0]
     migration["metadata"]["name"] = "loom-management-migrate-" + revision.removeprefix("sha256:")[:12]
     migration_pod = migration["spec"]["template"]["spec"]
@@ -286,6 +316,10 @@ def render_management(
                         volume["configMap"]["items"] = [{"key": "environment.json", "path": "environment.json"}]
             size = deployment.postgres_storage_gi * 1024 if doc["kind"] == "CronJob" else 256
             for c in template["spec"].get("initContainers", []) + template["spec"]["containers"]:
-                c["resources"]["requests"]["ephemeral-storage"] = f"{size}Mi"
-                c["resources"]["limits"]["ephemeral-storage"] = f"{size}Mi"
+                allocated = size
+                if (doc is service and c is container and application is not None
+                        and application.runtime.source_upload is not None):
+                    allocated += source_spool_mib(application.runtime.source_upload)
+                c["resources"]["requests"]["ephemeral-storage"] = f"{allocated}Mi"
+                c["resources"]["limits"]["ephemeral-storage"] = f"{allocated}Mi"
     return RenderedManagement(runtime_config, files, revision, _envelope(files))

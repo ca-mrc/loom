@@ -48,6 +48,36 @@ class PostBatchesResponse(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class ResolvedHarness(TypedDict):
+    name: str
+    version: str | None
+
+
+@with_config(ConfigDict(extra="allow"))
+class ResolvedExecutionSelection(TypedDict):
+    harness: ResolvedHarness
+    network_policy: dict[str, Any] | None
+    verification: Literal["shared", "separate"]
+    isolation: Literal["container", "guest"]
+
+
+@with_config(ConfigDict(extra="allow"))
+class DryRunTaskSelection(TypedDict):
+    task_id: str
+    trials: list[ResolvedExecutionSelection]
+
+
+@with_config(ConfigDict(extra="allow"))
+class PostBatchesDryRunResponse(TypedDict):
+    dry_run: bool
+    accepted: bool
+    backend: str
+    rejected_task_ids: list[str]
+    rejection_reasons: dict[str, list[str]]
+    tasks: list[DryRunTaskSelection]
+
+
+@with_config(ConfigDict(extra="allow"))
 class GetBackendsResponseItemsItem(TypedDict):
     name: str
     description: str
@@ -468,6 +498,42 @@ class Trial(TypedDict):
 
 
 @with_config(ConfigDict(extra="allow"))
+class TrialExecutionPhaseRequested(TypedDict):
+    cpu_millis: int
+    memory_mib: int
+    ephemeral_storage_mib: int
+
+
+@with_config(ConfigDict(extra="allow"))
+class TrialExecutionPhase(TypedDict):
+    phase: Literal["agent"] | Literal["awaiting_verifier"] | Literal["verifier"]
+    retry: int
+    lease_id: str | None
+    state: str
+    reserved_at: str | None
+    started_at: str | None
+    finished_at: str | None
+    released_at: str | None
+    reserved_seconds: float | None
+    requested: TrialExecutionPhaseRequested | None
+    estimated_cost_microusd: int | None
+    allocated_cost_microusd: int | None
+    cost_state: str | None
+
+
+@with_config(ConfigDict(extra="allow"))
+class TrialExecutionPhases(TypedDict):
+    schema_version: Literal["loom.service-execution-phases.v1"]
+    verifier_execution: str | None
+    verifier_state: str | None
+    phases: list[TrialExecutionPhase]
+    handoff_gap_seconds: float | None
+    reservation_overlap_seconds: float | None
+    handoff_storage_bytes: int | None
+    reserved_seconds: float
+
+
+@with_config(ConfigDict(extra="allow"))
 class TrialDetail(Trial):
     task_environment_preparation: NotRequired[list[TrialDetailTaskEnvironmentPreparationItem]]
     owner_team: NotRequired[TrialDetailOwnerTeam]
@@ -482,6 +548,7 @@ class TrialDetail(Trial):
     trajectory_ready: bool
     artifacts: list[TrialDetailArtifactsItem]
     materialization: NotRequired[TrialDetailMaterializationVariant0 | None]
+    execution_phases: NotRequired[TrialExecutionPhases | None]
     price_snapshots: NotRequired[list[PriceSnapshot]]
     debug_evidence: NotRequired[DebugEvidence]
     diagnosis: NotRequired[DiagnosisReport]

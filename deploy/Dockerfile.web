@@ -13,6 +13,9 @@ ARG TARGETARCH
 # "unknown"-labeled local bundle.
 ARG LOOM_BUILD_SHA=unknown
 ARG LOOM_SOURCE_REF=unknown
+ARG LOOM_BUILD_KIND=commit
+ARG LOOM_SOURCE_DIGEST=unknown
+ARG LOOM_SOURCE_BASE_COMMIT=unknown
 COPY web/package.json web/package-lock.json ./
 # Native bindings are already pinned in the lockfile. A second npm install
 # with --package-lock=false upgrades unrelated dependencies after npm ci.
@@ -31,6 +34,9 @@ RUN set -eux; \
 COPY web/ ./
 RUN VITE_BUILD_REVISION="${LOOM_BUILD_SHA}" \
     VITE_BUILD_SOURCE_REF="${LOOM_SOURCE_REF}" \
+    VITE_BUILD_KIND="${LOOM_BUILD_KIND}" \
+    VITE_SOURCE_DIGEST="${LOOM_SOURCE_DIGEST}" \
+    VITE_SOURCE_BASE_COMMIT="${LOOM_SOURCE_BASE_COMMIT}" \
     VITE_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     npm run build
 
@@ -59,8 +65,14 @@ USER root
 # loaded, this one reflects whatever this container is serving right now.
 ARG LOOM_BUILD_SHA=unknown
 ARG LOOM_SOURCE_REF=unknown
+ARG LOOM_BUILD_KIND=commit
+ARG LOOM_SOURCE_DIGEST=unknown
+ARG LOOM_SOURCE_BASE_COMMIT=unknown
 ENV LOOM_FRONTEND_BUILD_REVISION=${LOOM_BUILD_SHA}
 ENV LOOM_FRONTEND_SOURCE_REF=${LOOM_SOURCE_REF}
+ENV LOOM_FRONTEND_BUILD_KIND=${LOOM_BUILD_KIND}
+ENV LOOM_FRONTEND_SOURCE_DIGEST=${LOOM_SOURCE_DIGEST}
+ENV LOOM_FRONTEND_SOURCE_BASE_COMMIT=${LOOM_SOURCE_BASE_COMMIT}
 # ENV can't hold a computed value, so the build timestamp goes in a file
 # the entrypoint reads instead (mirrors deploy/Dockerfile.service's
 # /opt/loom/build-time for the backend).

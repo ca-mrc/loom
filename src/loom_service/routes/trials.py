@@ -20,6 +20,7 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -27,11 +28,13 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
     Artifact,
     ArtifactUploadFile,
     ArtifactUploadSession,
+    ExecutionCostReservation,
     LlmCall,
     ServiceExecutionLease,
     Task,
@@ -47,6 +50,7 @@ from loom.model_switch_store import load_model_switch_plan, plan_snapshot_from_r
 from loom.models.types import ModelSpec
 from loom.resource_usage_store import resource_usage_response
 from loom.service_execution_backend import NEBIUS_BACKEND, local_execution_enabled
+from loom.service_execution_phases import PhaseCost, PhaseLease, execution_phases
 from loom_llm_gateway.rate_card import (
     COST_META_CONFIDENCE_KEY,
     COST_META_SOURCE_KEY,
@@ -648,6 +652,60 @@ def _projected_service_execution_artifacts(
     return out
 
 
+async def _execution_phases(
+    s: AsyncSession, *, trial: Trial, attempt: int, admin: bool,
+) -> dict[str, Any] | None:
+    leases = (await s.execute(
+        select(ServiceExecutionLease).where(
+            ServiceExecutionLease.trial_id == trial.id,
+            ServiceExecutionLease.attempt == attempt,
+        )
+    )).scalars().all()
+    reservations = (await s.execute(
+        select(ExecutionCostReservation).where(
+            ExecutionCostReservation.trial_id == trial.id,
+            ExecutionCostReservation.attempt == attempt,
+        )
+    )).scalars().all()
+    result = trial.result if isinstance(trial.result, dict) else {}
+    handoff = result.get("verifier_execution")
+    phases = execution_phases(
+        [
+            PhaseLease(
+                lease_id=str(lease.id),
+                execution_role=lease.execution_role,
+                observed_state=lease.observed_state,
+                created_at=lease.created_at,
+                pod_started_at=lease.pod_started_at,
+                pod_terminated_at=lease.pod_terminated_at,
+                deleted_at=lease.deleted_at,
+                runtime_contract=lease.runtime_contract_json,
+                verifier_retry=lease.verifier_retry,
+            )
+            for lease in leases
+        ],
+        verifier_execution=handoff if isinstance(handoff, dict) else None,
+        costs={
+            str(item.lease_id): PhaseCost(
+                requested_cpu_millis=item.requested_cpu_millis,
+                requested_memory_mib=item.requested_memory_mib,
+                requested_ephemeral_storage_mib=item.requested_ephemeral_storage_mib,
+                estimated_cost_microusd=item.estimated_cost_microusd,
+                actual_allocated_microusd=item.actual_allocated_microusd,
+                state=item.state,
+            )
+            for item in reservations
+        },
+        now=datetime.now(UTC),
+    )
+    if phases is not None and not admin:
+        # Execution prices are operator finance data; teams see resources and time.
+        for phase in phases["phases"]:
+            phase["estimated_cost_microusd"] = None
+            phase["allocated_cost_microusd"] = None
+    return phases
+
+
 @router.get("/trials/{trial_id}", response_model=wire.TrialDetail, response_model_exclude_unset=True)
 async def get_trial(
     request: Request,
@@ -933,6 +991,11 @@ async def get_trial(
                 else None
             ),
         }
+        if materialization is not None
+        else None
+    )
+    base["execution_phases"] = (
+        await _execution_phases(s, trial=trial, attempt=materialization.attempt, admin=is_admin(ctx))
         if materialization is not None
         else None
     )

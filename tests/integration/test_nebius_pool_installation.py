@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 from loom.db.nebius_pool_schema import NebiusPoolBinding, NebiusPoolMachine, NebiusPoolParticipant
 from loom_service.pool_management.auth import resolve_pool_machine
 from tests.integration.test_nebius_pool_registry import sessions as sessions
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_pool_profiles import document
 
 
@@ -50,6 +51,109 @@ def installation(environments=("production", "staging", "development")):
         "quota_identities": {name: ["parent", "eu-north1", "compute", name, unit]
             for name, unit in (("nodes", "count"), ("vcpu", "milli-vcpu"), ("storage", "MiB"))},
         "participants": participants, "machines": credentials, "profiles": profiles}, raw
+
+
+def add_application_builder(config, recipe):
+    """Add a separate management credential/target to the existing dev identity."""
+    config = copy.deepcopy(config)
+    participant, = [row for row in config["participants"] if row["environment_class"] == "development"]
+    ordinary, = [row for row in config["machines"] if row["participant_id"] == participant["participant_id"]]
+    profile_id = participant["targets"][0]["profile_id"]
+    profile = copy.deepcopy(next(row for row in config["profiles"]["task_images"] if row["profile_id"] == profile_id))
+    profile.pop("cpu_arch")
+    profile["profile_id"] = str(uuid4())
+    profile["target"]["target_id"] = "application-builder"
+    profile["recipe"] = recipe.model_copy(update={"trusted_image_ref": profile["settings"]["service_image"]}).model_dump(mode="json")
+    config["profiles"]["application_images"] = [profile]
+    participant["targets"].append({"target_id": "application-builder", "profile_id": profile["profile_id"],
+        "workload_kinds": ["application_image_build"]})
+    identity, secret = uuid4(), "application_builder_" + uuid4().hex
+    config["machines"].append({**ordinary, "machine_id": str(identity), "workload_scope": "application_builder",
+        "token_sha256": hashlib.sha256(secret.encode()).hexdigest()})
+    return config, identity, secret
+
+
+def test_default_machine_scope_preserves_historical_installation_document_and_hash():
+    from loom_service.pool_management.capacity import digest
+    from loom_service.pool_management.installation import PoolInstallation
+
+    config, _ = installation()
+    historical = PoolInstallation.model_validate(config).model_dump(mode="json")
+    assert all("workload_scope" not in row for row in historical["machines"])
+    for row in config["machines"]:
+        row["workload_scope"] = "environment"
+    explicit = PoolInstallation.model_validate(config).model_dump(mode="json")
+    assert explicit == historical and digest(explicit) == digest(historical)
+
+
+async def test_complete_builder_installation_retains_distinct_scopes_and_replays_closed(sessions, build_inputs):
+    from loom_service.pool_management.installation import PoolInstallation, register_installation
+
+    config, raw = installation(("development",))
+    config, builder_id, secret = add_application_builder(config, build_inputs[0].recipe)
+    raw[builder_id] = secret
+    spec = PoolInstallation.model_validate(config)
+    async with sessions.begin() as session:
+        receipt = await register_installation(session, spec)
+    async with sessions.begin() as session:
+        assert await register_installation(session, spec) == receipt
+    assert receipt["mode"] == "closed" and receipt["participants"] == 1 and receipt["machines"] == 4
+    async with sessions() as session:
+        for identity, token in raw.items():
+            principal = await resolve_pool_machine(session, "Bearer " + token)
+            assert principal is not None and principal.machine_id == identity and principal.pool_mode == "closed"
+            assert principal.workload_scope == ("application_builder" if identity == builder_id else "environment")
+            if principal.role == "participant":
+                assert principal.participant_id == spec.participants[0].participant_id
+        assert (await session.get(NebiusPoolMachine, builder_id)).workload_scope == "application_builder"
+
+
+@pytest.mark.parametrize("damage", ["missing-builder", "duplicate-builder", "missing-environment", "duplicate-environment",
+    "foreign-builder", "observer-builder", "gateway-builder", "wrong-class", "missing-profile", "orphan-profile",
+    "orphan-builder", "foreign-namespace", "foreign-node-group", "mixed-target"])
+def test_builder_registration_rejects_unbound_or_cross_scope_authority(build_inputs, damage):
+    from loom_service.pool_management.installation import PoolInstallation
+
+    config, _ = installation(("development",))
+    config, _, _ = add_application_builder(config, build_inputs[0].recipe)
+    participant, = config["participants"]
+    builder = config["machines"][-1]
+    if damage == "missing-builder":
+        config["machines"].pop()
+    elif damage in {"duplicate-builder", "duplicate-environment"}:
+        original = builder if damage == "duplicate-builder" else config["machines"][-2]
+        config["machines"].append({**original, "machine_id": str(uuid4()), "token_sha256": "f" * 64})
+    elif damage == "missing-environment":
+        config["machines"].pop(-2)
+    elif damage == "foreign-builder":
+        builder["participant_id"] = str(uuid4())
+    elif damage in {"observer-builder", "gateway-builder"}:
+        role = damage.split("-")[0]
+        next(row for row in config["machines"] if row["role"] == role)["workload_scope"] = "application_builder"
+    elif damage == "wrong-class":
+        participant["environment_class"] = "staging"
+    elif damage == "missing-profile":
+        config["profiles"]["application_images"] = []
+    elif damage in {"orphan-profile", "orphan-builder"}:
+        participant["targets"].pop()
+        if damage == "orphan-builder":
+            config["profiles"]["application_images"] = []
+        else:
+            config["machines"].pop()
+    elif damage == "foreign-namespace":
+        profile = config["profiles"]["application_images"][0]
+        profile["target"]["namespace"] = profile["settings"]["namespace"] = "foreign-builds"
+    elif damage == "foreign-node-group":
+        config["profiles"]["application_images"][0]["target"]["node_selector"]["nebius.com/node-group-id"] = "foreign"
+    else:
+        # Sharing resources does not make the new application target an actuator.
+        participant["targets"][-1]["workload_kinds"].append("task_image_build")
+        profile = copy.deepcopy(config["profiles"]["task_images"][0])
+        profile["profile_id"] = participant["targets"][-1]["profile_id"]
+        profile["target"]["target_id"] = "application-builder"
+        config["profiles"]["task_images"].append(profile)
+    with pytest.raises(ValueError):
+        PoolInstallation.model_validate(config)
 
 
 @pytest.mark.parametrize("environments, participant_count, machine_count", [

@@ -117,6 +117,17 @@ def test_runtime_config_reports_honest_unknown_build_metadata_when_absent(
     assert config["buildTime"] == ""
 
 
+def test_runtime_config_preserves_personal_source_without_commit_attribution(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOM_FRONTEND_BUILD_KIND", "personal")
+    monkeypatch.setenv("LOOM_FRONTEND_SOURCE_DIGEST", "sha256:" + "b" * 64)
+    monkeypatch.setenv("LOOM_FRONTEND_SOURCE_BASE_COMMIT", "a" * 40)
+    config, _ = _run_runtime_config(tmp_path, environment="development", route_path="/dev", build_revision="a" * 40)
+    assert config["buildKind"] == "personal"
+    assert config["sourceDigest"] == "sha256:" + "b" * 64
+    assert config["sourceBaseCommit"] == "a" * 40
+    assert config["buildRevision"] == "unknown"
+
+
 def test_runtime_config_accepts_only_exact_staging_rehearsal_route(tmp_path: Path) -> None:
     isolation = "a" * 24
     route = f"/staging/rehearsal/{isolation}"
@@ -1837,6 +1848,9 @@ def test_web_runtime_config_script_writes_public_metadata(tmp_path: Path) -> Non
         "apiRouteBase": "https://yylx.world/prod/api",
         "buildRevision": "unknown",
         "sourceRef": "unknown",
+        "buildKind": "unknown",
+        "sourceDigest": "unknown",
+        "sourceBaseCommit": "unknown",
         "buildTime": "",
     }
 

@@ -13,6 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from loom.models.task import TaskConfig
+from loom.native_image_build import NativeImageBuildComponentV1
 from loom.task_image_build_plan import TaskImageBuildComponentV1
 from loom_execution_actuator.renderer import ExecutionTargetRuntime
 
@@ -93,7 +94,7 @@ def task_image_job_name(materialization_id: UUID, lease_epoch: int) -> str:
 
 
 def _build_script(
-    components: tuple[TaskImageBuildComponentV1, ...],
+    components: tuple[NativeImageBuildComponentV1, ...],
     *,
     platform: str,
     max_processes: int,
@@ -103,6 +104,8 @@ def _build_script(
     build_target: str | None = None,
     export_cache_mode: Literal["max", "min"] = "max",
     oci_export_format: Literal["archive", "directory"] = "archive",
+    component_build_args: dict[str, dict[str, str]] | None = None,
+    component_build_targets: dict[str, str] | None = None,
 ) -> str:
     lines = [
         "set -eu",
@@ -151,11 +154,14 @@ def _build_script(
             "--output",
             output_spec,
         ]
-        if component.name == "task":
-            for key, value in sorted((build_args or {}).items()):
-                argv.extend(["--opt", f"build-arg:{key}={value}"])
-            if build_target is not None:
-                argv.extend(["--opt", f"target={build_target}"])
+        arguments = ((component_build_args or {}).get(component.name, {}) if component_build_args is not None
+                     else (build_args or {}) if component.name == "task" else {})
+        selected_target = ((component_build_targets or {}).get(component.name) if component_build_targets is not None
+                           else build_target if component.name == "task" else None)
+        for key, value in sorted(arguments.items()):
+            argv.extend(["--opt", f"build-arg:{key}={value}"])
+        if selected_target is not None:
+            argv.extend(["--opt", f"target={selected_target}"])
         lines.append("set --")
         if cache_enabled:
             argv.extend(
@@ -237,11 +243,37 @@ def render_task_image_job(
     components come from the existing task-image build-plan derivation. Secret
     values must never be placed in this ConfigMap or the shared build volume.
     """
-    name = task_image_job_name(materialization_id, lease_epoch)
+    checked = tuple(TaskImageBuildComponentV1.model_validate(component.model_dump()) for component in components)
+    environment = TaskConfig.model_validate(claim["task_config"]).environment if "task_config" in claim else None
+    return render_native_image_job(workload="task", work_id=materialization_id, attempt=lease_epoch,
+        claim=claim, components=checked, target=target, config=config,
+        build_timeout_seconds=math.ceil(environment.build_timeout_sec) if environment else config.active_deadline_seconds,
+        component_build_args={"task": environment.docker_build_args or {}} if environment else None,
+        component_build_targets={"task": environment.docker_build_target} if environment and environment.docker_build_target else None)
+
+
+def render_native_image_job(
+    *, workload: Literal["task", "application"], work_id: UUID, attempt: int,
+    claim: dict[str, Any], components: tuple[NativeImageBuildComponentV1, ...],
+    target: ExecutionTargetRuntime, config: TaskImageJobConfig,
+    build_timeout_seconds: int | None = None,
+    component_build_args: dict[str, dict[str, str]] | None = None,
+    component_build_targets: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Shared isolated Job mechanism; typed workload adapters own the authority.
+
+    This function neither admits work nor accepts owner HTTP requests. Trusted
+    adapters supply fixed component/options and retain their independent claims.
+    """
+    if workload not in {"task", "application"}:
+        raise ValueError("unsupported native image workload")
+    name = task_image_job_name(work_id, attempt)
+    if workload == "application":
+        name = f"loom-app-{work_id.hex}-a{attempt}"
     if not 1 <= len(components) <= MAX_NATIVE_BUILD_COMPONENTS:
         raise ValueError("task-image Job requires bounded Dockerfile components")
     checked = tuple(
-        TaskImageBuildComponentV1.model_validate(component.model_dump()) for component in components
+        NativeImageBuildComponentV1.model_validate(component.model_dump()) for component in components
     )
     if len({component.name for component in checked}) != len(checked) or any(
         component.oci_output_path != f"oci/{index:04d}.tar"
@@ -252,12 +284,9 @@ def render_task_image_job(
     # TaskImageBuildComponentV1 still use oci/NNNN.tar. The build script strips
     # .tar when oci_export_format=directory.
     frozen = copy.deepcopy(claim)
-    environment = (
-        TaskConfig.model_validate(frozen["task_config"]).environment
-        if "task_config" in frozen
-        else None
-    )
-    for field, expected in (("id", str(materialization_id)), ("lease_epoch", lease_epoch)):
+    identity = (("id", str(work_id)), ("lease_epoch", attempt)) if workload == "task" else (
+        ("build_id", str(work_id)), ("attempt", attempt))
+    for field, expected in identity:
         if field in frozen and frozen[field] != expected:
             raise ValueError("task-image claim differs from Job identity")
         frozen[field] = expected
@@ -275,8 +304,12 @@ def render_task_image_job(
         raise ValueError("task-image claim exceeds the ConfigMap limit")
     labels = {
         "app.kubernetes.io/component": "task-image-builder",
-        "loom.materialization-id": str(materialization_id),
-        "loom.lease-epoch": str(lease_epoch),
+        "loom.materialization-id": str(work_id),
+        "loom.lease-epoch": str(attempt),
+    } if workload == "task" else {
+        "app.kubernetes.io/component": "application-image-builder",
+        "loom.application-build-id": str(work_id),
+        "loom.build-attempt": str(attempt),
     }
     metadata = {"name": name, "namespace": target.namespace, "labels": labels}
     configmap = {
@@ -327,7 +360,7 @@ def render_task_image_job(
                 "-I",
                 "-B",
                 "-m",
-                "loom_execution_actuator.task_image_runtime",
+                f"loom_execution_actuator.{workload}_image_runtime",
                 phase_name,
                 "--claim",
                 _CLAIM,
@@ -355,14 +388,11 @@ def render_task_image_job(
                 platform="linux/amd64" if architecture == "x86_64" else "linux/arm64",
                 max_processes=config.max_processes,
                 cache_enabled=config.cache_secret_name is not None,
-                build_timeout_seconds=(
-                    math.ceil(environment.build_timeout_sec)
-                    if environment else config.active_deadline_seconds
-                ),
-                build_args=environment.docker_build_args if environment else None,
-                build_target=environment.docker_build_target if environment else None,
+                build_timeout_seconds=build_timeout_seconds if build_timeout_seconds is not None else config.active_deadline_seconds,
                 export_cache_mode=config.export_cache_mode,
                 oci_export_format=config.oci_export_format,
+                component_build_args=component_build_args,
+                component_build_targets=component_build_targets,
             ),
         ],
         "env": [

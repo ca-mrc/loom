@@ -18,10 +18,11 @@ import re
 import shlex
 import tarfile
 import threading
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from queue import Empty, Full, Queue
 from typing import Any, cast
 
 import docker
@@ -55,6 +56,63 @@ for f in cpu.stat memory.current memory.peak memory.events pids.current pids.pea
   cat "/sys/fs/cgroup/$f" 2>/dev/null || true
 done
 """.strip()
+
+
+class _DockerOutputBuffer:
+    """At most 1 MiB per stream, with one pending event-loop notification.
+
+    Blocking the Docker reader applies socket backpressure; neither queued
+    bytes nor callbacks grow with the total output or a slow consumer.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+        self._queue: Queue[bytes] = Queue(maxsize=16)
+        self._available = asyncio.Event()
+        self._finished = threading.Event()
+        self._notification_pending = threading.Event()
+
+    def _wake(self) -> None:
+        self._notification_pending.clear()
+        self._available.set()
+
+    def _notify(self) -> None:
+        if not self._notification_pending.is_set():
+            self._notification_pending.set()
+            with contextlib.suppress(RuntimeError):  # loop may be shutting down
+                self._loop.call_soon_threadsafe(self._wake)
+
+    def put(self, data: bytes, stopped: threading.Event) -> bool:
+        for offset in range(0, len(data), 64 * 1024):
+            chunk = data[offset:offset + 64 * 1024]
+            while not stopped.is_set():
+                try:
+                    self._queue.put(chunk, timeout=0.1)
+                except Full:
+                    continue
+                self._notify()
+                break
+            else:
+                return False
+        return True
+
+    def finish(self) -> None:
+        self._finished.set()
+        self._notify()
+
+    async def drain(self) -> AsyncIterator[bytes]:
+        while True:
+            await self._available.wait()
+            try:
+                chunk = self._queue.get_nowait()
+            except Empty:
+                self._available.clear()
+                # finish follows the last put; recheck the queue to retain a
+                # final chunk arriving between get_nowait and this check.
+                if self._finished.is_set() and self._queue.empty():
+                    return
+            else:
+                yield chunk
 
 
 def _default_caps() -> Capabilities:
@@ -307,6 +365,9 @@ class DockerDriver:
     _client: Any | None = field(default=None, init=False, repr=False)
     _container: Any | None = field(default=None, init=False, repr=False)
     _state: str = field(default="constructed", init=False)
+    _stream_readers: dict[asyncio.Task[None], Callable[[], None]] = field(
+        default_factory=dict, init=False, repr=False,
+    )
 
     async def start(self, *, options: StartOptions | None = None) -> None:
         # Spec §2.2: start() at most once. Reject when running OR stopped.
@@ -467,8 +528,6 @@ class DockerDriver:
         # Idempotent. Only running→stopped is a real transition; calling stop()
         # from 'constructed' leaves state intact so start() can still fire.
         await self._teardown(delete=delete)
-        if self._state == "running":
-            self._state = "stopped"
 
     async def resource_snapshot(self) -> DriverResourceSnapshot | None:
         """Read one bounded Docker stats observation before container removal."""
@@ -500,6 +559,14 @@ class DockerDriver:
         wants to keep the stopped container around for inspection).
         Skipping it saves ~10s per test in the docker-tier suite.
         """
+        # Close admission before the first await. A late exec_start below also
+        # checks this state before registering any reader or returning a handle.
+        if self._state == "running":
+            self._state = "stopped"
+        readers = dict(self._stream_readers)
+        for stop_reader in readers.values():
+            stop_reader()
+        await asyncio.gather(*readers, return_exceptions=True)
         if self._container is not None:
             if delete:
                 with contextlib.suppress(APIError, NotFound):
@@ -534,15 +601,15 @@ class DockerDriver:
         # but our local `container` is still valid for the in-flight call.
         container = self._container
         assert container is not None
+        assert self._client is not None
+        api = self._client.api
 
         exec_kwargs: dict[str, Any] = {
+            "container": container.id,
             "cmd": ["/bin/sh", "-c", cmd],
             "stdout": True,
             "stderr": True,
             "tty": False,
-            "detach": False,
-            "stream": False,
-            "demux": True,
         }
         if user is not None:
             exec_kwargs["user"] = str(user)
@@ -553,33 +620,60 @@ class DockerDriver:
 
         loop = asyncio.get_running_loop()
         started = loop.time()
+        cancelled = threading.Event()
+        stream_lock = threading.Lock()
+        active_stream: list[Any] = []
 
-        def _sync() -> tuple[int, bytes, bytes]:
-            result = container.exec_run(**exec_kwargs)
-            output = result.output
-            if isinstance(output, tuple):
-                stdout, stderr = output
+        def close_stream() -> None:
+            with stream_lock:
+                stream = active_stream.pop() if active_stream else None
+            if stream is not None:
+                with contextlib.suppress(Exception):
+                    stream.close()
+
+        def _sync() -> tuple[int, bytes, bytes, bool]:
+            exec_id = api.exec_create(**exec_kwargs)["Id"]
+            if cancelled.is_set():
+                raise DriverError("command output capture cancelled")
+            stream = api.exec_start(exec_id, stream=True, demux=True)
+            with stream_lock:
+                active_stream.append(stream)
+            stdout, stderr = bytearray(), bytearray()
+            truncated = False
+            try:
+                if cancelled.is_set():
+                    raise DriverError("command output capture cancelled")
+                for chunk in stream:
+                    if cancelled.is_set():
+                        raise DriverError("command output capture cancelled")
+                    out, err = chunk if isinstance(chunk, tuple) else (chunk, None)
+                    for target, data in ((stdout, out), (stderr, err)):
+                        if data:
+                            remaining = MAX_EXEC_STREAM_BYTES - len(target)
+                            target.extend(data[:remaining])
+                            truncated |= len(data) > remaining
+                # Keep draining after the caps, so output pressure cannot block
+                # the command or hide its actual exit code.
+                info = api.exec_inspect(exec_id)
+                return int(info["ExitCode"]), bytes(stdout), bytes(stderr), truncated
+            finally:
+                close_stream()
+
+        try:
+            if timeout_sec is not None:
+                exit_code, stdout, stderr, truncated = await asyncio.wait_for(
+                    asyncio.to_thread(_sync), timeout=timeout_sec,
+                )
             else:
-                stdout, stderr = output, b""
-            return int(result.exit_code), stdout or b"", stderr or b""
-
-        if timeout_sec is not None:
-            exit_code, stdout, stderr = await asyncio.wait_for(
-                asyncio.to_thread(_sync),
-                timeout=timeout_sec,
-            )
-        else:
-            exit_code, stdout, stderr = await asyncio.to_thread(_sync)
+                exit_code, stdout, stderr, truncated = await asyncio.to_thread(_sync)
+        except BaseException:
+            cancelled.set()
+            # Docker's CancellableStream closes its socket from another thread,
+            # including if the command has gone silent after producing output.
+            close_stream()
+            raise
 
         duration = loop.time() - started
-
-        truncated = False
-        if len(stdout) > MAX_EXEC_STREAM_BYTES:
-            stdout = stdout[:MAX_EXEC_STREAM_BYTES]
-            truncated = True
-        if len(stderr) > MAX_EXEC_STREAM_BYTES:
-            stderr = stderr[:MAX_EXEC_STREAM_BYTES]
-            truncated = True
 
         return ExecResult(
             return_code=exit_code,
@@ -619,6 +713,7 @@ class DockerDriver:
 
         exec_info = await asyncio.to_thread(api.exec_create, **exec_create_kwargs)
         exec_id = exec_info["Id"]
+        self._require_running()
 
         # `exec_start(stream=True, demux=True)` returns a SYNC generator of
         # (stdout_chunk, stderr_chunk) tuples (either side may be None for
@@ -629,13 +724,16 @@ class DockerDriver:
             stream=True,
             demux=True,
         )
+        if self._state != "running":
+            with contextlib.suppress(Exception):
+                raw_stream.close()
+            raise DriverNotStartedError("DockerDriver stopped during stream startup")
 
-        stdout_q: asyncio.Queue[bytes | None] = asyncio.Queue()
-        stderr_q: asyncio.Queue[bytes | None] = asyncio.Queue()
         loop = asyncio.get_running_loop()
-        # Signaled by the asyncio side (_wait race winner = poll path) to
-        # tell the blocking drainer it can quit early; we still process
-        # any chunks currently in flight before exiting.
+        stdout_buffer = _DockerOutputBuffer(loop)
+        stderr_buffer = _DockerOutputBuffer(loop)
+        # Only explicit stop/kill/cancellation may discard unread output.
+        # Process exit alone does not imply that the transport reached EOF.
         stop_reader = threading.Event()
 
         def _drain_blocking() -> None:
@@ -644,27 +742,40 @@ class DockerDriver:
                     if stop_reader.is_set():
                         break
                     out_chunk, err_chunk = chunk if isinstance(chunk, tuple) else (chunk, None)
-                    if out_chunk:
-                        loop.call_soon_threadsafe(stdout_q.put_nowait, out_chunk)
-                    if err_chunk:
-                        loop.call_soon_threadsafe(stderr_q.put_nowait, err_chunk)
+                    if out_chunk and not stdout_buffer.put(out_chunk, stop_reader):
+                        break
+                    if err_chunk and not stderr_buffer.put(err_chunk, stop_reader):
+                        break
             finally:
-                loop.call_soon_threadsafe(stdout_q.put_nowait, None)
-                loop.call_soon_threadsafe(stderr_q.put_nowait, None)
+                with contextlib.suppress(Exception):
+                    raw_stream.close()
+                stdout_buffer.finish()
+                stderr_buffer.finish()
 
         reader_task = asyncio.create_task(asyncio.to_thread(_drain_blocking))
 
-        async def _drain(q: asyncio.Queue[bytes | None]) -> AsyncIterator[bytes]:
-            while True:
-                chunk = await q.get()
-                if chunk is None:
-                    return
-                yield chunk
+        def _stop_output() -> None:
+            stop_reader.set()
+            with contextlib.suppress(Exception):
+                raw_stream.close()
+            # The executor job may still be queued. Its finally block cannot
+            # be the sole owner of EOF when cancelling that queued job.
+            stdout_buffer.finish()
+            stderr_buffer.finish()
+            if not reader_task.done():
+                reader_task.cancel()
+
+        self._stream_readers[reader_task] = _stop_output
+
+        def _reader_done(task: asyncio.Task[None]) -> None:
+            self._stream_readers.pop(task, None)
+            if not task.cancelled():
+                task.exception()  # Observe failures even if the handle is abandoned.
+
+        reader_task.add_done_callback(_reader_done)
 
         async def _poll_exit() -> int:
-            # Poll exec_inspect until Running becomes false. Used as a
-            # fallback when the stream iterator doesn't close cleanly
-            # (e.g., after SIGKILL).
+            # EOF can arrive just before Docker publishes the final exit status.
             backoff = 0.05
             while True:
                 info = await asyncio.to_thread(api.exec_inspect, exec_id)
@@ -674,25 +785,21 @@ class DockerDriver:
                 backoff = min(backoff * 1.5, 0.5)
 
         async def _wait() -> int:
-            # Race the stream-drain against a polled exec_inspect.
-            # Stream-drain wins on normal exits; the poller wins after
-            # SIGKILL when the iterator blocks indefinitely.
-            poll_task = asyncio.create_task(_poll_exit())
-            done, pending = await asyncio.wait(
-                {reader_task, poll_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-            # If the poll path won, signal the blocking drainer so it
-            # doesn't outlive its useful life as an orphan thread holding
-            # docker's iterator.
-            stop_reader.set()
-            if poll_task in done:
-                return poll_task.result()
-            # Normal path: reader finished; fetch the exit code.
-            info = await asyncio.to_thread(api.exec_inspect, exec_id)
-            return int(info.get("ExitCode") or 0)
+            try:
+                # Waiters share the completed reader without cancelling it on
+                # success. Both concurrent and repeated wait() retain output.
+                (reader_result,) = await asyncio.shield(
+                    asyncio.gather(reader_task, return_exceptions=True),
+                )
+                if isinstance(reader_result, BaseException) and not (
+                    isinstance(reader_result, asyncio.CancelledError) and stop_reader.is_set()
+                ):
+                    raise reader_result
+                return await _poll_exit()
+            except BaseException:
+                _stop_output()
+                await asyncio.gather(reader_task, return_exceptions=True)
+                raise
 
         async def _kill() -> None:
             # docker exec has no direct kill API; exec_inspect's Pid field
@@ -711,11 +818,14 @@ class DockerDriver:
                 await asyncio.to_thread(api.exec_start, killer["Id"], detach=True)
             except (APIError, NotFound):
                 pass
+            finally:
+                _stop_output()
+                await asyncio.gather(reader_task, return_exceptions=True)
 
         return ExecHandle(
             pid=0,  # docker exec doesn't surface a host-side PID we trust
-            stdout=_drain(stdout_q),
-            stderr=_drain(stderr_q),
+            stdout=stdout_buffer.drain(),
+            stderr=stderr_buffer.drain(),
             _wait=_wait,
             _kill=_kill,
         )

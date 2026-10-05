@@ -9,8 +9,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from tests.integration.test_nebius_pool_installation import add_application_builder
 from tests.ops.test_nebius_pool_migration import migration_request
 from tests.support.execution_image_admission import signed_image_admission_bundle
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_management_render import render as render_manager
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -88,6 +90,28 @@ def runtime_inputs(platform_inputs, management_inputs):
     return request, actuators, services, manager
 
 
+def test_app_target_does_not_require_an_actuator_or_deliver_builder_authority_to_one(runtime_inputs, build_inputs):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, actuators, services, _ = runtime_inputs
+    config, builder_id, _ = add_application_builder(request.registration.spec.model_dump(mode="json"), build_inputs[0].recipe)
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(config)))
+    participant, = [row for row in request.registration.spec.participants if row.environment_class == "development"]
+    identity = participant.participant_id
+    machine, = [row for row in request.registration.spec.machines
+        if row.participant_id == identity and row.workload_scope == "environment"]
+    result = wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+        actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]))
+    for key in ("control_plane", "actuator"):
+        volumes = result[key]["spec"]["template"]["spec"]["volumes"]
+        secret, = [row["secret"]["secretName"] for row in volumes if row["name"] == "pool-token-source"]
+        assert secret == "loom-pool-machine-" + machine.machine_id.hex
+        assert result[key]["spec"]["replicas"] == 0
+    assert builder_id.hex not in json.dumps(result)
+
+
 @pytest.fixture
 def guest_runtime_inputs(runtime_inputs, platform_inputs):
     """Use the real installed guest Pod shape, not a permissive mock actuator."""
@@ -145,6 +169,86 @@ def test_execution_only_sibling_uses_same_participant_without_another_builder(gu
     assert settings.global_pool.participant.participant_id == identity
     assert settings.target_id == "nebius-guest-fixture"
     assert settings.task_image_builder is None
+
+
+@pytest.fixture
+def auth_runtime_inputs(guest_runtime_inputs, platform_inputs):
+    """Retain the actual second guest rendered for emulated authentication."""
+    from loom.execution_contract import nebius_guest_execution_class
+    from loom.nebius_platform_render import _execution_documents
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, actuators, services, manager, guest = guest_runtime_inputs
+    participant = request.registration.spec.participants[0]
+    config, candidate, _ = copy.deepcopy(platform_inputs)
+    config.update(namespace=request.guards[0].namespace, execution_namespace=participant.execution_namespace.name,
+        target_id=participant.targets[0].target_id, guest_execution_target={"target_id": "nebius-guest-fixture"},
+        emulated_auth_execution_target={"target_id": "nebius-auth-fixture"},
+        task_image_builder={"registry_repository": "cr.eu-north1.nebius.cloud/test/task-images", "max_concurrent": 2})
+    documents = _execution_documents(config, {key: row["image_ref"] for key, row in candidate["images"].items()},
+        Path(__file__).resolve().parents[2])
+    auth, = [row for row in documents if row["kind"] == "Deployment" and row["metadata"]["name"] == "nebius-auth-fixture-actuator"]
+    auth["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+    spec = request.registration.spec.model_dump(mode="json")
+    profile = copy.deepcopy(spec["profiles"]["execution"][-1])
+    klass = nebius_guest_execution_class(supports_emulated_pkcs11=True)
+    profile.update(profile_id=str(uuid4()), execution_class_id=klass.class_id, execution_class=klass.model_dump(mode="json"))
+    profile["runtime"]["target_id"] = "nebius-auth-fixture"
+    spec["profiles"]["execution"].append(profile)
+    spec["participants"][0]["targets"].append({"target_id": "nebius-auth-fixture",
+        "profile_id": profile["profile_id"], "workload_kinds": ["trial", "verifier"]})
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(spec)))
+    return request, actuators, services, manager, guest, auth
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_both_installed_guest_targets_survive_runtime_wiring(auth_runtime_inputs, reverse):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _, guest, auth = auth_runtime_inputs
+    identity = request.guards[0].participant_id
+    siblings = (auth, guest) if reverse else (guest, auth)
+    before = copy.deepcopy(siblings)
+    result = wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+        actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]),
+        guest_actuators=siblings)
+    assert siblings == before
+    assert len(result) == 5
+    by_name = {row["metadata"]["name"]: row for row in result.values()}
+    assert set(by_name) == {"loom-control-plane", "loom-service", "loom-execution-actuator",
+        "nebius-guest-fixture-actuator", "nebius-auth-fixture-actuator"}
+    for original in siblings:
+        wired = by_name[original["metadata"]["name"]]
+        assert wired["metadata"]["uid"] == original["metadata"]["uid"]
+        assert wired["spec"]["replicas"] == 0
+        assert env(wired)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"] == env(original)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]
+        assert env(wired)["LOOM_EXECUTION_ACTUATOR_DB_URL"] == env(original)["LOOM_EXECUTION_ACTUATOR_DB_URL"]
+        assert env(wired)["LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"] == env(result["actuator"])["LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL"]
+        assert "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER" not in env(wired)
+
+
+@pytest.mark.parametrize("damage", ["omitted", "database", "service_account", "builder", "duplicate_uid"])
+def test_two_guest_runtime_preserves_exact_roster_and_authority(auth_runtime_inputs, damage):
+    from scripts.ops.nebius_pool_runtime import wire_participant
+
+    request, actuators, services, _, guest, auth = auth_runtime_inputs
+    identity = request.guards[0].participant_id
+    siblings = (guest, auth)
+    if damage == "omitted":
+        siblings = (guest,)
+    elif damage == "database":
+        env(auth)["LOOM_EXECUTION_ACTUATOR_DB_URL"]["valueFrom"]["secretKeyRef"]["name"] = "foreign-db"
+    elif damage == "service_account":
+        auth["spec"]["template"]["spec"]["serviceAccountName"] = "foreign-writer"
+    elif damage == "builder":
+        auth["spec"]["template"]["spec"]["containers"][0]["env"].append(
+            copy.deepcopy(env(actuators[identity])["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]))
+    else:
+        auth["metadata"]["uid"] = guest["metadata"]["uid"]
+    with pytest.raises(ValueError):
+        wire_participant(request=request, participant_id=identity, management_origin="https://manage.example.com",
+            actuator=actuators[identity], service=services[identity], runtime_profile=desired_profile(request, services[identity]),
+            guest_actuators=siblings)
 
 
 def test_runtime_cannot_omit_a_registered_execution_sibling(guest_runtime_inputs):

@@ -64,7 +64,7 @@ def test_contributor_quickstart_documents_nebius_and_compatibility_verification(
     text = (REPO_ROOT / "docs/contributing/contributor-quickstart.md").read_text(encoding="utf-8")
     normalized_text = _normalize_command(text)
     root_shards = root_job["strategy"]["matrix"]["include"]
-    assert {shard["shard_index"] for shard in root_shards} == {0, 1}
+    assert {shard["shard_index"] for shard in root_shards} == set(range(8))
     assert "test-paths --lane tests-root" in root_pytest_step["run"]
     assert "--shard-index" in root_pytest_step["run"]
     assert "uv run --no-sync pytest" in root_pytest_step["run"]

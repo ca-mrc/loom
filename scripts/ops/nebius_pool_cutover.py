@@ -8,6 +8,7 @@ receipts across runtime replacement. It never opens admission or starts a Pod.
 """
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from collections.abc import Callable
@@ -23,8 +24,14 @@ from scripts.ops.nebius_management_stage import (
     _qualified_defaulted,
     _stage_fixed_documents,
 )
+from scripts.ops.nebius_management_supplied import _defaulted as material_defaulted
 from scripts.ops.nebius_management_switch import _matches, _stable
-from scripts.ops.nebius_pool_material import deliver_pool_material, machine_documents
+from scripts.ops.nebius_pool_application_delivery import (
+    ApplicationBuildDeliveryRequest,
+    render_application_build_delivery,
+    source_material_json,
+)
+from scripts.ops.nebius_pool_material import machine_documents
 from scripts.ops.nebius_pool_migration import (
     PoolMigrationAPI,
     _hash,
@@ -32,8 +39,14 @@ from scripts.ops.nebius_pool_migration import (
     migration_contract,
 )
 from scripts.ops.nebius_pool_platform_authority import PoolPlatformAuthority
+from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import MARKER as RETIREMENT_MARKER
-from scripts.ops.nebius_pool_retirement import _closed, retirement_documents, stopped_document
+from scripts.ops.nebius_pool_retirement import (
+    _closed,
+    _read_closed_migration,
+    retirement_documents,
+    stopped_documents,
+)
 from scripts.ops.nebius_pool_role_fencing import (
     PoolRoleFenceAPI,
     PoolRoleFenceRequest,
@@ -48,6 +61,7 @@ from scripts.ops.nebius_pool_runtime import (
     wire_participant,
 )
 
+from loom.execution_image_admission import ImageAdmissionKeyring, verify_execution_image_admission
 from loom.nebius_platform_render import digest
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.pool_management.installation_render import render_gateway
@@ -66,12 +80,16 @@ class PoolCutoverRequest:
     kubernetes_endpoint: str
     collector_credential: PoolCollectorCredential
     platform_authority: PoolPlatformAuthority | None = None
+    application_delivery: ApplicationBuildDeliveryRequest | None = None
 
 
 class PoolCutoverAPI(Protocol):
-    migration: PoolMigrationAPI
-    fencing: PoolRoleFenceAPI
-    resources: ManagementStageAPI
+    @property
+    def migration(self) -> PoolMigrationAPI: ...
+    @property
+    def fencing(self) -> PoolRoleFenceAPI: ...
+    @property
+    def resources(self) -> ManagementStageAPI: ...
 
     def preflight(self, request: PoolCutoverRequest) -> None:
         """Qualify immutable publication/predecessor/backend and writer inventory."""
@@ -98,6 +116,27 @@ class PoolCutoverAPI(Protocol):
 
 def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     """Generate targets from retained originals, never accept arbitrary manifests."""
+    qualify_cutover_image_admission(request)
+    return _cutover_documents(request)
+
+
+def qualify_cutover_image_admission(request: PoolCutoverRequest) -> None:
+    """Keep current-clock admission checks outside input-only manifest reuse."""
+    try:
+        keyring = ImageAdmissionKeyring.from_json(json.dumps(
+            request.fencing.retirement.migration.registration.spec.profiles.image_admission_keyring,
+            sort_keys=True, separators=(",", ":")))
+        for profile in request.profiles.values():
+            verify_execution_image_admission(profile.image_admission, keyring=keyring,
+                required_image_refs=[value for value in (profile.task_image_ref,
+                    profile.runtime_image_ref, profile.agent_image_ref) if value is not None])
+    except Exception:
+        raise ValueError("pool_participant_runtime_unqualified") from None
+
+
+@pure_projection
+def _cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
+    """Private input-derived projection; the public entry rechecks admission."""
     migration = request.fencing.retirement.migration
     PoolCollectorCredential.model_validate(request.collector_credential.model_dump())
     spec, binding = migration.registration.spec, migration.registration.binding
@@ -110,7 +149,19 @@ def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     producers = {_key(row): row for row in (request.manager, *request.services)}
     if len(producers) != 1 + len(participants) or len({_uid(row) for row in producers.values()} | {_uid(row) for row in originals.values()}) != len(producers) + len(originals):
         raise ValueError("pool cutover workload identity differs")
-    runtime = {_key(request.manager): wire_manager(request=migration, original=request.manager)}
+    application = request.application_delivery
+    if bool(spec.profiles.application_images) != (application is not None):
+        raise ValueError('pool application delivery scope differs')
+    application_configuration: tuple[dict[str, Any], ...] = ()
+    if application is None:
+        manager = wire_manager(request=migration, original=request.manager)
+    else:
+        delivered = render_application_build_delivery(before=application.before, pool=spec,
+            active=request.manager, candidate=migration.registration.candidate,
+            profile=application.profile, repo_root=application.repo_root)
+        manager = delivered.deployment
+        application_configuration = delivered.configuration
+    runtime = {_key(request.manager): manager}
     for guard in migration.guards:
         participant = participants[guard.participant_id]
         service, = (row for row in request.services if row["metadata"]["namespace"] == guard.namespace)
@@ -145,12 +196,14 @@ def cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     reader_identity = tuple(row for row in participant_readonly_roles(request=migration)
         if row["kind"] in {"ClusterRole", "ClusterRoleBinding"})
     return {"producers": producers, "stopped": stopped, "runtime": runtime,
-        "configuration": (*gateway["configuration"], *observer["configuration"], *reader_identity),
+        "configuration": (*gateway["configuration"], *observer["configuration"], *reader_identity, *application_configuration),
         "authority": gateway["authority"], "workload": gateway["workload"]}
 
 
 def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[str, Any]:
     return {"migration": migration_contract(request.fencing.retirement.migration),
+        **({'application_source': request.application_delivery.source_credential.model_dump(mode='json')}
+            if request.application_delivery is not None else {}),
         **({"platform_authority": request.platform_authority.model_dump(mode="json")} if request.platform_authority is not None else {}),
         "roles": {"originals": [_stable(row) for row in request.fencing.originals], "targets": role_fence_documents(request.fencing)},
         "writers": {key: {"uid": _uid(row), "document": _stable(row)} for key, row in retirement_documents(request.fencing.retirement).items()},
@@ -160,16 +213,55 @@ def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[st
         "documents": {key: value for key, value in documents.items() if key != "producers"}}
 
 
+def cutover_material_documents(request: PoolCutoverRequest, tokens: dict[UUID, str],
+        source_credentials: dict[str, str] | None = None) -> dict[str, dict[str, Any]]:
+    """Fixed machine tokens and, only for builder cutover, pinned source material."""
+    migration = request.fencing.retirement.migration
+    documents = machine_documents(migration, tokens)
+    application = request.application_delivery
+    if application is None:
+        if source_credentials is not None:
+            raise ValueError('pool application source outside scope')
+        return documents
+    if source_credentials is None:
+        raise ValueError('pool application source unavailable')
+    payload = source_material_json(source_credentials, application.source_credential)
+    manager = cutover_documents(request)['runtime'][_key(request.manager)]
+    source, = (row for row in manager['spec']['template']['spec']['volumes']
+        if row['name'] == 'application-source-credentials')
+    document = {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'immutable': True,
+        'metadata': {'name': source['secret']['secretName'], 'namespace': migration.registration.binding.namespace,
+            'labels': {'loom.nebius/management-installation': migration.registration.binding.installation_id,
+                'loom.nebius/pool-operation': str(migration.registration.spec.operation_id)}},
+        'data': {'credentials.json': base64.b64encode(payload.encode()).decode()}}
+    if _key(document) in documents:
+        raise ValueError('pool application source identity collision')
+    documents[_key(document)] = document
+    return documents
+
+
 def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
                          state: Path, anchor: Path) -> dict[str, Any] | None:
     """The same anchored recovery validation serves preflight and mutation."""
+    return _read_cutover_evidence(request, documents, state, anchor,
+        contract_sha256=digest(_contract(request, documents)))
+
+
+def _read_cutover_evidence(request: PoolCutoverRequest, documents: dict[str, Any], state: Path, anchor: Path, *,
+                           contract_sha256: str, migration_contract_sha256: str | None = None) -> dict[str, Any] | None:
+    """Fresh private evidence; supplied expectations must come from pure rendering.
+
+    This is the shared reader, not a cache or a caller-selected authority. The
+    ordinary entry derives expectations above; startup derives the same values
+    with its other immutable targets in one complete typed-input projection.
+    """
     if (state != state.resolve() or anchor != anchor.resolve() or state == anchor
             or state in anchor.parents or anchor in state.parents):
         raise ValueError
     migration = request.fencing.retirement.migration
     operation = str(migration.registration.spec.operation_id)
     identity = {"schema": "loom.nebius-pool-cutover.v1", "operation_id": operation,
-        "state_dir": str(state), "contract_sha256": digest(_contract(request, documents))}
+        "state_dir": str(state), "contract_sha256": contract_sha256}
     marker, path = anchor / (operation + "-cutover.json"), state / "cutover.json"
     if not marker.exists() and not marker.is_symlink():
         if state.exists() or state.is_symlink():
@@ -200,7 +292,12 @@ def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
                 or set(record["fenced"]) != {"migration.json", "retirement.json", "role-fencing.json"}
                 or any(_hash(writer_state / name) != checksum for name, checksum in record["fenced"].items())):
             raise ValueError
-        _closed(migration, writer_state, writer_anchor)
+        if migration_contract_sha256 is None:
+            # Ordinary callers retain the original post-read requalification.
+            # Startup alone supplies its bundle and rechecks it before return.
+            _closed(migration, writer_state, writer_anchor)
+        else:
+            _read_closed_migration(migration, writer_state, writer_anchor, contract_sha256=migration_contract_sha256)
     elif (any(value != "prepared" for value in record["runtime_access"].values()) or record["phases"]
             or any(item["phase"] != "prepared" for item in record["runtime"].values())):
         raise ValueError
@@ -210,7 +307,8 @@ def _read_cutover_record(request: PoolCutoverRequest, documents: dict[str, Any],
     return record
 
 
-def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path) -> dict[str, dict[str, Any]]:
+def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path,
+                               observed: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Read only: derive each original or exactly journal-qualified successor.
 
     This is not drain, runtime-health or database evidence. It selects the right
@@ -241,14 +339,29 @@ def retained_cutover_workloads(request: PoolCutoverRequest, *, state_dir: Path, 
                     or set(child["workloads"]) != set(originals)
                     or any(value not in {"prepared", "intent", "stopped"} for value in child["workloads"].values())):
                 raise ValueError
+            stopped = stopped_documents(request.fencing.retirement)
             for key, phase in child["workloads"].items():
                 if phase != "prepared":
-                    expected[key] = stopped_document(request.fencing.retirement, key)
+                    expected[key] = stopped[key]
         elif path.exists() or path.is_symlink() or record["fenced"] is not None:
             raise ValueError
         for key, item in record["runtime"].items():
             if item["phase"] != "prepared":
                 expected[key] = item["expected"]
+        # Startup keeps the closed parent immutable. An uncertain write may be
+        # either exact template, so callers must supply observation, not guess.
+        from scripts.ops.nebius_pool_startup import startup_workload_options
+
+        choices = startup_workload_options(request, state_dir=state_dir, anchor_dir=anchor_dir)
+        if choices is not None:
+            for key in expected:
+                options = choices[key]
+                if observed is not None:
+                    original = originals[key] if key in originals else documents["producers"][key]
+                    options = tuple(row for row in options if _matches(observed[key], row, _uid(original)))
+                if len(options) != 1:
+                    raise ValueError
+                expected[key] = options[0]
         return copy.deepcopy(expected)
     except Exception:
         raise ValueError("pool_workload_recovery_unqualified") from None
@@ -295,7 +408,8 @@ def _updates(*, api: PoolCutoverAPI, originals: dict[str, Any], targets: dict[st
 
 
 def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], api: PoolCutoverAPI,
-                       state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
+                       state_dir: Path, anchor_dir: Path,
+                       source_credentials: dict[str, str] | None = None) -> dict[str, Any]:
     """Freeze → close → retire/fence → material/ACLs → disabled runtime.
 
     Runtime replacement changes the original templates. Recovery after that
@@ -310,13 +424,16 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
             raise ValueError
         documents = cutover_documents(request)
         migration = request.fencing.retirement.migration
-        machine_documents(migration, tokens)  # Qualify all hashes before downtime.
+        material = cutover_material_documents(request, tokens, source_credentials)  # Before downtime.
         operation = str(migration.registration.spec.operation_id)
         identity = {"schema": "loom.nebius-pool-cutover.v1", "operation_id": operation,
             "state_dir": str(state), "contract_sha256": digest(_contract(request, documents))}
         writer_state, writer_anchor = state / "writers", state / "writer-anchor"
         with private_state._locked_state(anchor):
             path, marker = state / "cutover.json", anchor / (operation + "-cutover.json")
+            if any(item.exists() or item.is_symlink() for item in (
+                    state / "startup.json", anchor / (operation + "-startup.json"))):
+                raise ValueError  # Recovery now belongs to startup, never replay closure.
             record = _read_cutover_record(request, documents, state, anchor)
             if record is None:
                 api.preflight(request)
@@ -367,10 +484,11 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
                         raise ValueError
                 # Before each stage, all retained writers must be stopped in
                 # precisely the old or journaled new template, never a third one.
+                stopped = stopped_documents(request.fencing.retirement)
                 for key, original in retirement_documents(request.fencing.retirement).items():
                     item = record["runtime"].get(key)
                     desired = (item["expected"] if item is not None and item["phase"] != "prepared"
-                        else stopped_document(request.fencing.retirement, key))
+                        else stopped[key])
                     if not _matches(api.read_workload(key), desired, _uid(original)) or api.drained_workload(key, desired) is not True:
                         raise ValueError
 
@@ -393,7 +511,10 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
                     record["phases"][phase] = None
                     save()
                 if phase == "material":
-                    deliver_pool_material(request=migration, tokens=tokens, api=api.resources, state_dir=state / phase)
+                    revision = digest({'contract': migration_contract(migration), 'documents': material})
+                    _stage_fixed_documents(documents=material, revision=revision, phase='pool-machine-material',
+                        binding=migration.registration.binding, api=api.resources, state_dir=state / phase,
+                        default_document=material_defaulted)
                 else:
                     stage_documents = {_key(row): row for row in documents[phase]}
                     _stage_fixed_documents(documents=stage_documents, revision=digest(stage_documents), phase="pool-cutover-" + phase,
@@ -403,8 +524,9 @@ def stage_pool_cutover(*, request: PoolCutoverRequest, tokens: dict[UUID, str], 
                     raise ValueError
                 record["phases"][phase] = checksum
                 save()
+            stopped = stopped_documents(request.fencing.retirement)
             previous = {key: (documents["stopped"][key] if key in documents["stopped"]
-                else stopped_document(request.fencing.retirement, key)) for key in documents["runtime"]}
+                else stopped[key]) for key in documents["runtime"]}
             retained = {**retirement_documents(request.fencing.retirement), **documents["producers"]}
             previous = copy.deepcopy(previous)
             for key, document in previous.items():

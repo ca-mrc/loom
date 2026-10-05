@@ -15,6 +15,7 @@ from tests.ops.test_nebius_ingress_bootstrap import archive
 from tests.ops.test_nebius_management_gateway import (
     diagnostic_operation,
     operation,
+    pool_operation,
     recovery_operation,
     refresh_operation,
     retirement_operation,
@@ -26,7 +27,7 @@ def module():
     return importlib.import_module("scripts.ops.install_nebius_management_entrypoint")
 
 
-@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic", "recovery", 'refresh'])
+@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic", "recovery", 'refresh', 'pool'])
 def inputs(tmp_path, request):
     (tmp_path / ".loom").mkdir(mode=0o700)
     (tmp_path / ".ssh").mkdir(mode=0o700)
@@ -34,7 +35,8 @@ def inputs(tmp_path, request):
     keys.write_bytes(b'# operator\nrestrict,command="ingress-command" ssh-ed25519 FOREIGN old\n')
     keys.chmod(0o600)
     metadata = {"initial": operation, "upgrade": upgrade_operation, "retirement": retirement_operation,
-        "diagnostic": diagnostic_operation, "recovery": recovery_operation, 'refresh': refresh_operation}[request.param](tmp_path / ".loom")
+        "diagnostic": diagnostic_operation, "recovery": recovery_operation, 'refresh': refresh_operation,
+        'pool': pool_operation}[request.param](tmp_path / ".loom")
     content = archive({"operation.json": json.dumps(metadata).encode(),
         "scripts/ops/nebius_management_gateway.py": b'def authorized_main(digest):\n    return 0\n',
         "scripts/ops/nebius_certificate_gateway.py": b"# supervisor\n"})
@@ -47,6 +49,24 @@ def test_preview_preserves_keys_and_creates_nothing(inputs):
     root, keys, key, content, digest = inputs
     before = keys.read_bytes()
     assert module().install(content, expected_sha256=digest, public_key=key)["status"] == "prepared"
+    assert keys.read_bytes() == before and not root.exists()
+
+
+@pytest.mark.parametrize('inputs', ['pool'], indirect=True)
+def test_operator_installer_accepts_real_complete_pool_bundle_without_private_state(inputs, tmp_path):
+    from scripts.ops.nebius_management_rollout import build_bundle
+
+    root, keys, key, _, _ = inputs
+    uv, requirements, wheels = tmp_path / 'uv', tmp_path / 'requirements', tmp_path / 'wheels'
+    uv.write_bytes(b'fixture uv')
+    requirements.write_bytes(b'fixture requirements')
+    wheels.mkdir()
+    for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
+        (wheels / name).write_bytes(b'fixture wheel')
+    metadata = pool_operation(root.parent)
+    content = build_bundle(metadata, uv=uv, requirements=requirements, wheels=wheels)
+    before = keys.read_bytes()
+    assert module().install(content, expected_sha256=hashlib.sha256(content).hexdigest(), public_key=key)['status'] == 'prepared'
     assert keys.read_bytes() == before and not root.exists()
 
 
@@ -96,7 +116,12 @@ def test_grant_is_exact_fixed_command_preserves_existing_keys_and_checks_sources
     assert module().install(content, expected_sha256=digest, public_key=key, apply=True) == report
     assert keys.read_bytes() == after and not (root / "state").exists()
     entry = root / "authority" / digest / "entrypoint.py"
+    import io
+    import zipfile
+    with zipfile.ZipFile(io.BytesIO(content)) as packed:
+        pool = json.loads(packed.read('operation.json'))['schema'] == 'loom.nebius-pool-cutover-operation.v1'
     for command, expected in [("loom-nebius-management-preflight-v1", 0), ("loom-nebius-management-install-v1", 0),
+        ('loom-nebius-pool-rollback-v1', 0 if pool else 126),
         ("loom-nebius-management-install-v1 extra", 126), ("loom-nebius-ingress-v1", 126), ("kubectl apply", 126)]:
         result = subprocess.run([sys.executable, "-I", str(entry)], input=content, capture_output=True,
                                 env={"SSH_ORIGINAL_COMMAND": command}, timeout=10)

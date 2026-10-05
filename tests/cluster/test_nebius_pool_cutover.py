@@ -6,7 +6,6 @@ import copy
 import json
 import os
 import ssl
-import sys
 import time
 from dataclasses import replace
 from uuid import UUID
@@ -72,6 +71,21 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
                         assert time.monotonic() < bootstrap_deadline, "disposable bootstrap RBAC did not appear"
                         await asyncio.sleep(0.1)
                 platform_resources.append(core.api_client.sanitize_for_serialization(document))
+        # This pinned K3s image adds its own RBAC after the upstream bootstrap.
+        # An initially complete inventory can therefore precede its late
+        # bindings/roles. Require the actual late roles and resolve bindings at
+        # the same revision; never omit bindings or manufacture permissions.
+        late_bootstrap_roles = {"clustercidrs-node", "system:k3s-controller"}
+        while True:
+            bootstrap_roles = await asyncio.to_thread(rbac.list_cluster_role)
+            bootstrap_bindings = await asyncio.to_thread(rbac.list_cluster_role_binding,
+                resource_version=bootstrap_roles.metadata.resource_version, resource_version_match="Exact")
+            available = {row.metadata.name for row in bootstrap_roles.items}
+            missing = ({row.role_ref.name for row in bootstrap_bindings.items} | late_bootstrap_roles) - available
+            if not missing:
+                break
+            assert time.monotonic() < bootstrap_deadline, f"disposable bootstrap role references unresolved: {sorted(missing)}"
+            await asyncio.sleep(0.1)
         platform_authority = PoolPlatformAuthority(schema_version="loom.pool-platform-authority.v1",
             kube_system_uid=kube_system.metadata.uid, resources=tuple(platform_resources))
         originals = {**retirement_documents(request.fencing.retirement), **cutover_documents(request)["producers"]}
@@ -137,7 +151,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
 
             def cutover_readiness_page(self, target, *, after):
                 assert target in self.request.guards and after is None
-                return {"status": "observed", "schema_revision": "0172", "rows": []}
+                return {"status": "observed", "schema_revision": "0174", "rows": []}
 
         class Checks:
             def qualify_binding(self, actual, manager):
@@ -276,32 +290,27 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
             def observed_stage():
                 # Only disposable-fixture source locations; never exception
                 # values, credentials, manifests or production diagnostics.
-                failures = []
-                def trace(frame, event, value):
-                    if not frame.f_code.co_filename.endswith(("nebius_pool_cutover_live.py", "nebius_pool_role_fencing.py")):
-                        return None
-                    if event == "exception" and issubclass(value[0], Exception):
-                        failures.append((frame.f_code.co_name, frame.f_lineno, value[0].__name__))
-                        key = frame.f_locals.get("key")
-                        if value[0] is KeyError and isinstance(key, str) and key.startswith(("Role:", "ClusterRole:")):
-                            failures.append(("unresolved RBAC reference", key))
-                    if event == "return" and frame.f_code.co_name == "_patch" and value is None:
-                        response = frame.f_locals.get("response")
-                        status = frame.f_locals.get("value", {})
-                        if response is not None and isinstance(status, dict):
-                            failures.append(("workload definite rejection", response.status_code, status.get("reason"),
-                                [(row.get("reason"), row.get("field")) for row in status.get("details", {}).get("causes", [])]))
-                    return trace
-                prior = sys.gettrace()
-                sys.settrace(trace)
                 try:
                     return stage_pool_cutover(request=request, tokens=tokens, api=api,
                         state_dir=tmp_path / "cutover", anchor_dir=tmp_path / "anchor")
-                except Exception:
+                except Exception as error:
+                    failures = []
+                    seen = set()
+                    current = error
+                    while current is not None and id(current) not in seen:
+                        seen.add(id(current))
+                        frame = current.__traceback__
+                        while frame is not None:
+                            code = frame.tb_frame.f_code
+                            if code.co_filename.endswith(("nebius_pool_cutover_live.py", "nebius_pool_role_fencing.py")):
+                                failures.append((code.co_name, frame.tb_lineno, type(current).__name__))
+                                key = frame.tb_frame.f_locals.get('key')
+                                if isinstance(current, KeyError) and isinstance(key, str) and key.startswith(('Role:', 'ClusterRole:')):
+                                    failures.append(('unresolved RBAC reference', key))
+                            frame = frame.tb_next
+                        current = current.__context__
                     print("disposable cutover qualification locations:", failures)
                     raise
-                finally:
-                    sys.settrace(prior)
 
             deadline = time.monotonic() + 120
             first = True

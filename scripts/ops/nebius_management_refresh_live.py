@@ -27,9 +27,11 @@ class HTTPSManagementRefreshSwitchAPI(HTTPSApplicationSetupAPI):
 
     def __init__(self, *, request: ManagementRefreshSwitchRequest, binding: ManagementBinding,
                  shared_namespace_uid: str, api_server: str, ssl_context: ssl.SSLContext,
-                 activation_check: Callable[[ManagementRefreshSwitchRequest], bool], token: str | None = None):
+                 activation_check: Callable[[ManagementRefreshSwitchRequest], bool], token: str | None = None,
+                 before_write: Callable[[], None] | None = None):
         self.refresh = request
         self.check_activation = activation_check
+        self.before_write = before_write
         refresh_target(request, 'activate')
         setup = ApplicationSetupRequest(request.render.after, request.render.candidate, request.render.profile,
             binding, shared_namespace_uid, request.render.repo_root)
@@ -71,6 +73,8 @@ class HTTPSManagementRefreshSwitchAPI(HTTPSApplicationSetupAPI):
             if action == 'activate':
                 patches.append({'op': 'replace', 'path': '/spec/template', 'value': desired['spec']['template']})
             self.verify_identity(self.binding)
+            if not preview and self.before_write is not None:
+                self.before_write()
             with self.client.stream('PATCH', self.path + ('?dryRun=All' if preview else ''), json=patches,
                                     headers={'Content-Type': 'application/json-patch+json'}) as response:
                 if response.headers.get('content-encoding', 'identity').lower() != 'identity':

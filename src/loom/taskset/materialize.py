@@ -55,6 +55,7 @@ class TaskRowDraft:
     config: dict[str, Any]
     source: str
     source_provenance: dict[str, Any] = field(default_factory=dict)
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -516,6 +517,12 @@ def _materialize_bundle_upload(
                             config=task_config.model_dump(mode="json"),
                             source=f"s3://{artifacts_bucket}/{bundle_prefix}/",
                             source_provenance=source_provenance,
+                            # Derive from the validated immutable bundle, never
+                            # from a user assertion or verifier-name convention.
+                            tags={"oracle_eligible": (
+                                "true" if (bundle_dir / "solution/solve.sh").is_file()
+                                else "false"
+                            )},
                         ),
                     )
                 except (tomllib.TOMLDecodeError, ValidationError) as exc:

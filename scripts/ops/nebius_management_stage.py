@@ -199,11 +199,12 @@ def _qualified_defaulted(desired: dict[str, Any], observed: dict[str, Any]) -> d
     return _comparison_snapshot(observed)
 
 
-def _canonical_quantities(document: dict[str, Any]) -> dict[str, Any]:
+def _canonical_quantities(document: dict[str, Any], *, detached: bool = False) -> dict[str, Any]:
     """Exact decimal equality for API-equivalent resource spellings, no rounding."""
     from kubernetes.utils.quantity import parse_quantity
 
-    result = copy.deepcopy(document)
+    # Only callers passing their own fresh snapshot may skip another full copy.
+    result = document if detached else copy.deepcopy(document)
     kind = result.get("kind")
     if kind not in {"Deployment", "StatefulSet", "Job", "CronJob"}:
         return result
@@ -232,7 +233,7 @@ def _comparison_snapshot(document: dict[str, Any]) -> dict[str, Any]:
     Dry-run and persisted Jobs receive different UIDs. The full persisted snapshot
     still freezes those fields on replay; only the dry-run comparison omits them.
     """
-    result = _canonical_quantities(_snapshot(document, allocation=False))
+    result = _canonical_quantities(_snapshot(document, allocation=False), detached=True)
     if document["kind"] == "Job":
         uid, name = _uid(document), document["metadata"]["name"]
         spec = result["spec"]

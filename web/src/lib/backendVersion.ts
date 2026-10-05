@@ -7,6 +7,9 @@ const STALE_TIME_MS = 60_000;
 export interface BackendVersion {
   buildRevision: string | null;
   buildTime: string | null;
+  buildKind?: "personal" | "commit";
+  sourceDigest?: string | null;
+  sourceBaseCommit?: string | null;
 }
 
 async function fetchBackendVersion(): Promise<BackendVersion | null> {

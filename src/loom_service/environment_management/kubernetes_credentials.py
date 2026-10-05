@@ -6,7 +6,7 @@ import re
 import ssl
 import stat
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -34,6 +34,9 @@ class ProjectedKubernetesCredentials:
         self.token_file = connection.token_file
 
     async def get_token(self) -> str:
+        return self.get_token_sync()
+
+    def get_token_sync(self) -> str:
         try:
             # Reopen the projected symlink on every request so kubelet rotation
             # replaces credentials. Nonblocking open also rejects special files
@@ -60,3 +63,26 @@ class ProjectedKubernetesCredentials:
         # All file descriptors are request-local. Match the owned credentials
         # lifecycle used by the explicit SDK mode without retaining token bytes.
         return None
+
+
+def create_projected_api_client(connection: ProjectedKubernetesConnection) -> tuple[Any, ProjectedKubernetesCredentials]:
+    """Explicit SDK transport; refresh the kubelet-projected token per request.
+
+    The caller owns the returned client/credentials. This creates no API object
+    and grants no Kubernetes permissions; RBAC remains separately installed.
+    """
+    from kubernetes import client
+
+    credentials = ProjectedKubernetesCredentials(connection)
+    configuration = client.Configuration()
+    configuration.host = connection.endpoint
+    configuration.ssl_ca_cert = str(connection.ca_file)
+    configuration.verify_ssl = True
+    configuration.api_key["authorization"] = ""
+    configuration.api_key_prefix["authorization"] = "Bearer"
+
+    def refresh(current: Any) -> None:
+        current.api_key["authorization"] = credentials.get_token_sync()
+
+    configuration.refresh_api_key_hook = refresh
+    return client.ApiClient(configuration), credentials

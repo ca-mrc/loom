@@ -25,7 +25,7 @@ class PoolNativeRuntimeV1(BaseModel):
 
     @model_validator(mode="after")
     def bound_runtime(self) -> PoolNativeRuntimeV1:
-        if (self.receipt.request_key.workload_kind != "task_image_build" or self.receipt.plan_sha256 is None
+        if (self.receipt.request_key.workload_kind not in {"task_image_build", "application_image_build"} or self.receipt.plan_sha256 is None
                 or self.job_name != f"loom-pool-{self.receipt.reservation_id.hex}"
                 or self.deadline_at.utcoffset() is None
                 or ((self.receipt.job_uid is None) != (self.job_effect_id is None))

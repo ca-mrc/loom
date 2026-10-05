@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_migration import PoolMigrationRequest, migration_contract
 
@@ -28,6 +29,17 @@ from loom_execution_actuator.task_image_settings import NativeTaskImageSettings
 from loom_execution_capacity_collector.config import PoolCapacityCollectorSettings
 from loom_service.environment_management.deployment import mount_pool_profiles
 from loom_service.pool_management.installation_render import mount_machine_token
+
+
+class _RetainedPoolCollectorSettings(PoolCapacityCollectorSettings):
+    """Validate only protected retained inputs, never the operator's environment."""
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls: type[BaseSettings],
+            init_settings: PydanticBaseSettingsSource, env_settings: PydanticBaseSettingsSource,
+            dotenv_settings: PydanticBaseSettingsSource, file_secret_settings: PydanticBaseSettingsSource,
+            ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
 
 
 class PoolCollectorCredential(BaseModel):
@@ -99,7 +111,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
         original_name = "loom-execution-actuator"
         if (actuator["spec"]["selector"] != {"matchLabels": {"app.kubernetes.io/name": original_name}}
                 or actuator["spec"]["template"]["metadata"]["labels"].get("app.kubernetes.io/name") != original_name
-                or len(guests) > 1):
+                or len(guests) > 2):
             raise ValueError
         settings = _environment(container)
         target_id = settings["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"]
@@ -108,6 +120,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
         if settings["LOOM_EXECUTION_ACTUATOR_NAMESPACE"].get("value") != participant.execution_namespace.name:
             raise ValueError
         seen = {target_id}
+        seen_uids = {_uid(actuator)}
         primary_profile, = (row for row in request.registration.spec.profiles.execution if row.profile_id == primary.profile_id)
         for guest in guests:
             guest_container, = guest["spec"]["template"]["spec"]["containers"]
@@ -122,8 +135,9 @@ This check does not discover controllers or authorize arbitrary Deployment names
             name = guest_id + "-actuator"
             _disabled(guest, namespace=participant.execution_namespace.name, name=name,
                 container_name="actuator", image=_image(request, "execution_actuator"))
-            if _uid(guest) == _uid(actuator):
+            if _uid(guest) in seen_uids:
                 raise ValueError
+            seen_uids.add(_uid(guest))
             # The installed renderer clones the ordinary Pod, changing only
             # target/labels/affinity and removing the native builder. Comparing
             # that complete spec also binds DB references, SA, mounts and image.
@@ -143,7 +157,7 @@ This check does not discover controllers or authorize arbitrary Deployment names
             if any(getattr(guest_profile, key) != getattr(primary_profile, key)
                     for key in ("candidate_sha", "runtime_image_ref", "runtime_binary_sha256")):
                 raise ValueError
-        if seen != {row.target_id for row in participant.targets}:
+        if seen != {row.target_id for row in participant.targets if set(row.workload_kinds) != {"application_image_build"}}:
             raise ValueError
     except Exception:
         raise ValueError("pool_actuator_roster_unqualified") from None
@@ -178,7 +192,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         spec = request.registration.spec
         participant, = (row for row in spec.participants if row.participant_id == participant_id)
         guard, = (row for row in request.guards if row.participant_id == participant_id)
-        machine, = (row for row in spec.machines if row.participant_id == participant_id)
+        machine, = (row for row in spec.machines if row.participant_id == participant_id and row.workload_scope == "environment")
         cp, cp_pod, cp_container = _disabled(guard.controller, namespace=guard.namespace, name="loom-control-plane",
             container_name="loom-control-plane", image=_image(request, "control_plane"))
         worker, worker_pod, worker_container = _disabled(actuator, namespace=participant.execution_namespace.name,
@@ -254,7 +268,8 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
             guest_container["env"] = [row for row in guest_container["env"]
                 if row["name"] != "LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]
             _environment(guest_container)["LOOM_EXECUTION_ACTUATOR_TARGET_ID"]["value"] = guest_id
-            result["guest_actuator"] = wired_guest
+            key = "guest_actuator" if len(guest_actuators) == 1 else "guest_actuator:" + guest_id
+            result[key] = wired_guest
         return result
     except Exception:
         raise ValueError("pool_participant_runtime_unqualified") from None
@@ -325,7 +340,7 @@ retained for the existing two-file initializer, but now holds observer authority
         values.update(pool_id=spec.pool_id, management_url=management_origin,
             nebius_credentials_file=paths[prefix + "NEBIUS_CREDENTIALS_FILE"],
             management_bearer_token_file=paths[prefix + "CONTROL_PLANE_BEARER_TOKEN_FILE"])
-        settings = PoolCapacityCollectorSettings(_env_file=None, **values)
+        settings = _RetainedPoolCollectorSettings(_env_file=None, **values)
         quotas = {key: (settings.nebius_quota_parent_id or settings.nebius_project_id, settings.nebius_region,
             settings.quota_service, getattr(settings, "quota_" + key + "_name"), getattr(settings, "quota_" + key + "_unit"))
             for key in ("nodes", "vcpu", "memory", "storage") if getattr(settings, "quota_" + key + "_name") is not None}

@@ -161,6 +161,56 @@ function elapsedSeconds(start: string | null, end: string | null): string {
   return Number.isFinite(seconds) ? `${seconds}s` : "—";
 }
 
+const PHASE_LABELS = {
+  agent: "Agent",
+  awaiting_verifier: "Awaiting verifier",
+  verifier: "Verifier",
+} as const;
+
+function formatPhaseSeconds(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : `${Math.round(value)}s`;
+}
+
+function ExecutionPhases({
+  phases,
+}: {
+  phases: components["schemas"]["TrialExecutionPhases"];
+}): JSX.Element {
+  return (
+    <section aria-label="Execution phases" className="space-y-2">
+      <h3 className="font-semibold">Execution phases</h3>
+      <p className="text-sm text-slate-600">
+        {phases.verifier_execution === "separate_execution"
+          ? "The agent's sandbox is released before grading; a separate verifier execution restores its workspace."
+          : "The agent and verifier run in one execution."}
+      </p>
+      <ol className="space-y-1 text-sm">
+        {phases.phases.map((phase) => (
+          <li key={`${phase.phase}-${phase.retry}`}>
+            <strong>{PHASE_LABELS[phase.phase]}</strong>
+            {phase.retry ? ` (retry ${phase.retry})` : ""}: {phase.state}
+            {phase.lease_id ? ` · reserved ${formatPhaseSeconds(phase.reserved_seconds)}` : " · nothing reserved"}
+            {phase.requested
+              ? ` · ${phase.requested.cpu_millis / 1000} CPU, ${phase.requested.memory_mib / 1024} GiB memory`
+              : ""}
+            {phase.started_at ? ` · ${elapsedSeconds(phase.started_at, phase.finished_at)}` : ""}
+          </li>
+        ))}
+      </ol>
+      {phases.verifier_execution === "separate_execution" ? (
+        <dl className="grid gap-2 text-sm md:grid-cols-3">
+          <div><dt className="text-slate-500">Handoff gap</dt><dd>{formatPhaseSeconds(phases.handoff_gap_seconds)}</dd></div>
+          <div><dt className="text-slate-500">Reservation overlap</dt><dd>{formatPhaseSeconds(phases.reservation_overlap_seconds)}</dd></div>
+          <div>
+            <dt className="text-slate-500">Handed-off workspace</dt>
+            <dd>{phases.handoff_storage_bytes === null || phases.handoff_storage_bytes === undefined ? "—" : formatBytes(phases.handoff_storage_bytes)}</dd>
+          </div>
+        </dl>
+      ) : null}
+    </section>
+  );
+}
+
 function MaterializationCard({
   trial,
 }: {
@@ -211,6 +261,7 @@ function MaterializationCard({
             </ul>
           </section>
         ) : null}
+        {trial.execution_phases ? <ExecutionPhases phases={trial.execution_phases} /> : null}
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           <StatCard label="Backend" value={materialization.backend} />
           <StatCard label="Pool" value={materialization.pool_id} />

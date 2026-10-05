@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import (
     ROOT,
     render,
@@ -16,7 +17,13 @@ from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
 from tests.unit.test_nebius_management_render import (
+    builder_management_inputs as builder_management_inputs,
+)
+from tests.unit.test_nebius_management_render import (
     management_inputs as management_inputs,
+)
+from tests.unit.test_nebius_management_render import (
+    source_management_inputs as source_management_inputs,
 )
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -43,6 +50,81 @@ def build(request):
     from scripts.ops.nebius_management_refresh import render_refresh
 
     return render_refresh(request)
+
+
+@pytest.fixture
+def builder_refresh_request(builder_management_inputs):
+    from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
+
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw, candidate, profile = copy.deepcopy(builder_management_inputs)
+    active = next(doc for doc in render(builder_management_inputs).files['40-services.yaml']
+        if doc['kind'] == 'Deployment')
+    active['metadata'].update(uid=str(uuid4()), resourceVersion='31', generation=4)
+    # First cutover keeps the original cloud/shared material and adds source-only
+    # material at its own revision. A later image refresh must retain all three.
+    for volume in active['spec']['template']['spec']['volumes']:
+        if volume['name'] in {'management-cloud', 'application-shared'}:
+            volume['secret']['secretName'] = volume['secret']['secretName'][:-12] + '0123456789ab'
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '9' * 64
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    before = ManagementDeployment.model_validate(raw)
+    return ManagementRefreshRenderRequest(before, before, active, candidate, profile, ROOT)
+
+
+def test_builder_refresh_preserves_independently_revisioned_source_credentials(builder_refresh_request):
+    request = builder_refresh_request
+    original = copy.deepcopy(request)
+    first = build(request)
+    active = copy.deepcopy(first.deployment)
+    active['metadata'].update(uid=request.active['metadata']['uid'], resourceVersion='33', generation=5)
+    candidate, profile = copy.deepcopy(request.candidate), copy.deepcopy(request.profile)
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '8' * 64
+    profile['task_image_ref'] = candidate['images']['service']['image_ref']
+    second = build(replace(request, active=active, candidate=candidate, profile=profile))
+    for result in (first, second):
+        pod = result.deployment['spec']['template']['spec']
+        secrets = [volume for volume in pod['volumes'] if 'secret' in volume]
+        assert secrets == [volume for volume in request.active['spec']['template']['spec']['volumes'] if 'secret' in volume]
+        assert json.loads(result.config['data']['installation.json'])['applications']['runtime'] == (
+            request.before.installation.applications.runtime.model_dump(mode='json'))
+        template = copy.deepcopy(result.deployment['spec']['template'])
+        old_template = request.active['spec']['template']
+        template['metadata']['annotations']['loom.nebius/configuration-revision'] = (
+            old_template['metadata']['annotations']['loom.nebius/configuration-revision'])
+        old_image = old_template['spec']['containers'][0]['image']
+        for container in template['spec']['containers'] + template['spec']['initContainers']:
+            assert container['image'] == (request.candidate if result is first else candidate)['images']['service']['image_ref']
+            container['image'] = old_image
+        for volume, previous in zip(template['spec']['volumes'], old_template['spec']['volumes'], strict=True):
+            if volume['name'] == 'management-config':
+                assert volume['configMap']['name'] == result.config['metadata']['name']
+                volume['configMap']['name'] = previous['configMap']['name']
+        assert template == old_template
+    assert first.revision != second.revision
+    assert request == original
+
+
+@pytest.mark.parametrize('name', ['foreign-secret', 'loom-applications-source-0123456789a',
+                                'loom-applications-source-0123456789az'])
+def test_builder_refresh_rejects_unqualified_source_material_names(builder_refresh_request, name):
+    active = copy.deepcopy(builder_refresh_request.active)
+    source, = (volume for volume in active['spec']['template']['spec']['volumes']
+        if volume['name'] == 'application-source-credentials')
+    source['secret']['secretName'] = name
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(builder_refresh_request, active=active))
+
+
+def test_builder_refresh_cannot_change_source_runtime(builder_refresh_request):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw = builder_refresh_request.after.model_dump(mode='json')
+    raw['installation']['applications']['runtime']['source_upload']['max_inflight'] = 3
+    changed = ManagementDeployment.model_validate(raw)
+    with pytest.raises(ValueError, match='refresh'):
+        build(replace(builder_refresh_request, after=changed))
 
 
 def test_refresh_changes_only_image_config_and_revision(refresh_request):

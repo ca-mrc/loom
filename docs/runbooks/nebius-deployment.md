@@ -63,12 +63,62 @@ loom --context management-alice dev app login APPLICATION_UUID --browser
 ```
 
 Replace uppercase placeholders with verified installation values. `--release`
-selects an application release already qualified in the management installation;
-it is not a branch, candidate ID or local directory. This command does not build
-or publish arbitrary local source. Use the exact `loom --context app-...` command
+selects a protected pinned release or your own completed application build;
+it is not a branch, candidate ID or local directory. `create` itself does not build
+or publish source. Use the exact `loom --context app-...` command
 printed after login to talk to that personal API. The default and management
 contexts, model-provider settings and credentials are not copied or replaced.
 Omit `--browser` on a headless machine.
+
+After the protected source/build runtime is installed, build local feature code
+through that same management context:
+
+```bash
+loom --context management-alice dev app build --source /PATH/TO/CHECKOUT \
+  --idempotency-key alice-feature-1
+loom --context management-alice dev app build-status BUILD_UUID
+loom --context management-alice dev app build-wait BUILD_UUID --timeout 900
+loom --context management-alice dev app create alice --release BUILD_UUID \
+  --idempotency-key alice-create-1
+```
+
+The source capture includes committed, modified and non-ignored untracked files,
+with credential/owner-context exclusions. It is **not CI-approved source**. A build
+uses shared capacity at personal-development priority; it does not deploy anything.
+Only `ready` status, after publication and pool cleanup, includes the qualified
+release. That release ID is the build ID and can also be used with `app update`.
+An unconfigured management installation returns 503; these commands do not bypass
+protected installation or prove that an installation is ready.
+
+After an uncertain response, use the latest printed retry command with its original
+key and management context. Before upload completes the command binds the captured
+source digest; changed source is refused. After verification it uses `--upload-id`
+and no longer reads the checkout. `build-wait` exits 0 only for a ready build,
+1 for failure/cancellation/request errors, and 2 for a local timeout without cancelling
+the remote build. Explicit controls retain the expected attempt from build status:
+
+```bash
+loom --context management-alice dev app build-cancel BUILD_UUID --attempt ATTEMPT
+loom --context management-alice dev app build-retry BUILD_UUID --attempt ATTEMPT
+```
+
+Retry is available only after a failed/cancelled attempt has completed cleanup.
+It keeps the original source and recipe; use a new build key for different source.
+Ready builds cannot be retried or retargeted to different images.
+
+The version sidebar identifies personal source by digest. Its details distinguish
+the JavaScript this page loaded from the backend instance that answered, and show
+the base commit only as informational—not CI approval. A newer served build shows
+an update notice without relabelling or automatically refreshing the current page.
+Compare these reports with the ready build's source digest; they are not a substitute
+for the management operation's deployment/readiness evidence.
+
+Operator installation must deliver the configured source-only Secret, private
+builder token and shared-build read permissions through the protected operation.
+The management renderer reserves 2 GiB of temporary disk per concurrent source
+upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
+Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+Do not hand-mount credentials or treat the renderer as installation authority.
 
 Subsequent lifecycle changes use the same management context:
 
@@ -917,12 +967,29 @@ To prepare those shared inputs without an unprotected Kubernetes operation, run
 protected `nebius-rollout` with `operation=inspect` and
 `prepare_shared_inputs=true`. Its fixed gateway collector verifies the shared
 namespace and cluster identities against both inspection and the retained original
-management configuration. It reads only the shared ConfigMap, service Deployment,
+management configuration. It reads the shared ConfigMap, service Deployment,
 database/auth Secrets and namespace identities; it makes no Kubernetes writes.
 The gateway retains configuration/profile/public keyring, resource UIDs, database
 name, database CA and secret-store keys under the private
 `.loom/nebius-management/shared-input-observations/<observation_id>/` directory.
 It never copies the database administrator password, JWT keys or whole Secrets.
+The same snapshot additionally retains `pool-resources.json` for cutover input
+preparation: actual Deployments, CronJobs, StatefulSets, Services, ConfigMaps,
+Roles and RoleBindings in the configured shared/execution/build namespaces,
+their namespace identities and complete ClusterRole/ClusterRoleBinding lists.
+Only identity/version pins for fixed database Secrets and an identity/version/
+SHA256 pin for the fixed collector credential are recorded, not their contents.
+The fixed shared `loom-platform-storage` Secret also supplies an
+`application_source_credential` UID/version pin and SHA256 of canonical JSON
+containing only its source access/secret keys. No source credential bytes are
+exported. The capture rejects malformed material or a changed Secret generation;
+the protected builder cutover independently rereads and qualifies the same pin
+against the actual shared control-plane source consumer before delivery.
+Collection count/size limits and missing pages fail closed. Typed list entries
+inherit omitted Kubernetes kind/version fields from their collection; conflicting
+types are rejected. The private resource snapshot is not atomic and grants no
+authority: the protected cutover must requalify the selected live resources and
+permissions. Do not publish its raw configuration, workload or RBAC documents.
 Only the observation UUID and candidate commit return to Actions. Ordinary
 inspection does not collect credentials. Select that private snapshot when
 preparing upgrade inputs; the upgrade still checks it against live consumers.
@@ -1183,6 +1250,116 @@ suspend and original-key denial cycle before explicitly retrying the historical
 blocked retirement. Missing
 material, incompatible scope or unresolved provider effects remain blocked.
 
+## Protected shared-pool cutover
+
+Use the protected `nebius-rollout` actions `management-pool-preflight`,
+`management-pool-install` and, when recovery is explicitly selected,
+`management-pool-rollback`. These operate on a complete fixed migration, not
+individual stages or caller-supplied Kubernetes commands. Source support does
+not establish that the pool has been installed or accepted on a particular cluster.
+
+Before preparing authority, obtain fresh installed inventory and complete the
+ordinary protected platform/management schema upgrades and their backup proofs.
+Pin all production, staging and shared-development participants, dormant consumers,
+actual namespace/workload/credential identities, provider pool and quota scope,
+effective writer permissions, and the protected candidate/runtime publication.
+Preserve the original management upgrade and immediate completed predecessor.
+Include both configured execution-only guest targets, including the emulated-auth
+target, in the same participant's retained actuator roster and execution profiles.
+They share the ordinary collector and capacity authority; do not omit a running
+sibling or classify it as dormant merely because its originating issue is closed.
+
+Use a new nonzero UUID and private
+`nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The
+`loom.nebius-pool-cutover-private-inputs.v1` contract contains that complete
+retained scope, installation/catalog, dedicated machine-token file references
+and original/predecessor selectors. Keep those inputs and credentials on the
+operator host. The public `loom.nebius-pool-cutover-operation.v1` metadata contains
+only `operation_id`, identical integrated `source_sha` and `candidate`,
+`installation_id`, `namespace`, the three private paths and `inputs_sha256`.
+
+Prepare the exact integrated tooling bundle with the existing management rollout
+builder, then preview/apply its dedicated grant through
+`install_nebius_management_entrypoint.py` and the existing operator route.
+Configure protected `NEBIUS_MANAGEMENT_POOL_OPERATION_JSON` and
+`NEBIUS_MANAGEMENT_POOL_SSH_KEY`; no bootstrap, recovery or refresh-key fallback
+is permitted. The installer preserves other SSH grants and private state, pins
+the bundle digest, and allows rollback's fixed `loom-nebius-pool-rollback-v1`
+command only for the pool grant. It does not install cluster resources itself.
+
+Preflight reloads the private inputs and qualifies current retained scope without
+mutations; it is not a runtime-readiness certificate. Installation closes intake,
+retires and fences old writers, stages the fixed successor, starts it closed,
+qualifies runtime/capacity and permissions, then opens global admission and
+releases local guards. Each mutating pass shares one operation lock, while child
+journals retain their original locks and uncertain-write observation rules.
+
+Connection failures retain fixed diagnostic stages for publication, operator
+readers, runtime databases, runtime telemetry, management database, provider,
+connected scope and changed private inputs (each prefixed `pool_`). Unknown
+failures remain `pool_connection`. These codes contain no exception text,
+credential, resource payload or retry authority; investigate the identified
+prerequisite before another operation. They do not change installation ordering
+or authorize retries of uncertain writes.
+
+Telemetry failures further identify fixed `pool_runtime_telemetry_...` categories:
+binding, Pod, node inventory, probe delivery, identity recheck, settings, client
+construction, TLS, authorization, network, HTTP, reader, counters, cleanup,
+node identity/address, bearer or local trust authority, or response payload. These
+are bounded diagnostics, not raw exceptions or statistics. TLS diagnostics identify
+the Kubernetes API (`tls_api`) or direct kubelet (`tls_kubelet`) transport when the
+bounded exception chain establishes it. Certificate-verification failures retain
+only an integer OpenSSL verification code in 0–255, for example
+`pool_runtime_telemetry_tls_kubelet_verify_20`; `tls_unknown_verify_<code>` means
+the transport was not established. Without qualified details, the diagnostic stays
+at the transport category or legacy `tls`. No exception text, URLs or certificate
+contents are returned. The fixed in-Pod probe can exit zero to deliver a `blocked`
+diagnostic; that exit code alone never qualifies telemetry.
+
+Only positively identified direct-kubelet sampling failures (`tls_kubelet`,
+`tls_kubelet_verify_0` through `_255`, `kubelet_authorization`, `kubelet_network`,
+`kubelet_http`) and missing/invalid counters (`counters`) become optional warnings.
+The protected pool result includes `telemetry`, for example:
+
+```json
+{"status": "unavailable", "checks": 2, "unavailable": 1, "reasons": ["tls_kubelet_verify_19"]}
+```
+
+Counts represent the latest checks per actuator against the current pool Nodes and
+its host, not unique machines. `available` requires successful probes; zero checks
+is `not_observed`. Historical results without this field provide no availability
+evidence. Both protected report filters preserve it through startup, activation
+and legacy recovery. A sampling warning still requires post-probe runtime, Node
+and contract rechecks. API failures, unknown/ambiguous errors, malformed probe
+output, wrong-node summaries, unqualified addresses or TLS/bearer configuration,
+and client-close failures remain blocking. No failed TLS response is used as data.
+
+Missing detailed samples do not block execution or cleanup and must not be reported
+as zero usage. Scheduling/capacity readiness uses authenticated inventory, requested
+resources, provider quota and reservation accounting. Canonical inference usage and
+complete resource-calibration evidence retain their existing requirements. This
+separation does not claim a durable kubelet certificate-refresh mechanism is installed.
+Keep the same TLS, node-identity and statistics checks when investigating; no
+node-proxy fallback, additional permissions or automatic retries are introduced.
+
+`pending` means reconcile the same operation and named phase; it does not permit
+recreating an uncertain resource or resetting evidence. Replays select the newest
+recorded phase. Explicit rollback requires the completed closed cutover, fences
+global admission first, settles startup writes and drains effects, stops successor
+processes, revokes machine authority, restricts gateway permissions, restores the
+original templates/roles, then proves legacy runtime readiness before reopening
+owners. Recovery does not rerun closed-mode drain checks against already reopened
+owners. A pre-closure failure retains its original recovery evidence and cannot
+use later rollback stages to bypass that boundary.
+
+`pool_cutover_completed` binds the UUID, `global` or `legacy` outcome and
+`completion_sha256`, with `acceptance_verified: false`. Preserve this immutable
+receipt and all predecessor/phase evidence for subsequent management refreshes.
+A completed global outcome cannot be rolled back by rewriting that same history;
+a new transition needs new protected authority. Actual concurrent-owner builds,
+tasks/results, isolation, teardown/redeploy and scale-to-zero are separate live
+acceptance requirements.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
@@ -1197,12 +1374,16 @@ original installation and all prior operation directories. The private input
 schema is `loom.nebius-management-refresh-private-inputs.v1`, with:
 
 - `original_upgrade`: the completed original upgrade selector and receipt hashes.
-- `predecessor`: that same upgrade selector, or the immediately preceding completed
-  refresh selector. A refresh selector binds its operation UUID, private-input
+- `predecessor`: that same upgrade selector, the completed shared-pool cutover,
+  or the immediately preceding completed refresh selector. A refresh selector binds its operation UUID, private-input
   digest and completion receipt digest; it does not accumulate an unbounded chain.
   Receipt qualification compares Kubernetes resource quantities numerically
   (for example, `100m` and `0.1`) without rewriting frozen receipt bytes or
   accepting changed resource amounts or other runtime configuration.
+- `pool_baseline`, when inherited from a completed cutover: the exact qualified
+  pool selector. Keep it through subsequent refreshes; omitting it cannot restore
+  legacy writer authority. The separately scoped pool reader requalifies workloads,
+  credentials, mode and effective permissions around refresh writes and completion.
 - `deployment`, `candidate` and `profile`: the target manager configuration and
   protected publication. The tooling source and candidate SHA must be identical.
 - `manager_revision` and `target_manager_revision`: the expected management DB
@@ -1435,14 +1616,15 @@ against changed templates is invalid. A restarted producer, effective extra
 writer grant, changed UID or missing evidence stops further mutation. Do not
 interpret an idle activity count as an empty future queue. The fixed database
 readiness pages also inspect delayed native work and batches awaiting fan-out,
-require schema `0172` and reject live application access even with no connected
+require schema `0173` and reject live application access even with no connected
 session. Preserve unknown queued origins: drain through the existing execution
 path before cutover instead of rewriting provenance or cancelling unrelated work.
 The protected parent still must qualify retained personal origin history in the
 management database; the database page alone cannot authorize it. Do not
 restore replicas, resume the collector, release guards or change pool mode
-manually. Protected entry, activation/rollback and successor-refresh qualification
-must be connected before this path is used on Nebius.
+manually. Use the complete protected pool operation for activation or rollback;
+subsequent manager refresh qualifies its completed pool baseline. These source
+connections do not replace successful protected installation and live acceptance.
 
 **Verifying the deployed version (#2009):** confirm the rendered candidate SHA
 actually reached the cluster by comparing it against what the running app

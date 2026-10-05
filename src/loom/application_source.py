@@ -4,10 +4,11 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+from bisect import bisect_left
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal, Self
 
 import rfc8785
@@ -62,7 +63,18 @@ class ApplicationSourceFileV1(BaseModel):
         return self
 
 
-def _resolve(path: str, files: dict[str, ApplicationSourceFileV1], directories: set[str]) -> None:
+def _is_directory(path: str, sorted_paths: list[str]) -> bool:
+    """Find a descendant without materializing all ancestors of every file.
+
+    Valid UTF-8 paths have the same scalar and byte ordering. Searching for the
+    slash-qualified prefix also handles intervening names such as a- before a/b.
+    """
+    prefix = path + "/"
+    index = bisect_left(sorted_paths, prefix)
+    return index < len(sorted_paths) and sorted_paths[index].startswith(prefix)
+
+
+def _resolve(path: str, files: dict[str, ApplicationSourceFileV1], sorted_paths: list[str]) -> None:
     remaining = deque(path.split("/"))
     resolved: list[str] = []
     links = 0
@@ -82,7 +94,7 @@ def _resolve(path: str, files: dict[str, ApplicationSourceFileV1], directories: 
             if links > 40:
                 raise ValueError("application source link cycle or chain too long")
             remaining.extendleft(reversed(item.link_target.split("/")))
-        elif candidate in directories:
+        elif _is_directory(candidate, sorted_paths):
             resolved.append(part)
         elif item is not None and not remaining:
             return
@@ -104,12 +116,11 @@ class ApplicationSourceManifestV1(BaseModel):
         if sum(item.size_bytes for item in self.files) > MAX_SOURCE_BYTES:
             raise ValueError("application source byte limit exceeded")
         indexed = {item.path: item for item in self.files}
-        directories = {str(parent) for path in paths for parent in PurePosixPath(path).parents} - {"."}
-        if directories & indexed.keys():
+        if any(_is_directory(path, paths) for path in paths):
             raise ValueError("application source file is also a directory")
         for item in self.files:
             if item.link_target is not None:
-                _resolve(item.path, indexed, directories)
+                _resolve(item.path, indexed, paths)
         return self
 
     def canonical_bytes(self) -> bytes:

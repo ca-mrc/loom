@@ -66,12 +66,15 @@ def test_management_ignores_unused_workload_execution_contract(monkeypatch: pyte
     assert "/api/v1/auth/login" in paths
     assert "/api/v1/auth/me" in paths
     assert "/api/v1/health/ready" in paths
+    assert "/api/v1/application-builds" in paths
+    assert "/api/v1/application-sources" in paths
     for path in paths:
         assert path.startswith((
             "/api/v1/auth/", "/api/v1/admin/", "/api/v1/invites",
             "/api/v1/tokens", "/api/v1/teams", "/api/v1/team-registrations", "/api/v1/health",
             "/api/v1/environments", "/api/v1/environment-operations",
             "/api/v1/applications", "/api/v1/application-operations",
+            "/api/v1/application-builds", "/api/v1/application-sources",
         )), path
 
 

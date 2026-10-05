@@ -22,6 +22,7 @@ import pytest
 import urllib3
 from alembic import command
 from minio import Minio
+from minio.versioningconfig import ENABLED, VersioningConfig
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -31,6 +32,8 @@ from testcontainers.minio import MinioContainer
 
 from loom.db.schema import (
     Artifact,
+    DataLifecycleObject,
+    ExecutionCostReservation,
     LlmCall,
     ServiceExecutionLease,
     ServiceExecutionLeaseHistory,
@@ -98,6 +101,16 @@ class _HistoricalSnapshotSession(AsyncSession):
             # 0172's origin is intentionally absent on this historical schema.
             # Recovery must not depend on it, synthesize it, or lazy-load it.
             state.statement = state.statement.options(defer(Trial.pool_origin, raiseload=True))
+        # 0173's verifier retry number is likewise absent before that revision.
+        # Loader options only apply when the whole entity is selected.
+        whole = {item.get("entity") for item in state.statement.column_descriptions
+                 if item.get("expr") is item.get("entity")}
+        if ServiceExecutionLease in whole:
+            state.statement = state.statement.options(
+                defer(ServiceExecutionLease.verifier_retry, raiseload=True))
+        if ExecutionCostReservation in whole:
+            state.statement = state.statement.options(
+                defer(ExecutionCostReservation.verifier_retry, raiseload=True))
 
 
 @pytest.fixture
@@ -164,17 +177,22 @@ async def _wait_for_minio_bucket(container: MinioContainer, bucket: str) -> None
 
 
 @pytest.mark.parametrize(
-    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade,usage_recovery",
-    [pytest.param(False, False, False, False, False, False, False, False, id="direct"),
-     pytest.param(True, False, False, False, False, False, False, False, id="terminus"),
-     pytest.param(True, True, False, False, False, False, False, False, id="accounting-repair"),
-     pytest.param(True, True, True, False, False, False, False, False, id="prepared-snapshot"),
-     pytest.param(True, False, False, True, False, False, False, False, id="typed-failure"),
-     pytest.param(True, False, False, False, True, False, False, False, id="verifier-archive"),
-     pytest.param(True, False, False, False, True, True, False, False, id="verifier-archive-corrupt"),
-     pytest.param(True, False, False, False, True, False, True, False, id="verifier-archive-history-upgrade"),
-     pytest.param(True, False, False, False, False, False, False, True, id="usage-archive"),
-     pytest.param(True, False, False, False, False, True, False, True, id="usage-archive-corrupt")],
+    "terminus,legacy_repair,prepared_snapshot,typed_failure,archival_recovery,corrupt_recovery,archival_history_upgrade,usage_recovery,versioned,missing_multipart_version",
+    [pytest.param(False, False, False, False, False, False, False, False, False, False, id="direct"),
+     pytest.param(True, False, False, False, False, False, False, False, False, False, id="terminus"),
+     pytest.param(True, True, False, False, False, False, False, False, False, False, id="accounting-repair"),
+     pytest.param(True, True, True, False, False, False, False, False, False, False, id="prepared-snapshot"),
+     pytest.param(True, False, False, True, False, False, False, False, False, False, id="typed-failure"),
+     pytest.param(True, False, False, False, True, False, False, False, False, False, id="verifier-archive"),
+     pytest.param(True, False, False, False, True, True, False, False, False, False, id="verifier-archive-corrupt"),
+     pytest.param(True, False, False, False, True, False, True, False, False, False, id="verifier-archive-history-upgrade"),
+     pytest.param(True, False, False, False, False, False, False, True, False, False, id="usage-archive"),
+     pytest.param(True, False, False, False, False, True, False, True, False, False, id="usage-archive-corrupt"),
+     pytest.param(False, False, False, False, False, False, False, False, True, False, id="versioned-direct"),
+     pytest.param(True, False, False, False, False, False, False, False, True, False, id="versioned-terminus"),
+     pytest.param(True, True, False, False, False, False, False, False, True, False, id="versioned-accounting-repair"),
+     pytest.param(False, False, False, False, False, False, False, False, True, True, id="missing-version-multipart"),
+     pytest.param(False, False, False, False, False, False, False, False, False, True, id="unversioned-multipart")],
 )
 async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     terminus: bool,
@@ -185,12 +203,34 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     corrupt_recovery: bool,
     archival_history_upgrade: bool,
     usage_recovery: bool,
+    versioned: bool,
+    missing_multipart_version: bool,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
 ) -> None:
     spool_container, canonical_container = independent_minio_endpoints
+    if versioned:
+        for bucket in ("artifacts", "trajectories"):
+            canonical_container.get_client().set_bucket_versioning(bucket, VersioningConfig(ENABLED))
     source_store, canonical_store = _store(spool_container), _store(canonical_container)
+    multipart_completions = []
+    multipart_readbacks = []
+    if missing_multipart_version:
+        original_call = MinioObjectStore._run_client_call
+
+        async def missing_receipt(self, operation, call):
+            response = await original_call(self, operation, call)
+            if self is not source_store and operation == "complete_multipart_upload":
+                # Suppress only the real completion's parsed version receipt.
+                # HEAD/content still come from the independent real MinIO.
+                multipart_completions.append(response.get("VersionId"))
+                return {key: value for key, value in response.items() if key != "VersionId"}
+            if self is not source_store and operation == "multipart_version_readback":
+                multipart_readbacks.append(response)
+            return response
+
+        monkeypatch.setattr(MinioObjectStore, "_run_client_call", missing_receipt)
     engine = create_async_engine(isolated_migration_postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -367,6 +407,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             ),
             "verifier/output.json": b'{"rewards":{"passed":1.0}}',
         }
+        if missing_multipart_version:
+            payloads["artifacts/answer.txt"] = b"42\n" * (3 * 1024**2)
         if terminus:
             from tests.unit.test_service_execution_terminus_accounting import _case
 
@@ -724,7 +766,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             sessions = async_sessionmaker(engine, expire_on_commit=False)
             async with sessions() as session:
                 assert await session.scalar(text(
-                    "SELECT to_jsonb(e) FROM execution_leases e WHERE id=:id"), {"id": lease.id}) == lease_before
+                    "SELECT to_jsonb(e) - 'verifier_retry' FROM execution_leases e WHERE id=:id"),
+                    {"id": lease.id}) == lease_before
                 trial = await session.get(Trial, trial_id)
                 assert (trial.state, trial.result, trial.finished_at, trial.failure_reason,
                         trial.failure_message, trial.attempt_count) == original_outcome
@@ -804,6 +847,27 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 archive.body.close()
             for (bucket, key), expected in original_objects.items():
                 assert await canonical_store.get_object(bucket=bucket, key=key) == expected
+
+        # The durable index/registry must identify the versions that actually
+        # exist, including corrected accounting and preserved source evidence.
+        if missing_multipart_version:
+            assert multipart_completions and multipart_readbacks == multipart_completions
+        async with sessions() as session:
+            registered = set((await session.execute(select(
+                DataLifecycleObject.bucket, DataLifecycleObject.object_key,
+                DataLifecycleObject.version_id,
+            ).where(DataLifecycleObject.authority_id == artifact.lifecycle_authority_id))).all())
+        for item in [*files, *evidence]:
+            actual = canonical_container.get_client().stat_object(item["bucket"], item["key"])
+            assert bool(actual.version_id) is versioned
+            assert item.get("version_id") == actual.version_id
+            assert (item["bucket"], item["key"], actual.version_id) in registered
+        for name in ("trajectory", "atif"):
+            key = trajectory_index[f"{name}_uri"].removeprefix("s3://trajectories/")
+            actual = canonical_container.get_client().stat_object("trajectories", key)
+            assert bool(actual.version_id) is versioned
+            assert trajectory_index[f"{name}_version_id"] == actual.version_id
+            assert ("trajectories", key, actual.version_id) in registered
 
         # Compute is gone and source GC is now ACK-authorized. Canonical files,
         # raw trace/accounting, source evidence, and derived ATIF remain readable.

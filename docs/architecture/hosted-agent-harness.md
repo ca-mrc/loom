@@ -329,12 +329,12 @@ That plan restores the public state into `verifier-sandbox`, injects private
 inputs, and grades without rerunning the agent. The verifier command must never
 be recovered by editing the preceding harness argv.
 
-Current limitation: no production scheduler path calls the deferred compiler
-or automatically reserves the child verifier lease. The administrative
-reservation path enforces parent cleanup, but automatic on-demand creation is
-owned by [#2212](https://github.com/qianyi-sun/loom/issues/2212). Until that is
-wired, the fixed deferred argv is a compiler contract rather than active trial
-behavior.
+The control-plane scheduler calls the deferred compiler once the agent pod is
+deleted and reserves the child verifier lease automatically
+([#2212](https://github.com/qianyi-sun/loom/issues/2212)). The child's
+`handoff_input` carries the parent's committed workspace; the verifier lease
+owns the reward and the trial's terminal state. Tasks with a service lifecycle
+grade in the agent pod instead. Deployed Nebius acceptance is pending.
 
 Guest execution may colocate both private guests for its bounded runtime. That
 is an execution-class constraint, not a harness-specific verifier policy.

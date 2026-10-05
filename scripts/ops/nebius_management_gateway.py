@@ -37,14 +37,36 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_refresh_resources", "nebius_management_refresh_evidence", "nebius_management_refresh_backup",
     "nebius_management_refresh_install", "nebius_management_refresh_predecessor", "nebius_management_refresh_connected",
     "nebius_management_refresh_entry", "nebius_management_refresh_supersession",
+    "deploy_nebius_platform", "nebius_pool_application_delivery", "nebius_pool_activation_database", "nebius_pool_activation_live",
+    "nebius_pool_activation_stage", "nebius_pool_completion", "nebius_pool_cutover",
+    "nebius_pool_cutover_entry", "nebius_pool_cutover_live", "nebius_pool_dormant",
+    "nebius_pool_gateway_authority", "nebius_pool_gateway_probe", "nebius_pool_gateway_retirement",
+    "nebius_pool_guard_activation", "nebius_pool_legacy_authority", "nebius_pool_legacy_reopening",
+    "nebius_pool_legacy_restart", "nebius_pool_legacy_settings", "nebius_pool_machine_database",
+    "nebius_pool_machine_retirement", "nebius_pool_material", "nebius_pool_migration",
+    "nebius_pool_migration_guard", "nebius_pool_operation", "nebius_pool_origin_history", "nebius_pool_platform_authority",
+    "nebius_pool_predecessor", "nebius_pool_projection", "nebius_pool_recovery_database", "nebius_pool_recovery_release",
+    "nebius_pool_refresh", "nebius_pool_refresh_live", "nebius_pool_registration",
+    "nebius_pool_retirement", "nebius_pool_retirement_live", "nebius_pool_role_fencing",
+    "nebius_pool_role_fencing_live", "nebius_pool_role_restoration", "nebius_pool_runtime",
+    "nebius_pool_runtime_settings", "nebius_pool_shutdown", "nebius_pool_startup",
+    "nebius_pool_startup_capacity", "nebius_pool_startup_database", "nebius_pool_startup_fence",
+    "nebius_pool_startup_live", "nebius_pool_template_restoration",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
-COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install"}
+COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install",
+    "loom-nebius-pool-rollback-v1": "rollback"}
+POOL_PHASES = frozenset({'cutover', 'startup', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
+    'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
 REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
     "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
     "foundation", "shared_material", "platform_capacity", "publication", "cloud_identity", "public_route",
+})
+OPTIONAL_TELEMETRY_STAGES = frozenset({
+    'tls_kubelet', 'kubelet_authorization', 'kubelet_network', 'kubelet_http', 'counters',
+    *(f'tls_kubelet_verify_{code}' for code in range(256)),
 })
 DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
     "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
@@ -66,8 +88,18 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     "refresh_manager", "refresh_recovery", "refresh_prerequisites", "refresh_config", "refresh_retire",
     "refresh_manager_probe", "refresh_shared_probe", "refresh_backup", "refresh_migration",
     "refresh_post_migration_probe", "refresh_activate", "refresh_activation", "refresh_public",
-    "refresh_public_authentication", "refresh_completion", "refresh_supersession",
-    *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES)})
+    "refresh_public_authentication", "refresh_completion", "refresh_supersession", "refresh_pool_authority",
+    *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES),
+    *('pool_' + stage.replace('-', '_') for stage in POOL_PHASES | {
+        'operation', 'connection', 'preflight', 'cancellation', 'completion',
+        'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
+        *('runtime_telemetry_' + detail for detail in {
+            'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
+            'authorization', 'network', 'http', 'reader', 'counters', 'close',
+            'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
+            *OPTIONAL_TELEMETRY_STAGES,
+            *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256))}),
+        'management_database', 'provider', 'connected_scope', 'private_inputs'})})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
 
 
@@ -80,7 +112,8 @@ def validate_operation(value: dict[str, Any]) -> None:
         fields = {"schema", "source_sha", "candidate", "installation_id", "namespace",
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
         refresh = value.get('schema') == 'loom.nebius-management-refresh-operation.v1'
-        if refresh:
+        pool = value.get('schema') == 'loom.nebius-pool-cutover-operation.v1'
+        if refresh or pool:
             fields.add('operation_id')
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
             raise ValueError()
@@ -88,7 +121,7 @@ def validate_operation(value: dict[str, Any]) -> None:
                                    "loom.nebius-management-retirement-operation.v1",
                                    "loom.nebius-management-retirement-diagnostic-operation.v1",
                                    "loom.nebius-management-retirement-recovery-operation.v1",
-                                   "loom.nebius-management-refresh-operation.v1"}:
+                                   "loom.nebius-management-refresh-operation.v1", "loom.nebius-pool-cutover-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -104,10 +137,10 @@ def validate_operation(value: dict[str, Any]) -> None:
                 raise ValueError()
         state = Path(value["state_dir"])
         root = state.parent
-        if refresh:
+        if refresh or pool:
             operation_id = UUID(value['operation_id'])
             if (not operation_id.int or str(operation_id) != value['operation_id'] or root.name != str(operation_id)
-                    or root.parent.name != 'refresh' or value['source_sha'] != value['candidate']):
+                    or root.parent.name != ('pool-cutover' if pool else 'refresh') or value['source_sha'] != value['candidate']):
                 raise ValueError()
             root = root.parent.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
@@ -124,6 +157,13 @@ def validate_operation(value: dict[str, Any]) -> None:
             raise ValueError()
     except Exception:
         raise GatewayError("invalid management operation metadata") from None
+
+
+def validate_action(action: str, operation: dict[str, Any]) -> None:
+    validate_operation(operation)
+    if (action not in {'qualify', 'preflight', 'install', 'rollback'}
+            or (action == 'rollback' and operation['schema'] != 'loom.nebius-pool-cutover-operation.v1')):
+        raise GatewayError('management action outside fixed authority')
 
 
 def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
@@ -154,7 +194,7 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
 
 
 def command(release: Path, action: str) -> list[str]:
-    if action not in {"qualify", "preflight", "install"}:
+    if action not in {"qualify", "preflight", "install", "rollback"}:
         raise GatewayError("management action outside fixed authority")
     return [str(release / "venv/bin/python"), "-I", "-c", _ENTRY,
             str(release), str(release / "operation.json"), action]
@@ -329,6 +369,33 @@ def validate_capacity_report(value: dict[str, Any]) -> dict[str, Any]:
         raise GatewayError('invalid platform capacity diagnostic') from None
 
 
+def validate_telemetry_report(value: Any) -> dict[str, Any]:
+    """Bounded sampling availability only; never capacity or readiness authority."""
+    try:
+        if not isinstance(value, dict) or set(value) != {'status', 'checks', 'unavailable', 'reasons'}:
+            raise ValueError
+        status, checks, unavailable, reasons = (value[key] for key in ('status', 'checks', 'unavailable', 'reasons'))
+        if (type(checks) is not int or type(unavailable) is not int or not 0 <= unavailable <= checks < 2**31
+                or not isinstance(reasons, list) or len(reasons) > len(OPTIONAL_TELEMETRY_STAGES)
+                or any(not isinstance(reason, str) or reason not in OPTIONAL_TELEMETRY_STAGES for reason in reasons)
+                or reasons != sorted(set(reasons)) or len(reasons) > unavailable):
+            raise ValueError
+        if status == 'not_observed':
+            if checks or unavailable or reasons:
+                raise ValueError
+        elif status == 'available':
+            if not checks or unavailable or reasons:
+                raise ValueError
+        elif status == 'unavailable':
+            if not unavailable or not reasons:
+                raise ValueError
+        else:
+            raise ValueError
+        return {'status': status, 'checks': checks, 'unavailable': unavailable, 'reasons': list(reasons)}
+    except Exception:
+        raise GatewayError('invalid pool telemetry report') from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -341,7 +408,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
         recovery = operation["schema"] == "loom.nebius-management-retirement-recovery-operation.v1"
         refresh = operation['schema'] == 'loom.nebius-management-refresh-operation.v1'
-        success = ("retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
+        pool = operation['schema'] == 'loom.nebius-pool-cutover-operation.v1'
+        success = ('pool_cutover_completed' if pool else "retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
             else "management_refreshed" if refresh else "management_upgraded" if upgrade else "management_installed")
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
             raise ValueError()
@@ -350,7 +418,7 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if value[key] != operation[key]:
                 raise ValueError()
             result[key] = value[key]
-        if refresh:
+        if refresh or pool:
             if value.get('operation_id') != operation['operation_id']:
                 raise ValueError()
             result['operation_id'] = value['operation_id']
@@ -358,6 +426,20 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
             result["stage"] = value["stage"]
+        if pool:
+            if 'telemetry' in value:
+                result['telemetry'] = validate_telemetry_report(value['telemetry'])
+            if status == 'pending':
+                if value.get('phase') not in POOL_PHASES:
+                    raise ValueError()
+                result['phase'] = value['phase']
+            elif status == success:
+                if (value.get('outcome') not in {'global', 'legacy'} or value.get('acceptance_verified') is not False
+                        or not isinstance(value.get('completion_sha256'), str)
+                        or not re.fullmatch(r'[0-9a-f]{64}', value['completion_sha256'])):
+                    raise ValueError()
+                result.update(outcome=value['outcome'], completion_sha256=value['completion_sha256'], acceptance_verified=False)
+            return result
         if 'capacity' in value:
             if not refresh or status != 'blocked' or value['stage'] != 'refresh_platform_capacity':
                 raise ValueError()
@@ -406,9 +488,12 @@ def authorized_main(expected_sha256: str) -> int:
         return 126
     try:
         _, operation = unpack_bundle(content)
+        validate_action(action, operation)
         release = prepare_release(content)
         report = safe_report(run_private(command(release, action), timeout=1800), operation)
         if report["status"] != "blocked" and (action == "preflight") != (report["status"] == "preflight_qualified"):
+            raise ValueError()
+        if action == 'rollback' and report['status'] == 'pool_cutover_completed' and report['outcome'] != 'legacy':
             raise ValueError()
         print(json.dumps(report, sort_keys=True))
         return 0

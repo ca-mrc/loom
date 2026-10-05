@@ -18,6 +18,12 @@ rehearsal_id="${LOOM_FRONTEND_REHEARSAL_ID:-}"
 # because Dockerfile ENV can't hold a `date` computed at build time.
 build_revision="${LOOM_FRONTEND_BUILD_REVISION:-unknown}"
 source_ref="${LOOM_FRONTEND_SOURCE_REF:-unknown}"
+build_kind="${LOOM_FRONTEND_BUILD_KIND:-unknown}"
+source_digest="${LOOM_FRONTEND_SOURCE_DIGEST:-unknown}"
+source_base_commit="${LOOM_FRONTEND_SOURCE_BASE_COMMIT:-unknown}"
+if [ "${build_kind}" = "personal" ]; then
+  build_revision="unknown"
+fi
 build_time_path="${LOOM_FRONTEND_BUILD_TIME_PATH:-/etc/loom-frontend-build-time}"
 build_time=""
 if [ -f "${build_time_path}" ]; then
@@ -134,6 +140,9 @@ cat > "${tmp_path}" <<EOF
   "apiRouteBase": "$(json_escape "${api_route_base}")",
   "buildRevision": "$(json_escape "${build_revision}")",
   "sourceRef": "$(json_escape "${source_ref}")",
+  "buildKind": "$(json_escape "${build_kind}")",
+  "sourceDigest": "$(json_escape "${source_digest}")",
+  "sourceBaseCommit": "$(json_escape "${source_base_commit}")",
   "buildTime": "$(json_escape "${build_time}")"
 }
 EOF

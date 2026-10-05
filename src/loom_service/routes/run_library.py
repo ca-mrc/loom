@@ -600,7 +600,11 @@ def _serialize_typed_artifact(
         "content_hash": artifact.content_hash if full_metadata else None,
         "storage": artifact.storage if full_metadata else None,
         "provenance": artifact.provenance if full_metadata else {},
-        "metadata": artifact.artifact_metadata if full_metadata else {},
+        "metadata": {
+            key: value for key, value in (artifact.artifact_metadata or {}).items()
+            if not (artifact.control_producer_kind == "service_execution"
+                    and key == "execution_event_payloads")
+        } if full_metadata else {},
         "parents": (parents or []) if full_metadata else [],
     }
     if bundle_file is not None and full_metadata:

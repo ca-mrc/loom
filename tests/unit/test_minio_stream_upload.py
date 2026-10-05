@@ -28,6 +28,8 @@ class StreamS3:
         self.active_uploads = set()
         self.block_create = False
         self.aborted = threading.Event()
+        self.upload_metadata = {}
+        self.object_metadata = {}
 
     def close(self):
         pass
@@ -60,6 +62,7 @@ class StreamS3:
             assert self.release.wait(5)
         self.uploads += 1
         self.active_uploads.add(str(self.uploads))
+        self.upload_metadata[str(self.uploads)] = dict(kwargs.get("Metadata", {}))
         return {"UploadId": str(self.uploads)}
 
     def upload_part(self, *, UploadId, PartNumber, Body, **kwargs):  # noqa: N803
@@ -73,8 +76,13 @@ class StreamS3:
         assert [r["PartNumber"] for r in rows] == list(range(1, len(rows) + 1))
         assert all(len(self.parts[UploadId, r["PartNumber"]]) >= 5 * 1024**2 for r in rows[:-1])
         self.objects[Bucket, Key] = b"".join(self.parts.pop((UploadId, r["PartNumber"])) for r in rows)
+        self.object_metadata[Bucket, Key] = self.upload_metadata[UploadId]
         self.active_uploads.remove(UploadId)
         return {}
+
+    def head_object(self, *, Bucket, Key):  # noqa: N803
+        return {"ContentLength": len(self.objects[Bucket, Key]),
+                "Metadata": self.object_metadata[Bucket, Key]}
 
     def abort_multipart_upload(self, *, UploadId, **kwargs):  # noqa: N803
         self.parts = {k: v for k, v in self.parts.items() if k[0] != UploadId}
@@ -87,9 +95,99 @@ def make_store(monkeypatch, client):
     return MinioObjectStore(endpoint_url="http://test-s3", access_key="test", secret_key="test")
 
 
+class VersionlessCompletionS3(StreamS3):
+    """S3-compatible completion omits versions; HEAD still returns identity."""
+
+    def __init__(self, *, head_version="version-owned", replace=False, completion_version=None):
+        super().__init__()
+        self.head_version = head_version
+        self.replace = replace
+        self.completion_version = completion_version
+        self.upload_metadata = {}
+        self.metadata = {}
+        self.head_calls = 0
+
+    def create_multipart_upload(self, **kwargs):
+        response = super().create_multipart_upload(**kwargs)
+        self.upload_metadata[response["UploadId"]] = dict(kwargs.get("Metadata", {}))
+        return response
+
+    def complete_multipart_upload(self, **kwargs):
+        super().complete_multipart_upload(**kwargs)
+        self.metadata[kwargs["Bucket"], kwargs["Key"]] = self.upload_metadata[kwargs["UploadId"]]
+        if self.replace:
+            # Even identical bytes/ETag cannot bind a different writer's object.
+            self.metadata[kwargs["Bucket"], kwargs["Key"]] = {"foreign-write": "other"}
+        response = {"ETag": '"same-content-etag"'}
+        if self.completion_version is not None:
+            response["VersionId"] = self.completion_version
+        return response
+
+    def head_object(self, *, Bucket, Key):  # noqa: N803
+        self.head_calls += 1
+        assert self.completion_version is None, "explicit write versions need no current HEAD"
+        response = {"ContentLength": len(self.objects[Bucket, Key]),
+                    "ETag": '"same-content-etag"', "Metadata": self.metadata[Bucket, Key]}
+        if self.head_version is not None:
+            response["VersionId"] = self.head_version
+        return response
+
+
+@pytest.mark.parametrize("version", ["version-owned", None], ids=["versioned", "unversioned"])
+async def test_stream_completion_recovers_only_its_own_readback_version(monkeypatch, version):
+    backend = VersionlessCompletionS3(head_version=version)
+    store = make_store(monkeypatch, backend)
+    payload = b"same-upload" * (1024**2)
+    result = await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(payload))
+    assert result.version_id == version
+    assert result.uri == "s3://b/k" and backend.objects["b", "k"] == payload
+    assert backend.head_calls == 1
+    assert not backend.active_uploads
+
+
+async def test_stream_completion_rejects_readback_from_competing_same_content_write(monkeypatch):
+    backend = VersionlessCompletionS3(replace=True)
+    store = make_store(monkeypatch, backend)
+    with pytest.raises(ValueError, match="identity"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+    assert backend.head_calls == 1
+
+
+@pytest.mark.parametrize("version", ["", " padded ", 3, False, {}])
+async def test_stream_completion_rejects_malformed_readback_version(monkeypatch, version):
+    backend = VersionlessCompletionS3(head_version=version)
+    store = make_store(monkeypatch, backend)
+    with pytest.raises(ValueError, match="malformed VersionId"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+
+
+async def test_stream_completion_preserves_explicit_version_without_head(monkeypatch):
+    backend = VersionlessCompletionS3(completion_version="completed-version")
+    store = make_store(monkeypatch, backend)
+    result = await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)))
+    assert result.version_id == "completed-version" and backend.head_calls == 0
+
+
 async def chunks(*values):
     for value in values:
         yield value
+
+
+@pytest.mark.parametrize("size", [7, 9 * 1024**2], ids=["small", "multipart"])
+@pytest.mark.parametrize("version", [None, "", " padded ", 3, False, {}])
+async def test_stream_write_rejects_malformed_version_evidence(monkeypatch, size, version):
+    class MalformedVersionS3(StreamS3):
+        def put_object(self, **kwargs):
+            super().put_object(**kwargs)
+            return {"VersionId": version}
+
+        def complete_multipart_upload(self, **kwargs):
+            super().complete_multipart_upload(**kwargs)
+            return {"VersionId": version}
+
+    store = make_store(monkeypatch, MalformedVersionS3())
+    with pytest.raises(ValueError, match="malformed VersionId"):
+        await store.put_object_stream_with_metadata(bucket="b", key="k", body=chunks(b"v" * size))
 
 
 @pytest.mark.parametrize("payload", [b"complete payload", b"x" * (9 * 1024**2)], ids=["small", "multipart"])

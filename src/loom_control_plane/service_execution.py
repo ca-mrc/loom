@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,8 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import Text, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.db.schema import (
@@ -109,6 +111,8 @@ _RESOURCE_RELEASE_DEADLINE = timedelta(minutes=5)
 _NATIVE_TERMINAL_FAILURES = frozenset(
     {"failed", "oom_killed", "evicted", "node_lost", "deadline_exceeded"}
 )
+# Deferred verifier leases a handoff may spend after the first one fails natively.
+MAX_VERIFIER_RETRIES = 2
 _ALLOWED_DESIRED_TRANSITIONS = {
     "create": frozenset({"start", "cancel", "timeout", "retry", "delete_pending"}),
     "start": frozenset({"finalize", "cancel", "timeout", "retry", "delete_pending"}),
@@ -248,19 +252,23 @@ def _execution_identity(
     execution_role: str,
     namespace_name: str,
     target_id: str,
+    verifier_retry: int = 0,
 ) -> tuple[str, str, str, UUID]:
     role_suffix = "a" if execution_role == "attempt" else "v"
+    # Retry 0 keeps the pre-retry identity of existing verifier leases.
+    if verifier_retry:
+        role_suffix += f"r{verifier_retry}"
     job_name = f"loom-{trial_id.hex[:12]}-a{attempt}-g{generation}-{role_suffix}"
-    execution_unit_key = canonical_uuid5(
-        _EXECUTION_UNIT_NAMESPACE,
-        {
-            "schema_version": "loom.execution-unit-key.v1",
-            "trial_id": str(trial_id),
-            "attempt": attempt,
-            "generation": generation,
-            "execution_role": execution_role,
-        },
-    )
+    unit: dict[str, object] = {
+        "schema_version": "loom.execution-unit-key.v1",
+        "trial_id": str(trial_id),
+        "attempt": attempt,
+        "generation": generation,
+        "execution_role": execution_role,
+    }
+    if verifier_retry:
+        unit["verifier_retry"] = verifier_retry
+    execution_unit_key = canonical_uuid5(_EXECUTION_UNIT_NAMESPACE, unit)
     provider_scope_key = canonical_digest(
         {
             "schema_version": "loom.provider-scope-key.v1",
@@ -564,6 +572,7 @@ async def reserve_trial_execution(
     image_admission_keyring: ImageAdmissionKeyring,
     routing_reason: ExecutionRoutingReason = ExecutionRoutingReason.ADMIN_TARGET_BINDING,
     parent_lease_id: UUID | None = None,
+    verifier_retry: int = 0,
     deadline_at: datetime,
     now: datetime | None = None,
     pool_handoff_id: UUID | None = None,
@@ -590,6 +599,7 @@ async def reserve_trial_execution(
             or existing.runtime_contract_sha256 != runtime_contract_digest
             or existing.execution_role != execution_role
             or existing.parent_lease_id != parent_lease_id
+            or existing.verifier_retry != verifier_retry
             or existing.deadline_at != deadline_at
         ):
             raise ServiceExecutionConflict("reservation request_id changed immutable identity")
@@ -614,7 +624,7 @@ async def reserve_trial_execution(
     parent_lease: ServiceExecutionLease | None = None
     previous_lease: ServiceExecutionLease | None = None
     if execution_role == "attempt":
-        if parent_lease_id is not None:
+        if parent_lease_id is not None or verifier_retry:
             raise ServiceExecutionConflict("attempt execution cannot have a parent lease")
         if trial.state != "queued":
             raise ServiceExecutionConflict("trial is not reservable")
@@ -677,6 +687,8 @@ async def reserve_trial_execution(
             raise ServiceExecutionConflict("trial is not awaiting its verifier")
         if runtime_contract.handoff_input is None:
             raise ServiceExecutionConflict("verifier execution requires a workspace handoff")
+        if verifier_retry != verifier_retries(trial):
+            raise ServiceExecutionConflict("verifier retry does not match the pending handoff")
         attempt = parent_lease.attempt
     if deadline_at <= current_time:
         raise ServiceExecutionConflict("execution deadline must be in the future")
@@ -804,6 +816,7 @@ async def reserve_trial_execution(
         execution_role=execution_role,
         namespace_name=str(target.spec_json["namespace_name"]),
         target_id=target.id,
+        verifier_retry=verifier_retry,
     )
     if global_identity is not None:
         job_name = global_identity[1]
@@ -815,6 +828,7 @@ async def reserve_trial_execution(
         lifecycle_authority_id=trial.lifecycle_authority_id,
         attempt=attempt,
         execution_role=execution_role,
+        verifier_retry=verifier_retry,
         parent_lease_id=parent_lease.id if parent_lease is not None else None,
         generation=generation,
         resource_generation=generation,
@@ -1492,6 +1506,125 @@ async def recover_execution_node_attribution(
     return result
 
 
+_EVENT_PAYLOAD_REFERENCE = "loom.execution-event-payload-reference.v1"
+_EVENT_PAYLOAD_METADATA = "execution_event_payloads"
+
+
+async def _execution_event_artifact(
+    session: AsyncSession, *, lease: ServiceExecutionLease, for_update: bool = False,
+) -> Artifact:
+    """Resolve the immutable output owner, including after source-spool cleanup."""
+    statement = select(Artifact).where(
+        Artifact.control_producer_kind == "service_execution",
+        Artifact.control_producer_id == lease.id,
+    )
+    if for_update:
+        statement = statement.with_for_update()
+    artifact = await session.scalar(statement.execution_options(populate_existing=True))
+    if (
+        artifact is None
+        or lease.output_commit_state != "committed"
+        or lease.output_upload_session_id is None
+        or lease.output_generation != lease.resource_generation
+        or artifact.team_id != lease.team_id
+        or artifact.trial_id != lease.trial_id
+        or artifact.artifact_upload_session_id != lease.output_upload_session_id
+        or artifact.provenance.get("lease_id") != str(lease.id)
+        or artifact.provenance.get("generation") != lease.resource_generation
+        or artifact.provenance.get("runtime_contract_sha256") != lease.runtime_contract_sha256
+    ):
+        raise ServiceExecutionConflict("execution event payload artifact identity drift")
+    return artifact
+
+
+def _event_payload_reference(
+    *, artifact: Artifact, generation: int, ordinal: int, event_kind: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    reference: dict[str, Any] = {
+        "schema_version": _EVENT_PAYLOAD_REFERENCE,
+        "artifact_id": str(artifact.id),
+        "payload_key": f"{generation}:{ordinal}:{event_kind}",
+        "payload_sha256": canonical_digest(payload),
+    }
+    # Keep the bounded failure reason visible to lifecycle diagnosis readers.
+    if event_kind == "finalized" and isinstance(payload.get("failure_reason"), str):
+        reference["failure_reason"] = payload["failure_reason"][:120]
+    return reference
+
+
+async def _stored_execution_event_payload(
+    session: AsyncSession, *, lease: ServiceExecutionLease, generation: int,
+    ordinal: int, event_kind: str, payload: dict[str, Any],
+) -> dict[str, Any]:
+    if event_kind not in {"result_reported", "finalized"}:
+        return payload
+    # Use the database's representation: JSONB expands exponent-form numbers,
+    # so even a small Python JSON document can exceed the actual constraint.
+    size = await session.scalar(select(func.octet_length(cast(literal(payload, JSONB), Text))))
+    if size is not None and size <= 65_536:
+        return payload
+    artifact = await _execution_event_artifact(session, lease=lease, for_update=True)
+    reference = _event_payload_reference(
+        artifact=artifact, generation=generation, ordinal=ordinal,
+        event_kind=event_kind, payload=payload,
+    )
+    metadata = artifact.artifact_metadata or {}
+    payloads = metadata.get(_EVENT_PAYLOAD_METADATA, {})
+    if not isinstance(payloads, dict):
+        raise ServiceExecutionConflict("execution event payload metadata is invalid")
+    key = reference["payload_key"]
+    # Preserve numeric types as JSON text. Both JSONB and JCS can turn valid
+    # floats into integer tokens outside the canonicalizer's safe integer range.
+    # The reference still binds the full payload's canonical digest.
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    if key in payloads and payloads[key] != serialized:
+        raise ServiceExecutionConflict("execution event payload identity drift")
+    artifact.artifact_metadata = {
+        **metadata, _EVENT_PAYLOAD_METADATA: {**payloads, key: serialized},
+    }
+    return reference
+
+
+async def _resolve_execution_event_payload(
+    session: AsyncSession, event: ServiceExecutionEvent,
+) -> dict[str, Any]:
+    """Verify both the stored event and its full, lease-owned payload on replay."""
+    reference = event.payload_json
+    if reference.get("schema_version") != _EVENT_PAYLOAD_REFERENCE:
+        return reference
+    if canonical_digest(reference) != event.payload_sha256:
+        raise ServiceExecutionConflict("execution event payload digest drift")
+    lease = await session.get(ServiceExecutionLease, event.lease_id)
+    if lease is None or event.event_kind not in {"result_reported", "finalized"}:
+        raise ServiceExecutionConflict("execution event payload reference is invalid")
+    artifact = await _execution_event_artifact(session, lease=lease)
+    payloads = (artifact.artifact_metadata or {}).get(_EVENT_PAYLOAD_METADATA, {})
+    key = f"{event.generation}:{event.ordinal}:{event.event_kind}"
+    serialized = payloads.get(key) if isinstance(payloads, dict) else None
+    try:
+        payload = json.loads(serialized) if isinstance(serialized, str) else None
+        expected = _event_payload_reference(
+            artifact=artifact, generation=event.generation, ordinal=event.ordinal,
+            event_kind=event.event_kind, payload=payload,
+        ) if isinstance(payload, dict) else None
+    except ValueError as exc:
+        raise ServiceExecutionConflict("execution event payload is invalid") from exc
+    if not isinstance(payload, dict) or reference != expected:
+        raise ServiceExecutionConflict("execution event payload reference identity drift")
+    return payload
+
+
+async def _execution_event_full_digest(
+    session: AsyncSession, event: ServiceExecutionEvent,
+) -> str:
+    if event.payload_json.get("schema_version") != _EVENT_PAYLOAD_REFERENCE:
+        # Preserve legacy inline replay semantics, including JSONB numeric
+        # normalization: this digest was computed before the database round trip.
+        return event.payload_sha256
+    return canonical_digest(await _resolve_execution_event_payload(session, event))
+
+
 async def record_execution_event(
     session: AsyncSession,
     *,
@@ -1535,7 +1668,7 @@ async def record_execution_event(
             or existing.generation != generation
             or existing.ordinal != ordinal
             or existing.event_kind != event_kind
-            or existing.payload_sha256 != payload_digest
+            or await _execution_event_full_digest(session, existing) != payload_digest
         ):
             raise ServiceExecutionConflict("execution event replay changed")
         SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL.labels(command_type="event").inc()
@@ -1660,6 +1793,10 @@ async def record_execution_event(
             raise ServiceExecutionConflict("committed execution no longer owns the trial attempt")
         committed_cleanup_payload = await _committed_result_finalization_payload(session, lease=lease)
         finalized_projection = (trial, committed_cleanup_payload["trial_state"])
+    stored_payload = await _stored_execution_event_payload(
+        session, lease=lease, generation=generation, ordinal=ordinal,
+        event_kind=event_kind, payload=payload,
+    )
     event = ServiceExecutionEvent(
         id=uuid4(),
         lease_id=lease_id,
@@ -1667,8 +1804,8 @@ async def record_execution_event(
         ordinal=ordinal,
         event_kind=event_kind,
         idempotency_key=key,
-        payload_json=payload,
-        payload_sha256=payload_digest,
+        payload_json=stored_payload,
+        payload_sha256=canonical_digest(stored_payload),
         observed_at=observed_at,
     )
     session.add(event)
@@ -2105,7 +2242,7 @@ async def record_committed_runtime_result(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        if existing.payload_sha256 != canonical_digest(result_payload):
+        if await _execution_event_full_digest(session, existing) != canonical_digest(result_payload):
             raise ServiceExecutionConflict("committed runtime result identity drift")
         return existing
     if lease.desired_state == "create":
@@ -2159,7 +2296,9 @@ async def _committed_result_finalization_payload(
     ).scalar_one_or_none()
     if result_event is None:
         raise ServiceExecutionConflict("finalizing execution has no committed runtime result")
-    runtime_result = ExecutionRuntimeResultV1.model_validate(result_event.payload_json)
+    runtime_result = ExecutionRuntimeResultV1.model_validate(
+        await _resolve_execution_event_payload(session, result_event),
+    )
     if lease.execution_role == "verifier":
         return await _verifier_finalization_payload(session, lease=lease, runtime_result=runtime_result)
     result: dict[str, Any] = {
@@ -2251,6 +2390,40 @@ async def committed_handoff_files(
         files.append((row.relative_path, row.actual_size, row.computed_sha256))
         keys.append(f"{upload.prefix}artifacts/{artifact.id}/{row.relative_path}")
     return files, keys
+
+
+def verifier_retries(trial: Trial) -> int:
+    """Verifier leases already spent on the pending handoff (0 before any retry)."""
+    handoff = (trial.result or {}).get("verifier_execution")
+    retries = handoff.get("retries", 0) if isinstance(handoff, dict) else 0
+    return retries if isinstance(retries, int) and retries >= 0 else 0
+
+
+def _retry_verifier(trial: Trial, lease: ServiceExecutionLease, *, reason: str, now: datetime) -> bool:
+    """Return the handoff to pending for another verifier lease, if still allowed.
+
+    Only an infrastructure failure without committed output reaches here; a
+    graded verifier result, including reward 0, is never retried.
+    """
+    handoff = (trial.result or {}).get("verifier_execution")
+    if (
+        lease.verifier_retry >= MAX_VERIFIER_RETRIES
+        or trial.cancellation_requested_at is not None
+        or not isinstance(handoff, dict)
+        or handoff.get("parent_lease_id") != str(lease.parent_lease_id)
+    ):
+        return False
+    trial.result = {
+        **(trial.result or {}),
+        "verifier_execution": {
+            "state": "pending",
+            "parent_lease_id": str(lease.parent_lease_id),
+            "retries": lease.verifier_retry + 1,
+            "last_retry_reason": reason[:120],
+            "pending_since": now.isoformat(),
+        },
+    }
+    return True
 
 
 def mark_verifier_unavailable(trial: Trial, lease: ServiceExecutionLease | None, *, reason: str) -> None:
@@ -2478,14 +2651,20 @@ async def finalize_failed_service_execution(
     lease.output_unavailable_reason = "native_execution_failed"
     lease.finalized_at = observed_at
     lease.observed_state = "finalized"
-    trial.state = "failed"
-    trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
-    trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
-    trial.finished_at = observed_at
-    if lease.execution_role == "verifier":
-        # The agent's committed attempt is still archived; only grading is lost.
-        mark_verifier_unavailable(trial, lease, reason=lease.error_code or "native_execution_failed")
-        trial.failure_message = message
+    failure_code = lease.error_code or "native_execution_failed"
+    # A retried verifier keeps the Trial running; the scheduler reserves the
+    # next verifier lease only after this pod is deleted.
+    if not (lease.execution_role == "verifier" and _retry_verifier(
+        trial, lease, reason=failure_code, now=observed_at,
+    )):
+        trial.state = "failed"
+        trial.failure_reason = "oom_killed" if lease.error_code == "oom_killed" else "native_execution_failed"
+        trial.failure_message = lease.error_message if lease.error_code == "oom_killed" else message
+        trial.finished_at = observed_at
+        if lease.execution_role == "verifier":
+            # The agent's committed attempt is still archived; only grading is lost.
+            mark_verifier_unavailable(trial, lease, reason=failure_code)
+            trial.failure_message = message
     await enqueue_execution_transition(
         session,
         lease_id=lease.id,

@@ -23,6 +23,7 @@ from scripts.ops.nebius_management_gateway import (
     SOURCES,
     safe_report,
     unpack_bundle,
+    validate_action,
     validate_operation,
 )
 
@@ -88,6 +89,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
         raise RolloutError("invalid protected management transport")
     try:
         _, operation = unpack_bundle(content)
+        validate_action(action, operation)
         args = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes",
                 "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
                 "-o", "UserKnownHostsFile=" + str(known_hosts), "-i", str(key), target, commands[action]]
@@ -97,6 +99,8 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
         report = safe_report(result.stdout, operation)
         if report["status"] != "blocked" and (action == "preflight") != (report["status"] == "preflight_qualified"):
             raise ValueError()
+        if action == 'rollback' and report['status'] == 'pool_cutover_completed' and report['outcome'] != 'legacy':
+            raise ValueError()
         return report
     except Exception:
         raise RolloutError("management outcome unavailable; reconcile before retry") from None
@@ -104,7 +108,7 @@ def transfer(content: bytes, *, action: str, target: str, key: Path, known_hosts
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--operation", choices=("preflight", "install"), required=True)
+    parser.add_argument("--operation", choices=("preflight", "install", "rollback"), required=True)
     parser.add_argument("--requirements", type=Path, required=True)
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--prepare-bundle", type=Path, help="Operator preparation; no remote operation")
@@ -145,7 +149,7 @@ def main() -> int:
     # Diagnostic success acknowledges report delivery, never retirement completion.
     return 0 if result["status"] in {"prepared", "preflight_qualified", "pending", "management_installed",
         "management_upgraded", "management_retired", "retirement_diagnostic_observed", "retirement_recovered",
-        "management_refreshed"} else 1
+        "management_refreshed", "pool_cutover_completed"} else 1
 
 
 if __name__ == "__main__":

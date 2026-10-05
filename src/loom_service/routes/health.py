@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from loom.auth import AuthContext
 from loom_service import wire_responses as wire
-from loom_service.build_info import read_build_revision, read_build_time
+from loom_service.build_info import read_build_revision, read_build_source, read_build_time
 from loom_service.dependencies import authed_session
 from loom_service.readiness import probe_api_dependencies, probe_dependencies
 
@@ -55,6 +55,7 @@ async def version(response: Response) -> dict[str, str | None]:
     return {
         "buildRevision": read_build_revision(),
         "buildTime": read_build_time(),
+        **read_build_source(),
     }
 
 

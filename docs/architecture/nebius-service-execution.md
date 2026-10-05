@@ -193,14 +193,36 @@ All declared and required artifact paths are frozen into the runtime plan with
 the lossless model-call trajectory, attributed usage and structured verifier
 output. Multiple artifacts are supported within those path constraints.
 
+Process environment values remain limited to 4096 UTF-8 bytes. Small artifact
+lists retain `LOOM_TASK_ARTIFACTS_JSON`. A deployment profile advertising
+`supports_task_artifact_inputs=true` permits larger lists to use
+`LOOM_TASK_ARTIFACTS_FROM_INPUT=1` instead. The trusted controller reads the
+normalized immutable task input and deduplicates the declared and required
+paths; it never takes declarations from the agent's returned workspace. Output
+declarations and command identity still bind the complete list. The capability
+is omitted when false, preserving older frozen profiles and their controller
+images. A version-pinned agent release uses this capability only when its exact
+controller image matches the profile's qualified default controller. New
+candidate publication advertises it explicitly; queued batches are not silently
+upgraded.
+
+The environment-local scheduler isolates runtime-contract validation failures
+per queued trial. It records `service_execution_configuration_invalid`, clears
+stale scheduling progress, and proceeds to the next candidate without creating
+an attempt, capacity reservation, or spend. The public diagnostic identifies the
+configuration boundary without exposing validation input values. Temporary
+capacity and image-readiness waits retain their existing retry behavior.
+
 Shared and separate verification are properties of the private-sandbox plan,
 not of the Terminus harness. Shared grading injects private inputs and verifies
 in the existing task sandbox. Separate grading commits a validated public
 workspace. The deferred-plan compiler emits a fixed verifier command without
 inspecting or rewriting the preceding agent command, and the reservation path
-gates a child lease on parent cleanup. Automatic child-lease reservation is not
-wired yet; [#2212](https://github.com/qianyi-sun/loom/issues/2212) owns that
-on-demand lifecycle. A future workspace-reading harness supplies its own
+gates a child lease on parent cleanup. Since
+[#2212](https://github.com/qianyi-sun/loom/issues/2212) the control-plane
+scheduler reserves that child automatically once the agent pod is deleted; see
+[On-demand separate verifier](#on-demand-separate-verifier). Tasks with a
+service lifecycle still grade in the agent pod. A future workspace-reading harness supplies its own
 trusted agent phase and evidence declarations while reusing this topology,
 deferred-plan contract, allocation and cleanup gate. The implementation
 checklist is in [`hosted-agent-harness.md`](hosted-agent-harness.md).
@@ -620,6 +642,29 @@ or timeout. Source failure or cancellation attempts to abort the incomplete
 multipart upload; network failure can still require bucket lifecycle cleanup.
 The existing complete-file digest and destination readback checks still gate
 canonical acknowledgement.
+Canonical file, trajectory and ATIF registrations retain the object version
+returned by each successful write, including streamed multipart completion and
+accounting corrections. New streamed multipart uploads carry a unique creation
+identity in object metadata. If completion omits the version, a HEAD readback
+may supply it only when that same creation identity matches. An unrelated
+current-key version is rejected even when its bytes match. Explicit completion
+versions need no fallback, and legacy/resumed uploads without the creation
+binding keep their existing receipt semantics. Unversioned stores retain a null
+version; malformed evidence fails before canonical metadata is acknowledged.
+This repairs future publication. Existing null-version registrations have a
+separate [admin recovery operation](../runbooks/operator-runbook.md#historical-canonical-object-version-metadata).
+It is bounded to one terminal Trial's committed canonical Artifact, 32 exact
+objects and 256 MiB. Preview binds the complete published metadata and ownership
+state to a plan digest. Apply independently verifies the surviving versions'
+full bytes and exact-key inventories before acquiring bounded database locks.
+It then rechecks ownership, pinned retention, GC claims, competing registrations
+and the preview state, and atomically fills only absent/null versions in the registry,
+Artifact storage and every existing Trial index mirror, with one admin audit.
+Replay requires an identical request and unchanged recorded post-state. This
+adopts verified surviving versions without inventing original write receipts,
+changing Trial outcomes or retention, or restarting execution. The storage
+observation and database transaction are separate; no storage IO occurs while
+the repair holds database locks.
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
@@ -709,6 +754,33 @@ Event and command payloads are database-bounded at 64 KiB. An execution lease
 accepts at most 10,000 event ordinals and 20,000 projected history transitions;
 operator projections also return at most 500 event and 500 history rows. These
 limits are contract errors, not invitations to discard older authority.
+Runtime results can legitimately contain up to 10,000 output entries. When a
+validated `result_reported` or `finalized` payload exceeds the database's JSONB
+text bound, its owning output Artifact retains the complete JSON text
+under `metadata.execution_event_payloads`. The lifecycle event stores a compact
+`loom.execution-event-payload-reference.v1` document binding the Artifact,
+generation/ordinal/kind key and full-payload digest. The event's own digest hashes
+that stored reference. The finalization failure reason remains available to
+bounded diagnosis readers. Other event kinds and command limits are unchanged.
+
+Commit replay and finalization resolve the full payload only after verifying
+the reference digest and exact lease, team, trial, upload-session, resource
+generation and runtime-contract ownership. Changed, missing or foreign payloads
+fail closed. JSON text preserves integer/float types across JSONB
+round trips. Small and historical inline events keep their existing behavior.
+Trial results, rewards, source `result.json` and normal API/download semantics
+retain the complete runtime result; no output inventory is truncated. Artifact
+metadata survives canonical materialization and source-spool cleanup, so replay
+does not depend on retained temporary objects. Existing lifecycle deletion order
+removes execution events before deleting their owning Artifact.
+Artifact listing responses omit this internal payload store rather than repeating
+the full lifecycle documents for every published file. Ordinary artifact metadata
+and the full Trial result remain available through their existing projections.
+The restricted actuator database role can read Artifact identity and payloads and
+update only the Artifact's `metadata` column for finalization. It cannot insert or
+delete Artifacts or rewrite their storage, ownership, provenance or lineage.
+Bootstrap installs these explicit grants; Gateway artifact permissions are unchanged.
+
 Prometheus service-execution metrics aggregate by command type or surface and
 never use trial, lease, Job, namespace, or team identifiers as labels. The
 materializer additionally reports pending count, bytes, oldest age, retries,
@@ -1080,6 +1152,51 @@ digests and publishes a signed result reference. It does not attach to the
 task container, mount another trial's volume, or receive agent/provider
 credentials. The trial becomes terminal only after Loom records both execution
 conditions and the verifier result under the same attempt generation.
+
+#### On-demand separate verifier
+
+A separate-mode attempt commits its outputs without rewards and leaves the
+trial `running` with `result.verifier_execution.state = "pending"`. Its pod is
+then deleted, so no capacity is held while grading waits. The control-plane
+scheduler pass reserves one verifier lease per attempt after parent cleanup
+completes. Its request id is derived from the parent lease and child plan, so
+repeated or concurrent passes are no-ops. The child keeps the parent's target
+and requirements and receives the parent's committed `workspace.tar`,
+workspace references and mutable paths through the plan's `handoff_input`. The
+runtime places them under `.loom/` outside the task-bundle digest.
+
+The verifier lease's finalize sets the reward and moves the trial on; the
+materializer archives both bundles, with verifier files under
+`verifier-execution/`. Failure paths:
+
+- Cancellation while waiting creates no child; an existing child is cancelled
+  with the attempt.
+- A verifier that fails natively before committing output (`failed`,
+  `oom_killed`, `evicted`, `node_lost`, `deadline_exceeded`) is retried on a
+  new verifier lease, up to `MAX_VERIFIER_RETRIES = 2` times. The handoff
+  returns to `pending` with `retries`, `last_retry_reason` and
+  `pending_since`, and the trial stays `running`. Each lease row carries its
+  `verifier_retry` number. One verifier per attempt and retry is a database
+  constraint, and so is the per-retry job name (`-vr{n}`) and request id. The
+  next lease is reserved only after the failed verifier's pod is deleted, so
+  retries never hold two verifier pods at once. The failed lease's output is
+  already fenced, so a late upload cannot commit. A verifier that committed a
+  graded result, including reward 0, is never retried.
+- If a child cannot be reserved within 30 minutes of the handoff becoming
+  pending (the parent's `deleted_at`, or the retry's `pending_since`), or hits
+  a permanent error, the trial fails with `verifier_unavailable`. So does a
+  verifier failure once retries are exhausted, or after cancellation.
+- The agent is never re-run.
+
+Trial detail exposes `execution_phases`: agent, awaiting verifier and one
+verifier phase per try (`retry` numbers it), each with reserved seconds and
+requests (costs for admins), plus the handoff
+gap, reservation overlap and handed-off workspace size. For a modeled trial
+with a 600 s agent run and 120 s of grading, holding a colocated 2.2-CPU pod
+reserves 1584 CPU-seconds. On demand, a 1.2-CPU agent pod and a 1.2-CPU
+verifier pod reserve 864 CPU-seconds, at the cost of the wait for verifier
+capacity (`test_service_execution_phases.py`). Deployed Nebius acceptance of
+this lifecycle is pending.
 
 GPU, ARM64-only, desktop/GUI, privileged, hostPath, host-network,
 nested-container, host-device, and host-specialized workloads are rejected by

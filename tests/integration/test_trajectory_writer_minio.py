@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from minio.versioningconfig import ENABLED, VersioningConfig
 from testcontainers.core.wait_strategies import HttpWaitStrategy
 from testcontainers.minio import MinioContainer
 
@@ -43,6 +44,30 @@ def _event(seq: int) -> StepStartEvent:
         seq=seq,
         instruction_excerpt=f"event {seq}",
     )
+
+
+@pytest.mark.parametrize("versioned", [False, True], ids=["unversioned", "versioned"])
+@pytest.mark.parametrize("size", [0, 17, 9 * 1024**2], ids=["empty", "small", "multipart"])
+async def test_stream_write_returns_exact_object_version(
+    store: MinioObjectStore, minio: MinioContainer, versioned: bool, size: int,
+) -> None:
+    bucket = f"stream-version-{uuid4().hex}"
+    client = minio.get_client()
+    client.make_bucket(bucket)
+    if versioned:
+        client.set_bucket_versioning(bucket, VersioningConfig(ENABLED))
+    payload = b"v" * size
+
+    async def chunks():
+        yield payload[:11]
+        yield payload[11:]
+
+    receipt = await store.put_object_stream_with_metadata(bucket=bucket, key="output", body=chunks())
+    actual = client.stat_object(bucket, "output")
+    assert receipt.uri == f"s3://{bucket}/output"
+    assert bool(actual.version_id) is versioned
+    assert receipt.version_id == actual.version_id
+    assert await store.get_object(bucket=bucket, key="output") == payload
 
 
 async def test_trajectory_writer_writes_to_minio(

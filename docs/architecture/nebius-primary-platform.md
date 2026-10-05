@@ -880,8 +880,265 @@ unmerged indices and included-file/parent/inventory changes. Transfer bounds are
 25,000 files, 512 MiB aggregate and 8 MiB canonical manifest, not execution quotas.
 Consumers must use the verified manifest reader rather than reopen unchecked
 paths. The owned temporary snapshot is removed on exit, including errors.
-Publication, global build-capacity admission, image building, release qualification
-and installed source-to-deploy acceptance remain separate, unimplemented consumers.
+
+`package_application_source` composes that capture with the shared verified
+archive encoder, yielding an anonymous owner-only temporary upload stream, its
+byte length and archive SHA256. The archive checksum is distinct from the source
+manifest digest; neither turns the informational base commit into CI approval.
+The stream is rewound for upload and closed on caller exit or failure.
+`loom.application_source_archive` encodes deterministic uncompressed USTAR:
+one canonical manifest followed by fixed numbered regular byte records. Archive
+names never become extraction paths. The trusted reader bounds and validates
+headers, lengths, content hashes and final padding; it creates source files
+exclusively under a pinned empty private directory and installs safe links last.
+Failed extraction is not accepted context; the caller owns partial-file cleanup.
+
+The management `ApplicationSourceRegistry` retains owner/team-qualified upload
+intents in `nebius_application_source_uploads` (migration `0173`). Each intent
+freezes its installation/data binding, source digest, archive checksum/length,
+informational Git commit and one-hour-or-shorter database-clock expiry. Concurrent
+same-key retries return one identity; changed intent or team conflicts. Only the
+internal verifier can record `source_verified`, and verified receipts remain
+readable after the upload deadline. SQL retains their immutable identity/history.
+Identical archives select one content-addressed key in the shared source bucket,
+while owners retain separate access records. A source receipt is not a build,
+release, CI approval or capacity reservation.
+
+`ApplicationSourceUploader` authenticates this intent before consuming its stream,
+spools bounded bytes privately, verifies both the transport hash and full source
+archive, then writes only verified content to the server-derived shared key. It
+reads back and hashes stored content before recording acceptance; an ETag or a
+successful PUT reply is insufficient, and an uncertain PUT is observed without
+another explicit upload call. The shared S3 adapter can retry identical verified
+bytes under its existing SDK retry policy; this does not grant another source
+identity or retry a build/deployment mutation. Database-clock expiry is rechecked after reception and before
+completion. Per-process in-flight limits and reception/storage deadlines bound the
+work. At most two archive verifiers run concurrently, independently of the
+configured reception/storage limit, to bound parsed-manifest memory in the
+management Pod. Other admitted uploads wait with their private disk spool;
+cancellation before verification releases that spool without starting a parser.
+Cancellation during verification retains the spool and admission until off-loop
+verification finishes, then cleans private temporary state. Manifest validation
+uses sorted-path prefix lookup rather than expanding every directory ancestor.
+
+Management exposes `POST /api/v1/application-sources` (idempotent intent),
+`GET /api/v1/application-sources/{upload_id}` (owner status) and
+`PUT /api/v1/application-sources/{upload_id}/content` (raw
+`application/octet-stream`). Session/membership/CSRF checks and upload ownership
+precede body consumption. Only that exact configured PUT route bypasses ordinary
+JSON buffering; it retains strict framing, encoding and incremental byte limits.
+Responses are non-cacheable; HTTP/1 rejection with an unread body closes the
+connection. Personal application APIs do not expose these routes, and there is
+no caller-controlled completion endpoint.
+
+Optional protected `applications.runtime.source_upload` configuration enables the
+uploader. It names absolute `credentials_file` and private `spool_directory` paths,
+`max_inflight` (default 2, range 1–16), reception/storage deadlines (default 300
+seconds each, range 1–3600) and `upload_ttl_seconds` (default 3600, range 60–3600).
+The bounded private credential file contains only `access-key` and `secret-key`;
+the installer must supply a source-scoped identity and bounded spool volume.
+Bucket, endpoint, region and installation/data/cluster identities come from the
+protected shared configuration, never owner input or ambient credentials. The
+runtime owns the storage client and closes it on shutdown or failed startup;
+omitting these settings preserves old installation fingerprints and disables
+upload. Configuration support is not evidence that the capability is installed.
+
+`ApplicationClient` connects packaged source to these authenticated intent,
+status and streaming-upload routes. It checks every returned source identity and
+upload ID, uses the same frozen archive on an explicit CSRF rejection, and never
+automatically retries an uncertain network write. This is the transport used by
+the build command, not a standalone deployment command or CI approval.
+The native application Job adapter shares the existing task-image
+prepare/rootless-build/publish rendering mechanism. Its protected claim binds
+owner, source upload, build attempt, installation/data/cluster and an immutable
+recipe; fixed service/web components use `deploy/Dockerfile.service` and
+`deploy/Dockerfile.web`. Recipe identity includes platform, tool images, component
+paths and output format. Application Jobs carry their own build identity, not
+synthetic Task or materialization fields. Credentials remain outside the
+untrusted build phase and publication sees the build volume read-only. Personal
+build arguments distinguish the source digest from its informational base commit
+and never label that commit as a CI-approved build.
+
+The trusted application runtime verifies the exact uploaded archive size, SHA256
+and source manifest before extraction. It parses migration revision literals and
+their complete acyclic ancestry, including historical merges, without importing
+developer Python or running migrations. The single declared head must match the
+protected shared schema. This is a metadata compatibility check, not a claim that
+arbitrary application code is semantically safe; personal code receives no DDL
+authority. Only the rootless build phase executes developer build instructions.
+
+Publication validates exactly two bounded local OCI outputs against the recipe's
+architecture, preserves digests through Skopeo, and reads back each immutable
+registry manifest. The final receipt binds both images to owner, source, recipe,
+installation/data/cluster and build attempt. Interrupted progress has a distinct
+schema and cannot qualify a release; unknown publication is not retried. Native
+cache keys include a separate application domain, source digest and recipe
+(including platform); the existing bounded blob store and GC are shared without
+fabricating Tasks. Source/registry credentials never enter the build context.
+These runtime helpers do not themselves admit or launch application builds.
+
+`ApplicationBuildRegistry` records owner/team/install/data/cluster-bound build
+intent from a verified source upload. Concurrent requests with the same replay
+key retain one build and one queued attempt. Each attempt freezes its source and
+protected recipe/storage/pool binding; replay after a management restart uses
+those retained inputs even if the active recipe catalog changes. SQL prevents
+deleting build history or rewriting source, owner or attempt inputs. Status
+checks the retained claim against the original source and binding before returning
+it. Creating this intent performs no network operation, resource admission or
+release qualification; its queued state does not mean a builder has been launched.
+
+`ApplicationBuildDispatch` commits the exact pool request and absolute deadline
+on that same retained attempt before a caller can perform network I/O. Concurrent
+selection and restart return the same request, including its original recipe and
+deadline. SQL prevents rewriting or erasing it. A cancelled build cannot create
+new demand, but its existing request remains readable for cancellation and
+uncertain-reply reconciliation. Reading that record is not activation consent;
+the automatic worker and its activation/completion evidence are separate consumers.
+
+`ApplicationBuildWorker` drives that request through the common pool's existing
+prepare/status/activate and stop/drain APIs. The attempt journal uses database-time
+leases and runner epochs; stale workers cannot commit results. Each activation
+consent and each cleanup message is retained once before HTTP, so uncertain replies
+reconcile the same build attempt without extending consent or creating another
+Job. Its Kubernetes interface only reads the exact gateway-bound Job and Pods.
+Successful publication requires completed prepare/build/publish containers without
+restarts and the complete trusted publisher receipt for this owner/source/recipe.
+The attempt remains `settling` and charged until the common pool returns its
+authenticated cleanup receipt; only then can it become `ready`. Cancellation wins
+over a result observed afterward. Failed/cancelled attempts also retain their
+charge until cleanup; an unsubmitted cancellation needs no pool call, while any
+frozen request requires a pool cancellation tombstone or cleanup receipt. SQL
+retains evidence and forbids a successor attempt before prior cleanup. Heartbeats
+run independently of external reads, cancellation drains in-flight work before
+releasing its lease, and bounded keyset polling avoids first-page starvation.
+Management-only `/api/v1/application-builds` accepts a verified `upload_id` and
+an idempotency header, not caller-selected images, target, recipe or priority.
+Owner/team-scoped status and generation-checked cancel/retry controls use the same
+retained build. Cancel records intent, not capacity release. Retry requires the
+previous attempt to be failed/cancelled with cleanup completed; its expected
+attempt number is the replay key, so a repeated retry cannot create two successors.
+The successor keeps the original source and recipe. These endpoints return 503
+without the explicitly configured build registry and are absent from personal
+application services. This implementation does not itself configure management
+credentials or install the read-only role.
+
+Ready build status includes a deployable `ApplicationReleaseV1`: its release ID
+is the build ID, and its source/schema and immutable service/web image digests
+come from the retained qualified publisher receipt. Resolution is scoped to the
+authenticated owner/team and installed management/data/cluster binding. A published
+but still-settling build is not a release; the retained released pool receipt must
+match the original request, reservation, plan and Job. SQL makes ready attempts
+immutable and prohibits retrying them, so the same release ID cannot later target
+different images. Changing the current recipe catalog does not change old releases.
+
+`ApplicationManager` accepts these completed owner builds alongside the protected
+pinned release catalog. Create/update/resume use the same build registry as the
+automatic worker and owner status routes. They still enforce exact shared-schema
+compatibility and freeze the selected release and rendered images in the operation.
+Already-frozen operation replay does not need the current catalog or a running
+builder. Resume resolves the application's recorded release, never a newer build.
+
+The application builder supplies personal kind, manifest digest and informational
+base commit as Docker build arguments, while leaving the actual Git build revision
+unknown. The service image records these beside its existing build metadata;
+`/api/v1/version` reports `buildKind`, `sourceDigest` and `sourceBaseCommit` for
+personal code and never presents that code as the base Git revision. The web image
+bakes the same fields into the loaded JavaScript and separately publishes served
+metadata for update checks. A later fetch cannot relabel an already-open page.
+Version details label personal code as not CI-approved, with separate frontend and
+responding-backend source identities. These are informational reports from authored
+code, not authorization or proof that every replica has rolled out; retained
+publication and frozen deployment evidence remain authoritative.
+
+Optional protected `applications.runtime.build` settings connect these controls
+and the automatic worker to the management service lifecycle. They bind the
+source/recipe/pool profile, management HTTPS origin, dedicated private bearer-token
+file, concurrency (default 4, range 1–16), polling interval (default 5 seconds,
+range 1–60), and pool HTTP timeout (default 30 seconds, range 1–60). The source
+uploader must also be configured. Startup checks shared installation/data/cluster,
+schema and source storage, matches the loaded profile catalog's digest against
+protected pool registration, and authenticates the dedicated builder machine in
+the real management database. The origin must match the management service's
+public origin. A registered closed pool permits startup, not resource admission;
+every common-pool operation still reauthorizes the machine and admission mode.
+
+The runtime owns both deployment and build workers. Readiness requires both to
+be healthy; shutdown drains both before closing their HTTP, Kubernetes and database
+dependencies. Build observation reuses the native Kubernetes reader with an
+explicit endpoint, CA and per-request projected-token refresh, never ambient
+kubeconfig or the cloud provisioning identity. Routes receive the build registry
+only after successful runtime creation. Omitted settings preserve historical
+installation fingerprints.
+
+The management renderer binds configured source uploads to a revision-named,
+source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
+initializer verifies the spool directory's ownership and mode on every Pod start.
+The spool is capped at 2 GiB per admitted concurrent upload (4 GiB at the default
+concurrency of two), included in the manager's ephemeral-storage request and limit,
+and disappears with the Pod; it creates no PVC or backup requirement. Archive
+verification streams regular files in 1 MiB chunks, retaining content hashes,
+strict headers/padding and link-last validation without allocating a whole source
+file in management memory. Filesystem-metadata-heavy trees remain subject to the
+spool limit. Source-enabled management uses `Recreate`, preventing a rolling surge
+from multiplying this local upload allowance.
+
+Configured builds additionally require a protected dedicated machine ID and pool
+catalog operation. The renderer reuses the private process-owned token mount and
+provides only Job reads and Pod reads/list/logs in the shared build namespace.
+It grants no Job writes, Secret reads or access to other build namespaces.
+The protected first cutover derives these settings from its completed predecessor
+and exact registered machine/profile. It qualifies the retained shared control
+plane's source endpoint/bucket/key references and freshly reads the fixed
+`loom-platform-storage` Secret against its protected UID/version/source-only hash.
+Only `source-access-key` and `source-secret-key` are copied into the manager's
+immutable source Secret; data, backup and operator credentials are not copied.
+It stages material, configuration and reader roles before replacing the stopped
+manager, and checks platform fit including the upload spool before downtime.
+Completed global ancestry retains the full builder-enabled configuration; recovery
+to the legacy outcome retains the original manager. Historical
+image-only refresh remains narrow: it preserves the existing source Secret even
+when its revision differs from the older cloud/shared bundles, and cannot enable,
+remove or change source/build runtime settings. Rendering these prerequisites
+does not install them or establish multi-owner acceptance.
+
+The common pool registry has an application-build adapter. New admission and
+activation check the retained current build attempt, verified source, protected
+participant/profile binding and cancellation state under the pool transaction.
+The owner cannot replace the frozen claim. Personal builds receive priority 3
+and share the existing build-concurrency/resource accounting with task builds and
+execution. Cancelled or obsolete waiting builds no longer protect capacity from
+other work. The native Job wrapper retains the same reservation-specific name,
+absolute phase deadlines, credential isolation and rendered-Pod resource charge
+for both build kinds. The existing machine-only pool API transports this typed
+request. Gateway dispatch, retained native-runtime readback and the physical
+collector bind application Jobs to build ID/attempt and observed Job UID. Stop
+and output-drain use that same attempt; neither releases capacity without the
+existing gateway absence check. Pool adapter support alone does not install the
+management worker or enable owner-facing build endpoints.
+
+Participant machine identity also retains an immutable workload scope. Ordinary
+environment credentials can submit/control trials, verifiers and task builds;
+the separate management builder credential can submit/control only application
+builds in the same data participant. Prepare/replay, allocation and every retained
+request operation recheck that scope under the existing authority locks. Credential
+rotation cannot change it. Existing machines retain environment scope on upgrade;
+this does not expand an already registered pool catalog. Initial registration
+requires exactly one environment machine for each participant and exactly one
+builder machine for each development participant with application-build targets.
+Application targets are distinct from execution/task-build targets, use the same
+participant build namespace and physical node group, and require bound profiles.
+Default environment scope is omitted from serialized installations so historical
+installation hashes do not change. Registration remains closed and exact-replay-only.
+
+The protected material stage delivers the builder token only to the management
+namespace, never to a shared controller, execution worker or personal namespace.
+Ordinary actuator wiring selects the environment credential explicitly and does
+not require an actuator for the dedicated application-build target.
+
+Protected manager mounting and worker configuration, the user-facing build
+command, durable management worker, image building and release qualification
+are implemented as described above. Protected installation and live multi-owner
+source-to-deploy acceptance remain separate, unproven delivery steps.
 
 ### Stopped application completion
 
@@ -1732,9 +1989,9 @@ profile. Selection generation and prospective native lease epoch are distinct;
 Job/ConfigMap names use the global reservation identity. The adapter acquires no
 attempt or grant itself. Capture binds the frozen native Job's actual attempt epoch,
 not its separate selection generation. Admission HTTP and the native outbox are
-connected locally. Execution outbox integration, installed gateway startup and
-protected writer migration are still required. Application-image builds remain a
-later consumer of the same ledger.
+connected in source, including the execution outbox. Installed gateway startup
+and protected writer migration still require live qualification. Application-image
+builds remain a later consumer of the same ledger.
 
 `loom.nebius_pool_contract` binds request identity to a participant, workload kind,
 local work ID and generation. Equal local IDs in independent environment databases
@@ -1976,7 +2233,8 @@ the retained canonical specification and must pass source admission/pinning in
 the final outbox transaction. Generations advance from retained outbox history,
 independently of build lease epochs. A configured native controller selects one
 new candidate after reconciliation, then uses the same driver/runtime path.
-The installed startup and protected no-dual-writer transition are not yet connected.
+The protected pool operation connects startup and the no-dual-writer transition;
+its successful source tests do not establish installation on a live cluster.
 
 The service scheduler separates workload compilation from reservation. Compilation
 retains the existing image-readiness and configuration handling, but does not claim
@@ -2203,18 +2461,34 @@ or invalid-request rejection permits another attempt. Complete namespace
 ReplicaSet/Job/Pod observations must prove drain, including terminating Pods and
 all collector container states. Replay rechecks earlier stopped workloads without
 writing. This stage neither changes RBAC nor activates a replacement writer;
-effective authority fencing and the connected protected installer remain required.
+the subsequent authority-fencing and runtime stages belong to the complete
+protected pool operation, not to retirement alone.
 
 An installed execution-only guest actuator belongs to its ordinary data
 participant, not another database, collector or builder. Retirement and runtime
-wiring require the complete registered target set. The supported guest sibling
-must retain its renderer-defined name, distinct UID, shared database references,
+wiring require the complete registered target set, including both the ordinary
+guest and the separate emulated-authentication guest when installed. Each sibling
+must retain its renderer-defined name, mutually distinct UID, shared database references,
 ServiceAccount and ordinary Pod configuration, differing only in target identity,
 labels/affinity and absence of the native builder. Missing, duplicate or changed
-siblings reject the migration inputs. Its replacement remains stopped, receives
+siblings reject the migration inputs. Each replacement remains stopped, receives
 the same participant credential and global binding, and does not acquire a build
 loop. Guest Pods must drain before retirement qualifies; replay checks them again.
 These checks do not replace installed database or effective writer qualification.
+
+The retirement contract separately accepts an explicit dormant remote-consumer
+roster through the optional `dormant_consumers` private cutover input; an omitted
+roster does not authorize adopting undeclared consumers. Each entry binds an
+already-zero actuator and suspended collector in an existing participant's
+execution namespace. The actuator must retain that
+participant's database Secret reference, use a distinct fixed ServiceAccount and
+target a namespace outside this operation. A registered target cannot be
+reclassified as dormant. Both retained UIDs and templates join the ordinary
+retirement journal, complete process-drain checks and effective permission review.
+Replay rejects a restarted or changed consumer. Their remote namespaces and pools
+are not added to operation scope, and they are not wired or started as successor
+participants. Unexpected grants remain rejected; dormancy is not credential
+revocation. This is retirement-only support, not an installed cutover claim.
 
 The participant-role phase composes that retained retirement barrier with two
 fixed Role replacements per participant: the existing execution-actuator and
@@ -2305,7 +2579,7 @@ replacement. Targets are generated from the retained manager, complete shared
 API/actuator roster and one development collector; arbitrary manifests are not
 inputs. Producer Pod drain is followed by independent application-access,
 schema-readiness and queued-origin qualification. It cannot manufacture provenance
-for a legacy queue. The fixed live adapter now reads schema `0172`, idle guard/
+for a legacy queue. The fixed live adapter now reads schema `0173`, idle guard/
 work state and personal-access quiescence through each retained database Pod,
 qualifying its StatefulSet, Service, Secret version and Pod identity before and
 after every read-only page. Complete EndpointSlice readback also binds the Service
@@ -2355,8 +2629,9 @@ consumer mounts; alternate volumes, command arguments, initialization environmen
 or lifecycle hooks cannot substitute another credential. This qualifies the retained
 credential route and its cloud access, not a successful successor collector process.
 The read accepts a scale-zero pool and does not reserve headroom, request nodes or
-introduce a per-environment budget. Workload fit, direct-kubelet telemetry and actual
-collector startup still require qualification. These checks do not prove the complete
+introduce a per-environment budget. Workload fit and actual collector startup still
+require qualification; detailed kubelet sample availability is reported separately.
+These checks do not prove the complete
 external-writer inventory or an installed global activation.
 The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
@@ -2420,11 +2695,438 @@ durable successor refresh remain required for an operational global cutover.
 Runtime ACL intent is retained separately per participant;
 unknown SQL outcomes permit qualification only, not repeated grant commands.
 
+The internal successor-startup stage binds a separate journal to the exact bytes
+of the completed closed parent and its retained workload identities. It starts
+only the manager, fixed gateway, participant adapters and selected pool collector;
+other collectors and explicitly dormant foreign-target roots remain stopped.
+Startup changes only replicas or suspension, preserving the retained Pod templates.
+Every write records its original resourceVersion before one compare-and-swap
+request. A lost reply permits exact readback only, never a retry; seeing the old
+replica count does not prove that a delayed request cannot still commit.
+The connected startup adapter reuses the parent's HTTPS and fixed SQL authority.
+It rechecks the closed registration, held local guards, restricted effective
+writer permissions and exact staged material/configuration/authority identities.
+Every persistent PATCH tests UID, resourceVersion and the complete current spec
+before changing the one replica/suspend field. Definite API rejection permits a
+fresh prepared attempt; ambiguous responses never do. Disposable Kubernetes tests
+cover server defaults, retained identities and a lost committed PATCH response.
+
+After startup intent exists, the old closed-stage mutation path refuses replay.
+Read-only writer inventory and database readers accept only the recorded before
+or after template for an uncertain start. They retain namespace, workload UID,
+database and credential checks without depending on an unready successor Pod.
+The retained management-database reader also exposes a fixed READ ONLY startup
+check for the exact closed pool epoch, participant and machine roster, binding
+digests and current dedicated credentials. It rejects changed/revoked/expired
+authority rather than replaying registration to reset it. Backend and operator
+identity are rechecked around that read; no raw bearer appears in its report.
+This keeps recovery available; it is not runtime acceptance. A separate read-only
+database-runtime barrier requires every startup write to have a settled `started`
+journal entry, then selects the exact recorded successor templates itself. It
+probes the manager's own backend and each participant controller, service and
+ordinary/guest actuator through their original database credential identities.
+The fixed probes allow only the expected replacement while retaining Deployment
+UID, namespace/name, selector, container and ServiceAccount identity. They check
+current ReplicaSet/Pod lineage, readiness, loaded effective database settings and
+the unchanged pinned Secret reference; equivalent Kubernetes resource-quantity
+spellings do not cause false drift. Actuator probes additionally check direct
+telemetry against the current pool-node roster, reporting known sampling failures
+as unavailable without relaxing runtime identity checks. A second fixed challenge loads
+that image's real settings classes inside the qualified Pod and verifies the
+effective global participant binding, enabled controller scheduler/materializer,
+image-admission keyring, actuator target/builder configuration and shared API
+submission identity/runtime profile. It reads machine tokens through the normal
+current-UID-owned `0600` file reader and compares their hashes with the exact
+registered participant credential; no operator credential is substituted.
+The manager's settings must select the retained catalog path, and its normal
+profile loader must accept bytes matching the immutable installed catalog before
+and after loading. The gateway has no running predecessor: its closed child UID
+comes from the completed startup journal, and only a replica-count change may
+separate it from the running template. Its real settings must select the registered
+pool, installation, machine and admission epoch, the exact owner-only machine
+token and the projected Kubernetes connection. Its effective database URL must
+resolve through the same retained management `service-url` Secret reference and
+qualified backend; participant credentials cannot substitute for that binding.
+Only the role and fresh challenge enter exec arguments, and
+only a bounded qualification result leaves the Pod. Import, configuration and
+file errors emit no configuration or token values. These settings checks make no SQL or
+network request, issue no credential and open no admission.
+Closure and all workload roots
+are rechecked afterward. An unhealthy successor does not prevent constructing
+the independent recovery connection. This barrier is not a saved health receipt,
+complete gateway/collector acceptance or permission to activate admission.
+The separate gateway-authority barrier resolves effective permissions through
+nonpersisted SelfSubjectRulesReview requests with request-local gateway
+impersonation. It checks every operation namespace and any foreign RoleBinding
+namespace naming the account, equivalent user or its groups. Required permissions
+must match the fixed renderer; extra named-resource grants, wildcards, Secret
+access and unresolved rules are rejected. Ordinary self-inspection/discovery is
+allowed. No bearer is minted, no grant is changed, and no impersonation persists
+on the parent client. This proves effective authority, not runtime connectivity.
+The bound gateway runtime barrier separately uses its actual projected token and
+CA with the normal credential reader and origin-restricted HTTP authentication.
+It reads only the registered execution/build namespace names and requires their
+exact UIDs. Its challenge binds the loaded pool/installation/machine/epoch and
+Kubernetes connection as well as every returned namespace identity. Each request
+reopens the projected token for rotation; neither ambient kubeconfig nor proxy
+credentials are used. Reads have per-request and total deadlines, bounded
+uncompressed responses, verified TLS and no redirects or retries. This probe
+issues no credential, changes no resource and returns no token or API error body.
+Pod, database, credential and parent closure checks still surround the proof.
+Disposable Kubernetes coverage exercises the real service-account permissions,
+TLS/credential files and namespace UID matching, but not an installed gateway Pod
+or concurrent-owner task execution.
+The same bound gateway also authenticates its current dedicated machine credential
+to management and runs the existing connected-capacity admission reader. That
+reader requires a fresh accepted observation, exact current registration/capture
+digest, physical node-group and provider-quota identities. The challenge separately
+binds those current registration values to the protected installation, active
+participant roster and gateway credential. It neither publishes a new observation
+nor substitutes operator-supplied capacity. These fixed SQL reads use the existing
+management mutation lock and row locks in a bounded `READ COMMITTED` transaction,
+which is always rolled back; this is non-mutating qualification, not a SQL
+`READ ONLY` transaction. Pod/backend/credential identity and closed authority are
+rechecked afterward. The result is not a saved capacity grant: admission opening
+must requalify current evidence under its own locked transition.
+The internal fixed opening primitive repeats that qualification and changes only
+the exact `closed/R` registration to `global/R` in the same transaction. Token
+expiry and every connected observation's freshness are checked again at the SQL
+write, and a success report follows commit. The separate protected recovery SQL
+can observe the original, opened or fenced binding without a running gateway or
+runtime token. Its cancellation fence takes the same mutation lock and changes
+either `closed/R` or `global/R` to `closed/R+1`. Repeated fencing leaves that
+revision unchanged. The old opening challenge can never authorize admission after
+this fence, including when it was already waiting on the database lock. Opening
+requires room for this successor within the canonical-JSON integer range.
+Readback and fencing bind the exact installation, physical pool and immutable
+configuration; an unrelated revision or configuration is rejected. Neither
+cancellation nor readback releases charged requests, clears effects, releases
+local guards or restores legacy writers. A failed transport response is ambiguous
+and requires readback, not a repeated opening or fencing dispatch.
+The internal activation stage anchors a child journal to the closed-stage and
+startup-journal bytes. Opening requires all startup writes settled and fresh
+runtime proof. Each opening, local-guard release and cancellation write has a
+persisted intent before its one dispatch. Recovery accepts only the before/after
+states permitted by that intent; an unchanged state or lost response never
+authorizes a retry. Guard dispatch order follows the protected participant roster,
+including after sorted JSON journals are reloaded. Once activation evidence
+exists, the startup mutation entry refuses replay.
+Cancellation also works before startup completes and does not require healthy
+successor processes. It first confirms the global revision fence, then fences
+each local intake guard under its existing admission lock. The same guard row is
+transferred to `pool-recovery:<operation UUID>`, or inserted with that owner if
+the original release already committed. Foreign ownership is never adopted.
+An original-owner release already waiting on the row cannot delete the recovery
+owner. Active work is retained; fencing does not assert idle state or completed
+cleanup. Every stage result explicitly withholds legacy-restoration authority.
+The fixed activation transports use the retained management or participant
+PostgreSQL Pod and qualified Service backend, with private operator scope and
+identity-bound reports checked around each dispatch. Recovery needs neither a
+running application/gateway nor its runtime token. A separate read-only runtime
+ACL inspection accepts active work and absent/recovery guards while preserving
+the same schema and least-privilege checks; the initial role stage/observation
+still requires the original idle guard. Inspection never repairs grants or work.
+Opening uses the exact gateway Pod from fresh settings, database, projected-API
+and capacity qualification. A separate fresh challenge invokes only the fixed
+opening command, once. Its result and the retained Pod/backend/operator scope are
+checked afterward; a lost reply or late drift is unconfirmed, never retried.
+The connected activation adapter shares the parent's temporary operator authority
+and validates anchored intent before each write. It retains private-input,
+provider/backend, complete writer-inventory, restricted-role and staged-resource
+checks during recovery, without rerunning initial idle/backlog or runtime-health
+checks. Opening separately requires the full fresh startup runtime and gateway
+authority barriers. A guard release requires the same global pool; recovery guard
+fencing requires the confirmed terminal pool fence. Neither connection construction
+nor recovery restores or restarts workloads.
+After global and local cancellation are complete, a separate anchored startup
+fence resolves any still-uncertain original startup PATCH. A different current
+resourceVersion on the same qualified workload UID already invalidates that
+original compare-and-swap. If the version is unchanged, the operation persists
+intent and adds only the fixed top-level `loom.nebius/pool-startup-fence`
+annotation, containing its operation UUID. UID, version, complete metadata and
+spec tests protect that write. The real metadata change advances the version;
+an unchanged replica count or a no-op PATCH is not cancellation evidence.
+If the original startup wins first, the fence loses its version test; if the
+fence wins, the original startup loses. Unknown replies are observed without
+redispatch. Only an explicit API rejection permits another prepared attempt.
+The child journal freezes the activation/startup hashes and each settled exact
+template; entry, writer inventory and activation recovery share that projection.
+Foreign markers and unanchored changes are rejected. Settled or never-dispatched
+startup rows require no metadata write. This barrier leaves Pod templates and
+running cleanup processes unchanged, does not prove process drain, and still
+withholds permission to restore legacy writers.
+
+Recovery also reads both sides of the existing handoff before successor shutdown.
+The retained management database must still have this operation's terminal
+revision fence and no waiting/reserved requests, active requests, uncertain
+CREATEs, or releases lacking their matching cleanup/output evidence. Each
+participant database must retain the exact recovery owner and candidate and have
+no active claims, execution/output cleanup, native build cleanup, or unfinished
+execution/build outbox. A selected outbox blocks even before any attempt or Pod
+exists; queued work without a handoff remains available for later admission.
+These fixed queries run in read-only snapshots through the retained PostgreSQL
+Pods. The connected recovery adapter requires the settled startup fence and
+rechecks retained authority and all local/global fences around the observations.
+It never persists a zero-count result as a reusable permission. Existing
+participant controllers cancel unstarted handoffs or finish result/output drain;
+the existing gateway verifies complete cleanup before releasing capacity. A lost
+CREATE followed by absence remains charged and pending, without redispatch or a
+fabricated rejection. This read-only barrier itself neither stops processes nor
+restores legacy writers.
+
+Once both journals drain, an anchored shutdown stage stops only the successor
+startup targets in reverse order, leaving the gateway and manager until last.
+Its fixed updates change only Deployment replicas to zero or suspend the
+collector CronJob; templates, UIDs, startup-fence annotations and dormant siblings
+are preserved. Each one-time update retains its original resourceVersion before
+dispatch and tests the UID, version, complete metadata and spec. Unknown replies
+are observed, never resent; definite API rejection alone permits another prepared
+attempt. Already-stopped roots need no update. The shared recovery projection
+accepts only the anchored before/after templates, including partially started
+operations. The connected transport rechecks fresh two-sided drain before each
+PATCH and accepts no caller-supplied replacement manifest.
+Completion requires complete ReplicaSet/Job and Pod inventories for every
+successor, acknowledged Deployment generations with zero replica counts, and
+terminal collector history. Terminating Deployment Pods still block; paginated
+or incomplete lists cannot prove drain. Global/local fences and both journals
+are rechecked afterward.
+This phase neither deletes resources nor revokes cleanup credentials, and still
+withholds legacy-restoration authority pending successor credential retirement.
+
+An anchored machine-retirement stage subsequently rechecks both journal drains
+and every successor's process inventory before one credential transaction. The
+transaction takes the existing global mutation lock and locks the exact retained
+binding, participants, machines, credential bindings and tokens in authentication
+order. It requires the terminal pool revision, exact installation roster and
+fresh global drain, then marks only those machines revoked and timestamps only
+their dedicated tokens. Expired originals can be retired without renewal. No
+history, credential binding, epoch or unrelated token is changed or deleted.
+Readback accepts only the exact all-active or all-revoked authority; partial,
+extra or foreign registrations are rejected. Revocation is atomic, emits only
+one identity-bound report, and invalidates both new authentication and retained
+principals at their next locked authorization boundary. A lost reply leaves the
+anchored intent observation-only. The protected adapter continues to use the
+retained management PostgreSQL backend and operator scope after revocation;
+it does not require a running gateway or its token. This stage still grants no
+legacy-restoration authority: gateway Kubernetes-role retirement and safe
+workload/role restoration remain separate prerequisites.
+
+Gateway-role retirement then removes only `create` and `delete` from the exact
+installed gateway namespace Roles. Their UIDs, read rules, bindings and the
+namespace-reader ClusterRole are retained. Its child journal is anchored to the
+completed machine revocation and original authority receipt; each update tests
+the UID, resourceVersion, complete metadata and original rules. Intent is durable
+before dispatch. Unknown replies are observation-only, and a definite rejection
+alone permits another prepared attempt. Both retained-resource and writer-inventory
+readers accept the same anchored original/reduced projections during partial
+retirement, without accepting arbitrary drift or unanchored permission changes.
+The connected transport requires fresh process/journal drain, closed admission
+and revoked machine authority before every update. Completion also requires
+effective gateway permission reviews across registered namespaces and all foreign
+RoleBinding namespaces naming its identity or groups; an extra named grant or
+incomplete review blocks completion even if every fixed Role is read-only.
+No binding is deleted, no unrelated resource is changed, and legacy-restoration
+permission remains withheld until the separate workload/role restoration path.
+
+The next anchored recovery phase restores only retained pre-migration workload
+specs, with every Deployment kept at zero replicas and every CronJob suspended.
+It preserves current top-level metadata and all retirement/startup fences; the
+gateway, material, configuration and permission resources remain untouched.
+Unchanged dormant and retired templates need no write. The journal binds the
+completed gateway retirement, shutdown and exact before/after workload catalog.
+Every spec update requires fresh gateway effective-readonly, revoked-machine and
+process/journal-drain checks, then an intent-bound UID/version/metadata/spec CAS.
+Unknown outcomes only observe the same retained object; definite rejection alone
+permits another prepared attempt. Recovery entrypoints and writer inventories
+consume the same anchored partial-restoration projection. Process drain still
+requires complete child/Pod inventories and acknowledgment of the current
+Deployment generation after a spec update, not merely zero requested replicas.
+This stage grants no write role, starts no process and releases no intake guard;
+legacy permission restoration, restart and reopening remain separate prerequisites.
+
+Closed Role restoration follows completed stopped-template restoration. It
+restores only the exact retained participant Role rules and original annotation
+shape, removing the operation's role-fencing marker. UIDs, other metadata,
+bindings, gateway authority and all workload specs remain unchanged. Each update
+requires fresh revoked-machine, gateway effective-readonly and process/journal
+drain checks, with durable intent and UID/version/full-metadata/rules CAS. An
+unknown reply permits observation only; a definite rejection may prepare again.
+The child journal binds completed template recovery and exact before/after Role
+snapshots. Without that evidence, retained readers still require restricted Roles
+and their original read-only qualification. With it, readers accept only the
+recorded per-Role recovery projections and check effective permissions separately
+for every retained account and destination, including foreign namespaces with
+bindings to the account or its actual groups. The fixed participant binding map,
+not a union of all restored rights, defines each account's required grants.
+Harmless reader/discovery/self-inspection extras remain allowed; missing required
+grants, extra writes, credential/exec access and incomplete reviews fail closed.
+Exact Role and journal readbacks bracket these reviews. No workload starts and
+no admission guard is released: `pool_legacy_roles_restored_closed` still sets
+`legacy_restore_allowed` to false. Restart and reopening are separate phases.
+
+Closed legacy restart restores only each retained predecessor's original replica
+or suspend scalar. Its journal binds completed Role/template restoration, records
+intent before UID/version/full-metadata/spec CAS, and admits only its exact
+prepared/intent/started projections. Unknown replies only observe; a definite
+rejection may prepare again. The first restart requires a fresh complete stopped
+recovery barrier. Subsequent writes still require globally fenced mode, every
+local recovery guard, revoked machine credentials, exact effective legacy rights,
+fresh two-sided journal drain, and the stopped gateway's read-only authority and
+process inventory. Running the exact old workload is no longer interpreted as a
+surviving successor, without relaxing the original all-stopped retirement check.
+Originally dormant workloads and the gateway remain unchanged. The
+`pool_legacy_restart_staged_closed` result asserts neither runtime health nor
+permission to reopen; restored runtime readiness and guard reopening are separate.
+
+The fixed legacy settings challenge is separate from successor qualification. It
+requires the original non-global controller/actuator settings, service runtime
+profile and management mode, with no successor pool, submission source or profile
+catalog. Actual typed runtime loaders answer a fresh challenge without printing
+settings or credentials. Retained Pod identity/readiness is checked before and
+after each probe, and the original spec cannot be substituted. These read-only
+primitives neither release an admission guard nor authorize a rollback by themselves.
+The closed restart runtime barrier consumes only a completed, anchored restart,
+then probes the actual retained manager and every participant's controller,
+service and active actuator. It checks their backend and legacy settings, plus
+actuator telemetry availability, with recovery closure and exact workload/journal readbacks
+before and after. Dormant roots and the stopped gateway are not started or probed
+as active legacy consumers. Guard reopening uses a separate parent phase.
+
+The internal legacy-reopening child anchors the completed restart and records an
+ordered `prepared`/`intent`/`released` phase for every participant. Only a saved
+intent can account for an observed open guard; unrelated open or foreign guards
+fail qualification. Each release has durable intent before one fixed dispatch,
+and unknown replies only observe. Reopening the first participant does not require
+stopping its newly admitted legacy work to reopen the others: only still-fenced
+local journals must be idle. The global pool remains terminally fenced, machine
+credentials revoked and the successor gateway stopped with read-only authority.
+The same actual legacy runtime probes run under this journal-derived partial-open
+barrier; the original all-closed readiness check remains strict. The final result
+reports legacy intake open only after every release settles and fresh runtime and
+authority checks pass. It never opens global admission or rewrites the original
+activation/restart receipts. This remains an internal protected-operation phase,
+not a standalone rollback or release command.
+
+The internal terminal handoff derives its outcome from these anchored journals,
+never from a caller-selected mode. Global completion requires completed startup,
+pool opening and every local release, with no recovery evidence. Legacy completion
+requires the complete restoration/reopening chain. The receipt freezes the exact
+request digest, phase bytes and UID-bearing stable workload snapshots; it adds no
+live mutation. Repeated completion validates rather than rewrites the receipt or
+its ancestors. An interrupted local receipt write can finish only the identical
+anchor-bound bytes after fresh qualification. Current retained authority, workload
+identities, pool mode and open guards are rechecked; legacy completion additionally
+requires revoked machine credentials, a stopped read-only gateway and drained
+global effects, without draining legitimate reopened legacy work. Historical
+loading does not contact the cluster or replay any operation. This is terminal
+phase/identity evidence, not fresh runtime or installed multi-owner acceptance;
+the result explicitly withholds that claim. Protected entry and refresh consumers
+must still qualify the baseline before using it for live operations.
+The private predecessor reader binds that receipt to its original completed
+management upgrade and exact cutover input hash. It derives the manager's pool
+catalog operation from global completion (or retains the non-pool configuration
+after legacy restoration), preserving the original workload UID and credentials.
+The existing strict refresh renderer validates the derived configuration against
+the recorded manager. No caller-supplied post-cutover manager is accepted, and
+reading this baseline neither replays installation nor authorizes a live refresh.
+Ordinary refresh completion contracts may retain this qualified pool baseline.
+Their cumulative configuration and runtime checks are rooted in that baseline,
+not a caller-provided `before` snapshot, and still preserve the original manager
+UID. Repeated ordinary refreshes retain bounded root/pool/immediate evidence;
+cross-kind pool/refresh loading rejects cycles and excessive ancestry. Historical
+non-pool contracts remain byte-compatible. A pool-backed refresh requires the
+exact bound pool authority verifier, even if a request omits the inherited
+baseline. The protected refresh entry acquires that separately scoped reader for
+the operation and closes its credentials and transports on success or failure;
+the retained manager-only resource reader does not gain pool-namespace scope.
+The separate read-only active-pool database proof requires exact global mode,
+installation, epoch, participant and machine registrations, and current unrevoked
+credentials. It permits waiting, reserved and active requests without changing
+them. Its bound transport rechecks the management backend, credential identity
+and operator authority around the read. This does not relax the closed-mode
+startup proof or by itself qualify live refresh workloads and permissions.
+The manager-only refresh projection reuses the anchored parent and switch
+readers. It admits both sides only while a retirement or activation write is
+uncertain, and requires the recorded activation prerequisites before accepting
+the new manager. The original installation, immediate completed predecessor,
+pool baseline and any superseded failed refresh are requalified; every other
+pool workload retains its completed-cutover identity. This projection alone
+does not supply the still-required live authority verification.
+The connected read-only manager-backend and writer-inventory checks can consume
+that bound projection. They match the actual upgraded manager, not a substituted
+old observation, while preserving the common API-server revision for workload
+and permission inventory and the original database credential identities.
+The dedicated read-only pool refresh verifier composes those checks with exact
+retained material, participant database roles, physical provider scope and
+effective gateway permissions. An open global pool retains current active
+authority and open participant guards without requiring idle work. A completed
+rollback instead retains the fenced and drained global ledger, revoked machine
+credentials and a stopped, process-drained read-only gateway; reopened legacy
+owners may keep working. Fresh full workload and authority readbacks bracket
+each qualification. The result is not a persisted or reusable write permit.
+The refresh installer requalifies it in preflight, immediately before actual
+resource creation and manager patches, around activation qualification and
+before public completion. It does not require child journals during earlier
+identity or dry-run calls. Unknown writes retain their existing observation-only
+recovery contract. Bootstrap evidence stays bound to the original installation,
+while current candidate/provider prerequisites are bound to the qualified refresh;
+a later pool catalog does not rewrite or relax the bootstrap contract. This is
+source-level upgrade support, not installed pool or multi-owner acceptance.
+The fixed protected tooling bundle includes the pool readers and their recovery
+dependencies. Refresh tooling qualification imports that dependency chain before
+declaring the bundle usable, without reading private installation inputs or
+opening cluster/provider connections; checkout imports cannot satisfy that proof.
+
+The internal complete-operation adapter composes closure, startup, opening and
+the terminal receipt under one per-operation dispatch lock. Replays select the
+newest recorded phase (including an anchor without its state file) and let that
+child validate its full predecessor chain; they never restart closure after
+startup or closed recovery after legacy owners reopen. Rollback is an explicit
+direction, not a response to an uncertain network result. Completed global
+ancestry cannot be cancelled in place, and an install replay cannot reverse a
+rollback already in progress. Preflight reads retained scope without dispatching
+or claiming readiness. The private entry reloads its exact inputs before opening
+transports. Protected `nebius-rollout` exposes only whole-operation preflight,
+installation and explicit rollback, using a dedicated exact-bundle key and
+operation metadata. It exposes no individual phase command. A terminal report
+binds the operation UUID, outcome and completion digest, and explicitly reports
+`acceptance_verified: false`; installed multi-owner acceptance remains separate.
+
+The internal recovery-release database primitive is distinct from the original
+activation release: it can remove only `pool-recovery:<operation>` for the exact
+candidate. It takes the admission lock and the guard row lock, then freshly
+checks the same six local activity/outbox counters as recovery-drain observation
+before deleting the guard. Queued work without a handoff is retained. A missing
+or foreign guard, active work, unresolved handoff or schema mismatch rolls back
+the transaction. It emits one identity-bound report; its bound transport rechecks
+the retained database and operator authority and never retries an unknown reply.
+This primitive does not establish restored runtime health or authorize reopening
+by itself. The anchored rollback parent must supply those barriers and durable
+intent before using it; no standalone deployment command exposes it.
+
+The startup stage does not open admission or claim a working execution pool,
+and is not exposed as an independent deployment command. The complete protected
+operation connects activation, uncertain-start rollback and charged-effect
+cleanup; subsequent manager refresh qualifies the completed pool baseline.
+Installed runtime/collector acceptance still requires live verification.
+
 Once runtime replacement starts, recovery must not replay the original retirement
 or fencing installer against the changed templates. The parent instead qualifies
 the anchored child hashes, held guards, restricted roles, current effective rules
 and each exact stopped old or journaled new workload. It rechecks every frozen
 producer before further mutations, including partial replacement recovery.
+Pure input-derived migration contracts and manifests use bounded, single-entry
+reuse keyed by complete type-sensitive request snapshots. Nested input changes
+are requalified and returned documents are detached. Each call captures a fresh
+flat graph with local references, so shared subobjects are inspected once without
+expanding or comparing repeated subtrees; alias changes also invalidate reuse.
+This does not cache journal
+reads, cluster identities, effective permissions, database observations or write
+outcomes. Per-request transport scope checks compare the retained inputs and
+still read the live cluster and namespace identities on every check. Image
+admission continues to qualify against the current clock; collector settings
+come only from retained inputs and explicit defaults, never operator environment
+variables or local secret files.
 Kubernetes previews qualify defaults before UID/resource-version/spec-fenced
 updates; uncertain updates are observed, never retried. Immutable material and
 gateway resource creation retain the existing single-create journals. The
@@ -2438,8 +3140,9 @@ successor-refresh authority remain required; this internal parent is not a
 standalone operational command or evidence of an installed usable pool.
 
 Actuator telemetry uses the qualified Node's private `InternalIP` and fixed
-kubelet HTTPS `/stats/summary` endpoint. The cluster CA verifies the serving
-certificate and the renewable runtime bearer authorizes GET `nodes/stats`;
+kubelet HTTPS `/stats/summary` endpoint. It requires the serving certificate to
+validate against the configured cluster CA; clusters using a separate kubelet CA
+may therefore have unavailable samples. The renewable runtime bearer authorizes GET `nodes/stats`;
 GET `nodes` supplies endpoint identity. The reader preserves cumulative CPU,
 sampled memory and filesystem counters without retaining foreign Pod data.
 It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
@@ -2455,28 +3158,46 @@ and summary authorization **inside each retained ordinary and guest actuator Pod
 before controller retirement. It qualifies the Deployment/ReplicaSet/Pod lineage,
 fixed ServiceAccount, loaded namespace/target settings and complete Node inventory,
 then calls the production direct reader with each selected Node's exact UID.
-Operator credentials never enter the Pod. Only nonnegative CPU, memory and
-filesystem counter availability qualifies; foreign Pod statistics and credentials
-are not returned. Changed Pod or Node identities and incomplete inventories reject
-the check. Existing images without the UID-aware reader require an ordinary
+Operator credentials never enter the Pod. Nonnegative CPU, memory and filesystem
+counters establish sample availability; foreign Pod statistics and credentials
+are not returned. A positively identified direct-kubelet TLS, HTTP, network or
+authorization failure, or missing/invalid counters after summary identity is
+verified, records unavailable telemetry rather than blocking installation.
+API failures, ambiguous exception provenance, malformed probe output, wrong-node
+summaries, unqualified addresses/credentials, incompatible readers and client-close
+failures still block. Changed Pod or Node identities and incomplete inventories
+reject the check even after a sampling warning. Existing images without the UID-aware reader require an ordinary
 protected rollout followed by refreshed inputs; there is no node-proxy fallback.
 
 The check covers all current physical-pool Nodes plus the actuator's hosting Node.
 At scale zero, the hosting Node still tests runtime authority/TLS/network without
 requesting a worker or creating an idle reservation. This does not prove reachability
-of future workers; collector/startup and real-task acceptance must qualify those
-when they appear. Recovery skips execution in a stopped Pod only when the same
+of future workers. Collector/startup and real-task acceptance still qualify capacity
+and execution when they appear; sampling failures retain the same optional semantics.
+Recovery skips execution in a stopped Pod only when the same
 anchored parent already qualifies its exact stopped or rewired template; it never
 restarts a retired controller just to run a probe. Successor startup remains a
 separate barrier before admission can reopen.
+
+Protected pool results carry `telemetry` with `status` (`available`, `unavailable`
+or `not_observed`), bounded `checks` and `unavailable` counts, and finite sanitized
+`reasons`. Counts are runtime-node checks, not unique machines; re-probing an actuator
+replaces its earlier observation only after Pod/Node/contract rechecks. No probes
+means `not_observed`, never healthy or zero usage. This field survives both protected
+gateway filters, including startup, activation and legacy recovery. Historical
+reports may omit it; omission is not proof of availability.
+Scheduling authority remains authenticated Node/Pod inventory, resource requests,
+provider quota and reservation accounting, not sampled usage. Inference-usage
+acceptance and complete-measurement requirements for resource calibration are
+unchanged. Unavailable samples do not establish durable kubelet trust integration.
 
 The standalone platform rollout checks for existing global participant settings
 and retained pool-retirement markers before any mutation and again under its idle
 guard. It refuses to overwrite these with legacy controller configuration or
 direct-writer roles, including a cutover that completes between those checks.
-This fail-closed boundary does not implement the protected successor refresh:
-durable runtime/catalog/token bindings and staged database permissions still must
-be preserved and qualified by that connected path before global activation.
+This fail-closed boundary does not authorize a participant software refresh or
+reset its pool bindings. Ordinary manager refresh uses the separate pool-aware
+reader described above; participant changes need their own protected lifecycle.
 
 Receipt storage and transition constraints alone are not Kubernetes cleanup proof
 or installed global admission. The fixed gateway verifier supplies the qualified
@@ -2484,8 +3205,9 @@ absence/output-drain and settled-create evidence before recording cleanup.
 The registry authenticates dedicated machine identities and must
 validate all workload kinds and serialize physical-pool admission. The current
 single-environment controllers do not switch writers merely because these tables
-exist; connected admission, installation of the production pool collector, durable local handoff
-and protected no-dual-writer migration remain required before activation.
+exist. The protected operation installs and qualifies the production pool
+collector, connected admission and durable local handoff before opening intake;
+an installed acceptance claim still requires live evidence.
 
 ## Native task-image capacity fairness
 

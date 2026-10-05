@@ -6230,3 +6230,104 @@ async def test_rerun_failed_rejects_old_conflicting_selection_and_keeps_parent(
         assert parent.combinations == combinations
         assert s.execute(select(Batch).where(Batch.rerun_of_batch_id == batch_id)).first() is None
     sync_engine.dispose()
+
+
+@pytest.mark.usefixtures("hosted_environment")
+async def test_execution_selection_dry_run_resolves_or_rejects_without_writing(
+    camp_setup: tuple[FastAPI, str, UUID],
+    postgres_url: str,
+) -> None:
+    """#2314: one submission reports every axis conflict; dry run never writes."""
+    app, raw, team_id = camp_setup
+    task_id = "local/execution-selection-dry-run"
+    target_id = "nebius-execution-selection-dry-run"
+    profile = _service_execution_runtime_profile()
+    app.state.settings = app.state.settings.model_copy(update={
+        "service_execution_runtime_profile_json": json.dumps(profile.model_dump(mode="json")),
+    })
+    execution_class_spec = NEBIUS_CPU_EXECUTION_CLASS_V1.model_dump(mode="json")
+    sync_engine = create_engine(postgres_url)
+    sl = sessionmaker(sync_engine)
+    with sl() as s:
+        s.execute(delete(Worker))
+        s.add(ServiceExecutionClass(
+            id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+            schema_version=NEBIUS_CPU_EXECUTION_CLASS_V1.schema_version,
+            spec_json=execution_class_spec, spec_sha256=canonical_digest(execution_class_spec),
+            enabled=True,
+        ))
+        s.add(ServiceExecutionTarget(
+            id=target_id, logical_pool_id="nebius-cpu",
+            execution_class_id=NEBIUS_CPU_EXECUTION_CLASS_V1.class_id,
+            schema_version="loom.execution-target.v1", spec_json={"health_stale_after_seconds": 60},
+            spec_sha256="sha256:" + "e" * 64, environment="development", provider="nebius",
+            region="eu-north1", failure_domain="eu-north1-a", data_residency="eu",
+            desired_state="active", observed_state="ready", health_status="healthy",
+            health_observed_at=datetime.now(UTC),
+        ))
+        s.execute(insert(Task).values(
+            id=task_id, checksum="c" * 64, config=_automatic_service_execution_task_config(task_id),
+            source="s3://artifacts/task-inputs/task/",
+            source_provenance={"service_execution_input": {
+                "schema_version": "loom.service-execution-input.v1",
+                "manifest_uri": "s3://artifacts/task-inputs/task.json",
+                "manifest_sha256": "sha256:" + "d" * 64, "file_count": 3, "total_bytes": 4096,
+            }},
+            license="MIT",
+        ))
+        s.commit()
+        batches_before = s.scalar(select(func.count()).select_from(Batch))
+
+    connection_id = _seed_connection(postgres_url, team_id, "gpt-5")
+
+    def payload(**trial: object) -> dict[str, object]:
+        return {
+            "name": "execution-selection-dry-run",
+            "purpose": "evaluation",
+            "provider_connection_id": connection_id,
+            "task_filter": {"subset_kind": "explicit", "task_ids": [task_id]},
+            "trial_config": {
+                "agent_name": "direct-completion",
+                "agent_model": {"provider": "openai", "name": "gpt-5", "source": "api"},
+                **trial,
+            },
+            "backend": "nebius",
+            "budget_policy": "none",
+        }
+
+    headers = {"Authorization": f"Bearer {raw}"}
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as ac:
+            created = await ac.post("/api/v1/batches", headers=headers, json=payload(isolation="guest"))
+            rejected = await ac.post("/api/v1/batches/dry-run", headers=headers, json=payload(isolation="guest"))
+            accepted = await ac.post("/api/v1/batches/dry-run", headers=headers, json=payload(isolation="auto"))
+
+        assert created.status_code == 400, created.text
+        detail = created.json()["detail"]
+        assert detail["reason"] == "nebius_task_incompatible"
+        reasons = detail["rejection_reasons"][task_id]
+        assert "isolation_guest_response_only" in reasons and len(reasons) >= 2
+
+        assert rejected.status_code == 200, rejected.text
+        assert rejected.json()["accepted"] is False
+        assert rejected.json()["rejection_reasons"] == {task_id: reasons}
+        assert rejected.json()["rejected_task_ids"] == [task_id]
+
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["accepted"] is True
+        assert accepted.json()["tasks"] == [{"task_id": task_id, "trials": [{
+            "harness": {"name": "direct-completion", "version": None},
+            "network_policy": {"kind": "gateway-only"},
+            "verification": "separate",
+            "isolation": "container",
+        }]}]
+        with sl() as s:
+            assert s.scalar(select(func.count()).select_from(Batch)) == batches_before
+    finally:
+        with sl() as s:
+            s.execute(delete(Task).where(Task.id == task_id))
+            s.execute(delete(ServiceExecutionTarget).where(ServiceExecutionTarget.id == target_id))
+            s.execute(delete(ServiceExecutionClass).where(
+                ServiceExecutionClass.id == NEBIUS_CPU_EXECUTION_CLASS_V1.class_id))
+            s.commit()
+        sync_engine.dispose()

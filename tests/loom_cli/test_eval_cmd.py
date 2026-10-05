@@ -3945,3 +3945,139 @@ def test_batch_request_preserves_server_authority(mock_server: MockServer) -> No
     )
     assert main(["eval", "batch", "create", "--request-json", '{"purpose":"evaluation","team_id":"other-team"}']) != 0
     assert len(mock_server) == 1
+
+
+def _execution_config(tmp_path: Path, **axes: Any) -> str:
+    path = tmp_path / "execution.json"
+    path.write_text(json.dumps({"schema_version": "loom.execution-selection.v1", **axes}))
+    return str(path)
+
+
+def test_batch_create_execution_config_maps_all_four_axes(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(201, json={
+        "batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted",
+        "created_at": "2026-06-16T00:00:00Z",
+    })
+    config = _execution_config(
+        tmp_path,
+        harness={"name": "terminus-2", "version": "2026.06.1"},
+        network_policy={"mode": "web-allowlist", "allow": ["https://pypi.org"]},
+        verification="shared",
+        isolation="guest",
+    )
+    rc = main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--provider", "openai-prod",
+        "--model", "gpt-4o", "--benchmark", "terminal-bench", "--execution-config", config,
+    ])
+    assert rc == 0
+    trial_config = json.loads(mock_server[-1].content)["trial_config"]
+    assert trial_config["agent_name"] == "terminus-2"
+    assert trial_config["agent_version"] == "2026.06.1"
+    assert trial_config["verifier_env_mode"] == "shared"
+    assert trial_config["isolation"] == "guest"
+    assert trial_config["baseline_network_policy_override"] == {
+        "kind": "web-allowlist", "destinations": [{"host": "pypi.org", "protocol": "https"}],
+    }
+    capsys.readouterr()
+
+
+def test_batch_create_execution_config_auto_isolation_is_omitted(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches")] = httpx.Response(201, json={
+        "batch_id": _BATCH_ID, "expected_trial_count": 1, "state": "submitted",
+        "created_at": "2026-06-16T00:00:00Z",
+    })
+    config = _execution_config(tmp_path, isolation="auto")
+    assert main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--provider", "openai-prod",
+        "--model", "gpt-4o", "--agent", "terminus-2", "--benchmark", "terminal-bench",
+        "--execution-config", config,
+    ]) == 2
+    assert "omit --agent" in capsys.readouterr().err
+    config = _execution_config(tmp_path, harness={"name": "terminus-2"}, isolation="auto")
+    assert main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--provider", "openai-prod",
+        "--model", "gpt-4o", "--benchmark", "terminal-bench", "--execution-config", config,
+    ]) == 0
+    trial_config = json.loads(mock_server[-1].content)["trial_config"]
+    assert "isolation" not in trial_config and "agent_version" not in trial_config
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--agent-version", "2026.06.1"],
+        ["--network-policy", "public-web"],
+        ["--verifier-env-mode", "separate"],
+    ],
+)
+def test_batch_create_execution_config_conflicts_with_axis_flags(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], tmp_path: Path, flags: list[str],
+) -> None:
+    config = _execution_config(tmp_path, isolation="container")
+    rc = main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--benchmark", "terminal-bench",
+        "--execution-config", config, *flags,
+    ])
+    assert rc == 2
+    assert f"omit {flags[0]}" in capsys.readouterr().err
+    assert len(mock_server) == 0
+
+
+def test_batch_create_execution_config_rejects_unknown_fields(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    config = _execution_config(tmp_path, isolation="vm")
+    with pytest.raises(SystemExit) as exc:
+        main(["eval", "batch", "create", "--purpose", "evaluation", "--execution-config", config])
+    assert exc.value.code == 2
+    assert "invalid execution config" in capsys.readouterr().err
+
+
+def test_batch_create_dry_run_prints_every_rejection_and_creates_nothing(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches/dry-run")] = httpx.Response(200, json={
+        "dry_run": True, "accepted": False, "backend": "nebius", "tasks": [],
+        "rejection_reasons": {"tb/a": ["isolation_guest_response_only", "agent_version_not_in_runtime_profile"]},
+    })
+    config = _execution_config(tmp_path, harness={"name": "terminus-2"}, isolation="guest")
+    rc = main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--provider", "openai-prod",
+        "--model", "gpt-4o", "--benchmark", "terminal-bench", "--execution-config", config, "--dry-run",
+    ])
+    assert rc == 0
+    assert not any(r.url.path == "/api/v1/batches" for r in mock_server.requests)
+    out = capsys.readouterr().out
+    assert "rejected" in out
+    assert "tb/a: isolation_guest_response_only, agent_version_not_in_runtime_profile" in out
+
+
+def test_batch_create_dry_run_prints_resolved_axes(
+    mock_server: MockServer, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_connection_lookup(mock_server)
+    mock_server.canned[("POST", "/api/v1/batches/dry-run")] = httpx.Response(200, json={
+        "dry_run": True, "accepted": True, "backend": "nebius", "rejection_reasons": {},
+        "tasks": [{"task_id": "tb/a", "trials": [{
+            "harness": {"name": "terminus-2", "version": None},
+            "network_policy": {"kind": "gateway-only"},
+            "verification": "separate", "isolation": "container",
+        }]}],
+    })
+    assert main([
+        "eval", "batch", "create", "--purpose", "evaluation", "--provider", "openai-prod",
+        "--model", "gpt-4o", "--agent", "terminus-2", "--benchmark", "terminal-bench", "--dry-run",
+    ]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "tb/a: harness=terminus-2@default network=gateway-only verification=separate isolation=container"
+        in out
+    )

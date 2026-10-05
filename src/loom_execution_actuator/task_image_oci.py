@@ -12,7 +12,7 @@ import stat
 import tarfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 _MAX_BYTES = 3 * 1024**3
 _MAX_MEMBERS = 10000
@@ -93,7 +93,10 @@ def _validate_image(
     *,
     members: Mapping[str, _BlobMember],
     read_json: Any,
+    architecture: Literal["amd64", "arm64"],
 ) -> None:
+    if architecture not in {"amd64", "arm64"}:
+        raise NativeOCIArchiveError("OCI requested architecture is unsupported")
     layout = read_json("oci-layout")
     if layout.get("imageLayoutVersion") != "1.0.0":
         raise NativeOCIArchiveError("OCI layout version is unsupported")
@@ -106,8 +109,8 @@ def _validate_image(
     manifest_name = _descriptor(image, members, {_MANIFEST})
     if "platform" in image:
         platform = image["platform"]
-        if not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != "amd64":
-            raise NativeOCIArchiveError("OCI image platform must be linux/amd64")
+        if not isinstance(platform, dict) or platform.get("os") != "linux" or platform.get("architecture") != architecture:
+            raise NativeOCIArchiveError(f"OCI image platform must be linux/{architecture}")
     manifest = read_json(manifest_name)
     if (manifest.get("schemaVersion") != 2 or manifest.get("mediaType", _MANIFEST) != _MANIFEST
             or not isinstance(manifest.get("layers"), list) or "subject" in manifest):
@@ -116,8 +119,8 @@ def _validate_image(
     for layer in manifest["layers"]:
         _descriptor(layer, members, _LAYERS)
     config = read_json(config_name)
-    if config.get("os") != "linux" or config.get("architecture") != "amd64":
-        raise NativeOCIArchiveError("OCI image configuration must be linux/amd64")
+    if config.get("os") != "linux" or config.get("architecture") != architecture:
+        raise NativeOCIArchiveError(f"OCI image configuration must be linux/{architecture}")
     rootfs = config.get("rootfs")
     if (not isinstance(rootfs, dict) or rootfs.get("type") != "layers"
             or not isinstance(rootfs.get("diff_ids"), list)
@@ -126,7 +129,7 @@ def _validate_image(
         raise NativeOCIArchiveError("OCI image root filesystem metadata is incomplete")
 
 
-def _validate(archive: tarfile.TarFile, archive_size: int) -> None:
+def _validate(archive: tarfile.TarFile, archive_size: int, *, architecture: Literal["amd64", "arm64"]) -> None:
     members: dict[str, tarfile.TarInfo] = {}
     total = 0
     for member in archive:
@@ -155,11 +158,12 @@ def _validate(archive: tarfile.TarFile, archive_size: int) -> None:
     _validate_image(
         members=members,
         read_json=lambda name: _json(archive, members, name),
+        architecture=architecture,
     )
 
 
-def validate_native_oci_archive(path: Path) -> None:
-    """Require a bounded, local, single linux/amd64 OCI image before Skopeo.
+def validate_native_oci_archive(path: Path, *, architecture: Literal["amd64", "arm64"] = "amd64") -> None:
+    """Require a bounded, local, single OCI image for the specified Linux platform.
 
     The caller must keep the build volume immutable throughout validation and
     publication; sequential init containers and a read-only publisher mount do
@@ -170,7 +174,7 @@ def validate_native_oci_archive(path: Path) -> None:
         if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= _MAX_BYTES:
             raise NativeOCIArchiveError("OCI archive must be a bounded regular file")
         with tarfile.open(path, "r:") as archive:
-            _validate(archive, metadata.st_size)
+            _validate(archive, metadata.st_size, architecture=architecture)
     except NativeOCIArchiveError:
         raise
     except (OSError, tarfile.TarError, ValueError, RecursionError) as error:
@@ -187,7 +191,7 @@ class _DirMember:
         return True
 
 
-def validate_native_oci_directory(path: Path) -> None:
+def validate_native_oci_directory(path: Path, *, architecture: Literal["amd64", "arm64"] = "amd64") -> None:
     """Require a bounded OCI layout directory (BuildKit tar=false) before Skopeo.
 
     Same layout rules as the archive validator; walks the filesystem without
@@ -232,7 +236,7 @@ def validate_native_oci_directory(path: Path) -> None:
                 raise NativeOCIArchiveError("OCI metadata is truncated")
             return _json_bytes(data)
 
-        _validate_image(members=members, read_json=read_json)
+        _validate_image(members=members, read_json=read_json, architecture=architecture)
     except NativeOCIArchiveError:
         raise
     except (OSError, ValueError, RecursionError) as error:

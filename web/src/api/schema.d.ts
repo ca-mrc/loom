@@ -805,6 +805,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/batches/dry-run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry Run Batch
+         * @description Run batch admission and resolve every axis without writing anything.
+         */
+        post: operations["dry_run_batch_api_v1_batches_dry_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/batches/{batch_id}": {
         parameters: {
             query?: never;
@@ -4083,6 +4103,15 @@ export interface components {
         } & {
             [key: string]: unknown;
         };
+        /** DryRunTaskSelection */
+        DryRunTaskSelection: {
+            /** Task Id */
+            task_id: string;
+            /** Trials */
+            trials: components["schemas"]["ResolvedExecutionSelection"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** ExecutionContainerAllocation */
         ExecutionContainerAllocation: {
             limits: components["schemas"]["ExecutionResourceValues"];
@@ -5839,6 +5868,25 @@ export interface components {
              */
             vla_interface_version: "behavior_b1k_websocket_v1";
         };
+        /** PostBatchesDryRunResponse */
+        PostBatchesDryRunResponse: {
+            /** Accepted */
+            accepted: boolean;
+            /** Backend */
+            backend: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Rejected Task Ids */
+            rejected_task_ids: string[];
+            /** Rejection Reasons */
+            rejection_reasons: {
+                [key: string]: string[];
+            };
+            /** Tasks */
+            tasks: components["schemas"]["DryRunTaskSelection"][];
+        } & {
+            [key: string]: unknown;
+        };
         /** PostBatchesIdCancelResponse */
         PostBatchesIdCancelResponse: {
             /** Batch Id */
@@ -6402,6 +6450,35 @@ export interface components {
             score_outcome: string;
             /** Task Id */
             task_id: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** ResolvedExecutionSelection */
+        ResolvedExecutionSelection: {
+            harness: components["schemas"]["ResolvedHarness"];
+            /**
+             * Isolation
+             * @enum {string}
+             */
+            isolation: "container" | "guest";
+            /** Network Policy */
+            network_policy: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Verification
+             * @enum {string}
+             */
+            verification: "shared" | "separate";
+        } & {
+            [key: string]: unknown;
+        };
+        /** ResolvedHarness */
+        ResolvedHarness: {
+            /** Name */
+            name: string;
+            /** Version */
+            version: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -7496,6 +7573,7 @@ export interface components {
             diagnosis?: components["schemas"]["DiagnosisReport"];
             /** Estimated Cost Usd */
             estimated_cost_usd?: number | null;
+            execution_phases?: components["schemas"]["TrialExecutionPhases"] | null;
             /** Failure Reason */
             failure_reason: string | null;
             /** Finished At */
@@ -7771,6 +7849,71 @@ export interface components {
             started_at?: string;
             /** State */
             state: "waiting" | "running" | "terminated";
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialExecutionPhase */
+        TrialExecutionPhase: {
+            /** Allocated Cost Microusd */
+            allocated_cost_microusd: number | null;
+            /** Cost State */
+            cost_state: string | null;
+            /** Estimated Cost Microusd */
+            estimated_cost_microusd: number | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Lease Id */
+            lease_id: string | null;
+            /** Phase */
+            phase: "agent" | "awaiting_verifier" | "verifier";
+            /** Released At */
+            released_at: string | null;
+            requested: components["schemas"]["TrialExecutionPhaseRequested"] | null;
+            /** Reserved At */
+            reserved_at: string | null;
+            /** Reserved Seconds */
+            reserved_seconds: number | null;
+            /** Retry */
+            retry: number;
+            /** Started At */
+            started_at: string | null;
+            /** State */
+            state: string;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialExecutionPhaseRequested */
+        TrialExecutionPhaseRequested: {
+            /** Cpu Millis */
+            cpu_millis: number;
+            /** Ephemeral Storage Mib */
+            ephemeral_storage_mib: number;
+            /** Memory Mib */
+            memory_mib: number;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialExecutionPhases */
+        TrialExecutionPhases: {
+            /** Handoff Gap Seconds */
+            handoff_gap_seconds: number | null;
+            /** Handoff Storage Bytes */
+            handoff_storage_bytes: number | null;
+            /** Phases */
+            phases: components["schemas"]["TrialExecutionPhase"][];
+            /** Reservation Overlap Seconds */
+            reservation_overlap_seconds: number | null;
+            /** Reserved Seconds */
+            reserved_seconds: number;
+            /**
+             * Schema Version
+             * @constant
+             */
+            schema_version: "loom.service-execution-phases.v1";
+            /** Verifier Execution */
+            verifier_execution: string | null;
+            /** Verifier State */
+            verifier_state: string | null;
         } & {
             [key: string]: unknown;
         };
@@ -10294,6 +10437,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PostBatchesResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dry_run_batch_api_v1_batches_dry_run_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["_CreateBatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PostBatchesDryRunResponse"];
                 };
             };
             /** @description Validation Error */

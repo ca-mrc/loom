@@ -1385,6 +1385,10 @@ def test_manifest_root_shard_salt_is_bound_to_measured_collection_balance() -> N
     assert {(pin.path, pin.shard_index) for pin in policy.pins} == {
         ("tests/ops/test_ci_secret_isolation.py", 0),
         ("tests/ops/test_component_ownership_manifest.py", 1),
+        ("tests/ops/test_nebius_pool_role_restoration_live.py", 4),
+        ("tests/ops/test_nebius_pool_template_restoration_live.py", 5),
+        ("tests/ops/test_nebius_pool_predecessor_live.py", 7),
+        ("tests/ops/test_nebius_pool_refresh_connected.py", 3),
     }
 
 
@@ -1977,6 +1981,29 @@ def test_all_image_ownership_covers_every_local_copy_input() -> None:
                 ):
                     missing.append((component.id, path))
     assert not missing, missing
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/loom/application_image_build.py",
+        "src/loom/application_session.py",
+        "src/loom/application_source.py",
+        "src/loom/application_source_archive.py",
+        "src/loom/application_source_upload.py",
+        "src/loom/native_image_build.py",
+        "src/loom/nebius_application_contract.py",
+        "src/loom/nebius_environment_contract.py",
+        "src/loom/nebius_management_authority.py",
+        "src/loom/nebius_pool_application_image.py",
+    ],
+)
+def test_application_build_dependency_changes_select_actuator_image(path: str) -> None:
+    manifest = component_ownership.load_manifest(REPO_ROOT / "config/component-ownership.toml")
+    selected = component_ownership.select_release_image_matrix(
+        manifest, changed_paths=(path,), force_all=False, image_set="nebius",
+    )
+    assert "execution-actuator" in {entry["image"] for entry in selected}
 
 
 @pytest.mark.parametrize(

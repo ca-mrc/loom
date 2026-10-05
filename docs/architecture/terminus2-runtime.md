@@ -128,9 +128,10 @@ execution lease with frozen runtime plan
 The hosted controller owns Harbor, model calls, typed events and native Harbor
 artifacts. Terminal commands and task file operations execute in
 `task-sandbox`. Shared verification later reuses that sandbox. Separate mode
-commits the public workspace and has a deferred verifier-plan compiler, but the
-automatic child-lease reservation is not wired yet; its on-demand lifecycle is
-tracked by [#2212](https://github.com/qianyi-sun/loom/issues/2212).
+commits the public workspace, releases the agent pod, and grades in a verifier
+lease the control plane reserves on demand
+([#2212](https://github.com/qianyi-sun/loom/issues/2212)). That lease restores
+the committed workspace from the handoff input before the fixed verifier runs.
 
 Harbor artifacts copied into the trial sandbox:
 

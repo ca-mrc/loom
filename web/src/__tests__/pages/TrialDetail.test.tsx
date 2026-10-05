@@ -589,6 +589,56 @@ describe("TrialDetail trajectory section", () => {
     expect(screen.getByText(/no canonical bundle is available/)).toBeInTheDocument();
   });
 
+  it("shows the agent, unreserved wait, and verifier phases of a separate-mode trial", async () => {
+    const phase = {
+      retry: 0,
+      reserved_at: "2026-09-28T21:40:00Z", started_at: "2026-09-28T21:40:05Z",
+      finished_at: "2026-09-28T21:41:38Z", released_at: "2026-09-28T21:41:40Z",
+      estimated_cost_microusd: null, allocated_cost_microusd: null, cost_state: "reserved",
+    };
+    fetchSpy({ ok: true, body: { events: [], next_cursor: null } }, {
+      ...TRIAL_BODY, state: "running",
+      materialization: {
+        state: "not_started", lifecycle_stage: "verifying", compute_state: "succeeded",
+        output_commit_state: "committed", canonical_ready: false,
+        backend: "nebius", pool_id: "nebius-cpu", execution_state: "deleted",
+        attempts: 0, source_cleanup_state: "not_ready", source_cleanup_attempts: 0,
+        atif_sha256: null, trajectory_sha256: null, committed_at: null,
+        next_attempt_at: null, output_committed_at: "2026-09-28T21:41:37Z", pod_scheduled_at: null,
+        pod_started_at: null, pod_terminated_at: null, started_at: null,
+        submitted_at: "2026-09-28T21:40:00Z", source_bundle: null,
+        source_cleanup_error_message: null, source_retain_until: null, error: null, bundle: null,
+      },
+      execution_phases: {
+        schema_version: "loom.service-execution-phases.v1",
+        verifier_execution: "separate_execution",
+        verifier_state: "committed",
+        phases: [
+          { ...phase, phase: "agent", lease_id: "agent-lease", state: "deleted", reserved_seconds: 100,
+            requested: { cpu_millis: 2000, memory_mib: 4096, ephemeral_storage_mib: 2048 } },
+          { ...phase, phase: "awaiting_verifier", lease_id: null, state: "complete", reserved_seconds: 0,
+            reserved_at: null, released_at: null, requested: null, cost_state: null },
+          { ...phase, phase: "verifier", lease_id: "verifier-lease", state: "deleted", reserved_seconds: 60,
+            requested: { cpu_millis: 500, memory_mib: 1024, ephemeral_storage_mib: 2048 } },
+          { ...phase, phase: "verifier", retry: 1, lease_id: "verifier-retry", state: "deleted",
+            reserved_seconds: 30, requested: { cpu_millis: 500, memory_mib: 1024, ephemeral_storage_mib: 2048 } },
+        ],
+        handoff_gap_seconds: 17,
+        reservation_overlap_seconds: 0,
+        handoff_storage_bytes: 4096,
+        reserved_seconds: 160,
+      },
+    });
+    renderWithProviders(<Routes><Route path="/trials/:trialId" element={<TrialDetail />} /></Routes>,
+      { route: `/trials/${TRIAL_ID}` });
+    const section = await screen.findByRole("region", { name: "Execution phases" });
+    expect(section).toHaveTextContent("Awaiting verifier: complete · nothing reserved");
+    expect(section).toHaveTextContent("Verifier: deleted · reserved 60s · 0.5 CPU, 1 GiB memory");
+    expect(section).toHaveTextContent("Verifier (retry 1): deleted · reserved 30s");
+    expect(section).toHaveTextContent("Handoff gap17s");
+    expect(section).toHaveTextContent("Reservation overlap0s");
+  });
+
   it("keeps a Nebius trial active while materializing and downloads the complete bundle", async () => {
     const fetchMock = fetchSpy(
       { ok: true, body: { events: [], next_cursor: null } },

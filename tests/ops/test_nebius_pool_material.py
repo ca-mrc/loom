@@ -11,8 +11,10 @@ from uuid import uuid4
 import httpx
 import pytest
 from scripts.ops.nebius_ingress_stage import _key
+from tests.integration.test_nebius_pool_installation import add_application_builder
 from tests.ops.test_nebius_management_stage import PhaseAPI
 from tests.ops.test_nebius_pool_migration import migration_request
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 
 
 def material():
@@ -28,6 +30,23 @@ def material():
 
 class MaterialAPI(PhaseAPI):
     key = staticmethod(_key)
+
+
+def test_builder_credential_is_delivered_only_to_management_not_controllers_or_execution(build_inputs):
+    from scripts.ops.nebius_pool_material import machine_documents
+
+    from loom_service.pool_management.installation import PoolInstallation
+
+    request, tokens = material()
+    config, identity, secret = add_application_builder(request.registration.spec.model_dump(mode="json"), build_inputs[0].recipe)
+    request = replace(request, registration=replace(request.registration, spec=PoolInstallation.model_validate(config)))
+    documents = machine_documents(request, tokens | {identity: secret})
+    selected = [row for row in documents.values() if row["metadata"]["name"] == "loom-pool-machine-" + identity.hex]
+    assert len(documents) == 9 and len(selected) == 1
+    assert selected[0]["metadata"]["namespace"] == request.registration.binding.namespace
+    import base64
+
+    assert base64.b64decode(selected[0]["data"]["token"]).decode() == secret
 
 
 def test_deliver_exact_hash_qualified_machine_tokens_without_rotation(tmp_path):

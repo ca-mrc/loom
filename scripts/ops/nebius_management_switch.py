@@ -195,7 +195,7 @@ class HTTPSManagementSwitchAPI(HTTPSApplicationSetupAPI):
 
 
 def _stable(document: dict[str, Any]) -> dict[str, Any]:
-    return _canonical_quantities(_snapshot(document))
+    return _canonical_quantities(_snapshot(document), detached=True)
 
 
 def _target(request: ManagementSwitchRequest) -> tuple[dict[str, Any], str]:

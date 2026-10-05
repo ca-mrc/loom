@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -130,6 +130,8 @@ class NodeResourceAllocationV1(_Strict):
 
 
 class ProcessPhaseV1(_Strict):
+    # Shared by plan validation and compiler transport selection.
+    MAX_ENV_VALUE_BYTES: ClassVar[int] = 4096
     role: Literal["setup", "agent", "verifier"]
     argv: tuple[str, ...] = Field(min_length=1, max_length=128)
     working_directory: str = Field(pattern=r"^(?:/app|/workspace(?:/[-A-Za-z0-9._]+)*)$")
@@ -160,7 +162,7 @@ class ProcessPhaseV1(_Strict):
         for name, item in value.items():
             if _ENV_NAME.fullmatch(name) is None or _SECRET_ENV.search(name):
                 raise ValueError("process environment contains a forbidden name")
-            if "\x00" in item or len(item.encode("utf-8")) > 4096:
+            if "\x00" in item or len(item.encode("utf-8")) > cls.MAX_ENV_VALUE_BYTES:
                 raise ValueError("process environment value is invalid")
         return value
 
@@ -194,11 +196,14 @@ class ProbeV1(_Strict):
 
 
 class GuestExecutionV1(_Strict):
-    """Exact task-declared capabilities implemented inside one private guest."""
+    """Exact task-declared capabilities implemented inside one private guest.
+
+    Empty capabilities describe a plain guest selected by ``isolation=guest``.
+    """
 
     schema_version: Literal["loom.guest-execution.v1"] = "loom.guest-execution.v1"
     runtime: Literal["qemu-tcg-v1"] = "qemu-tcg-v1"
-    capabilities: tuple[GuestExecutionCapability, ...] = Field(min_length=1, max_length=4)
+    capabilities: tuple[GuestExecutionCapability, ...] = Field(max_length=4)
 
     @field_validator("capabilities")
     @classmethod
@@ -819,8 +824,10 @@ def validate_runtime_plan_requirements(
                              if requirements.execution_requirements else ())
     expected_guest = ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared_capabilities)
     guests = [sidecar.guest_execution for sidecar in plan.sidecars if sidecar.guest_execution is not None]
-    if bool(guests) != bool(expected_guest) or bool(guests) != (
-        requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL
+    # A forced plain guest has a guest kernel without declared capabilities;
+    # declared capabilities always require one.
+    if bool(guests) != (requirements.isolation_level == IsolationLevel.DEDICATED_GUEST_KERNEL) or (
+        expected_guest and not guests
     ):
         raise ValueError("runtime guest plan does not match workload isolation and capabilities")
     if guests:

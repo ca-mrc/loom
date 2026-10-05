@@ -12,7 +12,7 @@ from loom.family_run.spec import FamilyRunSpec
 from loom.models.mcp import MCPConnection
 from loom.models.networking import NetworkPolicy
 from loom.models.skill import SkillRef
-from loom.models.types import AgentVersion, ModelSpec, VerifierEnvMode
+from loom.models.types import AgentVersion, IsolationSelection, ModelSpec, VerifierEnvMode
 from loom.request_params import sanitize_request_extras
 
 MixPolicy = Literal[
@@ -215,6 +215,10 @@ class TrialConfig(BaseModel):
     delete_env: bool = True
     skip_verifier: bool = False
     verifier_env_mode: VerifierEnvMode | None = None
+    # #2314: an admission-checked isolation override. ``None``/``auto`` keeps
+    # the task-derived class; ``guest`` forces the QEMU guest class and
+    # ``container`` the ordinary one. It never relaxes declared requirements.
+    isolation: IsolationSelection | None = None
 
     # Timeouts — `override_*` replaces task default; `*_multiplier` scales the resolved value
     override_agent_timeout_sec: float | None = Field(default=None, gt=0)
@@ -267,6 +271,12 @@ class TrialConfig(BaseModel):
     # Clone / exact replay / failed-case rerun: inherit the persisted
     # K1/K2/seed plan, or resample a new one. Exact replay defaults inherit.
     model_switch_plan_mode: Literal["inherit", "resample"] | None = None
+
+    @field_validator("isolation", mode="before")
+    @classmethod
+    def _auto_is_the_default(cls, value: Any) -> Any:
+        # Plans embed the trial without defaults; "auto" must not change them.
+        return None if value == "auto" else value
 
     @field_validator("request_params", mode="before")
     @classmethod

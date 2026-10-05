@@ -27,6 +27,11 @@ COPY src/loom/nebius_pool_allocation.py src/loom/nebius_pool_contract.py \
     src/loom/nebius_pool_native_runtime.py src/loom/nebius_pool_priority.py \
     src/loom/nebius_pool_settings.py src/loom/nebius_pool_task_image.py \
     src/loom/nebius_pool_workload.py src/loom/execution_resource_allocation.py ./src/loom/
+COPY src/loom/application_image_build.py src/loom/application_session.py \
+    src/loom/application_source.py src/loom/application_source_archive.py \
+    src/loom/application_source_upload.py src/loom/native_image_build.py \
+    src/loom/nebius_application_contract.py src/loom/nebius_environment_contract.py \
+    src/loom/nebius_management_authority.py src/loom/nebius_pool_application_image.py ./src/loom/
 COPY src/loom/driver/__init__.py src/loom/driver/task_image.py ./src/loom/driver/
 COPY src/loom/family_run/__init__.py src/loom/family_run/spec.py ./src/loom/family_run/
 COPY src/loom/trajectory/__init__.py src/loom/trajectory/storage.py ./src/loom/trajectory/

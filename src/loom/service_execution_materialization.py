@@ -21,6 +21,7 @@ from pydantic import (
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_contract import (
+    effective_guest_capabilities,
     evaluate_execution_admission,
     nebius_cpu_execution_class,
     nebius_guest_execution_class,
@@ -69,6 +70,7 @@ from loom.task_sandbox_planner import (
     guest_capabilities,
     plan_admissions,
 )
+from loom.verifier_runtime import resolve_verifier_env_mode
 
 
 def uses_runner_task_image(task: TaskConfig, trial: TrialConfig) -> bool:
@@ -182,6 +184,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     agent_image_ref: str | None = None
     agent_runtime_bindings: tuple[AgentRuntimeBindingV1, ...] = ()
     supports_task_web_egress: bool = False
+    supports_task_artifact_inputs: bool = Field(default=False, exclude_if=lambda value: not value)
     controller_resources: ControllerComputeResourcesV1 | None = None
     resource_allocation_policy: Literal["node-share-v1"] | None = None
     default_task_resource_requests: ExecutionResourceRequestsV1 | None = None
@@ -270,6 +273,7 @@ def build_nebius_runtime_profile(
     agent_image_ref: str | None = None,
     controller_resources: ControllerComputeResourcesV1 | None = None,
     supports_task_web_egress: bool = False,
+    supports_task_artifact_inputs: bool = False,
     service_lifecycle_ready: bool = False,
     supports_task_identity: bool = False,
     guest_runtime: Literal["qemu-tcg-v1"] | None = None,
@@ -298,6 +302,7 @@ def build_nebius_runtime_profile(
         controller_resources=controller_resources,
         supports_task_web_egress=supports_task_web_egress,
         service_lifecycle_ready=service_lifecycle_ready,
+        supports_task_artifact_inputs=supports_task_artifact_inputs,
         supports_task_identity=supports_task_identity,
         guest_runtime=guest_runtime,
         supports_emulated_pkcs11=supports_emulated_pkcs11,
@@ -428,11 +433,22 @@ def automatic_service_execution_rejections(
     reasons.extend(item.code for item in execution_requirement_diagnostics(
         env.execution_requirements, supported_capabilities=supported_capabilities,
     ))
-    if guest_capabilities(task):
+    if trial.isolation == "container" and guest_capabilities(task):
+        # A task that needs a guest kernel cannot run safely in a shared kernel.
+        reasons.append("isolation_container_unsatisfiable")
+    if effective_guest_capabilities(task, trial) is not None:
         if not controller:
-            reasons.append("guest_private_sandboxes_required")
+            reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
+                           else "guest_private_sandboxes_required")
         elif spec is not None and not spec.required_driver_capabilities <= GUEST_SANDBOX_DRIVER_CAPABILITIES:
             reasons.append("guest_driver_capabilities_unsupported")
+        # The guest path grades in a fresh verifier guest, not the agent's live
+        # sandbox. Reject an explicit request for that until it is supported;
+        # task-authored shared guest tasks keep their historical topology.
+        if resolve_verifier_env_mode(task, trial) == "shared" and (
+            trial.isolation == "guest" or trial.verifier_env_mode == "shared"
+        ):
+            reasons.append("isolation_guest_shared_unsupported")
         if env.sidecars:
             reasons.append("guest_sidecars_unsupported")
         for user in (env.user, task.verifier.user):
@@ -443,7 +459,8 @@ def automatic_service_execution_rejections(
             if identity is None or identity.run_as_user != 0 or identity.run_as_group != 0:
                 reasons.append("guest_root_identity_required")
         admission = evaluate_execution_admission(
-            workload_requirements_from_task(task, trial if network_override_supported else None),
+            workload_requirements_from_task(task, trial if network_override_supported else trial.model_copy(
+                update={"baseline_network_policy_override": None})),
             nebius_guest_execution_class(
                 supports_emulated_pkcs11="emulated_pkcs11_authentication" in supported_capabilities,
             ),
@@ -693,6 +710,10 @@ def compile_service_execution_plan(
         ),
         "LOOM_EFFECTIVE_NETWORK_POLICY_JSON": effective_network_policy_json,
     }
+    if (profile.supports_task_artifact_inputs
+            and len(main_environment["LOOM_TASK_ARTIFACTS_JSON"].encode("utf-8")) > ProcessPhaseV1.MAX_ENV_VALUE_BYTES):
+        del main_environment["LOOM_TASK_ARTIFACTS_JSON"]
+        main_environment["LOOM_TASK_ARTIFACTS_FROM_INPUT"] = "1"
     verifier_path = str(task.verifier.args.get("script_path", ""))
     verifier = ProcessPhaseV1(
         role="verifier",
@@ -868,7 +889,12 @@ def runtime_profile_rejections(
     task: TaskConfig, trial: TrialConfig, profile: ServiceExecutionRuntimeProfileV1,
     *, allow_task_image_preparation: bool = False,
 ) -> tuple[str, ...]:
-    """Submission and scheduling share the profile's image/agent compatibility."""
+    """Submission and scheduling share the profile's image/agent compatibility.
+
+    Every applicable reason is returned, in a fixed order whose first element
+    is the most specific one; callers that surface a single error use it.
+    """
+    reasons: list[str] = []
     try:
         effective_network_policy = resolve_effective_network_policy(
             baseline=task.environment.baseline_network_policy,
@@ -876,40 +902,76 @@ def runtime_profile_rejections(
             override=trial.baseline_network_policy_override,
         )
     except UnsupportedNetworkPolicyOverrideError:
-        return ("network_policy_override_not_supported",)
-    if guest_capabilities(task):
+        reasons.append("network_policy_override_not_supported")
+        effective_network_policy = task.environment.baseline_network_policy
+    guest = effective_guest_capabilities(task, trial) is not None
+    if guest:
         if profile.guest_runtime is None:
-            return ("guest_runtime_unavailable",)
-        if (profile.guest_runtime_volume_mib or profile.runtime_volume_mib) < 1024:
-            return ("guest_runtime_volume_too_small",)
+            reasons.append("guest_runtime_unavailable")
+        elif (profile.guest_runtime_volume_mib or profile.runtime_volume_mib) < 1024:
+            reasons.append("guest_runtime_volume_too_small")
         if not profile.supports_task_identity:
-            return ("task_identity_runtime_unavailable",)
+            reasons.append("task_identity_runtime_unavailable")
     if hosted_http_egress(effective_network_policy) is not None and not profile.supports_task_web_egress:
-        return ("task_egress_runtime_unavailable",)
+        reasons.append("task_egress_runtime_unavailable")
     spec = hosted_harness(trial.agent_name)
     if trial.agent_version is not None and (
         spec is None or not spec.supports("pinned_versions")
         or controller_image_for_trial(profile, trial) is None
     ):
-        return ("agent_version_not_in_runtime_profile",)
+        reasons.append("agent_version_not_in_runtime_profile")
+    if trial.agent_version is not None and any(
+        binding.compatibility_error() is not None
+        for binding in profile.agent_runtime_bindings
+        if (binding.agent_name, binding.agent_version) == (trial.agent_name, trial.agent_version)
+    ):
+        reasons.append("agent_runtime_bridge_incompatible")
     if spec is None or spec.controller_image == "service-runner":
         # A pinned image must be the deployed runner image; a task that leaves
         # it unset runs in whichever runner image the plan freezes (#2054).
-        return (() if uses_runner_task_image(task, trial)
-                or task.environment.docker_image == profile.task_image_ref
-                else ("task_image_not_in_runtime_profile",))
+        if not (uses_runner_task_image(task, trial) or task.environment.docker_image == profile.task_image_ref):
+            reasons.append("task_image_not_in_runtime_profile")
+        return tuple(dict.fromkeys(reasons))
     if _requires_task_identity(task) and not profile.supports_task_identity:
-        return ("task_identity_runtime_unavailable",)
+        reasons.append("task_identity_runtime_unavailable")
     if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
-        return ("service_lifecycle_runtime_unavailable",)
+        reasons.append("service_lifecycle_runtime_unavailable")
     agent_image = controller_image_for_trial(profile, trial)
-    if agent_image is None:
-        return ("terminus_controller_unavailable",)
+    # An unpinnable version already explains the missing controller image.
+    if agent_image is None and "agent_version_not_in_runtime_profile" not in reasons:
+        reasons.append("terminus_controller_unavailable")
     admitted = {item.statement.image_ref for item in profile.image_admission.admissions}
     preparing = allow_task_image_preparation and task.environment.dockerfile is not None
-    if (not preparing and task.environment.docker_image not in admitted) or agent_image not in admitted:
-        return ("task_image_not_in_runtime_profile",)
-    return ()
+    if (not preparing and task.environment.docker_image not in admitted) or (
+        agent_image is not None and agent_image not in admitted
+    ):
+        reasons.append("task_image_not_in_runtime_profile")
+    return tuple(dict.fromkeys(reasons))
+
+
+def execution_selection_rejections(
+    task: TaskConfig,
+    trial: TrialConfig,
+    profile: ServiceExecutionRuntimeProfileV1 | None,
+    *,
+    source_provenance: dict[str, Any],
+    allow_task_image_preparation: bool = False,
+) -> tuple[str, ...]:
+    """Every reason the selected harness, network policy, verification and
+    isolation cannot run together for this task on this deployment (#2314)."""
+
+    reasons = list(automatic_service_execution_rejections(
+        task, trial, source_provenance=source_provenance,
+        allow_task_image_preparation=allow_task_image_preparation,
+        supported_capabilities=profile.supported_guest_capabilities if profile is not None else frozenset(),
+    ))
+    if profile is None:
+        reasons.append("runtime_profile_unavailable")
+    else:
+        reasons.extend(runtime_profile_rejections(
+            task, trial, profile, allow_task_image_preparation=allow_task_image_preparation,
+        ))
+    return tuple(dict.fromkeys(reasons))
 
 
 _HANDOFF_ARCHIVE = ".loom/workspace.tar"

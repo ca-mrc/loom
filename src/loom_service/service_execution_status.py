@@ -46,6 +46,9 @@ def service_execution_lifecycle_stage(
         return "admission_blocked"
     if output_commit_state == "uploading" or observed_state in {"finalizing", "finalized"}:
         return "verifying"
+    # A separate-mode attempt released its pod and awaits or runs its verifier lease.
+    if output_commit_state == "committed" and observed_state in {"delete_pending", "deleted"}:
+        return "verifying"
     if observed_state == "running":
         return "running"
     if observed_state in {"creating", "created", "starting"}:
@@ -78,6 +81,11 @@ def service_execution_lifecycle_case() -> Any:
         (
             (ServiceExecutionLease.output_commit_state == "uploading")
             | ServiceExecutionLease.observed_state.in_(("finalizing", "finalized")),
+            "verifying",
+        ),
+        (
+            (ServiceExecutionLease.output_commit_state == "committed")
+            & ServiceExecutionLease.observed_state.in_(("delete_pending", "deleted")),
             "verifying",
         ),
         (ServiceExecutionLease.observed_state == "running", "running"),

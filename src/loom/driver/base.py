@@ -121,9 +121,9 @@ class DriverResourceSnapshot:
 class ExecHandle:
     """Long-running process handle returned by Driver.exec_streaming.
 
-    Caller iterates stdout/stderr (async; chunks of any size), then
-    `await handle.wait()` for the exit code. Driver implementations
-    buffer nothing — chunks flow through. No 10 MB cap.
+    Caller drains stdout/stderr concurrently (async; chunks of any size), then
+    `await handle.wait()` for the exit code. Transport buffers are bounded;
+    slow consumers apply backpressure. Stream length has no 10 MB cap.
     """
 
     pid: int

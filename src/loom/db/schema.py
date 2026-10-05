@@ -38,6 +38,10 @@ from sqlalchemy.dialects.postgresql import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from loom.db.base import Base
+from loom.db.nebius_application_build_schema import NebiusApplicationBuild as NebiusApplicationBuild
+from loom.db.nebius_application_build_schema import (
+    NebiusApplicationBuildAttempt as NebiusApplicationBuildAttempt,
+)
 from loom.db.nebius_application_cloud_schema import (
     NebiusApplicationCloudEffect as NebiusApplicationCloudEffect,
 )
@@ -55,6 +59,9 @@ from loom.db.nebius_application_operation_schema import (
 )
 from loom.db.nebius_application_schema import NebiusApplication as NebiusApplication
 from loom.db.nebius_application_schema import NebiusDeploymentNameClaim as NebiusDeploymentNameClaim
+from loom.db.nebius_application_source_schema import (
+    NebiusApplicationSourceUpload as NebiusApplicationSourceUpload,
+)
 from loom.db.nebius_environment_schema import NebiusEnvironment as NebiusEnvironment
 from loom.db.nebius_environment_schema import (
     NebiusEnvironmentNamespace as NebiusEnvironmentNamespace,
@@ -3460,9 +3467,11 @@ class ExecutionAdmissionReservation(Base):
             "attempt",
             "execution_role",
             unique=True,
+            # A released verifier slot leaves uniqueness so a retry can be admitted.
             postgresql_where=text(
-                "state = 'active' OR owner_kind <> 'legacy_worker_claim' "
-                "OR release_reason IS DISTINCT FROM 'trial_setup_refund'"
+                "(state = 'active' OR owner_kind <> 'legacy_worker_claim' "
+                "OR release_reason IS DISTINCT FROM 'trial_setup_refund') "
+                "AND (execution_role <> 'verifier' OR state = 'active')"
             ),
         ),
         Index(
@@ -4233,7 +4242,12 @@ class ServiceExecutionLease(Base):
             "trial_id",
             "attempt",
             "execution_role",
+            "verifier_retry",
             name="execution_leases_trial_attempt_role_uidx",
+        ),
+        CheckConstraint(
+            "verifier_retry >= 0 AND (execution_role = 'verifier' OR verifier_retry = 0)",
+            name="execution_leases_verifier_retry_check",
         ),
         Index(
             "execution_leases_trial_authoritative_uidx",
@@ -4279,6 +4293,7 @@ class ServiceExecutionLease(Base):
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_role: Mapped[str] = mapped_column(Text, nullable=False, default="attempt")
+    verifier_retry: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     parent_lease_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("execution_leases.id", ondelete="RESTRICT"),
@@ -4537,7 +4552,12 @@ class ExecutionCostReservation(Base):
             "trial_id",
             "attempt",
             "execution_role",
+            "verifier_retry",
             name="execution_cost_reservations_trial_attempt_role_uidx",
+        ),
+        CheckConstraint(
+            "verifier_retry >= 0 AND (execution_role = 'verifier' OR verifier_retry = 0)",
+            name="execution_cost_reservations_verifier_retry_check",
         ),
         Index("execution_cost_reservations_pool_state_idx", "pool_id", "state", "acquired_at"),
         Index("execution_cost_reservations_team_time_idx", "team_id", "acquired_at"),
@@ -4563,6 +4583,7 @@ class ExecutionCostReservation(Base):
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     execution_role: Mapped[str] = mapped_column(Text, nullable=False)
+    verifier_retry: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     pool_id: Mapped[str] = mapped_column(Text, nullable=False)
     target_id: Mapped[str] = mapped_column(
         Text, ForeignKey("execution_targets.id", ondelete="RESTRICT"), nullable=False

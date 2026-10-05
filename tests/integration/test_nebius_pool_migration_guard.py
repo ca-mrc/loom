@@ -75,7 +75,7 @@ def test_cutover_reads_actual_schema_and_empty_backlog_without_database_changes(
     api, state, connection, _ = cutover_database
     before = connection.execute('SELECT * FROM public.nebius_rollout_guard').fetchall()
     assert api.cutover_readiness_page(state.target, after=None) == {
-        'status': 'observed', 'schema_revision': '0172', 'rows': []}
+        'status': 'observed', 'schema_revision': '0174', 'rows': []}
     assert connection.execute('SELECT * FROM public.nebius_rollout_guard').fetchall() == before
 
 
@@ -158,7 +158,7 @@ def test_cutover_qualifies_schema_guard_and_disconnected_application_credentials
     else:
         # No personal application session exists. A still-valid key can create
         # one later, so stopping application Pods is not credential retirement.
-        migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0172')
+        migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0174')
     with pytest.raises(PoolMigrationError):
         api.cutover_readiness_page(state.target, after=None)
 
@@ -167,7 +167,7 @@ def test_cutover_accepts_retired_and_drained_application_access_without_erasing_
     api, state, connection, _ = cutover_database
     access = migration_access[2]
     application, incarnation = uuid4(), uuid4()
-    access.grant(application, incarnation, 1, token_urlsafe(48), schema_revision='0172')
+    access.grant(application, incarnation, 1, token_urlsafe(48), schema_revision='0174')
     access.revoke(application, incarnation, 1)
     assert access.drain(application, incarnation, 1)
     history = connection.execute('SELECT * FROM loom_application_access.generations').fetchall()
@@ -200,7 +200,7 @@ def test_cutover_does_not_trust_a_replaced_application_readiness_routine(cutover
     from scripts.ops.nebius_pool_migration import PoolMigrationError
 
     api, state, connection, _ = cutover_database
-    migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0172')
+    migration_access[2].grant(uuid4(), uuid4(), 1, token_urlsafe(48), schema_revision='0174')
     connection.execute("""CREATE OR REPLACE FUNCTION loom_application_access.migration_ready() RETURNS boolean
         LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS 'BEGIN RETURN TRUE; END'""")
     assert connection.execute('SELECT loom_application_access.migration_ready()').fetchone() == (True,)

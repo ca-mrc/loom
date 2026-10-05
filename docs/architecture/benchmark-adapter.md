@@ -523,9 +523,9 @@ get cleaned up via `rmtree` on the next call.
   unittest TestCase as a pytest file
 - `structured_verifier_script(script_body, out_dir)` — write a
   script-verifier shim. The body must emit a `VerifierResult` JSON object to
-  `LOOM_VERIFIER_OUTPUT`; derive task/artifact paths from the script location
-  or explicit paths such as `/workspace`, because `ScriptVerifier` only
-  guarantees the output env var.
+  `LOOM_VERIFIER_OUTPUT`; Loom prepares its parent directory. Use
+  `LOOM_TASK_DIR` or explicit paths for task inputs and artifacts, following
+  the [verifier protocol](verifier-protocol.md#script-verifier-bundle-contract).
 - `embed_base64_image(image_bytes, alt_text)` — for multimodal
   benchmarks (SWE-Bench Multimodal)
 - `download_files_from_record(...)` — fetch per-instance assets
@@ -745,6 +745,15 @@ diagnostic to
 `full_setup_diagnostic_path` in the persisted message. The message keeps
 the build summary and trailing log output with a `truncated setup
 diagnostic` marker instead of preserving only the prefix.
+
+For retained local-worker execution, task-bundle preparation has a configurable
+300-second default deadline (`LOOM_WORKER_TASK_MATERIALIZE_TIMEOUT_SEC`). A
+timeout or storage failure before execution is reported through the same Trial
+detail and list APIs, with a `task materialization` diagnostic and the source
+scheme. Error details pass through secret redaction before publication. The
+pre-start heartbeat remains active during preparation; failed materialization
+removes its temporary directory. Existing retry classification and limits
+decide whether setup requeues or fails terminally.
 
 Sync (UPSERT into the `benchmarks` + `tasks` tables) runs:
 
