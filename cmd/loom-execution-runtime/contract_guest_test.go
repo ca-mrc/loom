@@ -62,8 +62,19 @@ func TestGuestPlanStrictRoundTripAndOrdinaryOmission(t *testing.T) {
 	}
 }
 
+func TestPlainGuestWithoutDeclaredCapabilitiesIsAccepted(t *testing.T) {
+	p := guestPlanPayload(t)
+	for _, item := range p["sidecars"].([]any) {
+		item.(map[string]any)["guest_execution"].(map[string]any)["capabilities"] = []any{}
+	}
+	raw, _ := json.Marshal(p)
+	if _, err := decodePlan(raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
-	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image", "skipped_verifier", "separate_verifier"} {
+	for _, damage := range []string{"ordinary_class", "missing_guest", "one_guest", "empty_caps", "missing_caps", "unknown_cap", "different_caps", "duplicate_caps", "unsorted_caps", "nonroot", "short_volume", "wrong_socket", "wrong_probe", "small_memory", "small_storage", "small_cpu", "bad_timeout", "foreign_sidecar", "wrong_schema", "wrong_runtime", "missing_controller", "storage_unreserved", "small_request", "wrong_image", "skipped_verifier", "separate_verifier"} {
 		t.Run(damage, func(t *testing.T) {
 			p := guestPlanPayload(t)
 			sides := p["sidecars"].([]any)
@@ -94,6 +105,10 @@ func TestGuestPlanRejectsPartialOrUnsafeAuthority(t *testing.T) {
 				delete(s, "guest_execution")
 			case "empty_caps":
 				g["capabilities"] = []any{}
+			case "missing_caps":
+				for _, x := range sides {
+					delete(x.(map[string]any)["guest_execution"].(map[string]any), "capabilities")
+				}
 			case "unknown_cap":
 				g["capabilities"] = []any{"external_cluster"}
 			case "different_caps":

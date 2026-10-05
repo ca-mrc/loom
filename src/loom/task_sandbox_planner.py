@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from loom.execution_contract import nebius_guest_execution_class
+from loom.execution_contract import effective_guest_capabilities, nebius_guest_execution_class
 from loom.execution_image_admission import ExecutionImageAdmissionBundleV1
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES, GuestExecutionCapability
 from loom.execution_runtime_contract import (
@@ -133,9 +133,10 @@ class _Topology:
 
 
 def _topology(task: TaskConfig, trial: TrialConfig) -> _Topology:
-    capabilities = guest_capabilities(task)
+    capabilities = effective_guest_capabilities(task, trial)
     return _Topology(
-        guest_execution=GuestExecutionV1(capabilities=tuple(sorted(capabilities))) if capabilities else None,
+        guest_execution=(GuestExecutionV1(capabilities=tuple(sorted(capabilities)))
+                         if capabilities is not None else None),
         shared=resolve_verifier_env_mode(task, trial) == "shared",
         retained_services=task.environment.service_lifecycle is not None,
     )

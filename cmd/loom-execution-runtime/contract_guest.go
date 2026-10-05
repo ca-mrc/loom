@@ -20,7 +20,7 @@ func (p plan) validateGuestExecution() error {
 		}
 		guests++
 		if !guestClass || !s.PrivateSandbox || (s.RoleName != "task-sandbox" && s.RoleName != "verifier-sandbox") ||
-			g.SchemaVersion != "loom.guest-execution.v1" || g.Runtime != "qemu-tcg-v1" || len(g.Capabilities) == 0 {
+			g.SchemaVersion != "loom.guest-execution.v1" || g.Runtime != "qemu-tcg-v1" || g.Capabilities == nil {
 			return fmt.Errorf("invalid guest execution authority")
 		}
 		for i, cap := range g.Capabilities {
