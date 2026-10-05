@@ -2242,6 +2242,13 @@ the Trial, consume an attempt, reserve admission/cost/capacity, or append a comm
 The legacy scheduler immediately reserves the compiled candidate. A global
 consumer must durably freeze its selected target and runtime before prepare, then
 recheck local authority when attaching the grant; compilation alone is not a lease.
+Both schedulers classify runtime-contract validation and unsupported deadlines as
+`service_execution_configuration_invalid`, without retaining private validation
+input. Shared-pool proposal compilation uses a savepoint: partial compiler writes
+roll back, and the terminal update clears stale scheduling diagnostics while the
+same transaction still locks the Trial, task and batch profile. No proposal,
+attempt or reservation is created for that failure, and later eligible work can
+proceed. Stale selections and temporary provisioning failures remain deferred.
 The execution outbox now retains that pre-claim proposal, including its prospective
 lease UUID, immutable request and Trial/source/target snapshot. Exact grant
 attachment rechecks eligibility and preserves existing local admission, image and

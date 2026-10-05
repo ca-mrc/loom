@@ -6,20 +6,14 @@ outbox rechecks the advisory scan under its existing exact-selection locks.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Protocol
-from uuid import UUID
 
-from sqlalchemy import text, update
+from sqlalchemy import text
 
-from loom.db.schema import Trial
 from loom.nebius_pool_allocation import PoolNodeAllocationRequestV1, PoolNodeAllocationV1
 from loom.nebius_rollout_guard import admission_open
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
-from loom_control_plane.service_execution_scheduler import (
-    _SERVICE_TRIAL_SQL,
-    ServiceExecutionConfigurationError,
-)
+from loom_control_plane.service_execution_scheduler import _SERVICE_TRIAL_SQL
 from loom_execution_actuator.pool_client import PoolRequestUnconfirmedError
 from loom_execution_actuator.pool_execution_outbox import (
     PoolExecutionHandoff,
@@ -53,15 +47,6 @@ class PoolExecutionSelector:
         if not self.targets:
             raise ValueError("global execution selection requires a registered trial target")
 
-    async def _configuration_failure(self, trial_id: UUID, error: ServiceExecutionConfigurationError,
-                                     now: datetime) -> None:
-        # Match normal queued configuration failure: no attempt, lease or spend.
-        async with self.outbox.sessions.begin() as session:
-            await session.execute(update(Trial).where(Trial.id == trial_id, Trial.state == "queued",
-                Trial.cancellation_requested_at.is_(None)).values(state="failed",
-                failure_reason="service_execution_configuration_invalid", failure_message=str(error),
-                finished_at=now, next_attempt_at=None))
-
     async def select_next(self) -> PoolExecutionHandoff | None:
         allocations = {}
         if self.allocation_reader is not None:
@@ -91,10 +76,7 @@ class PoolExecutionSelector:
                                 node_allocation=allocations.get(target_id))
                             if selected is not None:
                                 return selected
-                            break  # No runtime/image ready on any target for this candidate.
-                        except ServiceExecutionConfigurationError as error:
-                            await self._configuration_failure(candidate["id"], error, now)
-                            break
+                            break  # Candidate failed configuration/image checks or has no ready runtime.
                         except (ValueError, ExecutionProvisioningBlockedError) as error:
                             # A stale/incompatible candidate cannot hide later work.
                             # No HTTP or external writer is invoked by selection.

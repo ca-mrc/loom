@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.sql.dml import Update
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
-from loom.db.schema import Batch, Task, TaskImageMaterialization, Trial, TrialTaskImageMaterialization
+from loom.db.schema import (
+    Batch,
+    Task,
+    TaskImageMaterialization,
+    Trial,
+    TrialTaskImageMaterialization,
+)
 from loom_control_plane.execution_capacity import ExecutionProvisioningBlockedError
 from loom_control_plane.service_execution_scheduler import ServiceExecutionConfigurationError
 from tests.integration.test_nebius_pool_execution_controller import another_trial, connected

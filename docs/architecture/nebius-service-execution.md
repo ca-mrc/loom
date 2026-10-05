@@ -206,11 +206,13 @@ controller image matches the profile's qualified default controller. New
 candidate publication advertises it explicitly; queued batches are not silently
 upgraded.
 
-The environment-local scheduler isolates runtime-contract validation failures
-per queued trial. It records `service_execution_configuration_invalid`, clears
-stale scheduling progress, and proceeds to the next candidate without creating
+The environment-local and shared-pool schedulers isolate runtime-contract
+validation failures per queued trial. They record `service_execution_configuration_invalid`,
+clear stale scheduling progress, and proceed to the next candidate without creating
 an attempt, capacity reservation, or spend. The public diagnostic identifies the
-configuration boundary without exposing validation input values. Temporary
+configuration boundary without exposing validation input values. Shared-pool
+failures commit under the same Trial/task/profile locks used to compile the
+candidate, after partial compilation writes roll back. Temporary
 capacity and image-readiness waits retain their existing retry behavior.
 
 Shared and separate verification are properties of the private-sandbox plan,
