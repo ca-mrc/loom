@@ -53,6 +53,12 @@ function mockPickerEndpoints(
               versions: [
                 { agent_version: "harbor-v1", harbor_version: "0.1.0", loom_bridge_revision: "1" },
                 { agent_version: "harbor-v2", harbor_version: "0.2.0", loom_bridge_revision: "2" },
+                {
+                  agent_version: "harbor-0.18.0-nebius-44dbda72-b",
+                  harbor_version: "0.18.0", loom_bridge_revision: "1.0",
+                  readiness_status: "unavailable",
+                  readiness_message: "This published bridge rejects sandbox instance_id; choose a compatible published version.",
+                },
               ],
               needs_model: true,
               kind: "adapter",
@@ -299,6 +305,19 @@ describe("AgentModelPicker copy", () => {
 describe("Harbor agent versions", () => {
   beforeEach(() => { window.localStorage.setItem("loom_token", "t"); mockPickerEndpoints(); });
   afterEach(() => vi.restoreAllMocks());
+
+  it("disables an incompatible bridge and preserves a restored selection with its reason", async () => {
+    const version = "harbor-0.18.0-nebius-44dbda72-b";
+    renderPicker({ ...INITIAL_VALUE, agentName: "terminus-2", agentVersion: version }, true);
+    const option = await screen.findByRole("option", { name: new RegExp(version) });
+    expect(option).toBeDisabled();
+    expect(screen.getByLabelText("Agent version")).toHaveValue(version);
+    expect(await screen.findByRole("alert")).toHaveTextContent("rejects sandbox instance_id");
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText("Agent version"), "harbor-v2");
+    expect(screen.getByLabelText("Agent version")).toHaveValue("harbor-v2");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
 
   it("defaults to deployment version, preserves exact selection when copying, and clears on agent change", async () => {
     const user = userEvent.setup();
