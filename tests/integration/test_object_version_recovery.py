@@ -144,6 +144,10 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             index.update({f"{name}_uri": f"s3://{bucket}/{obj.object_key}",
                           f"{name}_sha256": obj.content_sha256,
                           f"{name}_size_bytes": obj.size_bytes, f"{name}_version_id": None})
+        if getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("historical_fields"):
+            for rows in (storage["files"], storage["source_evidence"], index["artifacts"]):
+                for row in rows:
+                    row.pop("version_id")
         state = "running" if getattr(request.node, "callspec", SimpleNamespace(params={})).params.get(
             "change") == "nonterminal" else "failed"
         trial.state, trial.failure_reason, trial.result = state, "verifier_error", {"reward": 0}
@@ -208,7 +212,8 @@ async def snapshot(r):
                 (trial.state, trial.failure_reason, trial.result, trial.attempt_count))
 
 
-async def test_preview_apply_and_replay_repair_every_published_mirror(recovery):
+@pytest.mark.parametrize("historical_fields", [False, True])
+async def test_preview_apply_and_replay_repair_every_published_mirror(recovery, historical_fields):
     r = recovery
     before = await snapshot(r)
     response = await r.client.post(URL, headers=HEADERS, json=r.payload)
