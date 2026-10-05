@@ -758,8 +758,10 @@ zero. Use the actual cluster's RFC1918 IPv4 or ULA IPv6 CIDRs, not the illustrat
 subnet above. Only TCP 10250 is accepted, and only the actuator receives this
 egress. Existing attachment inputs need this field before upgrading to the direct
 telemetry reader; there is no broad default route or node-proxy fallback. Rendering
-validates the route, but protected installed preflight must still prove CNI
-reachability, kubelet TLS and ServiceAccount authorization.
+validates the route; protected installed preflight separately probes CNI
+reachability, kubelet TLS and ServiceAccount authorization. Known direct-kubelet
+sampling failures produce unavailable-telemetry warnings. API access, Node/runtime
+identity and capacity checks remain mandatory; missing samples never imply zero usage.
 
 Render into a new directory with a separately reviewed staging capacity policy:
 

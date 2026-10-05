@@ -30,7 +30,6 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 @pytest.mark.timeout(600)
 def test_fixed_preflight_reads_kubelet_inside_production_actuator_image_without_operator_credentials(runtime_inputs, tmp_path, monkeypatch):
     from kubernetes import client
-    from scripts.ops.nebius_pool_migration import PoolMigrationError
     from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
 
     from loom_service.pool_management.installation import PoolInstallation
@@ -98,21 +97,23 @@ def test_fixed_preflight_reads_kubelet_inside_production_actuator_image_without_
             return json.loads(_run(cluster, 'kubectl', *args))
         monkeypatch.setattr(api, '_run', transport)
         api._runtime(target, original=original)  # Real Pod lineage and token defaults qualify.
-        with pytest.raises(PoolMigrationError) as denied:
-            api.qualify_runtime_telemetry(target, original=original)
-        assert denied.value.stage == 'runtime_telemetry_authorization' and len(commands) == 1
+        api.qualify_runtime_telemetry(target, original=original)
+        assert api.telemetry_report() == {'status': 'unavailable', 'checks': 1, 'unavailable': 1,
+            'reasons': ['kubelet_authorization']}
+        assert len(commands) == 1
         role['rules'].append({'apiGroups': [''], 'resources': ['nodes/stats'], 'verbs': ['get']})
         rbac.patch_cluster_role('pool-telemetry-reader', role)
         # Kubelet caches webhook authorization denials. Repeated fixed reads,
         # not repeated mutations or weaker credentials, observe propagation.
         deadline = time.monotonic() + 60
         while True:
-            try:
-                api.qualify_runtime_telemetry(target, original=original)
+            api.qualify_runtime_telemetry(target, original=original)
+            if api.telemetry_report() == {'status': 'available', 'checks': 1, 'unavailable': 0, 'reasons': []}:
                 break
-            except PoolMigrationError:
-                assert time.monotonic() < deadline, 'in-Pod nodes/stats authorization did not become usable'
-                time.sleep(1)
+            assert api.telemetry_report() == {'status': 'unavailable', 'checks': 1, 'unavailable': 1,
+                'reasons': ['kubelet_authorization']}
+            assert time.monotonic() < deadline, 'in-Pod nodes/stats authorization did not become usable'
+            time.sleep(1)
         assert all(row[12] == 'telemetry-node' and row[13] == core.read_node('telemetry-node').metadata.uid for row in commands)
         assert all('disposable-operator-transport' not in argument for row in commands for argument in row)
         # The production image/settings and projected authority ran; the

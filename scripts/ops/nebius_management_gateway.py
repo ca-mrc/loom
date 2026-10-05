@@ -64,6 +64,10 @@ REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
     "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
     "foundation", "shared_material", "platform_capacity", "publication", "cloud_identity", "public_route",
 })
+OPTIONAL_TELEMETRY_STAGES = frozenset({
+    'tls_kubelet', 'kubelet_authorization', 'kubelet_network', 'kubelet_http', 'counters',
+    *(f'tls_kubelet_verify_{code}' for code in range(256)),
+})
 DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
     "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
     "publication", "cloud_identity", "provider_quota", "backup_access", "public_route",
@@ -93,6 +97,7 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
             'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
             'authorization', 'network', 'http', 'reader', 'counters', 'close',
             'identity', 'address', 'authority', 'payload', 'tls_api', 'tls_kubelet',
+            *OPTIONAL_TELEMETRY_STAGES,
             *(f'tls_{transport}_verify_{code}' for transport in ('api', 'kubelet', 'unknown') for code in range(256))}),
         'management_database', 'provider', 'connected_scope', 'private_inputs'})})
 _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_management_entry import main; raise SystemExit(main(sys.argv[2], sys.argv[3]))"
@@ -364,6 +369,33 @@ def validate_capacity_report(value: dict[str, Any]) -> dict[str, Any]:
         raise GatewayError('invalid platform capacity diagnostic') from None
 
 
+def validate_telemetry_report(value: Any) -> dict[str, Any]:
+    """Bounded sampling availability only; never capacity or readiness authority."""
+    try:
+        if not isinstance(value, dict) or set(value) != {'status', 'checks', 'unavailable', 'reasons'}:
+            raise ValueError
+        status, checks, unavailable, reasons = (value[key] for key in ('status', 'checks', 'unavailable', 'reasons'))
+        if (type(checks) is not int or type(unavailable) is not int or not 0 <= unavailable <= checks < 2**31
+                or not isinstance(reasons, list) or len(reasons) > len(OPTIONAL_TELEMETRY_STAGES)
+                or any(not isinstance(reason, str) or reason not in OPTIONAL_TELEMETRY_STAGES for reason in reasons)
+                or reasons != sorted(set(reasons)) or len(reasons) > unavailable):
+            raise ValueError
+        if status == 'not_observed':
+            if checks or unavailable or reasons:
+                raise ValueError
+        elif status == 'available':
+            if not checks or unavailable or reasons:
+                raise ValueError
+        elif status == 'unavailable':
+            if not unavailable or not reasons:
+                raise ValueError
+        else:
+            raise ValueError
+        return {'status': status, 'checks': checks, 'unavailable': unavailable, 'reasons': list(reasons)}
+    except Exception:
+        raise GatewayError('invalid pool telemetry report') from None
+
+
 def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
     try:
         validate_operation(operation)
@@ -395,6 +427,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
                 raise ValueError()
             result["stage"] = value["stage"]
         if pool:
+            if 'telemetry' in value:
+                result['telemetry'] = validate_telemetry_report(value['telemetry'])
             if status == 'pending':
                 if value.get('phase') not in POOL_PHASES:
                     raise ValueError()

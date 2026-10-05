@@ -1314,9 +1314,14 @@ private `InternalIP` and GET `nodes/stats` for kubelet webhook authorization.
 It uses the cluster CA and renewable runtime bearer, never an administrator
 certificate, disabled TLS verification, redirect, ambient proxy or API-server
 `nodes/proxy` fallback. Execution Pods retain no Kubernetes API privilege.
-The protected cutover must qualify direct node reachability, serving-certificate
-trust and actual summary access before retiring writer authority; a source test
-does not establish that installed Nebius prerequisite.
+The protected cutover probes direct node reachability, serving-certificate trust
+and summary access before retiring writer authority. Known direct-kubelet sampling
+failures are reported as unavailable, not readiness or capacity failures. API
+access, exact runtime/Node identity, complete inventories, qualified TLS/bearer
+configuration and the fixed reader protocol remain mandatory. A source test does
+not establish installed sample availability. Clusters with a separate kubelet CA
+can operate without detailed samples; do not disable certificate checks to fill
+the gap or treat a static current-node CA snapshot as renewable autoscaling trust.
 
 Decode the HTTP JSON directly, preserving cumulative CPU, sampled memory and
 filesystem/container statistics. Reject a summary for another node or a body
