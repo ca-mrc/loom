@@ -719,7 +719,8 @@ def execute_pool_cutover(context: PoolCutoverContext, action: str) -> dict[str, 
         raise EntryError('pool operation private binding differs')
     try:
         with connected_pool_api(context) as parent:
-            return run_pool_operation(parent=parent, tokens=context.tokens, action=action)
+            result = run_pool_operation(parent=parent, tokens=context.tokens, action=action)
+            return {**result, 'telemetry': parent.guards.telemetry_report()}
     except PoolOperationError:
         raise
     except EntryError as error:
