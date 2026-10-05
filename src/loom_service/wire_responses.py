@@ -742,6 +742,7 @@ class BatchDetailServiceExecutionSummaryVariant0(TypedDict):
     lifecycle_stages: dict[str, int | float]
     output_commit_states: dict[str, int | float]
     materialization_states: dict[str, int | float]
+    execution_states: NotRequired[dict[str, int | float]]
     canonical_ready_count: int | float
 
 

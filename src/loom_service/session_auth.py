@@ -121,7 +121,23 @@ def browser_origin_allowed(request: Request, settings: LoomServiceSettings) -> b
         return False
 
 
-def verify_csrf(ctx: AuthContext, header_value: str | None) -> None:
+def session_csrf_token(ctx: AuthContext, raw_session: str | None) -> str:
+    """Return a stable read proof bound to the cookie and current CSRF nonce.
+
+    Hashes stored in the database cannot mint this proof: its HMAC key is the
+    actual HttpOnly cookie. Team switches and refreshes rotate the nonce.
+    """
+    if ctx.session_hash is None or ctx.csrf_hash is None or not raw_session:
+        raise HTTPException(status_code=401, detail="missing browser session")
+    digest = hmac.new(
+        raw_session.encode(), b"loom-session-csrf-v1\x00" + ctx.csrf_hash, hashlib.sha256,
+    ).hexdigest()
+    return f"loom_csrf_{digest}"
+
+
+def verify_csrf(
+    ctx: AuthContext, header_value: str | None, *, raw_session: str | None = None,
+) -> None:
     """Require a matching CSRF header for browser-session mutations.
 
     Bearer-token callers remain exempt because they are not authenticated by
@@ -131,8 +147,15 @@ def verify_csrf(ctx: AuthContext, header_value: str | None) -> None:
         return
     if ctx.csrf_hash is None or not header_value:
         raise HTTPException(status_code=403, detail="CSRF token required")
-    if not hmac.compare_digest(hash_secret(header_value), ctx.csrf_hash):
-        raise HTTPException(status_code=403, detail="CSRF token invalid")
+    # Keep the random proof returned by login/team/refresh valid until an auth
+    # transition, including clients opened before stable /me proofs existed.
+    if hmac.compare_digest(hash_secret(header_value), ctx.csrf_hash):
+        return
+    if raw_session and ctx.session_hash is not None and hmac.compare_digest(
+        header_value.encode(), session_csrf_token(ctx, raw_session).encode(),
+    ):
+        return
+    raise HTTPException(status_code=403, detail="CSRF token invalid")
 
 
 async def create_login_challenge(

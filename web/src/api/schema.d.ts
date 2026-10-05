@@ -3290,6 +3290,10 @@ export interface components {
         BatchDetailServiceExecutionSummaryVariant0: {
             /** Canonical Ready Count */
             canonical_ready_count: number;
+            /** Execution States */
+            execution_states?: {
+                [key: string]: number;
+            };
             /** Lease Count */
             lease_count: number;
             /** Lifecycle Stages */

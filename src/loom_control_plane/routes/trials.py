@@ -183,7 +183,7 @@ async def _browser_submitter(session: AsyncSession, request: Request) -> AuthCon
         except ValueError:
             raise HTTPException(status_code=401, detail="invalid session audience") from None
     ctx = require_human_or_admin(await verify_session_cookie(session, request.cookies.get("loom_session"), audience=audience))
-    verify_csrf(ctx, request.headers.get("X-Loom-CSRF"))
+    verify_csrf(ctx, request.headers.get("X-Loom-CSRF"), raw_session=request.cookies.get("loom_session"))
     require_scope(ctx, "submit")
     if ctx.team_id is not None and not is_admin(ctx):
         disabled_at = (await session.execute(

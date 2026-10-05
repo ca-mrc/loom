@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -268,6 +268,58 @@ function renderBatchDetail(): void {
 }
 
 describe("BatchDetail run plan", () => {
+  it("keeps polling after parent cancellation until children, output and cleanup converge", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const summary = {
+      lease_count: 1, lifecycle_stages: { running: 1 },
+      output_commit_states: { not_started: 1 }, materialization_states: { none: 1 },
+      execution_states: { running: 1 }, canonical_ready_count: 0,
+    };
+    const body = { ...BATCH_BODY, backend: "nebius", state: "cancelled", expected_trial_count: 1,
+      trial_summary: { running: 1 }, service_execution_summary: summary };
+    const fetchMock = mockBatch(body);
+    const reads = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith(`/api/v1/batches/${BATCH_ID}`)).length;
+    try {
+      renderBatchDetail();
+      await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+      expect(reads()).toBe(1);
+      Object.assign(body, { trial_summary: { cancelled: 1 } });
+      Object.assign(summary, { lifecycle_stages: { cancelled: 1 }, materialization_states: { pending: 1 },
+        execution_states: { delete_pending: 1 } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+      expect(reads()).toBe(2);
+      expect(screen.getByRole("row", { name: "cancelled 1" })).toBeInTheDocument();
+      Object.assign(summary, { materialization_states: { committed: 1 }, output_commit_states: { committed: 1 }, canonical_ready_count: 1 });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+      expect(reads()).toBe(3);
+      expect(within(screen.getByText("Canonical bundles ready").parentElement!).getByText("1")).toBeInTheDocument();
+      Object.assign(summary, { execution_states: { deleted: 1 } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+      expect(reads()).toBe(4);
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+      expect(reads()).toBe(4);
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it.each([undefined, {
+    lease_count: 1, lifecycle_stages: { cancelled: 1 },
+    output_commit_states: { not_started: 1 }, materialization_states: { not_started: 1 },
+    execution_states: { deleted: 1 }, canonical_ready_count: 0,
+  }])("stops polling settled cancellation without requiring output: %s", async (summary) => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    const fetchMock = mockBatch({ ...BATCH_BODY, state: "cancelled", trial_summary: { cancelled: 1 },
+      service_execution_summary: summary });
+    try {
+      renderBatchDetail();
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith(`/api/v1/batches/${BATCH_ID}`))).toHaveLength(1);
+    } finally { cleanup(); vi.useRealTimers(); }
+  });
+
   it.each([
     ["all_failed", { cancelled: 1 }, "All trials cancelled"],
     ["all_failed", { cancelled: 1, failed: 1 }, "Failed and cancelled"],

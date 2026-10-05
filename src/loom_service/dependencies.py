@@ -128,7 +128,10 @@ async def authed_session(
                 if settings is not None else "X-Loom-CSRF"
             )
             try:
-                verify_csrf(ctx, request.headers.get(header_name))
+                verify_csrf(
+                    ctx, request.headers.get(header_name),
+                    raw_session=request.cookies.get(settings.session_cookie_name) if settings else None,
+                )
             except HTTPException:
                 AUTH_FAILURES_TOTAL.labels(
                     auth_kind=ctx.auth_kind,

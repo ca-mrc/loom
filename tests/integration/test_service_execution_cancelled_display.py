@@ -119,6 +119,7 @@ async def test_cancelled_output_unavailable_agrees_across_public_projections(
         assert summary["output_commit_states"] == {"unavailable": 1}
         assert summary["materialization_states"] == {"not_started": 1}
         assert summary["canonical_ready_count"] == 0
+        assert summary["execution_states"] == {lease.observed_state: 1}
         assert activity["materialization"]["states"]["not_started"] == 1
         assert {
             "trial_api": materialization["lifecycle_stage"],

@@ -185,7 +185,7 @@ async def test_hosted_session_ignores_legacy_injection_and_rejects_sibling_origi
         assert cookie
         assert "Secure" in set_cookie[0] and "Domain=" not in set_cookie[0]
         assert (await ac.get("/api/v1/auth/me")).status_code == 200
-        # auth/me rotates CSRF; fetch the current value for the write checks.
+        # Read the stable CSRF proof for the write checks.
         csrf = (await ac.get("/api/v1/auth/me")).json()["csrf_token"]
         denied = await ac.post("/api/v1/auth/logout", headers={
             "Origin": "https://bob.dev.example.com", "X-Loom-CSRF": csrf,
@@ -310,6 +310,29 @@ async def test_refresh_rotates_session_cookie_and_returns_csrf_token(
     ) as new_ac:
         me = await new_ac.get("/api/v1/auth/me")
         assert me.status_code == 200, me.text
+
+
+async def test_identity_read_proofs_survive_reads_but_not_team_switch_or_refresh(auth_setup):
+    app, _team_a, team_b, _team_c, _team_d = auth_setup
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://svc") as client:
+        login, _ = await _login(client)
+        proof = (await client.get("/api/v1/auth/me")).json()["csrf_token"]
+        assert (await client.get("/api/v1/auth/me")).json()["csrf_token"] == proof
+        switched = await client.post("/api/v1/auth/team", json={"team_id": str(team_b)}, headers={"X-Loom-CSRF": proof})
+        assert switched.status_code == 200, switched.text
+        for old_token in (proof, login["csrf_token"]):
+            rejected = await client.post("/api/v1/auth/refresh", headers={"X-Loom-CSRF": old_token})
+            assert rejected.status_code == 403
+        current = (await client.get("/api/v1/auth/me")).json()["csrf_token"]
+        assert current != proof
+        refreshed = await client.post("/api/v1/auth/refresh", headers={"X-Loom-CSRF": current})
+        assert refreshed.status_code == 200, refreshed.text
+        rejected = await client.post("/api/v1/auth/logout", headers={"X-Loom-CSRF": current})
+        assert rejected.status_code == 403
+        latest = (await client.get("/api/v1/auth/me")).json()["csrf_token"]
+        logged_out = await client.post("/api/v1/auth/logout", headers={"X-Loom-CSRF": latest})
+        assert logged_out.status_code == 204
+        assert (await client.get("/api/v1/auth/me")).status_code == 401
 
 
 async def test_unknown_email_login_start_does_not_disclose_user_existence(

@@ -2318,6 +2318,7 @@ async def _batch_service_execution_summary(
                 lifecycle_expr.label("lifecycle_stage"),
                 ServiceExecutionLease.output_commit_state,
                 ServiceExecutionLease.materialization_state,
+                ServiceExecutionLease.observed_state,
                 func.count(),
             )
             .select_from(ServiceExecutionLease)
@@ -2331,6 +2332,7 @@ async def _batch_service_execution_summary(
                 lifecycle_expr,
                 ServiceExecutionLease.output_commit_state,
                 ServiceExecutionLease.materialization_state,
+                ServiceExecutionLease.observed_state,
             )
         )
     ).all()
@@ -2339,12 +2341,14 @@ async def _batch_service_execution_summary(
     lifecycle = {state: 0 for state in SERVICE_EXECUTION_LIFECYCLE_STAGES}
     output_commit: dict[str, int] = {}
     materialization: dict[str, int] = {}
+    execution: dict[str, int] = {}
     lease_count = 0
-    for lifecycle_stage, output_state, materialization_state, count in rows:
+    for lifecycle_stage, output_state, materialization_state, observed_state, count in rows:
         value = int(count)
         lease_count += value
         lifecycle[str(lifecycle_stage)] = lifecycle.get(str(lifecycle_stage), 0) + value
         output_commit[str(output_state)] = output_commit.get(str(output_state), 0) + value
+        execution[str(observed_state)] = execution.get(str(observed_state), 0) + value
         materialization[str(materialization_state)] = (
             materialization.get(str(materialization_state), 0) + value
         )
@@ -2353,6 +2357,7 @@ async def _batch_service_execution_summary(
         "lifecycle_stages": lifecycle,
         "output_commit_states": output_commit,
         "materialization_states": materialization,
+        "execution_states": execution,
         "canonical_ready_count": materialization.get("committed", 0),
     }
 
