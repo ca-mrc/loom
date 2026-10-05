@@ -536,6 +536,7 @@ def test_private_pool_operation_reloads_inputs_before_transport_and_preflight_is
 
 def test_protected_main_routes_pool_preflight_through_bound_operation(private_cutover, monkeypatch, capsys):
     from contextlib import contextmanager
+    from types import SimpleNamespace
 
     from scripts.ops import nebius_management_entry as management
     from scripts.ops import nebius_pool_cutover_entry as entry
@@ -545,6 +546,8 @@ def test_protected_main_routes_pool_preflight_through_bound_operation(private_cu
     selected = entry.load_pool_cutover_inputs(metadata)
     parent = CutoverAPI(selected.request)
     parent.state_dir, parent.anchor_dir, parent.refresh = Path(metadata['state_dir']), Path(metadata['anchor_dir']), None
+    telemetry = {'status': 'unavailable', 'checks': 2, 'unavailable': 1, 'reasons': ['tls_kubelet_verify_19']}
+    parent.guards = SimpleNamespace(telemetry_report=lambda: telemetry)
     path = Path(metadata['inputs_path']).with_name('operation.json')
     path.write_text(json.dumps(metadata))
     path.chmod(0o600)
@@ -556,7 +559,7 @@ def test_protected_main_routes_pool_preflight_through_bound_operation(private_cu
 
     monkeypatch.setattr(entry, 'connected_pool_api', connect)
     assert management.main(str(path), 'preflight') == 0
-    assert json.loads(capsys.readouterr().out) == {'status': 'preflight_qualified',
+    assert json.loads(capsys.readouterr().out) == {'status': 'preflight_qualified', 'telemetry': telemetry,
         **{key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}}
     assert not parent.state_dir.exists() and not parent.anchor_dir.exists()
 

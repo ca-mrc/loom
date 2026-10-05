@@ -2629,8 +2629,9 @@ consumer mounts; alternate volumes, command arguments, initialization environmen
 or lifecycle hooks cannot substitute another credential. This qualifies the retained
 credential route and its cloud access, not a successful successor collector process.
 The read accepts a scale-zero pool and does not reserve headroom, request nodes or
-introduce a per-environment budget. Workload fit, direct-kubelet telemetry and actual
-collector startup still require qualification. These checks do not prove the complete
+introduce a per-environment budget. Workload fit and actual collector startup still
+require qualification; detailed kubelet sample availability is reported separately.
+These checks do not prove the complete
 external-writer inventory or an installed global activation.
 The personal-access readiness routine must retain
 the installed body, language, owner and security/search-path attributes; a
@@ -2728,8 +2729,9 @@ The fixed probes allow only the expected replacement while retaining Deployment
 UID, namespace/name, selector, container and ServiceAccount identity. They check
 current ReplicaSet/Pod lineage, readiness, loaded effective database settings and
 the unchanged pinned Secret reference; equivalent Kubernetes resource-quantity
-spellings do not cause false drift. Actuator probes additionally qualify direct
-telemetry against the current pool-node roster. A second fixed challenge loads
+spellings do not cause false drift. Actuator probes additionally check direct
+telemetry against the current pool-node roster, reporting known sampling failures
+as unavailable without relaxing runtime identity checks. A second fixed challenge loads
 that image's real settings classes inside the qualified Pod and verifies the
 effective global participant binding, enabled controller scheduler/materializer,
 image-admission keyring, actuator target/builder configuration and shared API
@@ -2986,7 +2988,7 @@ primitives neither release an admission guard nor authorize a rollback by themse
 The closed restart runtime barrier consumes only a completed, anchored restart,
 then probes the actual retained manager and every participant's controller,
 service and active actuator. It checks their backend and legacy settings, plus
-actuator telemetry, with recovery closure and exact workload/journal readbacks
+actuator telemetry availability, with recovery closure and exact workload/journal readbacks
 before and after. Dormant roots and the stopped gateway are not started or probed
 as active legacy consumers. Guard reopening uses a separate parent phase.
 
@@ -3138,8 +3140,9 @@ successor-refresh authority remain required; this internal parent is not a
 standalone operational command or evidence of an installed usable pool.
 
 Actuator telemetry uses the qualified Node's private `InternalIP` and fixed
-kubelet HTTPS `/stats/summary` endpoint. The cluster CA verifies the serving
-certificate and the renewable runtime bearer authorizes GET `nodes/stats`;
+kubelet HTTPS `/stats/summary` endpoint. It requires the serving certificate to
+validate against the configured cluster CA; clusters using a separate kubelet CA
+may therefore have unavailable samples. The renewable runtime bearer authorizes GET `nodes/stats`;
 GET `nodes` supplies endpoint identity. The reader preserves cumulative CPU,
 sampled memory and filesystem counters without retaining foreign Pod data.
 It rejects redirects, unqualified addresses/TLS/credentials and wrong-node
@@ -3155,20 +3158,38 @@ and summary authorization **inside each retained ordinary and guest actuator Pod
 before controller retirement. It qualifies the Deployment/ReplicaSet/Pod lineage,
 fixed ServiceAccount, loaded namespace/target settings and complete Node inventory,
 then calls the production direct reader with each selected Node's exact UID.
-Operator credentials never enter the Pod. Only nonnegative CPU, memory and
-filesystem counter availability qualifies; foreign Pod statistics and credentials
-are not returned. Changed Pod or Node identities and incomplete inventories reject
-the check. Existing images without the UID-aware reader require an ordinary
+Operator credentials never enter the Pod. Nonnegative CPU, memory and filesystem
+counters establish sample availability; foreign Pod statistics and credentials
+are not returned. A positively identified direct-kubelet TLS, HTTP, network or
+authorization failure, or missing/invalid counters after summary identity is
+verified, records unavailable telemetry rather than blocking installation.
+API failures, ambiguous exception provenance, malformed probe output, wrong-node
+summaries, unqualified addresses/credentials, incompatible readers and client-close
+failures still block. Changed Pod or Node identities and incomplete inventories
+reject the check even after a sampling warning. Existing images without the UID-aware reader require an ordinary
 protected rollout followed by refreshed inputs; there is no node-proxy fallback.
 
 The check covers all current physical-pool Nodes plus the actuator's hosting Node.
 At scale zero, the hosting Node still tests runtime authority/TLS/network without
 requesting a worker or creating an idle reservation. This does not prove reachability
-of future workers; collector/startup and real-task acceptance must qualify those
-when they appear. Recovery skips execution in a stopped Pod only when the same
+of future workers. Collector/startup and real-task acceptance still qualify capacity
+and execution when they appear; sampling failures retain the same optional semantics.
+Recovery skips execution in a stopped Pod only when the same
 anchored parent already qualifies its exact stopped or rewired template; it never
 restarts a retired controller just to run a probe. Successor startup remains a
 separate barrier before admission can reopen.
+
+Protected pool results carry `telemetry` with `status` (`available`, `unavailable`
+or `not_observed`), bounded `checks` and `unavailable` counts, and finite sanitized
+`reasons`. Counts are runtime-node checks, not unique machines; re-probing an actuator
+replaces its earlier observation only after Pod/Node/contract rechecks. No probes
+means `not_observed`, never healthy or zero usage. This field survives both protected
+gateway filters, including startup, activation and legacy recovery. Historical
+reports may omit it; omission is not proof of availability.
+Scheduling authority remains authenticated Node/Pod inventory, resource requests,
+provider quota and reservation accounting, not sampled usage. Inference-usage
+acceptance and complete-measurement requirements for resource calibration are
+unchanged. Unavailable samples do not establish durable kubelet trust integration.
 
 The standalone platform rollout checks for existing global participant settings
 and retained pool-retirement markers before any mutation and again under its idle

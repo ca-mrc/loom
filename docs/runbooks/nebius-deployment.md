@@ -1300,7 +1300,7 @@ connected scope and changed private inputs (each prefixed `pool_`). Unknown
 failures remain `pool_connection`. These codes contain no exception text,
 credential, resource payload or retry authority; investigate the identified
 prerequisite before another operation. They do not change installation ordering
-or relax any qualification.
+or authorize retries of uncertain writes.
 
 Telemetry failures further identify fixed `pool_runtime_telemetry_...` categories:
 binding, Pod, node inventory, probe delivery, identity recheck, settings, client
@@ -1313,9 +1313,32 @@ only an integer OpenSSL verification code in 0–255, for example
 `pool_runtime_telemetry_tls_kubelet_verify_20`; `tls_unknown_verify_<code>` means
 the transport was not established. Without qualified details, the diagnostic stays
 at the transport category or legacy `tls`. No exception text, URLs or certificate
-contents are returned. The fixed in-Pod probe can exit
-zero to deliver a `blocked` diagnostic; the protected preflight still rejects it
-and exits nonzero. A successful diagnostic exchange does not qualify telemetry.
+contents are returned. The fixed in-Pod probe can exit zero to deliver a `blocked`
+diagnostic; that exit code alone never qualifies telemetry.
+
+Only positively identified direct-kubelet sampling failures (`tls_kubelet`,
+`tls_kubelet_verify_0` through `_255`, `kubelet_authorization`, `kubelet_network`,
+`kubelet_http`) and missing/invalid counters (`counters`) become optional warnings.
+The protected pool result includes `telemetry`, for example:
+
+```json
+{"status": "unavailable", "checks": 2, "unavailable": 1, "reasons": ["tls_kubelet_verify_19"]}
+```
+
+Counts represent the latest checks per actuator against the current pool Nodes and
+its host, not unique machines. `available` requires successful probes; zero checks
+is `not_observed`. Historical results without this field provide no availability
+evidence. Both protected report filters preserve it through startup, activation
+and legacy recovery. A sampling warning still requires post-probe runtime, Node
+and contract rechecks. API failures, unknown/ambiguous errors, malformed probe
+output, wrong-node summaries, unqualified addresses or TLS/bearer configuration,
+and client-close failures remain blocking. No failed TLS response is used as data.
+
+Missing detailed samples do not block execution or cleanup and must not be reported
+as zero usage. Scheduling/capacity readiness uses authenticated inventory, requested
+resources, provider quota and reservation accounting. Canonical inference usage and
+complete resource-calibration evidence retain their existing requirements. This
+separation does not claim a durable kubelet certificate-refresh mechanism is installed.
 Keep the same TLS, node-identity and statistics checks when investigating; no
 node-proxy fallback, additional permissions or automatic retries are introduced.
 
