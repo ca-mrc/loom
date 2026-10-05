@@ -142,9 +142,13 @@ _BOUND_TELEMETRY_COMMAND = """import asyncio, json, sys
 
 def reader_failure(error):
     import ssl
+    import httpcore
     import httpx
     from kubernetes.client.exceptions import ApiException
+    from loom_execution_actuator.contracts import KubernetesApiError
     from urllib3.exceptions import HTTPError, SSLError, TimeoutError
+    primary = error.__cause__ if isinstance(error, KubernetesApiError) else error
+    direct = isinstance(primary, (httpx.NetworkError, httpx.TimeoutException, httpx.HTTPStatusError))
     seen, network, tls = set(), False, False
     transports, verification, http_failure = set(), None, None
     for _ in range(8):
@@ -183,10 +187,16 @@ def reader_failure(error):
             }.get(str(error))
             if code is not None:
                 return code
+        if not isinstance(error, (KubernetesApiError, HTTPError, ApiException,
+                httpx.NetworkError, httpx.TimeoutException, httpx.HTTPStatusError,
+                httpcore.NetworkError, httpcore.TimeoutException, OSError)):
+            return "reader"
         error = error.__cause__ or error.__context__
     if error is not None or len(transports) > 1:
         return "reader"
     transport = next(iter(transports), "unknown")
+    if transport == "kubelet" and not direct:
+        return "reader"
     if http_failure is not None:
         return "kubelet_" + http_failure if transport == "kubelet" else http_failure
     if tls:
