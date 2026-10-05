@@ -806,6 +806,7 @@ def test_runtime_telemetry_uses_retained_actuator_and_every_pool_node(workload_d
     ('tls_bool', 'tls_kubelet'), ('tls_string', 'tls_kubelet'),
     ('tls_cycle', 'reader'), ('tls_deep', 'reader'),
     ('mixed_transport', 'reader'),
+    ('http_close', 'reader'), ('http_protocol', 'reader'),
     ('tls_unknown_plain', 'tls'),
 ])
 def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_credentials_in_output(monkeypatch, capsys, tmp_path, damage, stage):
@@ -879,6 +880,10 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         if damage == 'mixed_transport':
             from urllib3.exceptions import SSLError
             raise httpx.ConnectError('private-runtime-token') from SSLError('private-api-marker')
+        if damage == 'http_protocol':
+            raise httpx.RemoteProtocolError('private-runtime-token') from OSError('private-protocol-marker')
+        if damage == 'http_close':
+            raise httpx.ReadTimeout('private-runtime-token')
         if damage in {'tls_cycle', 'tls_deep'}:
             wrapped = ssl.SSLError('private-runtime-token')
             if damage == 'tls_cycle':
@@ -942,6 +947,12 @@ def test_fixed_telemetry_probe_runs_real_settings_and_direct_reader_without_cred
         return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     monkeypatch.setattr(client.ApiClient, 'request', node_read)
     monkeypatch.setattr(httpx.Client, 'get', summary)
+    if damage == 'http_close':
+        actual_exit = httpx.Client.__exit__
+        def failed_exit(self, *args):
+            actual_exit(self, *args)
+            raise RuntimeError('private-close-marker')
+        monkeypatch.setattr(httpx.Client, '__exit__', failed_exit)
     monkeypatch.setattr(ssl, 'create_default_context', create_context)
     monkeypatch.setattr(InClusterKubernetesJobApi, 'close', close)
     if damage == 'old_image':
