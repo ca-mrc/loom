@@ -30,6 +30,7 @@ from loom_control_plane.artifact_read_service import ArtifactReadService
 from loom_control_plane.config import ControlPlaneSettings
 from loom_control_plane.live_preview import run_live_preview_reconciler_loop
 from loom_control_plane.metrics_refresher import run_metrics_refresher_loop
+from loom_control_plane.object_version_recovery import ObjectVersionRecovery
 from loom_control_plane.retry_exhausted_sweeper import (
     run_retry_exhausted_sweeper_loop,
 )
@@ -38,6 +39,7 @@ from loom_control_plane.routes import (
     artifacts,
     execution_attempts,
     health,
+    object_version_recovery,
     pipeline_catalog,
     resource_usage,
     service_executions,
@@ -310,7 +312,9 @@ def create_app(
     app.include_router(artifacts.router)
     app.include_router(execution_attempts.router)
     app.include_router(tasks.router)
+    app.state.object_version_recovery = ObjectVersionRecovery()
     app.include_router(admin.router)
+    app.include_router(object_version_recovery.router)
     app.include_router(step_tokens.router)
     app.include_router(trial_cache.router)
     app.include_router(task_image_execution.router)
