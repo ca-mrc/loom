@@ -32,6 +32,14 @@ from loom.db.schema import (
     ServiceExecutionLease,
     Trial,
 )
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1
+from loom.pipeline.artifact_commit import (
+    ArtifactCommitManifestV1,
+    ArtifactCommitMarkerV1,
+    ArtifactManifestV1,
+    ServiceExecutionOutputProducerV1,
+)
+from loom.pipeline.keys import canonical_digest, canonical_document
 
 ACTION = "object_version_recovery"
 MAX_BYTES = 256 * 1024 * 1024
@@ -127,6 +135,83 @@ class RecoveryState:
         )])
 
 
+def _validate_source(state: RecoveryState) -> None:
+    """Validate retained commit identity without reopening the expiring spool."""
+    lease, upload, artifact = state.lease, state.upload, state.artifact
+    _require(len(json.dumps([lease.runtime_contract_json, upload.canonical_manifest_json,
+        artifact.storage, state.trial.trajectory_index]).encode()) <= MAX_METADATA_BYTES,
+        "metadata_limit_exceeded")
+    try:
+        runtime = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+        manifest = ArtifactCommitManifestV1.model_validate_json(canonical_document(upload.canonical_manifest_json))
+        producer = ServiceExecutionOutputProducerV1.model_validate_json(canonical_document(manifest.producer_identity))
+    except ValueError:
+        raise RecoveryConflictError("source_identity_invalid") from None
+    _require(canonical_digest(lease.runtime_contract_json) == lease.runtime_contract_sha256
+        and runtime.execution_role == "attempt"
+        and manifest.commit_kind == "service_execution_output" and manifest.session_id == upload.id
+        and canonical_digest(manifest) == upload.manifest_sha256
+        and manifest.request_digest == upload.request_digest
+        and manifest.total_bytes == upload.actual_total_bytes
+        and len(manifest.artifacts) == 1, "source_manifest_conflict")
+    _require(producer.team_id == upload.team_id and producer.service_execution_lease_id == lease.id
+        and producer.service_execution_generation == upload.service_execution_generation
+        and producer.service_execution_role == upload.service_execution_role
+        and producer.runtime_contract_sha256 == lease.runtime_contract_sha256
+        and producer.candidate_sha == upload.service_execution_candidate_sha == runtime.candidate_sha
+        and producer.task_revision_sha256 == upload.service_execution_task_revision_sha256 == runtime.task_revision_sha256
+        and producer.command_identity_sha256 == upload.service_execution_command_identity_sha256 == runtime.command_identity_sha256
+        and producer.input_lineage_artifact_ids == manifest.input_lineage_artifact_ids
+        and producer.input_lineage_digests == manifest.input_lineage_digests, "source_producer_conflict")
+    record = manifest.artifacts[0]
+    size = sum(item.size_bytes for item in record.stored_files)
+    _require(record.artifact_id == artifact.id and record.artifact_name == artifact.name
+        and record.artifact_type == artifact.artifact_type and record.content_sha256 == artifact.content_hash
+        and record.manifest_sha256 == artifact.manifest_sha256
+        and size == manifest.total_bytes == artifact.stored_size_bytes == artifact.unpacked_size_bytes
+        and len(record.stored_files) == artifact.file_count, "source_artifact_conflict")
+    try:
+        item_manifest = ArtifactManifestV1(artifact_id=record.artifact_id, artifact_name=record.artifact_name,
+            artifact_type=record.artifact_type, content_sha256=record.content_sha256,
+            stored_size_bytes=size, unpacked_size_bytes=size, file_count=len(record.stored_files),
+            stored_files=record.stored_files, lineage_artifact_ids=manifest.input_lineage_artifact_ids,
+            lineage_digests=manifest.input_lineage_digests)
+    except ValueError:
+        raise RecoveryConflictError("source_artifact_invalid") from None
+    _require(canonical_digest(item_manifest) == artifact.manifest_sha256
+        and canonical_digest(ArtifactCommitMarkerV1(commit_kind="service_execution_output",
+            manifest_sha256=canonical_digest(manifest), session_id=upload.id)) == upload.committed_marker_sha256,
+        "source_manifest_digest_conflict")
+
+
+async def _reject_detached_gc_claims(session: AsyncSession, state: RecoveryState) -> None:
+    # 0071's physical-key snapshots survive registry removal. Older resume plans
+    # retain these same identities in run.inventory instead. Both can still
+    # authorize deletion under a different registry UUID or namespace.
+    claimed = await session.scalar(text("""
+        WITH requested AS (
+            SELECT * FROM jsonb_to_recordset(CAST(:objects AS jsonb)) AS item(bucket text, object_key text)
+        )
+        SELECT EXISTS (
+            SELECT 1 FROM data_lifecycle_gc_items AS item
+            WHERE item.authority_id = :authority_id OR EXISTS (
+                SELECT 1 FROM requested WHERE requested.bucket = item.bucket AND requested.object_key = item.object_key
+            )
+        ) OR EXISTS (
+            SELECT 1 FROM data_lifecycle_gc_runs AS run WHERE NOT run.dry_run AND (
+                run.inventory->'authority_ids' @> CAST(:authority_ids AS jsonb) OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(CASE
+                        WHEN jsonb_typeof(run.inventory->'objects') = 'array' THEN run.inventory->'objects'
+                        ELSE '[]'::jsonb END) AS item, requested
+                    WHERE item->>'bucket' = requested.bucket AND item->>'object_key' = requested.object_key
+                )
+            )
+        )
+    """), {"objects": json.dumps([{"bucket": obj.bucket, "object_key": obj.object_key} for obj in state.objects]),
+           "authority_id": state.authority.id, "authority_ids": json.dumps([str(state.authority.id)])})
+    _require(not claimed, "physical_object_gc_claim")
+
+
 async def _load(
     session: AsyncSession, request: RecoveryRequest, *, locked: bool,
 ) -> RecoveryState:
@@ -137,7 +222,7 @@ async def _load(
         await session.execute(text("SET LOCAL statement_timeout = '5s'"))
         await session.execute(text(
             "LOCK TABLE data_lifecycle_authorities, data_lifecycle_objects, "
-            "data_lifecycle_gc_items, data_lifecycle_gc_authorities, admin_audit_events "
+            "data_lifecycle_gc_items, data_lifecycle_gc_authorities, data_lifecycle_gc_runs, admin_audit_events "
             "IN SHARE ROW EXCLUSIVE MODE"
         ))
     artifact = await session.get(Artifact, request.artifact_id, with_for_update=locked)
@@ -178,6 +263,7 @@ async def _load(
         and upload.committed_marker_sha256 == lease.output_marker_sha256,
         "native_owner_or_commit_conflict",
     )
+    _validate_source(state)
     _require(
         authority.environment == scope.environment and authority.namespace == scope.namespace
         and authority.owner_kind == authority.data_class == "artifact"
@@ -192,6 +278,7 @@ async def _load(
     _require(await session.scalar(select(DataLifecycleGcItem.object_id).where(
         DataLifecycleGcItem.object_id.in_(ids),
     ).limit(1)) is None, "object_gc_claim")
+    await _reject_detached_gc_claims(session, state)
     for obj in objects:
         _require(obj.authority_id == authority.id
             and obj.environment == scope.environment and obj.namespace == scope.namespace
@@ -372,8 +459,9 @@ class ObjectVersionRecovery:
         client: Any, actor: str, artifacts_bucket: str, trajectories_bucket: str,
     ) -> dict[str, Any]:
         request_digest = metadata_digest(request.identity())
-        async with sessions() as session:
+        async with asyncio.timeout(15), sessions() as session:
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout = '5s'"))
             state = await _load(session, request, locked=False)
             audit = await session.get(AdminAuditEvent, request.operation_id)
             if audit is not None:

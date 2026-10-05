@@ -255,7 +255,10 @@ existing operator credential mechanism, never in an issue or saved manifest.
 Use this only for an existing terminal native Trial whose current attempt has a
 committed canonical Artifact. The owning lifecycle authority must be active,
 pinned, in the Control Plane's environment and namespace, and free of deletion
-tokens or GC journal membership. This operation adopts a **verified surviving
+tokens or GC journal membership, including physical-key snapshots and legacy
+resume inventories stored under older registry IDs. The persisted source
+manifest, Artifact record and runtime producer must agree; source-spool objects
+need not still exist. This operation adopts a **verified surviving
 version**; it cannot prove the original upload's missing version receipt.
 
 1. Read the complete Artifact `storage`, Trial `trajectory_index`, owning lease,
