@@ -72,6 +72,9 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	runSetupCacheStep(ctx, "fetch", func(ctx context.Context) error {
+		return broker.fetchSetupCache(ctx, p, filepath.Clean(*workspace))
+	})
 	executionContext, stopMonitor := monitorPrivateSandboxes(ctx, p)
 	defer stopMonitor()
 	broker.setPhase("", time.Time{})
@@ -136,6 +139,9 @@ func main() {
 	)
 	stopTaskEgress()
 	stopMonitor()
+	runSetupCacheStep(ctx, "store", func(ctx context.Context) error {
+		return broker.storeSetupCache(ctx, p, filepath.Clean(*workspace))
+	})
 	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
 	if captureErr != nil {
 		result.FinishedAt = time.Now().UTC()

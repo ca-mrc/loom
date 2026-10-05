@@ -33,6 +33,8 @@ from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.hosted_harness import (
     HARNESS_SETUP_PHASE,
+    MAX_SETUP_CACHE_BYTES,
+    HarnessSetup,
     HostedHarnessSpec,
     hosted_harness,
     workspace_controller_phases,
@@ -236,16 +238,87 @@ def _setup_proxy_environment() -> dict[str, str]:
     return environment
 
 
+# Controller-workspace files the runtime exchanges with the Gateway (#2310).
+SETUP_CACHE_RESTORE = PurePosixPath(".loom/harness-cache/restore.tar.gz")
+SETUP_CACHE_STORE = PurePosixPath(".loom/harness-cache/store.tar.gz")
+SETUP_CACHE_OUTCOME = PurePosixPath(".loom/harness-cache/outcome.json")
+_SANDBOX_CACHE_ARCHIVE = PurePosixPath("/tmp/loom-harness-cache.tar.gz")
+
+
+def _remaining(deadline: AttemptDeadline | None, fallback: float) -> float:
+    return deadline.remaining() if deadline else fallback
+
+
+async def _check_install(driver: ServiceSandboxDriver, setup: HarnessSetup, timeout: float) -> bool:
+    result = await driver.exec(shlex.join(setup.check), timeout_sec=timeout)
+    return result.return_code == 0
+
+
+async def _restore_cached_install(
+    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+) -> str:
+    """Restore a fetched entry and prove it works; any problem means reinstall."""
+    archive = workspace / SETUP_CACHE_RESTORE
+    if not archive.is_file():
+        return "miss"
+    assert setup.install_root is not None
+    root = shlex.quote(setup.install_root)
+    remote = shlex.quote(str(_SANDBOX_CACHE_ARCHIVE))
+    try:
+        await driver.upload(archive, _SANDBOX_CACHE_ARCHIVE)
+        extracted = await driver.exec(
+            f"rm -rf -- {root} && mkdir -p -- {root} && tar -xzf {remote} -C {root}; status=$?; rm -f -- {remote}; exit $status",
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
+        )
+        if extracted.return_code == 0 and await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
+            return "hit"
+    except DriverError:
+        pass
+    await driver.exec(f"rm -rf -- {root}", timeout_sec=_remaining(deadline, setup.timeout_seconds))
+    return "restore_rejected"
+
+
+async def _archive_install(
+    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+) -> str:
+    """Archive a fresh, checked install for the runtime to store."""
+    assert setup.install_root is not None
+    remote = shlex.quote(str(_SANDBOX_CACHE_ARCHIVE))
+    target = workspace / SETUP_CACHE_STORE
+    try:
+        packed = await driver.exec(
+            f"tar -czf {remote} -C {shlex.quote(setup.install_root)} .",
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
+        )
+        if packed.return_code != 0:
+            return "store_unavailable"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await driver.download(_SANDBOX_CACHE_ARCHIVE, target)
+    except (DriverError, OSError):
+        target.unlink(missing_ok=True)
+        return "store_unavailable"
+    finally:
+        await driver.exec(f"rm -f -- {remote}", timeout_sec=_remaining(deadline, setup.timeout_seconds))
+    if not 0 < target.stat().st_size <= MAX_SETUP_CACHE_BYTES:
+        target.unlink(missing_ok=True)
+        return "store_unavailable"
+    return "stored"
+
+
 async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
     """Run the selected harness's pinned install inside the task sandbox.
 
     Only the install runs here: no task inputs are staged, no task command
     runs and no model call is possible (the broker refuses non-agent phases).
     Its output becomes this phase's logs; a non-zero exit is a setup failure.
+    A cacheable install is first restored from the runtime-fetched entry for
+    this team and task image when one exists, and archived after a fresh
+    install otherwise.
     """
     spec = hosted_harness(trial.agent_name)
     if spec is None or not spec.workspace or spec.setup is None:
         raise ServiceExecutionTaskError("selected harness declares no setup")
+    setup = spec.setup
     raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
     deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
     environment = _setup_proxy_environment()
@@ -254,11 +327,17 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     assert current is not None
     loop.add_signal_handler(signal.SIGTERM, current.cancel)
     driver = sandbox_driver("task-sandbox", task)
+    # {"restore": hit|miss|restore_rejected, "store": stored|store_unavailable}
+    outcome: dict[str, str] = {}
     try:
         await driver.start()
+        if setup.cacheable:
+            outcome["restore"] = await _restore_cached_install(driver, workspace, setup, deadline)
+            if outcome["restore"] == "hit":
+                return
         handle = await driver.exec_streaming(
-            list(spec.setup.install), env_vars=environment, cwd=task.environment.workdir,
-            timeout_sec=deadline.remaining() if deadline else spec.setup.timeout_seconds,
+            list(setup.install), env_vars=environment, cwd=task.environment.workdir,
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
         )
         try:
             async def forward(stream: AsyncIterator[bytes], sink: BinaryIO) -> None:
@@ -275,9 +354,17 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             raise
         if code != 0:
             raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
+        if setup.cacheable:
+            if not await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
+                raise ServiceExecutionTaskError("harness install check failed")
+            outcome["store"] = await _archive_install(driver, workspace, setup, deadline)
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
         await driver.stop()
+        if outcome:
+            _write_json_atomic(workspace / SETUP_CACHE_OUTCOME, {
+                "schema_version": "loom.harness-cache-outcome.v1", **outcome,
+            })
 
 
 class AgentTimeoutFinalizedError(TimeoutError):

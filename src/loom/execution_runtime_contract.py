@@ -293,6 +293,20 @@ class RuntimeHandoffInputV1(_Strict):
     total_bytes: int = Field(ge=0, le=10 * 1024**3)
 
 
+class RuntimeSetupCacheV1(_Strict):
+    """A cacheable harness install (#2310).
+
+    The Gateway derives the object key from the lease itself: the team, this
+    plan's task image and `identity_sha256`. A Pod never names a key, so an
+    entry is reused only by the same team on the exact same task image.
+    """
+
+    schema_version: Literal["loom.runtime-setup-cache.v1"] = "loom.runtime-setup-cache.v1"
+    identity_sha256: str = Field(pattern=_SHA256.pattern)
+    install_root: str = Field(pattern=r"^/[A-Za-z0-9._/-]{1,255}$")
+    max_bytes: int = Field(gt=0, le=256 * 1024 * 1024)
+
+
 class RuntimeOutputDeclarationV1(_Strict):
     """One immutable workspace file expected in the complete Trial bundle."""
 
@@ -372,6 +386,7 @@ class ExecutionRuntimePlanV1(_Strict):
     # Install sources reachable only during setup phases (#2310). Never part of
     # the task's own network policy; the agent and verifier cannot reach them.
     setup_egress: WebAllowlist | None = None
+    setup_cache: RuntimeSetupCacheV1 | None = None
     controller_resources: ContainerResourcesV1 | None = None
     resource_requests: ExecutionResourceRequestsV1 | None = None
     node_resource_allocation: NodeResourceAllocationV1 | None = None
@@ -466,6 +481,8 @@ class ExecutionRuntimePlanV1(_Strict):
             raise ValueError("task egress requires its immutable diagnostic output declaration")
         if self.setup_egress is not None and not self.setup:
             raise ValueError("setup egress requires a setup phase")
+        if self.setup_cache is not None and not self.setup:
+            raise ValueError("a setup cache requires a setup phase")
         if (
             self.effective_network_policy is not None
             and hosted_http_egress(self.effective_network_policy) != self.task_egress
@@ -610,6 +627,8 @@ class ExecutionRuntimePlanV1(_Strict):
             payload.pop("task_egress")
         if self.setup_egress is None:
             payload.pop("setup_egress")
+        if self.setup_cache is None:
+            payload.pop("setup_cache")
         # Keep existing published plans byte-compatible when new fields are unused.
         if not self.verifier_after_agent_timeout:
             payload.pop("verifier_after_agent_timeout")

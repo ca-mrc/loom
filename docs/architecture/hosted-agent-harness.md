@@ -235,6 +235,35 @@ phase. Egress is enforced twice:
 
 A failed install is classified `setup_error`, not an agent failure.
 
+### Install cache
+
+A `HarnessSetup` that declares `install_root` (a dedicated absolute directory
+the install writes into) and a `check` command is cacheable. The plan then
+carries `setup_cache`: the install identity digest, the root and a 256 MiB
+limit.
+
+- **Key.** The Gateway derives it from the lease alone: the team, the plan's
+  exact task image digest and the install identity (harness, install command,
+  sources, root and check). An install depends on its image (runtimes, C
+  library, existing files), so an entry is reused only on the image that
+  produced it, and never across teams. A Pod cannot name a key.
+- **Transfer.** Only the trusted Go runtime moves archives, through
+  `GET`/`PUT /internal/service-execution/harness-cache` with the Pod identity.
+  It fetches into `.loom/harness-cache/restore.tar.gz` before the setup phase
+  and stores `.loom/harness-cache/store.tar.gz` after the run. Size and
+  SHA-256 are verified on both sides. Entries are write-once, and published
+  only after their digest is verified. Nothing is exposed on the shared
+  loopback.
+- **Setup phase.** On a fetched entry it restores into `install_root` and runs
+  `check`. On a miss, or a rejected entry (which is wiped first), it installs,
+  runs `check` (a failure is a setup failure) and archives the root. Every
+  cache problem only means a fresh install. The result is recorded in
+  `diagnostics/harness-cache.json` (`restore`: hit, miss or restore_rejected;
+  `store`: stored or store_unavailable).
+
+A harness whose install is too slow even with this cache can declare a prebuilt
+runtime image instead (follow-up).
+
 ### Model access
 
 An installed agent reaches the model through the Pod-local runtime broker.
@@ -387,6 +416,8 @@ reward does not by itself satisfy this checklist.
 
 - Supervised sandbox processes:
   `cmd/loom-sandbox-runtime/processes.go`, `src/loom/driver/service_sandbox.py`
+- Install cache: `cmd/loom-execution-runtime/setup_cache.go`,
+  `src/loom_llm_gateway/harness_cache.py`
 - Setup-phase egress: `cmd/loom-execution-runtime/task_egress.go`,
   `src/loom_llm_gateway/routes/task_egress.py`
 - Typed harness specifications and registry:

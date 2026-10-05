@@ -139,7 +139,9 @@ type plan struct {
 	NodeResourceAllocation *nodeResourceAllocation `json:"node_resource_allocation,omitempty"`
 	TaskEgress             *storedTaskEgress       `json:"task_egress,omitempty"`
 	// Install sources reachable only while a setup phase runs (#2310).
-	SetupEgress                *webAllowlist              `json:"setup_egress,omitempty"`
+	SetupEgress *webAllowlist `json:"setup_egress,omitempty"`
+	// A cacheable harness install keyed by the Gateway (#2310).
+	SetupCache                 *setupCache                `json:"setup_cache,omitempty"`
 	EffectiveNetworkPolicy     json.RawMessage            `json:"effective_network_policy,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
@@ -245,6 +247,14 @@ func (p plan) validate() error {
 			return fmt.Errorf("setup egress requires a setup phase")
 		}
 		if err := p.SetupEgress.validate(); err != nil {
+			return err
+		}
+	}
+	if p.SetupCache != nil {
+		if len(p.Setup) == 0 {
+			return fmt.Errorf("a setup cache requires a setup phase")
+		}
+		if err := p.SetupCache.validate(); err != nil {
 			return err
 		}
 	}

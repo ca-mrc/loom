@@ -73,6 +73,9 @@ class InstallSource:
 
 # Bounds for the setup phase's own deadline, separate from the agent's.
 MAX_SETUP_TIMEOUT_SECONDS = 1800
+# A cached install travels through the sandbox file API, which bounds one
+# transfer at 256 MiB.
+MAX_SETUP_CACHE_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -88,6 +91,12 @@ class HarnessSetup:
     install: tuple[str, ...]
     sources: tuple[InstallSource, ...]
     timeout_seconds: int
+    # Absolute sandbox directory the install writes everything into. With
+    # `check`, it makes the install cacheable: the directory is archived after
+    # a fresh install and restored instead of reinstalling (#2310).
+    install_root: str | None = None
+    # Command proving an install (fresh or restored) is usable, e.g. `--version`.
+    check: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.install or not all(self.install):
@@ -96,6 +105,32 @@ class HarnessSetup:
             raise ValueError("harness setup requires declared install sources")
         if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
             raise ValueError("harness setup timeout is out of range")
+        if (self.install_root is None) != (not self.check):
+            raise ValueError("a cacheable harness setup declares both install_root and check")
+        if self.install_root is not None and (
+            not self.install_root.startswith("/") or self.install_root.rstrip("/") in {"", "/tmp", "/usr", "/home"}
+            or ".." in self.install_root.split("/") or "//" in self.install_root
+        ):
+            raise ValueError("harness setup install_root must be a dedicated absolute directory")
+
+    @property
+    def cacheable(self) -> bool:
+        return self.install_root is not None
+
+    def cache_identity(self, harness: str) -> str:
+        """Digest of everything that determines the installed bytes; part of
+        the cache key alongside the team and the exact task image."""
+        import hashlib
+        import json
+
+        document = {
+            "schema_version": "loom.harness-setup-cache-identity.v1",
+            "harness": harness, "install": list(self.install),
+            "sources": [[source.protocol, source.host] for source in self.sources],
+            "install_root": self.install_root, "check": list(self.check),
+        }
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -255,6 +290,7 @@ __all__ = [
     "GUEST_SANDBOX_DRIVER_CAPABILITIES",
     "HARNESS_SETUP_PHASE",
     "HOSTED_HARNESSES",
+    "MAX_SETUP_CACHE_BYTES",
     "MAX_SETUP_TIMEOUT_SECONDS",
     "NATIVE_EXECUTION_AGENT_NAMES",
     "NATIVE_SANDBOX_DRIVER_CAPABILITIES",
