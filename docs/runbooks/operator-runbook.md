@@ -283,13 +283,14 @@ version**; it cannot prove the original upload's missing version receipt.
 4. Review the exact plan within the issue's recovery authority. Send the same
    request with `apply: true` and the returned `plan_sha256`. Apply re-verifies
    storage, acquires bounded database locks and checks the entire state again.
-   It fills only existing null version fields in Artifact storage, the Trial
+   It fills only absent or null version fields in existing Artifact storage, the Trial
    index and registry, then adds one `AdminAuditEvent` atomically. It writes no
    object, changes no retention, and replays no execution or materialization.
 5. Retain the receipt and read back the published metadata, registry and audit.
    Verify ordinary downloads and unchanged Trial outcome/attempts. A repeated
    identical apply returns `replayed` only while the complete recorded post-state
-   is unchanged. Replay confirms the database receipt; it is not a fresh storage
+   is unchanged. The plan records whether each version field was absent or null.
+   Replay confirms the database receipt; it is not a fresh storage
    health probe. A changed request with the same operation UUID is rejected.
 
 Verification is serialized per Control Plane process, with a 90-second request

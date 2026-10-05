@@ -658,7 +658,7 @@ objects and 256 MiB. Preview binds the complete published metadata and ownership
 state to a plan digest. Apply independently verifies the surviving versions'
 full bytes and exact-key inventories before acquiring bounded database locks.
 It then rechecks ownership, pinned retention, GC claims, competing registrations
-and the preview state, and atomically fills only null versions in the registry,
+and the preview state, and atomically fills only absent/null versions in the registry,
 Artifact storage and every existing Trial index mirror, with one admin audit.
 Replay requires an identical request and unchanged recorded post-state. This
 adopts verified surviving versions without inventing original write receipts,

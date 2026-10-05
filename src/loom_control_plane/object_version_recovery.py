@@ -319,7 +319,7 @@ def _plan(
             sha256: Any, size: Any) -> None:
         _require(isinstance(bucket, str) and isinstance(key, str)
             and isinstance(sha256, str) and re.fullmatch(r"[0-9a-f]{64}", sha256) is not None
-            and type(size) is int and size >= 0 and field in row, "published_reference_invalid")
+            and type(size) is int and size >= 0, "published_reference_invalid")
         references.setdefault((bucket, key), []).append((row, field, location, sha256, size))
 
     files = storage.get("files")
@@ -358,15 +358,17 @@ def _plan(
         refs = references.get((obj.bucket, obj.object_key), [])
         _require(bool(refs) and obj.version_id is None, "object_not_unversioned_publication")
         for row, field, _, sha, size in refs:
-            _require(row[field] is None and sha == obj.content_sha256 and size == obj.size_bytes,
+            _require(row.get(field) is None and sha == obj.content_sha256 and size == obj.size_bytes,
                 "published_registry_conflict")
         version = proposed[obj.id]
+        before_fields = [{"location": location, "present": field in row, "value": row.get(field)}
+                         for row, field, location, _, _ in refs]
         for row, field, _, _, _ in refs:
             row[field] = version
         changes.append({"registry_id": str(obj.id), "authority_id": str(obj.authority_id),
             "bucket": obj.bucket, "key": obj.object_key, "version_id": version,
             "sha256": obj.content_sha256, "size_bytes": obj.size_bytes,
-            "locations": [ref[2] for ref in refs]})
+            "locations": [ref[2] for ref in refs], "before_version_fields": before_fields})
     plan = {"schema_version": "loom.object-version-recovery.v1", "request": request.identity(),
         "before_state_sha256": state.digest(), "objects": changes,
         "after_storage_sha256": metadata_digest(storage), "after_index_sha256": metadata_digest(index),
