@@ -501,6 +501,8 @@ def test_completed_image_correction_supports_runtime_activation_completion_and_r
 @pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
 @pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("late_commit", [False, True])
+# Targeted cases requalify two image entries through all successor shutdowns.
+@pytest.mark.timeout(180)
 def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_case, phase, late_commit, target):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
