@@ -18,6 +18,7 @@ from scripts.ops.nebius_pool_manager_image_history import (
     prepared_image_record,
 )
 from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_startup import closed_startup_documents
 from scripts.ops.nebius_pool_startup_repair import _RECOVERY, _exists
 
 
@@ -45,7 +46,9 @@ def repair_manager_image(*, request: PoolCutoverRequest, binding: ManagerImageRe
         with private_state._locked_state(anchor):
             entry = manager_image_entry(request, binding, state=state, anchor=anchor)
             record = entry.record or prepared_image_record(entry.identity)
-            key, uid = _key(request.manager), _uid(request.manager)
+            closed, _ = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
+            key = _key(entry.documents[0])
+            uid = _uid(closed[key])
 
             def observe() -> dict[str, Any]:
                 current = manager_image_entry(request, binding, state=state, anchor=anchor)

@@ -463,7 +463,7 @@ jobs:
               recovery != (value['schema'] == 'loom.nebius-management-retirement-recovery-operation.v1') or
               refresh != (value['schema'] == 'loom.nebius-management-refresh-operation.v1') or
               pool != (value['schema'] == 'loom.nebius-pool-cutover-operation.v1') or
-              repair != (value['schema'] in {'loom.nebius-pool-startup-repair-operation.v1', 'loom.nebius-pool-startup-repair-operation.v2'})):
+              repair != (value['schema'] in {'loom.nebius-pool-startup-repair-operation.v1', 'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'})):
               raise SystemExit('Management operation schema differs from selected authority')
           sha = value['source_sha']
           if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha):

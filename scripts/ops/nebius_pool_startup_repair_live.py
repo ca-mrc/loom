@@ -108,14 +108,19 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
         super().qualify_closed()
         self._qualify_binding()
 
+    def _repair_workload(self) -> dict[str, Any]:
+        return self.request.manager
+
     def manager_drained(self, key: str, desired: dict[str, Any]) -> bool:
         self.qualify_closed()
-        if (key != _key(self.request.manager)
+        original = self._repair_workload()
+        if (key != _key(original)
                 or not any(_stable(desired) == _stable(row) for row in self.documents[self.drain_slice])):
             raise ValueError('pool_repair_drain_scope_unqualified')
         current = self.read_workload(key)
-        namespace = self.request.manager['metadata']['namespace']
-        children = self.parent._request('GET', '/apis/apps/v1/namespaces/' + namespace + '/replicasets?limit=1000')
+        namespace = original['metadata']['namespace']
+        prefix, resource = ('/apis/batch/v1/', 'jobs') if original['kind'] == 'CronJob' else ('/apis/apps/v1/', 'replicasets')
+        children = self.parent._request('GET', prefix + 'namespaces/' + namespace + '/' + resource + '?limit=1000')
         pods = self.parent._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
         after = self.read_workload(key)
         if children is None or pods is None or not _matches(after, current, _uid(current)):
@@ -146,8 +151,9 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
         try:
             record = self._qualify_binding()
             index, version = self.steps.index(phase), before['metadata']['resourceVersion']
-            key = _key(self.request.manager)
-            if (record is None or not _matches(before, self.documents[index], _uid(self.request.manager))
+            original = self._repair_workload()
+            key = _key(original)
+            if (record is None or not _matches(before, self.documents[index], _uid(original))
                     or _stable(desired) != _stable(self.documents[index + 1])
                     or not isinstance(version, str) or not 0 < len(version) <= 128
                     or record['phases'][phase] != {'phase': 'prepared' if preview else 'intent',
@@ -160,13 +166,13 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
             proposed, changes = self._repair_changes(phase, before, desired)
             if _stable(proposed) != _stable(desired) or self._qualify_binding() != record:
                 raise ValueError
-            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(self.request.manager)},
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(original)},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
                 {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
                 {'op': 'test', 'path': '/spec', 'value': before['spec']}, *changes]
             with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
                     json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
-                return _patch_result(response, desired=proposed, uid=_uid(self.request.manager))
+                return _patch_result(response, desired=proposed, uid=_uid(original))
         except Exception:
             raise ValueError('pool_repair_update_unconfirmed') from None
 

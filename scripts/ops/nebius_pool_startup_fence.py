@@ -73,10 +73,9 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         ) -> tuple[dict[str, tuple[str | None, tuple[dict[str, Any], ...]]], dict[str, str | None]]:
     """Original starts plus the one anchored repair; no new recovery protocol."""
     from scripts.ops.nebius_pool_manager_image_history import (
-        image_phase_options,
+        image_chain_sources,
         load_manager_image_chain,
         original_recovery_image,
-        prepared_image_record,
     )
     from scripts.ops.nebius_pool_startup_repair import (
         _manager_options,
@@ -103,10 +102,7 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
             'repair_configuration_sha256': _hash(config) if config.exists() or config.is_symlink() else None}
     chain = load_manager_image_chain(request, state=state, anchor=anchor)
     if chain and original_recovery_image(request, state=state, anchor=anchor) is None:
-        tail = chain[-1]
-        record = tail.record or prepared_image_record(tail.identity)
-        version = next((row['before_resource_version'] for row in record['phases'].values() if row['phase'] == 'intent'), None)
-        sources[_key(request.manager)] = (version, image_phase_options(tail.documents, record))
+        sources.update(image_chain_sources(chain))
         history['manager_image_sha256'] = digest({str(path): _hash(path) if path.exists() else None
             for entry in chain for path in (entry.path, entry.marker)})
     return sources, history

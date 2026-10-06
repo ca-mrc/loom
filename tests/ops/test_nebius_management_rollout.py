@@ -33,7 +33,12 @@ def image_repair_operation(tmp_path):
     return repair_operation(tmp_path, 'v2')
 
 
-def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path):
+def runtime_image_repair_operation(tmp_path):
+    return repair_operation(tmp_path, 'v3')
+
+
+@pytest.mark.parametrize('version', ['v2', 'v3'])
+def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path, version):
     import hashlib
 
     from scripts.ops.nebius_management_gateway import GatewayError, unpack_bundle
@@ -44,7 +49,7 @@ def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_sou
     wheels.mkdir()
     for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
         (wheels / name).write_bytes(b'fixture wheel')
-    operation = image_repair_operation(tmp_path)
+    operation = repair_operation(tmp_path, version)
     content = module().build_bundle(operation, uv=uv, requirements=requirements, wheels=wheels)
     files, selected = unpack_bundle(content)
     assert selected == operation
@@ -121,6 +126,8 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     (repair_operation, missing) for missing in (None, 'nebius_pool_repair_entry', 'nebius_pool_startup_repair_live')
 ] + [
     (image_repair_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_manager_image_live')
+]+[
+    (runtime_image_repair_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_runtime_image')
 ])
 def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, metadata_factory, missing):
     """A qualified bundle must include the entry's deferred pool dependencies."""
