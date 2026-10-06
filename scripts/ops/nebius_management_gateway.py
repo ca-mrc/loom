@@ -51,14 +51,15 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_pool_role_fencing_live", "nebius_pool_role_restoration", "nebius_pool_runtime",
     "nebius_pool_runtime_settings", "nebius_pool_shutdown", "nebius_pool_startup",
     "nebius_pool_startup_capacity", "nebius_pool_startup_database", "nebius_pool_startup_fence",
-    "nebius_pool_startup_live", "nebius_pool_template_restoration",
+    "nebius_pool_startup_live", "nebius_pool_startup_repair", "nebius_pool_startup_repair_live",
+    "nebius_pool_template_restoration",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install",
     "loom-nebius-pool-rollback-v1": "rollback"}
-POOL_PHASES = frozenset({'cutover', 'startup', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
+POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
     'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
 REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
     "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
@@ -115,7 +116,10 @@ def validate_operation(value: dict[str, Any]) -> None:
         fields = {"schema", "source_sha", "candidate", "installation_id", "namespace",
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
         refresh = value.get('schema') == 'loom.nebius-management-refresh-operation.v1'
-        pool = value.get('schema') == 'loom.nebius-pool-cutover-operation.v1'
+        repair = value.get('schema') == 'loom.nebius-pool-startup-repair-operation.v1'
+        pool = value.get('schema') == 'loom.nebius-pool-cutover-operation.v1' or repair
+        if repair:
+            fields.add('original_operation_id')
         if refresh or pool:
             fields.add('operation_id')
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
@@ -124,7 +128,8 @@ def validate_operation(value: dict[str, Any]) -> None:
                                    "loom.nebius-management-retirement-operation.v1",
                                    "loom.nebius-management-retirement-diagnostic-operation.v1",
                                    "loom.nebius-management-retirement-recovery-operation.v1",
-                                   "loom.nebius-management-refresh-operation.v1", "loom.nebius-pool-cutover-operation.v1"}:
+                                   "loom.nebius-management-refresh-operation.v1", "loom.nebius-pool-cutover-operation.v1",
+                                   "loom.nebius-pool-startup-repair-operation.v1"}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -143,7 +148,11 @@ def validate_operation(value: dict[str, Any]) -> None:
         if refresh or pool:
             operation_id = UUID(value['operation_id'])
             if (not operation_id.int or str(operation_id) != value['operation_id'] or root.name != str(operation_id)
-                    or root.parent.name != ('pool-cutover' if pool else 'refresh') or value['source_sha'] != value['candidate']):
+                    or root.parent.name != ('pool-repair' if repair else 'pool-cutover' if pool else 'refresh')
+                    or value['source_sha'] != value['candidate']):
+                raise ValueError()
+            if repair and (str(UUID(value['original_operation_id'])) != value['original_operation_id']
+                    or not UUID(value['original_operation_id']).int or value['original_operation_id'] == value['operation_id']):
                 raise ValueError()
             root = root.parent.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
@@ -165,7 +174,8 @@ def validate_operation(value: dict[str, Any]) -> None:
 def validate_action(action: str, operation: dict[str, Any]) -> None:
     validate_operation(operation)
     if (action not in {'qualify', 'preflight', 'install', 'rollback'}
-            or (action == 'rollback' and operation['schema'] != 'loom.nebius-pool-cutover-operation.v1')):
+            or (action == 'rollback' and operation['schema'] not in {
+                'loom.nebius-pool-cutover-operation.v1', 'loom.nebius-pool-startup-repair-operation.v1'})):
         raise GatewayError('management action outside fixed authority')
 
 
@@ -411,7 +421,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
         recovery = operation["schema"] == "loom.nebius-management-retirement-recovery-operation.v1"
         refresh = operation['schema'] == 'loom.nebius-management-refresh-operation.v1'
-        pool = operation['schema'] == 'loom.nebius-pool-cutover-operation.v1'
+        repair = operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v1'
+        pool = operation['schema'] == 'loom.nebius-pool-cutover-operation.v1' or repair
         success = ('pool_cutover_completed' if pool else "retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
             else "management_refreshed" if refresh else "management_upgraded" if upgrade else "management_installed")
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
@@ -425,6 +436,10 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if value.get('operation_id') != operation['operation_id']:
                 raise ValueError()
             result['operation_id'] = value['operation_id']
+        if repair:
+            if value.get('original_operation_id') != operation['original_operation_id']:
+                raise ValueError()
+            result['original_operation_id'] = value['original_operation_id']
         if status == "blocked":
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()
