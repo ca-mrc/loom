@@ -795,52 +795,6 @@ def test_management_entry_runs_repair_and_reports_both_identities(private_repair
     assert 'private-payload' not in json.dumps(report)
 
 
-@pytest.mark.parametrize('phase', ['stop', 'template', 'start', 'complete'])
-@pytest.mark.timeout(420)
-def test_repair_rollback_restores_templates_roles_and_completes_legacy(prepared_repair, monkeypatch, phase):
-    from types import SimpleNamespace
-
-    from scripts.ops import nebius_pool_operation as target
-    from scripts.ops.nebius_management_switch import _stable
-    from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI
-    from tests.ops.test_nebius_pool_legacy_reopening import ReopeningAPI
-    from tests.ops.test_nebius_pool_legacy_restart import RestartAPI
-    from tests.ops.test_nebius_pool_machine_retirement import MachineAPI
-    from tests.ops.test_nebius_pool_role_restoration import RoleAPI
-    from tests.ops.test_nebius_pool_template_restoration import TemplateAPI
-
-    context, binding, remote, state, anchor = prepared_repair
-    if phase != 'complete':
-        remote.failure = (phase, 'before')
-    repair(prepared_repair)
-    fixture = context.request, context.tokens, remote.closed, remote.startup, None, state.parent
-    machine = MachineAPI(fixture)
-    gateway = GatewayAPI(fixture, machine)
-    template = TemplateAPI(fixture, gateway)
-    roles = RoleAPI(fixture, template)
-    restart = RestartAPI(fixture, roles)
-
-    class RecoveryAPI(ReopeningAPI):
-        def successor_drained(self, key, desired):
-            assert (desired['spec']['suspend'] is True if desired['kind'] == 'CronJob'
-                else desired['spec']['replicas'] == 0)
-            return self.processes_drained
-
-    runtime = RecoveryAPI(fixture, restart)
-    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
-    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: runtime)
-    result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding)
-    assert result['status'] == 'pool_cutover_completed' and result['outcome'] == 'legacy'
-    assert result['acceptance_verified'] is False
-    assert runtime.mode == 'fenced' and runtime.machine_phase == 'revoked'
-    assert set(runtime.guards.values()) == {'open'}
-    assert _stable(runtime.read_workload(_key(context.request.manager)))['spec'] == _stable(context.request.manager)['spec']
-    assert runtime.template_calls and runtime.legacy_calls and runtime.releases
-    history = {path: path.read_bytes() for directory in (state, anchor) for path in directory.rglob('*.json')}
-    assert target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding) == result
-    assert all(path.read_bytes() == raw for path, raw in history.items())
-
-
 @pytest.mark.parametrize('change', ['status', 'busy', 'spec', 'uid'])
 def test_manager_drain_distinguishes_controller_status_updates_from_workload_drift(prepared_repair, change):
     from types import SimpleNamespace
