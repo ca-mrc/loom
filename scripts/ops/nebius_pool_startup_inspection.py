@@ -10,13 +10,17 @@ from scripts.ops.nebius_management_gateway import validate_operation
 
 _LABEL = "loom.nebius/management-installation"
 _COLLECTOR = "loom-execution-capacity-collector"
+_WORKLOADS = {"manager": ("loom-service", "loom-service"),
+    "gateway": ("gateway", "loom-pool-gateway"), "collector": ("collector", _COLLECTOR)}
 _ERRORS = {"ValueError", "RuntimeError", "TypeError", "KeyError", "AttributeError", "AssertionError",
     "FileNotFoundError", "PermissionError", "TimeoutError", "ImportError", "ModuleNotFoundError",
     "OSError", "ConnectionError", "ExceptionGroup", "CapacityCollectionError", "PoolObservationError",
     "OperationalError", "ProgrammingError", "IntegrityError", "ValidationError", "ConnectError",
-    "ConnectTimeout", "ReadTimeout", "HTTPStatusError", "SSLCertVerificationError"}
+    "ConnectTimeout", "ReadTimeout", "HTTPStatusError", "SSLCertVerificationError",
+    "KubernetesObservationError", "SchemaNotAtHeadError", "PoolAuthenticationError"}
 _STAGES = {"invalid_application_provider_credentials", "invalid_environment_provider_credentials",
-    "invalid_application_source_runtime", "invalid_application_build_runtime", "invalid_application_runtime_material"}
+    "invalid_application_source_runtime", "invalid_application_build_runtime", "invalid_application_runtime_material",
+    "pool_gateway_identity_unavailable"}
 _FILES = {
     "loom_service/app.py": "service_app",
     "loom_service/config.py": "service_config",
@@ -28,6 +32,11 @@ _FILES = {
     "loom_service/application_management/source_upload.py": "application_source_upload",
     "loom_service/application_management/build_runtime.py": "application_build_runtime",
     "loom_service/pool_management/profiles.py": "pool_profiles",
+    "loom_service/pool_management/__main__.py": "pool_gateway_entry",
+    "loom_service/pool_management/auth.py": "pool_auth",
+    "loom_service/pool_management/kubernetes.py": "pool_kubernetes",
+    "loom_service/pool_management/gateway_journal.py": "pool_gateway_journal",
+    "loom_service/environment_management/kubernetes_credentials.py": "projected_kubernetes_credentials",
     "loom/db/schema_startup.py": "database_schema",
     "loom/secret_store.py": "secret_store",
     "loom_execution_capacity_collector/__main__.py": "collector_entry",
@@ -94,18 +103,19 @@ def _container(spec: dict[str, Any], name: str) -> dict[str, Any]:
 def _bound(kube: Kubectl, pod: dict[str, Any], role: str, installation: str) -> dict[str, Any]:
     from scripts.ops.nebius_pool_migration_guard import _runtime_pod_spec
 
-    name = "loom-service" if role == "manager" else "collector"
-    parent = _parent(kube, pod, "ReplicaSet" if role == "manager" else "Job")
-    root = _parent(kube, parent, "Deployment" if role == "manager" else "CronJob")
-    root_spec = root["spec"] if role == "manager" else root["spec"]["jobTemplate"]["spec"]
-    if root["metadata"]["name"] != ("loom-service" if role == "manager" else _COLLECTOR):
+    name, controller = _WORKLOADS[role]
+    deployment = role != "collector"
+    parent = _parent(kube, pod, "ReplicaSet" if deployment else "Job")
+    root = _parent(kube, parent, "Deployment" if deployment else "CronJob")
+    root_spec = root["spec"] if deployment else root["spec"]["jobTemplate"]["spec"]
+    if root["metadata"]["name"] != controller:
         raise ValueError
     if parent["spec"]["template"]["spec"] != root_spec["template"]["spec"]:
         raise ValueError
     actual_meta = parent["spec"]["template"].get("metadata", {})
     expected_meta = root_spec["template"].get("metadata", {})
     actual_labels, expected_labels = dict(actual_meta.get("labels", {})), expected_meta.get("labels", {})
-    generated = {"pod-template-hash"} if role == "manager" else {
+    generated = {"pod-template-hash"} if deployment else {
         "batch.kubernetes.io/controller-uid", "controller-uid", "batch.kubernetes.io/job-name", "job-name"}
     for key in generated - expected_labels.keys():
         actual_labels.pop(key, None)
@@ -122,6 +132,14 @@ def _bound(kube: Kubectl, pod: dict[str, Any], role: str, installation: str) -> 
         if (root["metadata"].get("labels", {}).get(_LABEL) != installation
                 or {"name": "LOOM_SVC_SERVICE_MODE", "value": "management"} not in container.get("env", [])
                 or container.get("command") not in (None, ["python", "-m", "loom_service"])
+                or container.get("args")):
+            raise ValueError
+    elif role == "gateway":
+        identity = [row for row in container.get("env", [])
+            if row.get("name", "").upper() == "LOOM_POOL_GATEWAY_INSTALLATION_ID"]
+        if (root["metadata"].get("labels", {}).get(_LABEL) != installation
+                or identity != [{"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID", "value": installation}]
+                or container.get("command") != ["python", "-m", "loom_service.pool_management"]
                 or container.get("args")):
             raise ValueError
     else:
@@ -163,15 +181,17 @@ def pool_startup_diagnostics(kube: Kubectl, pods: list[dict[str, Any]], *, opera
     except Exception:
         return {"status": "unavailable", "workloads": []}
     workloads: list[dict[str, Any]] = []
-    attempts = {"manager": 0, "collector": 0}
+    attempts = dict.fromkeys(_WORKLOADS, 0)
     observed: set[str] = set()
     for pod in sorted(pods, key=lambda row: row["metadata"].get("creationTimestamp", ""), reverse=True):
         try:
             metadata = pod["metadata"]
             role = "manager" if metadata.get("namespace") == namespace else "collector"
+            if role == "manager" and any(row.get("name") == "gateway" for row in pod["spec"].get("containers", [])):
+                role = "gateway"
             if metadata.get("namespace") not in {namespace, execution_namespace} or role in observed:
                 continue
-            name = "loom-service" if role == "manager" else "collector"
+            name = _WORKLOADS[role][0]
             instance = _instance(pod, name)
             if instance is None or attempts[role] == 3:
                 continue

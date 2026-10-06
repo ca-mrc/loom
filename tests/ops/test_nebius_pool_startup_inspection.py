@@ -274,3 +274,108 @@ def test_template_metadata_separates_old_rollouts_from_native_controller_labels(
             "batch.kubernetes.io/job-name": parent["metadata"]["name"]}
         parent["spec"]["template"]["metadata"] = {"labels": labels}
     assert any(row["role"] == role for row in inspect(cluster)["workloads"]) == (change == "native_labels")
+
+
+@pytest.fixture
+def gateway(cluster, monkeypatch):
+    installation = cluster.manager["metadata"]["labels"][LABEL]
+    container = {"name": "gateway", "image": "registry.test/service@sha256:" + "a" * 64,
+        "command": ["python", "-m", "loom_service.pool_management"],
+        "env": [{"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID", "value": installation}]}
+    template = {"spec": {"containers": [container]}}
+    root = resource("Deployment", "loom-pool-gateway", MANAGER, {"template": template})
+    root["metadata"]["labels"] = {LABEL: installation}
+    replica = resource("ReplicaSet", "loom-pool-gateway-abcdefgh", MANAGER, {"template": template}, owner=root)
+    pod = resource("Pod", "loom-pool-gateway-abcdefgh-12345", MANAGER, template["spec"], owner=replica)
+    pod["status"] = {"phase": "Running", "containerStatuses": [{"name": "gateway", "ready": False,
+        "restartCount": 4, "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+        "lastState": {"terminated": {"exitCode": 1, "reason": "Error"}}}]}
+    get = cluster.get
+
+    def gateway_get(kind, name, namespace):
+        for doc in (root, replica, pod):
+            if (kind, name, namespace) == (doc["kind"].lower(), doc["metadata"]["name"], doc["metadata"]["namespace"]):
+                cluster.calls.append(("get", kind, name, namespace))
+                return copy.deepcopy(doc)
+        return get(kind, name, namespace)
+
+    monkeypatch.setattr(cluster, "get", gateway_get)
+    cluster.lists["pods"].insert(0, pod)
+    return root, replica, pod
+
+
+def test_gateway_failure_is_independent_of_manager_and_exposes_no_payload(cluster, gateway):
+    cluster.log = '''Traceback (most recent call last):
+  File "/app/src/loom_service/pool_management/__main__.py", line 118, in _run
+    private_source(secret)
+  File "/app/src/loom_service/environment_management/kubernetes_credentials.py", line 60, in get_token
+    private_source(secret)
+PermissionError: private-token-path
+'''
+    result = inspect(cluster)
+    assert {row["role"] for row in result["workloads"]} == {"manager", "gateway", "collector"}
+    row, = (row for row in result["workloads"] if row["role"] == "gateway")
+    assert row["pod_uid"] == gateway[2]["metadata"]["uid"]
+    assert row["log_instance"] == "previous"
+    assert row["diagnostic"] == {"status": "observed", "errors": ["PermissionError"], "stages": [],
+        "locations": [{"component": "pool_gateway_entry", "line": 118},
+            {"component": "projected_kubernetes_credentials", "line": 60}]}
+    assert "private" not in json.dumps(result)
+    assert all(call[0] in {"get", "config", "logs"} for call in cluster.calls)
+
+
+@pytest.mark.parametrize("damage", ["installation_label", "installation_env", "command", "args", "stale_image",
+    "replica_uid", "root_uid", "root_name", "namespace", "ready"])
+def test_unbound_gateway_never_reads_logs(cluster, gateway, damage):
+    root, replica, pod = gateway
+    container = root["spec"]["template"]["spec"]["containers"][0]
+    if damage == "installation_label":
+        root["metadata"]["labels"][LABEL] = str(uuid4())
+    elif damage == "installation_env":
+        for doc in (root, replica):
+            doc["spec"]["template"]["spec"]["containers"][0]["env"][0]["value"] = str(uuid4())
+    elif damage == "command":
+        container["command"] = ["python", "-m", "other"]
+    elif damage == "args":
+        container["args"] = ["private"]
+    elif damage == "stale_image":
+        container["image"] = "different"
+    elif damage == "replica_uid":
+        replica["metadata"]["uid"] = str(uuid4())
+    elif damage == "root_uid":
+        root["metadata"]["uid"] = str(uuid4())
+    elif damage == "root_name":
+        root["metadata"]["name"] = "foreign"
+        replica["metadata"]["ownerReferences"][0]["name"] = "foreign"
+    elif damage == "namespace":
+        pod["metadata"]["namespace"] = EXECUTION
+    else:
+        pod["status"]["containerStatuses"][0].update(ready=True, state={"running": {}})
+    assert not any(row["role"] == "gateway" for row in inspect(cluster)["workloads"])
+    assert not any(call[:2] == ("logs", pod["metadata"]["name"]) for call in cluster.calls)
+
+
+def test_fixed_collector_and_gateway_error_types_are_retained_without_messages(cluster):
+    cluster.log = "| loom_execution_capacity_collector.kubernetes.KubernetesObservationError: private-pod\n" \
+        "SchemaNotAtHeadError: private-database\n" \
+        "ValueError: pool_gateway_identity_unavailable\n"
+    diagnostic = inspect(cluster)["workloads"][0]["diagnostic"]
+    assert diagnostic == {"status": "observed", "errors": ["KubernetesObservationError", "SchemaNotAtHeadError", "ValueError"],
+        "stages": ["pool_gateway_identity_unavailable"], "locations": []}
+
+
+@pytest.mark.parametrize("override", ["literal", "secret", "same", "case_alias"])
+def test_duplicate_gateway_installation_cannot_select_a_different_runtime(cluster, gateway, override):
+    root, replica, pod = gateway
+    value = {"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID"}
+    if override == "secret":
+        value["valueFrom"] = {"secretKeyRef": {"name": "foreign", "key": "installation"}}
+    else:
+        value["value"] = str(uuid4()) if override == "literal" else root["metadata"]["labels"][LABEL]
+    if override == "case_alias":
+        value["name"] = "loom_pool_gateway_installation_id"
+        value["value"] = str(uuid4())
+    for spec in (root["spec"]["template"]["spec"], replica["spec"]["template"]["spec"], pod["spec"]):
+        spec["containers"][0]["env"].append(copy.deepcopy(value))
+    assert not any(row["role"] == "gateway" for row in inspect(cluster)["workloads"])
+    assert not any(call[:2] == ("logs", pod["metadata"]["name"]) for call in cluster.calls)

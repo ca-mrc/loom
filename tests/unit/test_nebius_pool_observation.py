@@ -216,6 +216,63 @@ async def test_registered_work_scheduled_outside_pool_is_not_invented_free_capac
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["ReplicaSet", "Job"])
+@pytest.mark.parametrize("namespace", ["run-1", "run-1-build"])
+@pytest.mark.parametrize("pending", [False, True])
+async def test_platform_controllers_in_registered_namespaces_do_not_charge_execution_pool(kind, namespace, pending):
+    pod = _pod(name="platform-controller", pending=pending)
+    pod.metadata.namespace = namespace
+    pod.metadata.labels = {"app.kubernetes.io/name": "platform-controller"}
+    pod.metadata.annotations = {}
+    pod.metadata.owner_references = [k8s.V1OwnerReference(
+        api_version="apps/v1" if kind == "ReplicaSet" else "batch/v1", kind=kind,
+        name="platform-controller", uid="platform-controller-uid", controller=True)]
+    pod.spec.node_selector = {"loom.nebius/role": "system"}
+    pod.spec.node_name = None if pending else "platform-node"
+    snapshot = await _capture([], [pod])
+    assert snapshot.active_nodes == 0
+    assert snapshot.requested.cpu_millis == 0
+    assert snapshot.pending_pods == []
+    assert snapshot.pending_jobs == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("damage", [None, "generation", "owner_name", "owner_controller"])
+async def test_gateway_job_cannot_hide_off_pool_execution_with_a_conflicting_selector(damage):
+    pod = _pod()
+    pod.spec.node_selector = {"loom.nebius/role": "system"}
+    pod.spec.node_name = "platform-node"
+    if damage == "generation":
+        pod.metadata.labels["loom.openai.com/generation"] = "wrong"
+    elif damage == "owner_name":
+        pod.metadata.owner_references[0].name = "wrong"
+    elif damage == "owner_controller":
+        pod.metadata.owner_references[0].controller = False
+    with pytest.raises(KubernetesObservationError, match="outside"):
+        await _capture([], [pod])
+
+
+@pytest.mark.asyncio
+async def test_unknown_registered_pod_without_exclusion_remains_fail_closed_off_pool():
+    pod = _pod()
+    pod.metadata.owner_references = []
+    pod.spec.node_name = "platform-node"
+    with pytest.raises(KubernetesObservationError, match="outside"):
+        await _capture([], [pod])
+
+
+@pytest.mark.asyncio
+async def test_excluded_registered_controller_still_charges_actual_pool_occupancy():
+    pod = _pod()
+    pod.metadata.owner_references = []
+    pod.spec.node_selector = {"loom.nebius/role": "system"}
+    snapshot = await _capture([_node()], [pod])
+    assert snapshot.nodes[0].managed_pods == []
+    assert snapshot.nodes[0].requested.cpu_millis == 1000
+    assert snapshot.nodes[0].used_pod_slots == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["verifier", "task_image_build"])
 async def test_builds_and_verifiers_share_the_same_physical_accounting(kind):
     from loom_execution_capacity_collector.pool import PoolObservationScope
