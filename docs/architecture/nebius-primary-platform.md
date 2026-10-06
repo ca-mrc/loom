@@ -1106,6 +1106,17 @@ when its revision differs from the older cloud/shared bundles, and cannot enable
 remove or change source/build runtime settings. Rendering these prerequisites
 does not install them or establish multi-owner acceptance.
 
+Before first pool opening, protected image correction can continue a completed
+manager correction for the retained gateway or pooled development collector. It
+preserves the physical pool, credentials, configuration and execution profiles;
+only the selected workload's image changes. One bounded ancestry folds the latest
+image per workload through activation, cancellation and completion. The collector
+uses the execution-actuator publication component and CronJob suspension with
+observed child drain. Suspension cannot atomically prevent an already-dispatched
+Job, so installed proof includes a new successful corrected-image Job as well as
+the existing fresh-capacity activation barrier. See the
+[pre-opening runtime image correction procedure](../runbooks/nebius-deployment.md#correct-selected-pool-runtime-images-before-first-opening).
+
 The common pool registry has an application-build adapter. New admission and
 activation check the retained current build attempt, verified source, protected
 participant/profile binding and cancellation state under the pool transaction.

@@ -22,6 +22,7 @@ from scripts.ops.nebius_pool_cutover_entry import (
 from scripts.ops.nebius_pool_cutover_live import PoolCutoverChecks
 from scripts.ops.nebius_pool_manager_image_history import (
     ManagerImageRepairBinding,
+    RuntimeImageRepairBinding,
     manager_image_entry,
 )
 from scripts.ops.nebius_pool_manager_image_stage import qualify_image_entry_closed
@@ -40,22 +41,32 @@ class ImageRepairPrivateInputs(BaseModel):
     binding: ManagerImageRepairBinding
 
 
+class RuntimeImageRepairPrivateInputs(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    schema_version: Literal['loom.nebius-pool-runtime-image-private-inputs.v2']
+    original_operation: dict[str, Any]
+    binding: RuntimeImageRepairBinding
+
+
 @dataclass(frozen=True, repr=False)
 class ImageRepairContext:
     operation: dict[str, Any]
-    inputs: ImageRepairPrivateInputs
+    inputs: ImageRepairPrivateInputs | RuntimeImageRepairPrivateInputs
     original: PoolCutoverContext
 
 
 def load_image_repair_inputs(operation: dict[str, Any]) -> ImageRepairContext:
     try:
         validate_operation(operation)
-        if operation['schema'] != 'loom.nebius-pool-startup-repair-operation.v2':
+        if operation['schema'] not in {'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'}:
             raise ValueError
         raw = _private(Path(operation['inputs_path']), 4 * 1024**2)
         if hashlib.sha256(raw).hexdigest() != operation['inputs_sha256']:
             raise ValueError
-        inputs = ImageRepairPrivateInputs.model_validate_json(raw)
+        inputs: ImageRepairPrivateInputs | RuntimeImageRepairPrivateInputs = (
+            RuntimeImageRepairPrivateInputs.model_validate_json(raw)
+            if operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v3'
+            else ImageRepairPrivateInputs.model_validate_json(raw))
         original = load_pool_cutover_inputs(inputs.original_operation)
         binding = inputs.binding
         original_digest = hashlib.sha256(json.dumps(inputs.original_operation,

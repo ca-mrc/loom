@@ -10,19 +10,24 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
-from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
+from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest, render_refresh
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import _activation_record
 from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_manager_image import manager_image_target
 from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_runtime_image import (
+    RuntimeImageTarget,
+    runtime_image_key,
+    runtime_image_target,
+)
 from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents
 from scripts.ops.nebius_pool_startup_repair import (
     PoolStartupRepairBinding,
@@ -51,6 +56,19 @@ class ManagerImageRepairBinding(PoolStartupRepairBinding):
     publication: ProtectedPublication
     candidate: dict[str, Any]
     profile: dict[str, Any]
+
+
+class RuntimeImageRepairBinding(ManagerImageRepairBinding):
+    """Additional fields deliberately reject enrollment in retained v1 tooling."""
+
+    schema_version: Literal['loom.nebius-pool-runtime-image-binding.v2']
+    target: RuntimeImageTarget
+
+
+def parse_image_binding(value: dict[str, Any]) -> ManagerImageRepairBinding:
+    if 'schema_version' in value or 'target' in value:
+        return RuntimeImageRepairBinding.model_validate(value)
+    return ManagerImageRepairBinding.model_validate(value)
 
 
 @dataclass(frozen=True, repr=False)
@@ -121,7 +139,7 @@ def _record(path: Path, identity: dict[str, Any]) -> dict[str, Any] | None:
 
 def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, state: Path,
         anchor: Path, prior: tuple[ManagerImageEntry, ...]) -> ManagerImageEntry:
-    binding = ManagerImageRepairBinding.model_validate(binding.model_dump())
+    binding = parse_image_binding(binding.model_dump())
     operation = request.fencing.retirement.migration.registration.spec.operation_id
     path, marker = _paths(operation, binding.ordinal, state, anchor)
     retained = _read(marker) if _exists(marker) else None
@@ -161,29 +179,43 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
             or hashlib.sha256(activation_entry.encode()).hexdigest() != binding.activation_sha256
             or json.loads(activation_entry) != prepared):
         raise ValueError
-    original = copy.deepcopy(targets[_key(request.manager)])
+    manager = copy.deepcopy(targets[_key(request.manager)])
     if startup_repair_exists(request, state=state, anchor=anchor):
         source_documents, _, _, source = _repair_record(request, state=state, anchor=anchor)
         if (source is None or any(row['phase'] != 'applied' for row in source['phases'].values())
                 or binding.source_repair_sha256 != _hash(state / 'startup-repair.json')):
             raise ValueError
-        original = copy.deepcopy(source_documents[-1])
+        manager = copy.deepcopy(source_documents[-1])
     elif binding.source_repair_sha256 is not None or delivery.source_delivery_version != 'v2':
         raise ValueError
-    if prior:
-        original = copy.deepcopy(prior[-1].documents[-1])
-    original['metadata']['uid'] = _uid(request.manager)
+    targeted = isinstance(binding, RuntimeImageRepairBinding)
+    if targeted and (not prior or isinstance(prior[0].binding, RuntimeImageRepairBinding)):
+        raise ValueError
+    key = runtime_image_key(request, binding.target) if isinstance(binding, RuntimeImageRepairBinding) else _key(request.manager)
+    originals = {**targets, _key(request.manager): manager}
+    for row in prior:
+        originals[_key(row.documents[0])] = row.documents[-1]
+    original = copy.deepcopy(originals[key])
+    original['metadata']['uid'] = _uid(closed[key])
     deployment = derive_application_build_deployment(delivery.before,
         request.fencing.retirement.migration.registration.spec)
-    desired = manager_image_target(ManagementRefreshRenderRequest(deployment, deployment,
-        original, binding.candidate, binding.profile, delivery.repo_root))
+    active_manager = copy.deepcopy(originals[_key(request.manager)])
+    active_manager['metadata']['uid'] = _uid(request.manager)
+    rendering = ManagementRefreshRenderRequest(deployment, deployment,
+        active_manager, binding.candidate, binding.profile, delivery.repo_root)
+    if isinstance(binding, RuntimeImageRepairBinding):
+        render_refresh(rendering)
+        desired = runtime_image_target(request, binding.target, original, binding.candidate)
+    else:
+        desired = manager_image_target(rendering)
     if IMAGE_MARKER in original['metadata'].get('annotations', {}):
         raise ValueError
     isolated = _snapshot(original)
     isolated['metadata'].setdefault('annotations', {})[IMAGE_MARKER] = str(binding.operation_id)
     stopped, replaced = copy.deepcopy(isolated), copy.deepcopy(desired)
     replaced['metadata'].setdefault('annotations', {})[IMAGE_MARKER] = str(binding.operation_id)
-    stopped['spec']['replicas'] = replaced['spec']['replicas'] = 0
+    field = 'suspend' if original['kind'] == 'CronJob' else 'replicas'
+    stopped['spec'][field] = replaced['spec'][field] = True if field == 'suspend' else 0
     documents = (_snapshot(original), isolated, stopped, replaced, desired)
     identity = {'schema': 'loom.nebius-pool-manager-image.v1', 'operation_id': str(operation),
         'state_dir': str(state), 'binding': binding.model_dump(mode='json'),
@@ -214,7 +246,7 @@ def load_manager_image_chain(request: PoolCutoverRequest, *, state: Path, anchor
             if gap:
                 raise ValueError
             identity = _read(marker)
-            binding = ManagerImageRepairBinding.model_validate(identity['binding'])
+            binding = parse_image_binding(identity['binding'])
             if binding.ordinal != ordinal:
                 raise ValueError
             result += (_entry(request, binding, state=state, anchor=anchor, prior=result),)
@@ -242,11 +274,25 @@ def manager_image_options(request: PoolCutoverRequest, *, state: Path, anchor: P
     chain = load_manager_image_chain(request, state=state, anchor=anchor)
     if not chain:
         return choices
-    key = _key(request.manager)
-    if len(choices[key]) != 1 or _stable(choices[key][0]) != _stable(chain[0].documents[0]):
-        raise ValueError('pool_manager_image_projection_differs')
-    tail = chain[-1]
-    return {**choices, key: image_phase_options(tail.documents, tail.record or prepared_image_record(tail.identity))}
+    result = dict(choices)
+    for row in chain:
+        key = _key(row.documents[0])
+        if len(result[key]) != 1 or _stable(result[key][0]) != _stable(row.documents[0]):
+            raise ValueError('pool_manager_image_projection_differs')
+        result[key] = image_phase_options(row.documents, row.record or prepared_image_record(row.identity))
+    return result
+
+
+def image_chain_sources(chain: tuple[ManagerImageEntry, ...]
+        ) -> dict[str, tuple[str | None, tuple[dict[str, Any], ...]]]:
+    """Latest effective image per key; only the unfinished tail can have intent."""
+    result = {}
+    for entry in chain:
+        record = entry.record or prepared_image_record(entry.identity)
+        version = next((row['before_resource_version'] for row in record['phases'].values()
+            if row['phase'] == 'intent'), None)
+        result[_key(entry.documents[0])] = (version, image_phase_options(entry.documents, record))
+    return result
 
 
 def qualify_completed_manager_images(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> None:
@@ -269,7 +315,7 @@ def original_recovery_image(request: PoolCutoverRequest, *, state: Path, anchor:
     if not chain:
         return None
     _read(state / 'startup-fence.json')
-    if len(chain) != 1:
+    if len(chain) != 1 or isinstance(chain[0].binding, RuntimeImageRepairBinding):
         raise ValueError('pool_manager_image_legacy_recovery_unqualified')
     entry = chain[0]
     record = entry.record or prepared_image_record(entry.identity)
@@ -298,14 +344,16 @@ def manager_image_fence_patches(request: PoolCutoverRequest, before: dict[str, A
         raise ValueError('pool_manager_image_fence_unqualified')
     tail = chain[-1]
     assert tail.record is not None
+    closed, _ = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
+    uid = _uid(closed[_key(tail.documents[0])])
     index, = (index for index, name in enumerate(STEPS) if tail.record['phases'][name]['phase'] == 'intent')
     version = tail.record['phases'][STEPS[index]]['before_resource_version']
-    if (not _matches(before, tail.documents[index], _uid(request.manager))
+    if (not _matches(before, tail.documents[index], uid)
             or before['metadata']['resourceVersion'] != version):
         raise ValueError('pool_manager_image_fence_unqualified')
     operation = request.fencing.retirement.migration.registration.spec.operation_id
     desired = marked_startup_document(before, operation)
-    return [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(request.manager)},
+    return [{'op': 'test', 'path': '/metadata/uid', 'value': uid},
         {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
         {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
         {'op': 'test', 'path': '/spec', 'value': before['spec']},

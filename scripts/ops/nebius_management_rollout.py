@@ -18,6 +18,7 @@ from scripts.ops.nebius_certificate_gateway import _write
 from scripts.ops.nebius_ingress_rollout import build_wheels
 from scripts.ops.nebius_management_gateway import (
     COMMANDS,
+    IMAGE_REPAIR_SCHEMAS,
     LIMITS,
     MANAGER_SCHEMA_PROOF,
     MAX_WHEEL,
@@ -67,7 +68,7 @@ def build_bundle(config: dict[str, Any], *, uv: Path, requirements: Path, wheels
             if len(files[name]) > limit:
                 raise RolloutError("management bundle member exceeds bound")
         files["operation.json"] = json.dumps(config, sort_keys=True).encode()
-        if config['schema'] == 'loom.nebius-pool-startup-repair-operation.v2':
+        if config['schema'] in IMAGE_REPAIR_SCHEMAS:
             from loom.db.schema_startup import service_schema_head
 
             files[MANAGER_SCHEMA_PROOF] = json.dumps({'schema': 'loom.nebius-manager-schema.v1',

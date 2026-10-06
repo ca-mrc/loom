@@ -630,7 +630,8 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
         assert writes == (["isolate", "stop", "template"] if loss == "before" else ["isolate", "stop", "template", "start"])
 
 
-def test_https_cancellation_fences_image_intent_not_completed_source_repair(image_repair_case):
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+def test_https_cancellation_fences_image_intent_not_completed_source_repair(image_repair_case, target):
     from types import SimpleNamespace
 
     import httpx
@@ -641,7 +642,11 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
     from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
     from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
 
+    image_repair_case = selected_image_case(image_repair_case, target)
     context, remote, state, anchor, _ = image_repair_case
+    original = entry(image_repair_case).documents[0]
+    key = _key(original)
+    path = ("/cronjobs/" if original["kind"] == "CronJob" else "/deployments/") + original["metadata"]["name"]
     image_api = ImageAPI(image_repair_case)
     image_api.failure = ("template", "before")
     assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
@@ -649,13 +654,12 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
     api.state = state
     assert advance_pool_activation(request=context.request, api=api, state_dir=state,
         anchor_dir=anchor, cancel=True)["status"] == "pool_activation_cancelled"
-    key = _key(context.request.manager)
     writes = []
 
     def respond(message):
         before = remote.read_workload(key)
         patches = json.loads(message.content)
-        assert message.method == "PATCH" and message.url.path.endswith("/deployments/loom-service")
+        assert message.method == "PATCH" and message.url.path == path
         assert patches[:4] == [
             {"op": "test", "path": "/metadata/uid", "value": before["metadata"]["uid"]},
             {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
@@ -673,7 +677,7 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
     with httpx.Client(base_url="https://kubernetes.invalid", transport=httpx.MockTransport(respond)) as client:
         closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
         adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed, targets=targets,
-            parent=SimpleNamespace(client=client), _scope=lambda: None, _path=lambda key: "/deployments/loom-service",
+            parent=SimpleNamespace(client=client), _scope=lambda: None, _path=lambda key: path,
             verify_retained=api.verify_retained, pool_state=api.pool_state, guard_state=api.guard_state)
         api.preview_startup_fence = lambda key, before, desired: (copy.deepcopy(desired)
             if HTTPSPoolActivationAPI._startup_fence_patch(adapter, key, before, desired, preview=True) else None)
