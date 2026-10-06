@@ -19,6 +19,14 @@ from scripts.ops.nebius_pool_gateway_retirement import retire_gateway_roles
 from scripts.ops.nebius_pool_legacy_reopening import reopen_pool_legacy
 from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
 from scripts.ops.nebius_pool_machine_retirement import retire_pool_machines
+from scripts.ops.nebius_pool_manager_image_history import (
+    ManagerImageRepairBinding,
+    _completed,
+    load_manager_image_chain,
+    manager_image_entry,
+)
+from scripts.ops.nebius_pool_manager_image_live import HTTPSPoolManagerImageAPI
+from scripts.ops.nebius_pool_manager_image_stage import repair_manager_image
 from scripts.ops.nebius_pool_migration import PoolMigrationError, _hash
 from scripts.ops.nebius_pool_role_restoration import restore_pool_roles
 from scripts.ops.nebius_pool_shutdown import stop_pool_successors
@@ -65,7 +73,8 @@ class PoolOperationError(RuntimeError):
 
 
 def run_pool_operation(*, parent: HTTPSPoolCutoverAPI, tokens: dict[UUID, str], action: str,
-                       repair_binding: PoolStartupRepairBinding | None = None) -> dict[str, Any]:
+                       repair_binding: PoolStartupRepairBinding | None = None,
+                       image_binding: ManagerImageRepairBinding | None = None) -> dict[str, Any]:
     """Run a complete fixed direction or resume its newest journaled phase.
 
 The caller must use the private-input-qualified parent and keep its transports
@@ -75,7 +84,8 @@ own original journal lock and validates its predecessor before any side effect.
 """
     phase = 'operation'
     try:
-        if action not in {'preflight', 'install', 'rollback'} or parent.refresh is not None:
+        if (action not in {'preflight', 'install', 'rollback'} or parent.refresh is not None
+                or (repair_binding is not None and image_binding is not None)):
             raise ValueError
         state, anchor = parent.state_dir, parent.anchor_dir
         if (state is None or anchor is None or not state.is_absolute() or not anchor.is_absolute()
@@ -86,6 +96,8 @@ own original journal lock and validates its predecessor before any side effect.
         operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
         if repair_binding is not None:
             _repair_record(request, state=state, anchor=anchor, binding=repair_binding)
+        if image_binding is not None:
+            manager_image_entry(request, image_binding, state=state, anchor=anchor)
 
         def present(name: str) -> bool:
             # An orphaned marker is evidence, not permission to restart a stage.
@@ -107,6 +119,10 @@ own original journal lock and validates its predecessor before any side effect.
 
         if action == 'preflight':
             phase = 'preflight'
+            if image_binding is not None:
+                image_entry = manager_image_entry(request, image_binding, state=state, anchor=anchor)
+                if not _completed(image_entry):
+                    HTTPSPoolManagerImageAPI(parent=parent, binding=image_binding).qualify_closed()
             if repair_binding is not None and not startup_repair_exists(request, state=state, anchor=anchor):
                 HTTPSPoolStartupRepairAPI(parent=parent, binding=repair_binding).qualify_closed()
             if any(present(name) for name in ('startup', 'activation', 'completion', *_RECOVERY)):
@@ -129,10 +145,15 @@ own original journal lock and validates its predecessor before any side effect.
         private_state._private_directory(anchor)
         with private_state._locked_state(anchor / 'dispatch'):
             repaired = startup_repair_exists(request, state=state, anchor=anchor)
-            if action == 'install' and repaired and repair_binding is None:
+            images = load_manager_image_chain(request, state=state, anchor=anchor)
+            if action == 'install' and images and image_binding is None:
+                raise ValueError
+            if action == 'install' and repaired and repair_binding is None and image_binding is None:
                 raise ValueError  # Only the separately bound continuation may open.
             if repair_binding is not None:
                 _repair_record(request, state=state, anchor=anchor, binding=repair_binding)
+            if image_binding is not None:
+                manager_image_entry(request, image_binding, state=state, anchor=anchor)
             if present('completion'):
                 phase = 'completion'
                 record = activation_record(request, state_dir=state, anchor_dir=anchor)
@@ -144,6 +165,12 @@ own original journal lock and validates its predecessor before any side effect.
             if action == 'install':
                 if any(present(name) for name in _RECOVERY):
                     raise ValueError
+                if image_binding is not None and not _completed(manager_image_entry(request, image_binding, state=state, anchor=anchor)):
+                    pending = advance('manager-image', 'pool_manager_image_repaired_closed', lambda: repair_manager_image(
+                        request=request, binding=image_binding, api=HTTPSPoolManagerImageAPI(parent=parent, binding=image_binding),
+                        state_dir=state, anchor_dir=anchor))
+                    if pending is not None:
+                        return pending
                 if repair_binding is not None:
                     ready = False
                     if repaired:

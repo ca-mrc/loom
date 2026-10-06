@@ -1473,6 +1473,46 @@ legacy completion receipt stays unchanged, with the separately qualified repair
 ancestry included in historical loading. Later repair phases or altered old
 evidence reject this compatibility path; do not reset either journal.
 
+### Correct the manager image before first opening
+
+If source delivery is qualified but the manager image cannot start, use the same
+three protected pool-repair actions with a new
+`loom.nebius-pool-startup-repair-operation.v2` envelope and dedicated grant. Do not
+change the original cutover or source-repair inputs. This transition changes only
+the manager's main and initializer image references, not configuration, Secrets,
+execution images, pool registration, permissions, application releases or schema.
+
+The private `loom.nebius-pool-manager-image-private-inputs.v1` document contains
+`original_operation` and `binding`. The binding carries the original operation,
+input, closure, settled-startup and prepared-activation hashes used by source
+repair, plus `ordinal`, `source_repair_sha256` (null if none),
+`predecessor_sha256` (null for the first image correction), and the exact
+`publication`, `candidate` and `profile`. Source repair, if present, must be
+complete. A new correction requires closed admission, held guards and no
+recovery or completion descendant.
+
+The tooling source and protected publication source must be the same integrated
+commit. The bundle builder derives its single Alembic head from that source and
+binds `manager-schema.json` in the immutable bundle. Entry requires the existing
+pool's manager revision `0174`; a different head requires a separate migration,
+which this action cannot perform. The retained publication reader and keyring
+must verify the new image before operator connections are opened.
+
+Install uses the original dispatch lock, stops the manager, proves actual Pod
+drain, replaces only image references using exact identity/version/template
+checks, and restarts it. Unknown writes are observed, never resent. An interrupted
+local enrollment with only its valid anchor may finish recording the same
+all-prepared state; an existing write intent is never reset. Up to eight completed
+corrections can form an append-only chain before first opening. A pending tail
+cannot be replaced by a new operation.
+
+Only the bound image continuation may advance installation afterward. Normal
+runtime qualification and activation remain mandatory. The existing rollback
+fences any outstanding image write before shutdown and restoration. Completion
+preserves all correction records/anchors and supplies the final manager image to
+later refreshes, while keeping the original execution profile. A successful image
+correction alone is not installed multi-owner acceptance.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
