@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops import nebius_pool_cutover as cutover
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import (
     ManagementStageAPI,
@@ -26,8 +27,9 @@ from scripts.ops.nebius_management_stage import (
 )
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import _activation_record
-from scripts.ops.nebius_pool_cutover import PoolCutoverRequest, cutover_documents
+from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_migration import _hash
+from scripts.ops.nebius_pool_projection import pure_projection
 
 from loom.nebius_platform_render import digest
 
@@ -63,14 +65,26 @@ def source_repair_documents(request: PoolCutoverRequest, original: dict[str, Any
                             ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Derive the one supported v1→v2 delta, retaining server defaults and Secrets."""
     try:
+        cutover.qualify_cutover_image_admission(request)
+        return _source_repair_documents((request, original))
+    except Exception:
+        raise ValueError('pool_source_repair_projection_unqualified') from None
+
+
+@pure_projection
+def _source_repair_documents(inputs: tuple[PoolCutoverRequest, dict[str, Any]]
+                             ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Reuse only the combined input projection, never admission or journal reads."""
+    request, original = inputs
+    try:
         delivery = request.application_delivery
         if delivery is None or delivery.source_delivery_version != 'v1' or _uid(original) != _uid(request.manager):
             raise ValueError
         key = _key(request.manager)
-        old = cutover_documents(request)['runtime'][key]
+        old = cutover._cutover_documents(request)['runtime'][key]
         old['spec']['replicas'] = 1
         _qualified_defaulted(old, original)
-        current = cutover_documents(replace(request,
+        current = cutover._cutover_documents(replace(request,
             application_delivery=replace(delivery, source_delivery_version='v2')))
         new = current['runtime'][key]
         config, = (row for row in current['configuration'] if row['kind'] == 'ConfigMap'
