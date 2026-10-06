@@ -224,7 +224,7 @@ templates, cover every possible workload writer, or establish effective fencing.
 Use it to prepare exact migration inputs, not as permission to stop foreign work.
 An unreadable or partially paginated resource list fails inspection.
 
-`pool_startup_diagnostics` observes at most one failed manager and one failed
+`pool_startup_diagnostics` observes at most one failed manager, pool gateway and
 pooled collector. Selection is bound to the configured management installation,
 the selected platform execution namespace, current Deployment/ReplicaSet or
 CronJob/Job ancestry, and matching container configuration. At most three
