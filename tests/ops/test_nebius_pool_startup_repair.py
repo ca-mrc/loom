@@ -914,7 +914,8 @@ def _original_recovery(name, monkeypatch):
     return module
 
 
-@pytest.mark.parametrize('entry', ['prepared', 'intent', 'late_stop'])
+@pytest.mark.parametrize('entry', ['prepared', 'intent', 'late_stop', 'late_shutdown'])
+@pytest.mark.timeout(420)
 def test_original_tooling_fence_can_be_resumed_without_rewriting_its_bytes(prepared_repair, monkeypatch, entry):
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors
@@ -941,7 +942,16 @@ def test_original_tooling_fence_can_be_resumed_without_rewriting_its_bytes(prepa
         assert original.fence_pool_startup(**arguments)['status'] == 'startup_writes_fenced'
     before = {path: path.read_bytes() for path in (state / 'startup-fence.json',
         anchor / (context.operation['operation_id'] + '-startup-fence.json'))}
-    if entry == 'late_stop':
+    if entry == 'late_shutdown':
+        stop = api.stop_workload
+
+        def uncertain_manager_stop(key, observed, desired):
+            api.stop_failure = 'before' if key == _key(context.request.manager) else None
+            return stop(key, observed, desired)
+
+        monkeypatch.setattr(api, 'stop_workload', uncertain_manager_stop)
+        assert stop_pool_successors(**arguments)['status'] == 'pending_shutdown_outcome'
+    if entry in {'late_stop', 'late_shutdown'}:
         pending, desired = remote.pending
         desired = copy.deepcopy(desired)
         desired['metadata'].update(uid=pending['metadata']['uid'],
@@ -955,4 +965,135 @@ def test_original_tooling_fence_can_be_resumed_without_rewriting_its_bytes(prepa
         assert actual['metadata']['resourceVersion'] != remote.pending[0]['metadata']['resourceVersion']
     if entry == 'late_stop':
         assert _key(context.request.manager) not in api.stop_calls
+    elif entry == 'late_shutdown':
+        assert api.stop_calls.count(_key(context.request.manager)) == 1
     assert all(path.read_bytes() == raw for path, raw in before.items())
+    if remote.pending is not None:
+        # Once shutdown is settled, no restoration consumer may accept the
+        # unresolved repair's original object version as invalidation proof.
+        from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
+
+        remote.startup.documents[_key(context.request.manager)]['metadata']['resourceVersion'] = (
+            remote.pending[0]['metadata']['resourceVersion'])
+        with pytest.raises(ValueError):
+            observe_recovery_workloads(context.request, api, state=state, anchor=anchor)
+
+
+@pytest.fixture
+def original_fenced_repair(prepared_repair, monkeypatch):
+    import sys
+
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, _, remote, state, anchor = prepared_repair
+    remote.failure = ('stop', 'before')
+    repair(prepared_repair)
+    api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
+    arguments = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    assert advance_pool_activation(**arguments, cancel=True)['status'] == 'pool_activation_cancelled'
+    with monkeypatch.context() as legacy:
+        original = _original_recovery('startup_fence', legacy)
+        legacy.setitem(sys.modules, 'scripts.ops.nebius_pool_startup', _original_recovery('startup', legacy))
+        legacy.setitem(sys.modules, 'scripts.ops.nebius_pool_startup_fence', original)
+        assert original.fence_pool_startup(**arguments)['status'] == 'startup_writes_fenced'
+    return prepared_repair, api, arguments
+
+
+@pytest.mark.parametrize('damage', ['stop_applied', 'template_intent', 'start_intent', 'uid', 'spec', 'version', 'marker', 'journal'])
+def test_original_recovery_refuses_later_repair_or_unqualified_stop(original_fenced_repair, damage):
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
+
+    fixture, api, arguments = original_fenced_repair
+    context, _, remote, state, anchor = fixture
+    if damage in {'stop_applied', 'template_intent', 'start_intent'}:
+        path = state / 'startup-repair.json'
+        record = json.loads(path.read_bytes())
+        record['phases']['stop']['phase'] = 'applied'
+        if damage != 'stop_applied':
+            record['phases']['template'] = {'phase': 'intent', 'before_resource_version': '33'}
+        if damage == 'start_intent':
+            record['phases']['template']['phase'] = 'applied'
+            record['phases']['start'] = {'phase': 'intent', 'before_resource_version': '34'}
+        path.write_text(json.dumps(record, sort_keys=True))
+        with pytest.raises(ValueError):
+            original_recovery_repair(context.request, state=state, anchor=anchor)
+    elif damage in {'marker', 'journal'}:
+        path = (anchor / (context.operation['operation_id'] + '-startup-fence.json')
+            if damage == 'marker' else state / 'startup-fence.json')
+        path.write_bytes(path.read_bytes() + b'\n')
+        with pytest.raises(ValueError):
+            fence_pool_startup(**arguments)
+    else:
+        manager = remote.startup.documents[_key(context.request.manager)]
+        manager['spec']['replicas'] = 0
+        if damage == 'uid':
+            manager['metadata']['uid'] = str(uuid4())
+        elif damage == 'spec':
+            manager['spec']['template']['spec']['containers'][0]['image'] = 'foreign'
+        # 'version' keeps the original CAS resourceVersion despite scale zero.
+        with pytest.raises(ValueError):
+            stop_pool_successors(**arguments)
+    assert _key(context.request.manager) not in api.stop_calls
+    assert not (state / 'template-restoration.json').exists()
+
+
+@pytest.mark.timeout(600)
+def test_original_legacy_completion_is_preserved_with_repair_ancestry(original_fenced_repair, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+    from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
+    from scripts.ops.nebius_pool_migration import _hash
+    from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI
+    from tests.ops.test_nebius_pool_legacy_reopening import ReopeningAPI
+    from tests.ops.test_nebius_pool_legacy_restart import RestartAPI
+    from tests.ops.test_nebius_pool_machine_retirement import MachineAPI
+    from tests.ops.test_nebius_pool_role_restoration import RoleAPI
+    from tests.ops.test_nebius_pool_template_restoration import TemplateAPI
+
+    fixture, cancelled_api, _ = original_fenced_repair
+    context, binding, remote, state, anchor = fixture
+    chain = context.request, context.tokens, remote.closed, remote.startup, None, state.parent
+    machine = MachineAPI(chain)
+    gateway = GatewayAPI(chain, machine)
+    template = TemplateAPI(chain, gateway)
+    roles = RoleAPI(chain, template)
+    restart = RestartAPI(chain, roles)
+
+    class RecoveryAPI(ReopeningAPI):
+        def successor_drained(self, key, desired):
+            assert (desired['spec']['suspend'] is True if desired['kind'] == 'CronJob'
+                else desired['spec']['replicas'] == 0)
+            return self.processes_drained
+
+    runtime = RecoveryAPI(chain, restart)
+    runtime.mode, runtime.guards = cancelled_api.mode, cancelled_api.guards
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: runtime)
+    original = _original_recovery('completion', monkeypatch)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(target, 'complete_pool_cutover', original.complete_pool_cutover)
+        result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding)
+    assert result['outcome'] == 'legacy'
+    before = {path: path.read_bytes() for directory in (state, anchor) for path in directory.rglob('*.json')}
+    receipt = json.loads((state / 'completion.json').read_bytes())
+    assert str(state / 'startup-repair.json') not in receipt['phase_sha256']
+    loaded = load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+        completion_sha256=result['completion_sha256'])
+    assert loaded.outcome == 'legacy'
+    for path in (state / 'startup-repair.json', anchor / (context.operation['operation_id'] + '-startup-repair.json'),
+            state / 'source-repair-configuration/stage.json'):
+        assert loaded.history[path] == _hash(path)
+    assert complete_pool_cutover(request=context.request, api=runtime, state_dir=state, anchor_dir=anchor) == result
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    # Historical loading must not silently drop altered supplemental ancestry.
+    path = state / 'startup-repair.json'
+    record = json.loads(path.read_bytes())
+    record['phases']['stop']['phase'] = 'applied'
+    path.write_text(json.dumps(record, sort_keys=True))
+    with pytest.raises(ValueError):
+        load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+            completion_sha256=result['completion_sha256'])
