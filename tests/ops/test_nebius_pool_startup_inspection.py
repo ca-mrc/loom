@@ -362,3 +362,17 @@ def test_fixed_collector_and_gateway_error_types_are_retained_without_messages(c
     diagnostic = inspect(cluster)["workloads"][0]["diagnostic"]
     assert diagnostic == {"status": "observed", "errors": ["KubernetesObservationError", "SchemaNotAtHeadError", "ValueError"],
         "stages": ["pool_gateway_identity_unavailable"], "locations": []}
+
+
+@pytest.mark.parametrize("override", ["literal", "secret", "same"])
+def test_duplicate_gateway_installation_cannot_select_a_different_runtime(cluster, gateway, override):
+    root, replica, pod = gateway
+    value = {"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID"}
+    if override == "secret":
+        value["valueFrom"] = {"secretKeyRef": {"name": "foreign", "key": "installation"}}
+    else:
+        value["value"] = str(uuid4()) if override == "literal" else root["metadata"]["labels"][LABEL]
+    for spec in (root["spec"]["template"]["spec"], replica["spec"]["template"]["spec"], pod["spec"]):
+        spec["containers"][0]["env"].append(copy.deepcopy(value))
+    assert not any(row["role"] == "gateway" for row in inspect(cluster)["workloads"])
+    assert not any(call[:2] == ("logs", pod["metadata"]["name"]) for call in cluster.calls)
