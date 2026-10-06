@@ -28,7 +28,7 @@ async def test_collects_many_immutable_input_artifacts_after_agent_exit(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.delenv("LOOM_TASK_ARTIFACTS_JSON", raising=False)
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_FROM_INPUT", "1")
-    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda role, task: agent)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda role, task, trial: agent)
 
     async def identity(gateway):
         return uuid4(), uuid4()
@@ -213,7 +213,7 @@ async def test_declared_workspace_reference_manifest_is_used_by_both_phases(tmp_
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
-                        lambda role, task: agent if role == "task-sandbox" else verifier)
+                        lambda role, task, trial: agent if role == "task-sandbox" else verifier)
 
     async def identity(_):
         return uuid4(), uuid4()
@@ -255,7 +255,7 @@ async def test_phase_handoff_preserves_declared_state_at_original_absolute_path(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
-                        lambda role, task: agent if role == "task-sandbox" else verifier)
+                        lambda role, task, trial: agent if role == "task-sandbox" else verifier)
 
     async def identity(_):
         return uuid4(), uuid4()
@@ -316,7 +316,7 @@ async def test_phase_handoff_keeps_tests_private_and_quiesces_before_snapshot(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", '["answer.txt", "optional_script.py"]')
     monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
-                        lambda role, task: agent if role == "task-sandbox" else verifier)
+                        lambda role, task, trial: agent if role == "task-sandbox" else verifier)
 
     async def identity(gateway):
         return uuid4(), uuid4()

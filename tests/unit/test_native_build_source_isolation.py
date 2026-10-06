@@ -47,7 +47,7 @@ async def test_dedicated_build_context_stays_out_of_agent_with_private_handoff(
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver",
-                        lambda role, task: agent if role == "task-sandbox" else verifier)
+                        lambda role, task, trial: agent if role == "task-sandbox" else verifier)
 
     async def identity(gateway):
         return uuid4(), uuid4()
@@ -147,7 +147,7 @@ instruction_file = "instruction.md"
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
     monkeypatch.setattr("sys.argv", ["native-task", "terminus-2", "--workspace", str(tmp_path)])
-    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda role, task: driver)
+    monkeypatch.setattr("loom.service_execution_sandbox_task.sandbox_driver", lambda role, task, trial: driver)
 
     async def identity(gateway):
         return uuid4(), uuid4()

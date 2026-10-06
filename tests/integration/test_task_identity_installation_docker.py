@@ -377,7 +377,7 @@ REPORT
     connection = ServiceSandboxDriver(tmp_path / role / "sandbox.sock",
                                       capabilities=driver.capabilities, network_policy=NoNetwork())
 
-    def select_driver(actual_role, _task):
+    def select_driver(actual_role, _task, _trial):
         assert actual_role == ("task-sandbox" if mode == "shared" else "verifier-sandbox")
         return connection
 

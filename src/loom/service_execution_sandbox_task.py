@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator, Callable
 from glob import escape
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO
+from urllib.parse import SplitResult, urlsplit
 from uuid import UUID
 
 import httpx
@@ -30,7 +31,7 @@ from pydantic import TypeAdapter, ValidationError
 from loom.attempt_deadline import AttemptDeadline
 from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
-from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES
+from loom.execution_contract import effective_guest_capabilities
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
 from loom.hosted_harness import (
     HARNESS_SETUP_PHASE,
@@ -128,11 +129,37 @@ def _frozen_network_policy() -> NetworkPolicy:
         raise ServiceExecutionTaskError("effective_network_policy_invalid") from None
 
 
-def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
+# QEMU user networking maps the Pod loopback to this address inside a guest.
+GUEST_POD_LOOPBACK = "10.0.2.2"
+
+
+def in_guest(task: TaskConfig, trial: TrialConfig) -> bool:
+    """Whether this Trial's sandboxes are QEMU guests, by the planner's own rule.
+
+    A plain guest forced with `isolation: guest` declares no capabilities, so
+    the task's declarations alone do not decide it.
+    """
+    return effective_guest_capabilities(task, trial) is not None
+
+
+def _sandbox_loopback(url: SplitResult, guest: bool) -> str:
+    """A Pod-loopback URL as the task sandbox reaches it."""
+    return url._replace(netloc=f"{GUEST_POD_LOOPBACK}:{url.port}").geturl() if guest else url.geturl()
+
+
+def _proxy_environment(proxy: str, guest: bool) -> dict[str, str]:
+    # Pod-loopback services (the model broker) are reached directly, never
+    # through the egress proxy; in a guest that loopback is GUEST_POD_LOOPBACK.
+    bypass = "localhost,127.0.0.1,::1" + (f",{GUEST_POD_LOOPBACK}" if guest else "")
+    environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+    environment.update(no_proxy=bypass, NO_PROXY=bypass)
+    return environment
+
+
+def sandbox_driver(role: str, task: TaskConfig, trial: TrialConfig) -> ServiceSandboxDriver:
     network_policy = _frozen_network_policy()
     command_environment = {}
-    guest = (task.environment.execution_requirements is not None
-             and bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(task.environment.execution_requirements.capabilities)))
+    guest = in_guest(task, trial)
     max_transfer = 256 * 1024 * 1024
     if guest:
         try:
@@ -142,16 +169,10 @@ def sandbox_driver(role: str, task: TaskConfig) -> ServiceSandboxDriver:
         if not 0 < max_transfer <= 10 * 1024**3:
             raise ServiceExecutionTaskError("guest_transfer_limit_invalid")
     if hosted_http_egress(network_policy) is not None:
-        from urllib.parse import urlsplit
-
-        proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
-        url = urlsplit(proxy)
+        url = urlsplit(os.environ.get("LOOM_TASK_EGRESS_PROXY", ""))
         if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
             raise ServiceExecutionTaskError("task_egress_runtime_unavailable")
-        if guest:
-            proxy = url._replace(netloc=f"10.0.2.2:{url.port}").geturl()
-        command_environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
-        command_environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
+        command_environment = _proxy_environment(_sandbox_loopback(url, guest), guest)
     return ServiceSandboxDriver(
         Path(f"/loom/sandboxes/{role}/sandbox.sock"),
         capabilities=Capabilities(
@@ -203,7 +224,7 @@ WORKLOAD_PROXY_API_KEY = "loom_workload_proxy"
 
 
 def installed_agent_model_environment(
-    spec: HostedHarnessSpec, *, base_url_env: str, api_key_env: str,
+    spec: HostedHarnessSpec, *, base_url_env: str, api_key_env: str, guest: bool = False,
 ) -> dict[str, str]:
     """Model access for an installed agent inside the task sandbox (#2310).
 
@@ -213,31 +234,28 @@ def installed_agent_model_environment(
     token is bound to the Trial's Provider Connection and never leaves the
     trusted controller. Revocation is the end of the agent phase. Provider,
     control-plane and grading credentials are never passed to the sandbox.
+    A guest reaches the same broker through QEMU user networking.
     """
-    from urllib.parse import urlsplit
-
     if spec.model != "required" or spec.gateway_protocol is None:
         raise ServiceExecutionTaskError("selected harness does not use a model")
     gateway = os.environ.get("LOOM_GATEWAY_URL", "")
     url = urlsplit(gateway)
     if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1"} or not url.port or url.path.strip("/"):
         raise ServiceExecutionTaskError("installed agent model access requires the loopback broker")
+    if guest and url.hostname != "127.0.0.1":
+        # QEMU user networking forwards only IPv4 loopback.
+        raise ServiceExecutionTaskError("installed agent model access requires the loopback broker")
     # Both OpenAI protocols are served under /v1 (chat/completions, responses).
-    return {base_url_env: gateway.rstrip("/") + "/v1", api_key_env: WORKLOAD_PROXY_API_KEY}
+    return {base_url_env: _sandbox_loopback(url, guest).rstrip("/") + "/v1", api_key_env: WORKLOAD_PROXY_API_KEY}
 
 
-def _setup_proxy_environment() -> dict[str, str]:
+def _setup_proxy_environment(guest: bool = False) -> dict[str, str]:
     """The runtime's loopback egress proxy, which admits only install sources
-    while the setup phase runs (#2310)."""
-    from urllib.parse import urlsplit
-
-    proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
-    url = urlsplit(proxy)
+    while the setup phase runs (#2310), as the task sandbox reaches it."""
+    url = urlsplit(os.environ.get("LOOM_TASK_EGRESS_PROXY", ""))
     if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
         raise ServiceExecutionTaskError("harness setup egress is unavailable")
-    environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
-    environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
-    return environment
+    return _proxy_environment(_sandbox_loopback(url, guest), guest)
 
 
 # Controller-workspace files the runtime exchanges with the Gateway (#2310).
@@ -408,12 +426,15 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     setup = spec.setup
     raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
     deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
-    environment = _setup_proxy_environment()
+    # The trusted controller fetches a pinned archive through the proxy on its
+    # own loopback; an install command reaches it from inside the sandbox.
+    controller_proxy = _setup_proxy_environment()
+    sandbox_proxy = _setup_proxy_environment(in_guest(task, trial))
     loop = asyncio.get_running_loop()
     current = asyncio.current_task()
     assert current is not None
     loop.add_signal_handler(signal.SIGTERM, current.cancel)
-    driver = sandbox_driver("task-sandbox", task)
+    driver = sandbox_driver("task-sandbox", task, trial)
     # {"restore": hit|miss|restore_rejected, "store": stored|store_unavailable}
     outcome: dict[str, str] = {}
     try:
@@ -423,9 +444,9 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             if outcome["restore"] == "hit":
                 return
         if setup.archive is not None:
-            await _install_pinned_archive(driver, workspace, setup, environment, deadline)
+            await _install_pinned_archive(driver, workspace, setup, controller_proxy, deadline)
         else:
-            await _run_install_command(driver, task, setup, environment, deadline)
+            await _run_install_command(driver, task, setup, sandbox_proxy, deadline)
         if setup.cacheable:
             if not await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
                 raise ServiceExecutionTaskError("harness install check failed")
@@ -450,7 +471,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
     if not math.isfinite(grace) or grace <= 0:
         raise ServiceExecutionTaskError("termination grace must be finite and positive")
     gateway = os.environ["LOOM_GATEWAY_URL"]
-    driver = sandbox_driver("task-sandbox", task)
+    driver = sandbox_driver("task-sandbox", task, trial)
     output = workspace / ".loom/agent"
     output.mkdir(parents=True, exist_ok=True)
     trial_id = None
@@ -538,6 +559,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                         trial_id=trial_id, instruction=instruction, deadline=deadline,
                         model_environment=installed_agent_model_environment(
                             spec, base_url_env="OPENAI_BASE_URL", api_key_env="OPENAI_API_KEY",
+                            guest=in_guest(task, trial),
                         ),
                         ledger=ledger.get_trial_llm_calls,
                     )
@@ -696,7 +718,7 @@ async def _run_verifier(
     in_place = resolve_verifier_env_mode(task, trial) == "shared"
     separate_private_inputs = (not in_place) and _uses_harbor_private_inputs(workspace, task)
     input_root = _PRIVATE_VERIFIER_INPUT_ROOT if separate_private_inputs else task.environment.workdir
-    driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task)
+    driver = sandbox_driver("task-sandbox" if in_place else "verifier-sandbox", task, trial)
     driver_started = False
     failure: BaseException | None = None
 
@@ -812,7 +834,7 @@ async def _run_verifier(
             # from a second driver races the verifier cleanup above.
             if in_place or task.environment.service_lifecycle is None:
                 return
-            service_driver = sandbox_driver("task-sandbox", task)
+            service_driver = sandbox_driver("task-sandbox", task, trial)
             try:
                 await service_driver.start()
                 await service_driver.stop_processes()

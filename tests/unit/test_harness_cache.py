@@ -249,7 +249,7 @@ async def _setup(monkeypatch, tmp_path: Path, sandbox: _CacheSandbox, *, cached:
         restore = tmp_path / controller.SETUP_CACHE_RESTORE
         restore.parent.mkdir(parents=True)
         restore.write_bytes(b"cached-archive")
-    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task: sandbox)
+    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task, trial: sandbox)
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:41234")
     await controller.run_setup(tmp_path, task, _trial())
     return json.loads((tmp_path / controller.SETUP_CACHE_OUTCOME).read_text())

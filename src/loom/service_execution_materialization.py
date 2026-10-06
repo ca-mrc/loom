@@ -21,6 +21,7 @@ from pydantic import (
 
 from loom.agent_runtime import AgentRuntimeBindingV1, AgentRuntimeReleaseV1
 from loom.execution_contract import (
+    GUEST_LAUNCHER_STORAGE_MIB,
     effective_guest_capabilities,
     evaluate_execution_admission,
     nebius_cpu_execution_class,
@@ -492,6 +493,12 @@ def automatic_service_execution_rejections(
         reasons.append("resource_limits_required")
     elif env.cpus > 128 or env.memory_mb > 1_048_576 or env.storage_mb > 1_048_576:
         reasons.append("resource_limits_out_of_range")
+    elif spec is not None and spec.setup is not None and spec.setup.disk_mib:
+        # The install lands in the task sandbox's own disk; a guest's disk is
+        # its storage less the launcher's share (#2362).
+        reserve = GUEST_LAUNCHER_STORAGE_MIB if effective_guest_capabilities(task, trial) is not None else 0
+        if env.storage_mb - reserve < spec.setup.disk_mib:
+            reasons.append("harness_setup_storage_insufficient")
     if not controller and (env.workdir != PurePosixPath("/workspace") or env.user != "agent"):
         reasons.append("standard_workspace_identity_required")
     if controller:

@@ -155,3 +155,73 @@ async def test_real_codex_installs_and_runs_a_command_in_the_sandbox(
     assert any(isinstance(e, AgentThoughtEvent) and e.content == "wrote proof.txt" for e in events)
     usage = json.loads((output / "usage.json").read_text())
     assert usage["schema_version"] == "loom.service-execution-codex-usage.v1" and usage["call_count"] == 0
+
+
+async def test_real_codex_installs_and_runs_in_a_guest(codex_release, monkeypatch, tmp_path: Path) -> None:
+    """#2362: the same install and run inside a QEMU guest booted from a real
+    task image. Codex reaches the model the production way: a Pod-loopback
+    endpoint (the broker's place), through QEMU user networking."""
+    import socket
+    import subprocess
+    import sys
+
+    from loom.service_execution_sandbox_task import installed_agent_model_environment
+    from tests.integration.test_guest_sandbox_runtime import _guest_driver, guest
+
+    setup = CODEX.setup
+    assert setup is not None
+    transport = _ReleaseTransport(codex_release)
+    real_client = httpx.AsyncClient
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = tmp_path / "fake_responses.py"
+    server.write_text(_FAKE_RESPONSES)
+    endpoint = subprocess.Popen([sys.executable, str(server), str(port)])
+    monkeypatch.setenv("LOOM_GATEWAY_URL", f"http://127.0.0.1:{port}")
+    model_environment = installed_agent_model_environment(
+        CODEX, base_url_env="OPENAI_BASE_URL", api_key_env="OPENAI_API_KEY", guest=True,
+    )
+    assert model_environment["OPENAI_BASE_URL"] == f"http://10.0.2.2:{port}/v1"
+
+    task, _, _ = _inputs()
+    task = task.model_copy(update={"environment": task.environment.model_copy(update={"workdir": _WORKDIR})})
+    output = tmp_path / "agent"
+    trial_id = uuid4()
+
+    async def ledger(_: object) -> list[dict]:
+        return []
+
+    try:
+        # Exactly the disk admission guarantees: the launcher's --storage-mib
+        # is the guest disk, already net of its own reserve.
+        with guest(root_image="python:3.12-slim", storage_mib=setup.disk_mib,
+                   exec_timeout_seconds=setup.timeout_seconds) as (_, _, directory):
+            driver = _guest_driver(directory)
+            await driver.start()
+            try:
+                # Serve the release in place of the setup proxy, for this download only.
+                with monkeypatch.context() as patched:
+                    patched.setattr(controller.httpx, "AsyncClient", lambda **kwargs: real_client(
+                        transport=transport, **{k: v for k, v in kwargs.items() if k != "proxy"}))
+                    await controller._install_pinned_archive(
+                        driver, tmp_path, setup, {"https_proxy": "http://127.0.0.1:1"}, None,
+                    )
+                version = await driver.exec(f"{CODEX_INSTALL_ROOT}/bin/codex --version")
+                assert version.stdout.startswith(b"codex-cli 0.146.0")
+                assert (await driver.exec(f"mkdir -p {_WORKDIR}")).return_code == 0
+                await run_codex(
+                    driver=driver, workspace=output, task_config=task, trial_config=_trial(), trial_id=trial_id,
+                    instruction="Write proof.txt.", ledger=ledger, model_environment=model_environment,
+                )
+                assert (await driver.exec(f"cat {_WORKDIR}/proof.txt")).stdout == b"from-codex\n"
+            finally:
+                await driver.stop()
+    finally:
+        endpoint.kill()
+        endpoint.wait(timeout=5)
+
+    events = parse_codex_events((output / "trajectory.jsonl").read_bytes(), trial=_trial(), trial_id=trial_id)
+    shell = [e for e in events if isinstance(e, ToolUseEvent) and e.tool_name == "shell"]
+    assert len(shell) == 1 and shell[0].result is not None and shell[0].result["exit_code"] == 0
+    assert any(isinstance(e, AgentThoughtEvent) and e.content == "wrote proof.txt" for e in events)

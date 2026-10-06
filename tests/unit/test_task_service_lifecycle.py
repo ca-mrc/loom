@@ -278,7 +278,7 @@ async def test_service_survives_snapshot_until_private_verifier_finishes(tmp_pat
 
     agent, verifier, cleanup = ServiceSandbox(), Sandbox(), ServiceSandbox()
     connections = iter((agent, cleanup))
-    monkeypatch.setattr(module, "sandbox_driver", lambda role, _: next(connections) if role == "task-sandbox" else verifier)
+    monkeypatch.setattr(module, "sandbox_driver", lambda role, *_: next(connections) if role == "task-sandbox" else verifier)
     monkeypatch.setenv("LOOM_GATEWAY_URL", "http://127.0.0.1:9999")
     monkeypatch.setenv("LOOM_TASK_ARTIFACTS_JSON", "[]")
 

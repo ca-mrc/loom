@@ -197,7 +197,7 @@ with open(os.environ['LOOM_VERIFIER_OUTPUT'], 'w') as report:
 PY
 """)
 
-    def connect(role, _task):
+    def connect(role, _task, _trial):
         name = "agent" if role == "task-sandbox" else "verifier"
         return ServiceSandboxDriver(
             tmp_path / name / "sandbox.sock", capabilities=agent.capabilities,
@@ -265,7 +265,7 @@ from loom.models.networking import NoNetwork
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 root = Path(os.environ['LOOM_TEST_ROOT'])
-def connect(role, task):
+def connect(role, task, trial):
     name = 'agent' if role == 'task-sandbox' else 'verifier'
     return ServiceSandboxDriver(root / name / 'sandbox.sock',
         capabilities=Capabilities(os='linux', gpu_vendor='none', network_policies=frozenset({'no-network'}),
