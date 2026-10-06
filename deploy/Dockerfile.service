@@ -27,9 +27,9 @@ COPY database/capacity_guard_migrations ./database/capacity_guard_migrations
 COPY database/capacity_build_guard_migrations ./database/capacity_build_guard_migrations
 RUN chmod -R a+rX ./src ./packages ./database/migrations ./database/capacity_guard_migrations ./database/capacity_build_guard_migrations && \
     pip install --no-cache-dir -e ./packages/loom-bundle-checksum && \
-    pip install --no-cache-dir -e '.[nebius-gateway]' && \
+    pip install --no-cache-dir -e '.[nebius-gateway,cluster]' && \
     pip install --no-cache-dir -e ./packages/loom-launcher && \
-    python -c 'from nebius.sdk import SDK; import loom_execution_actuator.task_image_runtime'
+    python -c 'from nebius.sdk import SDK; from kubernetes import client; import loom_execution_actuator.task_image_runtime'
 ARG LOOM_BUILD_SHA=unknown
 ARG LOOM_BUILD_KIND=commit
 ARG LOOM_SOURCE_DIGEST=unknown
