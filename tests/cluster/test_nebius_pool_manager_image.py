@@ -82,11 +82,15 @@ def test_native_image_switch_preserves_projected_identity_and_proves_pod_drain(t
             desired = _snapshot(original)
             for container in (*desired['spec']['template']['spec']['containers'], *desired['spec']['template']['spec']['initContainers']):
                 container['image'] = images[1]
-            stopped, replaced = _snapshot(original), copy.deepcopy(desired)
+            repair_id = uuid4()
+            isolated = _snapshot(original)
+            isolated['metadata'].setdefault('annotations', {})['loom.nebius/manager-image-repair'] = str(repair_id)
+            stopped, replaced = copy.deepcopy(isolated), copy.deepcopy(desired)
+            replaced['metadata'].setdefault('annotations', {})['loom.nebius/manager-image-repair'] = str(repair_id)
             stopped['spec']['replicas'] = replaced['spec']['replicas'] = 0
-            documents = (_snapshot(original), stopped, replaced, desired)
+            documents = (_snapshot(original), isolated, stopped, replaced, desired)
             record = {'phases': {phase: {'phase': 'prepared', 'before_resource_version': None}
-                for phase in ('stop', 'template', 'start')}}
+                for phase in ('isolate', 'stop', 'template', 'start')}}
 
             class NativeImage(HTTPSPoolManagerImageAPI):
                 def _qualify_binding(self):
@@ -102,14 +106,14 @@ def test_native_image_switch_preserves_projected_identity_and_proves_pod_drain(t
             api.request = SimpleNamespace(manager=original)
             api.closed = {_key(original): original}
             api.documents = documents
-            api.image_binding = SimpleNamespace(candidate={'images': {'service': {'image_ref': images[1]}}})
+            api.image_binding = SimpleNamespace(operation_id=repair_id, candidate={'images': {'service': {'image_ref': images[1]}}})
             api.parent = SimpleNamespace(client=http,
                 _request=lambda method, resource: http.request(method, resource).raise_for_status().json())
-            for index, phase in enumerate(('stop', 'template', 'start')):
+            for index, phase in enumerate(('isolate', 'stop', 'template', 'start')):
                 target = documents[index + 1]
                 deadline = time.monotonic() + 60
                 while True:
-                    if phase != 'stop' and not api.manager_drained(_key(original), documents[index]):
+                    if phase in {'template', 'start'} and not api.manager_drained(_key(original), documents[index]):
                         assert time.monotonic() < deadline, 'manager Pods did not drain'
                         time.sleep(0.1)
                         continue
@@ -132,6 +136,7 @@ def test_native_image_switch_preserves_projected_identity_and_proves_pod_drain(t
                 time.sleep(0.1)
             after = api.read_workload(_key(original))
             assert after['metadata']['uid'] == original['metadata']['uid']
+            assert 'loom.nebius/manager-image-repair' not in after['metadata'].get('annotations', {})
             assert after['spec'] == desired['spec']
             assert new_pod.metadata.uid != old_pod.metadata.uid
             assert new_pod.spec.automount_service_account_token is False

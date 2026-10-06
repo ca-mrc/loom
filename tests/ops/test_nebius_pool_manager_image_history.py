@@ -80,7 +80,7 @@ def persist(value, *, complete=False, anchor_only=False):
         _atomic_json(value.path, {**value.identity, "phases": {
             name: {"phase": "applied" if complete else "prepared",
                    "before_resource_version": str(index + 100) if complete else None}
-            for index, name in enumerate(("stop", "template", "start"))
+            for index, name in enumerate(("isolate", "stop", "template", "start"))
         }})
 
 
@@ -89,9 +89,9 @@ def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_ta
     old = {path: path.read_bytes() for root in (state, anchor) for path in root.iterdir() if path.is_file()}
     value = entry(image_repair_case)
     assert value.record is None and not value.anchored
-    assert [row["spec"]["replicas"] for row in value.documents] == [1, 0, 0, 1]
+    assert [row["spec"]["replicas"] for row in value.documents] == [1, 1, 0, 0, 1]
     images = [row["spec"]["template"]["spec"]["containers"][0]["image"] for row in value.documents]
-    assert images[0] == images[1] != images[2] == images[3]
+    assert images[0] == images[1] == images[2] != images[3] == images[4]
     assert value.identity["operation_id"] == str(context.inputs.installation.operation_id)
     assert old == {path: path.read_bytes() for path in old}
 
@@ -263,7 +263,7 @@ def switch(fixture, api):
     return repair_manager_image(request=context.request, binding=binding, api=api, state_dir=state, anchor_dir=anchor)
 
 
-@pytest.mark.parametrize("phase", ["stop", "template", "start"])
+@pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("loss", ["before", "after"])
 def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_repair_case, phase, loss):
     api = ImageAPI(image_repair_case)
@@ -276,7 +276,7 @@ def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_
         assert api.calls == calls
         api.deliver()
     assert switch(image_repair_case, api)["status"] == "pool_manager_image_repaired_closed"
-    assert api.calls == ["stop", "template", "start"]
+    assert api.calls == ["isolate", "stop", "template", "start"]
     assert all(row["phase"] == "applied" for row in entry(image_repair_case).record["phases"].values())
 
 
@@ -284,14 +284,14 @@ def test_manager_image_switch_waits_for_actual_drain(image_repair_case):
     api = ImageAPI(image_repair_case)
     api.drained = False
     assert switch(image_repair_case, api)["status"] == "pending_manager_image_drain"
-    assert api.calls == ["stop"]
+    assert api.calls == ["isolate", "stop"]
     assert switch(image_repair_case, api)["status"] == "pending_manager_image_drain"
     api.drained = True
     assert switch(image_repair_case, api)["status"] == "pool_manager_image_repaired_closed"
-    assert api.calls == ["stop", "template", "start"]
+    assert api.calls == ["isolate", "stop", "template", "start"]
 
 
-@pytest.mark.parametrize("interrupt_at", [1, 2, 3, 4, 5, 6, 7, 8])
+@pytest.mark.parametrize("interrupt_at", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 def test_manager_image_switch_recovers_each_local_persistence_boundary(image_repair_case, monkeypatch, interrupt_at):
     from scripts.ops import nebius_certificates as private_state
 
@@ -313,12 +313,12 @@ def test_manager_image_switch_recovers_each_local_persistence_boundary(image_rep
     # A durable intent with no sent write cannot be disproved by same-version
     # readback. It remains pending for cancellation/fencing, never resent.
     result = switch(image_repair_case, api)
-    if interrupt_at in {3, 5, 7}:
+    if interrupt_at in {3, 5, 7, 9}:
         assert result["status"] == "pending_manager_image_outcome"
         assert len(api.calls) == (interrupt_at - 3) // 2
     else:
         assert result["status"] == "pool_manager_image_repaired_closed"
-        assert api.calls == ["stop", "template", "start"]
+        assert api.calls == ["isolate", "stop", "template", "start"]
 
 
 def test_prepared_image_correction_blocks_activation_even_with_ready_old_runtime(image_repair_case):
@@ -363,7 +363,7 @@ def test_completed_image_correction_supports_runtime_activation_completion_and_r
     assert loaded.deployment.installation.applications.shared.runtime_profile_json == context.predecessor.deployment.installation.applications.shared.runtime_profile_json
 
 
-@pytest.mark.parametrize("phase", ["stop", "template", "start"])
+@pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("late_commit", [False, True])
 def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_case, phase, late_commit):
     from scripts.ops.nebius_ingress_stage import _key
@@ -427,8 +427,7 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
             {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
             {"op": "test", "path": "/metadata", "value": before["metadata"]},
             {"op": "test", "path": "/spec", "value": before["spec"]}]
-        assert len(patches) == 5 and patches[-1]["op"] == "replace"
-        change, desired = patches[-1], copy.deepcopy(before)
+        change, desired = patches[4], copy.deepcopy(before)
         if change["path"] == "/spec/template":
             phase = "template"
             assert before["spec"]["replicas"] == 0
@@ -437,10 +436,21 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
                 container["image"] = binding.candidate["images"]["service"]["image_ref"]
             assert change["value"] == expected
             desired["spec"]["template"] = expected
+        elif change["path"] == "/metadata/annotations":
+            phase = "isolate"
+            assert change["op"] == "add" and len(patches) == 5
+            desired["metadata"]["annotations"] = {**before["metadata"].get("annotations", {}),
+                "loom.nebius/manager-image-repair": str(binding.operation_id)}
+            assert change["value"] == desired["metadata"]["annotations"]
         else:
             assert change["path"] == "/spec/replicas"
             phase = "stop" if change["value"] == 0 else "start"
             desired["spec"]["replicas"] = change["value"]
+        if phase == "start":
+            assert patches[5:] == [{"op": "remove", "path": "/metadata/annotations/loom.nebius~1manager-image-repair"}]
+            del desired["metadata"]["annotations"]["loom.nebius/manager-image-repair"]
+        elif phase != "isolate":
+            assert len(patches) == 5 and change["op"] == "replace"
         if message.url.params:
             assert dict(message.url.params) == {"dryRun": "All"}
         else:
@@ -467,7 +477,7 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
         result = switch(image_repair_case, api)
         assert result["status"] == ("pending_manager_image_outcome" if loss == "before" else "pool_manager_image_repaired_closed")
         assert switch(image_repair_case, api) == result
-        assert writes == (["stop", "template"] if loss == "before" else ["stop", "template", "start"])
+        assert writes == (["isolate", "stop", "template"] if loss == "before" else ["isolate", "stop", "template", "start"])
 
 
 def test_https_cancellation_fences_image_intent_not_completed_source_repair(image_repair_case):
@@ -542,7 +552,7 @@ def test_bound_image_operation_completes_original_pool_and_unbound_install_refus
     result = target.run_pool_operation(parent=parent, tokens=context.tokens, action="install", image_binding=binding)
     assert result["status"] == "pool_cutover_completed" and result["outcome"] == "global"
     assert result["operation_id"] == context.operation["operation_id"]
-    assert api.calls == ["stop", "template", "start"]
+    assert api.calls == ["isolate", "stop", "template", "start"]
 
 
 @pytest.fixture
@@ -656,3 +666,230 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
         with pytest.raises((PoolOperationError, target.EntryError)):
             target.execute_image_repair(context, "preflight")
         assert connections == []
+
+
+def test_legacy_activation_cannot_open_while_an_image_stop_may_arrive_late(image_repair_case, monkeypatch):
+    from scripts.ops import nebius_pool_activation_stage as activation
+    from scripts.ops import nebius_pool_manager_image_history as images
+
+    context, remote, state, anchor, _ = image_repair_case
+    api = ImageAPI(image_repair_case)
+    api.failure = ("stop", "before")
+    assert switch(image_repair_case, api)["status"] == "pending_manager_image_outcome"
+    remote.activation.ready = True
+    # Old v1 tooling has no image-history hooks, but does perform exact retained
+    # Deployment checks and serialize dispatch. Keep those checks real here.
+    with monkeypatch.context() as legacy:
+        legacy.setattr(images, "load_manager_image_chain", lambda *args, **kwargs: ())
+        with pytest.raises(ValueError):
+            activation.advance_pool_activation(request=context.request, api=remote.activation,
+                state_dir=state, anchor_dir=anchor)
+    assert remote.activation.calls == [] and remote.activation.mode == "closed"
+
+
+def test_late_isolation_after_legacy_opening_cannot_lead_to_a_manager_stop(image_repair_case, monkeypatch):
+    from scripts.ops import nebius_pool_manager_image_history as images
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+
+    context, remote, state, anchor, _ = image_repair_case
+    api = ImageAPI(image_repair_case)
+    api.failure = ("isolate", "before")
+    assert switch(image_repair_case, api)["status"] == "pending_manager_image_outcome"
+    with monkeypatch.context() as legacy:
+        legacy.setattr(images, "load_manager_image_chain", lambda *args, **kwargs: ())
+        remote.activation.ready = True
+        assert advance_pool_activation(request=context.request, api=remote.activation,
+            state_dir=state, anchor_dir=anchor)["status"] == "pool_activation_complete"
+    api.deliver()
+    with pytest.raises(ValueError):
+        switch(image_repair_case, api)
+    assert api.calls == ["isolate"]
+    assert remote.read_workload(_key(context.request.manager))["spec"]["replicas"] == 1
+
+
+@pytest.mark.parametrize(("moment", "loss"), [("prepared", None), ("intent", None), ("prepared_fence", None), ("late_isolate", None),
+    ("late_shutdown", None), ("late_shutdown", "before"), ("late_shutdown", "after"),
+    ("late_shutdown", "conflict"), ("stopped", None)])
+@pytest.mark.timeout(420)
+def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence(image_repair_case, monkeypatch, moment, loss, request):
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_manager_image_history as images
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup, observe_recovery_workloads
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, remote, state, anchor, _ = image_repair_case
+    image_api = ImageAPI(image_repair_case)
+    if moment == "prepared":
+        persist(entry(image_repair_case))
+    else:
+        image_api.failure = ("isolate", "before")
+        assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
+    api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
+    api.state = state
+    args = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    key = _key(context.request.manager)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(images, "load_manager_image_chain", lambda *args, **kwargs: ())
+        assert advance_pool_activation(**args, cancel=True)["status"] == "pool_activation_cancelled"
+        if moment == "prepared_fence":
+            save = private_state._atomic_json
+
+            def interrupt(path, value):
+                save(path, value)
+                if path == state / "startup-fence.json":
+                    raise OSError("synthetic interruption after old fence enrollment")
+
+            legacy.setattr(private_state, "_atomic_json", interrupt)
+            with pytest.raises(ValueError):
+                fence_pool_startup(**args)
+        else:
+            assert fence_pool_startup(**args)["status"] == "startup_writes_fenced"
+        if moment in {"late_shutdown", "stopped"}:
+            stop = api.stop_workload
+
+            def uncertain(key_, before, desired):
+                api.stop_failure = "before" if moment == "late_shutdown" and key_ == key else None
+                return stop(key_, before, desired)
+
+            legacy.setattr(api, "stop_workload", uncertain)
+            assert stop_pool_successors(**args)["status"] == (
+                "pending_shutdown_outcome" if moment == "late_shutdown" else "pool_successors_stopped")
+    frozen = {path: path.read_bytes() for path in (state / "startup-fence.json",
+        anchor / (context.operation["operation_id"] + "-startup-fence.json"))
+        if moment != "prepared_fence" or path.parent == anchor}
+    if moment in {"prepared_fence", "late_isolate", "late_shutdown"}:
+        image_api.deliver()
+    writes, pending = [], []
+    if moment == "late_shutdown":
+        def respond(message):
+            before = remote.read_workload(key)
+            patches = json.loads(message.content)
+            assert message.method == "PATCH"
+            assert patches == [
+                {"op": "test", "path": "/metadata/uid", "value": before["metadata"]["uid"]},
+                {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
+                {"op": "test", "path": "/metadata", "value": before["metadata"]},
+                {"op": "test", "path": "/spec", "value": before["spec"]},
+                {"op": "replace", "path": "/spec/replicas", "value": 0},
+                {"op": "remove", "path": "/metadata/annotations/loom.nebius~1manager-image-repair"}]
+            desired = copy.deepcopy(before)
+            desired["spec"]["replicas"] = 0
+            del desired["metadata"]["annotations"]["loom.nebius/manager-image-repair"]
+            if message.url.params:
+                return httpx.Response(200, json=desired)
+            row = json.loads((state / "shutdown.json").read_bytes())["workloads"][key]
+            assert row["phase"] == "intent"
+            assert row["isolation_stop"] == {"phase": "intent", "before_resource_version": before["metadata"]["resourceVersion"]}
+            assert row["before_resource_version"] != before["metadata"]["resourceVersion"]
+            writes.append(patches)
+            desired["metadata"]["resourceVersion"] = str(int(before["metadata"]["resourceVersion"]) + 1)
+            if len(writes) == 1 and loss == "conflict":
+                return httpx.Response(409, json={"apiVersion": "v1", "kind": "Status", "status": "Failure",
+                    "code": 409, "reason": "Conflict"})
+            if loss == "before":
+                pending.append(desired)
+                raise httpx.ReadTimeout("synthetic lost request")
+            remote.startup.documents[key] = desired
+            if loss == "after":
+                raise httpx.ReadTimeout("synthetic lost response")
+            return httpx.Response(200, json=desired)
+
+        client = httpx.Client(base_url="https://kubernetes.invalid", transport=httpx.MockTransport(respond))
+        request.addfinalizer(client.close)
+        closed, _ = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+        adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
+            parent=SimpleNamespace(client=client), _scope=lambda: None,
+            _path=lambda key: "/deployments/loom-service", recovery_drained=api.recovery_drained)
+        monkeypatch.setattr(api, "stop_workload", lambda key, before, desired:
+            HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=False))
+        monkeypatch.setattr(api, "preview_stop", lambda key, before, desired: copy.deepcopy(desired)
+            if HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=True) else None)
+    api.stop_failure = None
+    assert fence_pool_startup(**args)["status"] == "startup_writes_fenced"
+    if loss == "before":
+        assert stop_pool_successors(**args)["status"] == "pending_shutdown_outcome"
+        assert stop_pool_successors(**args)["status"] == "pending_shutdown_outcome"
+        assert len(writes) == 1 and len(pending) == 1
+        remote.startup.documents[key] = pending[0]
+    elif loss == "conflict":
+        assert stop_pool_successors(**args)["status"] == "pending_shutdown_update"
+    assert stop_pool_successors(**args)["status"] == "pool_successors_stopped"
+    if moment == "late_shutdown":
+        assert len(writes) == (2 if loss == "conflict" else 1)
+        client.close()
+    actual = api.read_workload(key)
+    assert actual["spec"]["replicas"] == 0
+    assert "loom.nebius/manager-image-repair" not in actual["metadata"].get("annotations", {})
+    assert all(path.read_bytes() == raw for path, raw in frozen.items())
+    if moment != "prepared":
+        version = entry(image_repair_case).record["phases"]["isolate"]["before_resource_version"]
+        assert actual["metadata"]["resourceVersion"] != version
+        remote.startup.documents[key]["metadata"]["resourceVersion"] = version
+        with pytest.raises(ValueError):
+            observe_recovery_workloads(context.request, api, state=state, anchor=anchor)
+
+
+@pytest.mark.timeout(600)
+def test_legacy_completion_preserves_receipt_and_carries_unstarted_image_ancestry(image_repair_case, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_manager_image_history as images
+    from scripts.ops import nebius_pool_operation as operation
+    from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
+    from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI
+    from tests.ops.test_nebius_pool_legacy_reopening import ReopeningAPI
+    from tests.ops.test_nebius_pool_legacy_restart import RestartAPI
+    from tests.ops.test_nebius_pool_machine_retirement import MachineAPI
+    from tests.ops.test_nebius_pool_role_restoration import RoleAPI
+    from tests.ops.test_nebius_pool_template_restoration import TemplateAPI
+
+    context, remote, state, anchor, _ = image_repair_case
+    image_api = ImageAPI(image_repair_case)
+    image_api.failure = ("isolate", "before")
+    assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
+    chain = context.request, context.tokens, remote.closed, remote.startup, None, state.parent
+    machine = MachineAPI(chain)
+    gateway = GatewayAPI(chain, machine)
+    template = TemplateAPI(chain, gateway)
+    roles = RoleAPI(chain, template)
+    restart = RestartAPI(chain, roles)
+
+    class RecoveryAPI(ReopeningAPI):
+        def successor_drained(self, key, desired):
+            assert desired["spec"].get("suspend", desired["spec"].get("replicas")) in (True, 0)
+            return self.processes_drained
+
+    runtime = RecoveryAPI(chain, restart)
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(operation, "HTTPSPoolActivationAPI", lambda **kwargs: runtime)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(images, "load_manager_image_chain", lambda *args, **kwargs: ())
+        legacy.setattr(images, "manager_image_paths", lambda *args, **kwargs: ())
+        result = operation.run_pool_operation(parent=parent, tokens=context.tokens, action="rollback")
+    assert result["outcome"] == "legacy"
+    frozen = {path: path.read_bytes() for root in (state, anchor) for path in root.rglob("*.json")}
+    loaded = load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+        completion_sha256=result["completion_sha256"])
+    assert loaded.outcome == "legacy"
+    retained = entry(image_repair_case)
+    assert {retained.path, retained.marker} <= set(loaded.history)
+    assert complete_pool_cutover(request=context.request, api=runtime, state_dir=state, anchor_dir=anchor) == result
+    assert all(path.read_bytes() == raw for path, raw in frozen.items())
+    from scripts.ops.nebius_certificates import _atomic_json
+
+    changed = json.loads(retained.path.read_bytes())
+    changed["phases"]["isolate"]["phase"] = "applied"
+    changed["phases"]["stop"] = {"phase": "intent", "before_resource_version": "999"}
+    _atomic_json(retained.path, changed)
+    with pytest.raises(ValueError):
+        load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+            completion_sha256=result["completion_sha256"])
