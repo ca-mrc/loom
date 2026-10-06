@@ -484,3 +484,26 @@ def test_repair_fence_https_tests_exact_pending_uid_version_metadata_and_spec(pr
         api.pool_state, api.guard_state = remote.pool_state, remote.guard_state
         assert fence_pool_startup(request=context.request, api=api, state_dir=state, anchor_dir=anchor)['status'] == 'startup_writes_fenced'
     assert writes == [key]
+
+
+@pytest.mark.parametrize('damage', [None, 'foreign_uid', 'altered_config', 'lost_record'])
+def test_repaired_config_live_readback_is_bound_to_journaled_create(prepared_repair, damage):
+    from scripts.ops.nebius_pool_startup_repair import qualify_repair_configuration
+
+    context, _, api, state, anchor = prepared_repair
+    repair(prepared_repair)
+    path = state / 'source-repair-configuration/stage.json'
+    child = json.loads(path.read_bytes())
+    key, = child['resources']
+    actual = api.resources.resources[key]
+    if damage == 'foreign_uid':
+        actual['metadata']['uid'] = str(uuid4())
+    elif damage == 'altered_config':
+        actual['data']['installation.json'] = '{}'
+    elif damage == 'lost_record':
+        path.unlink()
+    if damage is None:
+        qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
+    else:
+        with pytest.raises(ValueError):
+            qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
