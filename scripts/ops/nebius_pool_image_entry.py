@@ -48,6 +48,12 @@ class RuntimeImageRepairPrivateInputs(BaseModel):
     binding: RuntimeImageRepairBinding
 
 
+class ImageRepairToolingPrivateInputs(BaseModel):
+    model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
+    schema_version: Literal['loom.nebius-pool-image-tooling-private-inputs.v1']
+    repair_operation: dict[str, Any]
+
+
 @dataclass(frozen=True, repr=False)
 class ImageRepairContext:
     operation: dict[str, Any]
@@ -57,11 +63,27 @@ class ImageRepairContext:
 
 def load_image_repair_inputs(operation: dict[str, Any]) -> ImageRepairContext:
     try:
+        authority = operation
         validate_operation(operation)
-        if operation['schema'] not in {'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'}:
-            raise ValueError
         raw = _private(Path(operation['inputs_path']), 4 * 1024**2)
         if hashlib.sha256(raw).hexdigest() != operation['inputs_sha256']:
+            raise ValueError
+        continuation = operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v4'
+        if continuation:
+            operation = ImageRepairToolingPrivateInputs.model_validate_json(raw).repair_operation
+            validate_operation(operation)
+            if (operation['operation_id'] == authority['operation_id']
+                    or operation['source_sha'] == authority['source_sha']
+                    or any(operation[key] != authority[key] for key in (
+                        'original_operation_id', 'installation_id', 'namespace'))
+                    or Path(operation['inputs_path']).parent.parent != Path(authority['inputs_path']).parent.parent):
+                raise ValueError
+            raw = _private(Path(operation['inputs_path']), 4 * 1024**2)
+            if hashlib.sha256(raw).hexdigest() != operation['inputs_sha256']:
+                raise ValueError
+        # A tooling continuation consumes one existing image authority, never
+        # another continuation or a caller-supplied replacement image binding.
+        if operation['schema'] not in {'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'}:
             raise ValueError
         inputs: ImageRepairPrivateInputs | RuntimeImageRepairPrivateInputs = (
             RuntimeImageRepairPrivateInputs.model_validate_json(raw)
@@ -82,14 +104,16 @@ def load_image_repair_inputs(operation: dict[str, Any]) -> ImageRepairContext:
         # Alembic graph; manifest + fixed installer digest bind these bytes. The
         # retained pool's closed-manager SQL independently requires schema0174.
         # A different head needs a separate migration workflow, not this switch.
-        expected = {'schema': 'loom.nebius-manager-schema.v1', 'source_sha': binding.source_sha, 'revision': '0174'}
+        expected = {'schema': 'loom.nebius-manager-schema.v1', 'source_sha': authority['source_sha'], 'revision': '0174'}
         if _private(SCHEMA_PROOF_PATH, 4096) != json.dumps(expected, sort_keys=True).encode():
             raise ValueError
         state, anchor = Path(original.operation['state_dir']), Path(original.operation['anchor_dir'])
         entry = manager_image_entry(original.request, binding, state=state, anchor=anchor)
+        if continuation and not entry.anchored:
+            raise ValueError
         if not entry.anchored:
             qualify_image_entry_closed(entry, state=state, anchor=anchor)
-        return ImageRepairContext(operation, inputs, original)
+        return ImageRepairContext(authority, inputs, original)
     except Exception:
         raise EntryError('pool image repair private inputs unqualified') from None
 
