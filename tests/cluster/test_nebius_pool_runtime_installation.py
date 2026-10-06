@@ -28,6 +28,72 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(600)
+def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
+    from loom_service.application_management.build_deployment import (
+        SOURCE_CREDENTIALS_PATH,
+        SOURCE_SPOOL_PATH,
+        mount_application_source,
+    )
+    from loom_service.application_management.installation import ApplicationSourceUploadSettings
+    from tests.integration.test_execution_actuator_k3s import (
+        _build_image,
+        _docker_platform,
+        _import_image,
+    )
+
+    tag = 'cr.eu-north1.nebius.cloud/test/service:source-spool-' + uuid4().hex
+    cluster = None
+    try:
+        _build_image(tag=tag, dockerfile='deploy/Dockerfile.service', platform=_docker_platform())
+        cluster = _start_k3s(ephemeral_storage_floor='1Gi')
+        _, core, _ = _load_client(cluster)
+        namespace = 'source-spool'
+        core.create_namespace({'metadata': {'name': namespace,
+            'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        image = _import_image(cluster, tag=tag, root=tmp_path, ordinal=0)
+        core.create_namespaced_secret(namespace, {'metadata': {'name': 'source-credentials'},
+            'stringData': {'credentials.json': '{}'}})
+        # Execute the actual emitted initializer in the actual service image;
+        # the main process only proves the private spool is usable after init.
+        pod = {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
+            'securityContext': {'seccompProfile': {'type': 'RuntimeDefault'}},
+            'containers': [{'name': 'spool-user', 'image': image,
+                'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
+                    'capabilities': {'drop': ['ALL']}},
+                'command': ['python', '-c', 'import os,stat; from pathlib import Path; '
+                    'p=Path("/var/run/loom-application-source/spool"); '
+                    'assert p.parent.stat().st_mode & stat.S_ISGID; '
+                    'assert os.getuid()==p.stat().st_uid==1000; '
+                    'assert stat.S_IMODE(p.stat().st_mode)==0o700; '
+                    '(p/"upload").write_bytes(b"private source"); '
+                    'assert (p/"upload").read_bytes()==b"private source"']} ]}
+        mount_application_source(pod, settings=ApplicationSourceUploadSettings(
+            credentials_file=Path(SOURCE_CREDENTIALS_PATH) / 'credentials.json',
+            spool_directory=Path(SOURCE_SPOOL_PATH)), secret_name='source-credentials', service_image=image)
+        core.create_namespaced_pod(namespace, {'apiVersion': 'v1', 'kind': 'Pod',
+            'metadata': {'name': 'source-spool', 'namespace': namespace}, 'spec': pod})
+        deadline = time.monotonic() + 90
+        while True:
+            observed = core.read_namespaced_pod('source-spool', namespace)
+            if observed.status.phase in {'Succeeded', 'Failed'}:
+                break
+            assert time.monotonic() < deadline, observed.status.to_dict()
+            time.sleep(1)
+        if observed.status.phase != 'Succeeded':
+            statuses = [*(observed.status.init_container_statuses or []), *(observed.status.container_statuses or [])]
+            logs = {row.name: core.read_namespaced_pod_log('source-spool', namespace, container=row.name)
+                for row in statuses if row.state.terminated is not None}
+            raise AssertionError({'status': observed.status.to_dict(), 'logs': logs})
+        initializer, = observed.status.init_container_statuses
+        assert initializer.name == 'prepare-application-source'
+        assert initializer.state.terminated.exit_code == 0
+    finally:
+        if cluster is not None:
+            cluster.stop()
+        subprocess.run(['docker', 'image', 'rm', tag], capture_output=True, check=False)
+
+
+@pytest.mark.timeout(600)
 def test_fixed_preflight_reads_kubelet_inside_production_actuator_image_without_operator_credentials(runtime_inputs, tmp_path, monkeypatch):
     from kubernetes import client
     from scripts.ops.nebius_pool_migration_guard import KubectlPoolGuardAPI
