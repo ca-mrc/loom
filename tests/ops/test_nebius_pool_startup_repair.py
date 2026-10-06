@@ -180,6 +180,7 @@ def prepared_repair(historical_cutover):
         closure_sha256=_hash(state / 'cutover.json'), startup_sha256=_hash(state / 'startup.json'),
         activation_sha256=_hash(state / 'activation.json'))
     api = RepairAPI(startup, closed.resources, activation)
+    api.closed = closed
     return context, binding, api, state, anchor
 
 
@@ -627,6 +628,12 @@ def test_bound_operation_repairs_then_qualifies_and_completes_original_pool(prep
     monkeypatch.setattr(target, 'HTTPSPoolStartupRepairAPI', lambda **kwargs: api, raising=False)
     monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: api.activation)
     api.activation.ready = True
+    from scripts.ops import nebius_certificates as private_state
+
+    with private_state._locked_state(anchor / 'dispatch'):
+        with pytest.raises(target.PoolOperationError):
+            target.run_pool_operation(parent=parent, tokens=context.tokens, action='install', repair_binding=binding)
+    assert api.calls == []
     result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='install', repair_binding=binding)
     assert result['status'] == 'pool_cutover_completed' and result['outcome'] == 'global'
     assert result['operation_id'] == context.operation['operation_id']
@@ -746,3 +753,141 @@ def test_management_entry_runs_repair_and_reports_both_identities(private_repair
         assert api.calls == ['stop', 'template', 'start']
     assert connection_events == ['open', 'close']
     assert 'private-payload' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('phase', ['stop', 'template', 'start', 'complete'])
+@pytest.mark.timeout(420)
+def test_repair_rollback_restores_templates_roles_and_completes_legacy(prepared_repair, monkeypatch, phase):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+    from scripts.ops.nebius_management_switch import _stable
+    from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI
+    from tests.ops.test_nebius_pool_legacy_reopening import ReopeningAPI
+    from tests.ops.test_nebius_pool_legacy_restart import RestartAPI
+    from tests.ops.test_nebius_pool_machine_retirement import MachineAPI
+    from tests.ops.test_nebius_pool_role_restoration import RoleAPI
+    from tests.ops.test_nebius_pool_template_restoration import TemplateAPI
+
+    context, binding, remote, state, anchor = prepared_repair
+    if phase != 'complete':
+        remote.failure = (phase, 'before')
+    repair(prepared_repair)
+    fixture = context.request, context.tokens, remote.closed, remote.startup, None, state.parent
+    machine = MachineAPI(fixture)
+    gateway = GatewayAPI(fixture, machine)
+    template = TemplateAPI(fixture, gateway)
+    roles = RoleAPI(fixture, template)
+    restart = RestartAPI(fixture, roles)
+
+    class RecoveryAPI(ReopeningAPI):
+        def successor_drained(self, key, desired):
+            assert desired['spec']['suspend' if desired['kind'] == 'CronJob' else 'replicas'] in (True, 0)
+            return self.processes_drained
+
+    runtime = RecoveryAPI(fixture, restart)
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: runtime)
+    result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding)
+    assert result['status'] == 'pool_cutover_completed' and result['outcome'] == 'legacy'
+    assert result['acceptance_verified'] is False
+    assert runtime.mode == 'fenced' and runtime.machine_phase == 'revoked'
+    assert set(runtime.guards.values()) == {'open'}
+    assert _stable(runtime.read_workload(_key(context.request.manager)))['spec'] == _stable(context.request.manager)['spec']
+    assert runtime.template_calls and runtime.legacy_calls and runtime.releases
+    history = {path: path.read_bytes() for directory in (state, anchor) for path in directory.rglob('*.json')}
+    assert target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding) == result
+    assert all(path.read_bytes() == raw for path, raw in history.items())
+
+
+@pytest.mark.parametrize('change', ['status', 'spec', 'uid'])
+def test_manager_drain_distinguishes_controller_status_updates_from_workload_drift(prepared_repair, change):
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI
+
+    context, binding, _, state, anchor = prepared_repair
+    reads = []
+
+    class DrainReader(HTTPSPoolStartupRepairAPI):
+        def qualify_closed(self):
+            self._qualify_binding()
+
+        def read_workload(self, key):
+            current = copy.deepcopy(self.documents[1])
+            current['metadata'].update(uid=context.request.manager['metadata']['uid'], resourceVersion=str(len(reads) + 2), generation=2)
+            current['status'] = {'observedGeneration': 2, 'replicas': 0}
+            if reads:
+                if change == 'spec':
+                    current['spec']['replicas'] = 1
+                elif change == 'uid':
+                    current['metadata']['uid'] = str(uuid4())
+                else:
+                    current['status']['conditions'] = []
+            reads.append(current)
+            return current
+
+    def request(method, path):
+        assert method == 'GET' and path.endswith(('/pods?limit=1000', '/replicasets?limit=1000'))
+        replicas = '/replicasets' in path
+        return {'apiVersion': 'apps/v1' if replicas else 'v1', 'kind': 'ReplicaSetList' if replicas else 'PodList',
+            'metadata': {'resourceVersion': '100'}, 'items': []}
+
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, _scope=lambda: None,
+        binding=context.request.fencing.retirement.migration.registration.binding, _request=request)
+    reader = DrainReader(parent=parent, binding=binding)
+    if change == 'status':
+        assert reader.manager_drained(_key(context.request.manager), reader.documents[1]) is True
+    else:
+        with pytest.raises(ValueError):
+            reader.manager_drained(_key(context.request.manager), reader.documents[1])
+
+
+def test_repair_preflight_qualifies_completed_history_without_requiring_closed_admission(prepared_repair, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+    from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI
+
+    context, binding, api, state, anchor = prepared_repair
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None, _scope=lambda: None)
+    monkeypatch.setattr(target, 'HTTPSPoolStartupRepairAPI', lambda **kwargs: api)
+    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: api.activation)
+    api.activation.ready = True
+    result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='install', repair_binding=binding)
+    assert result['outcome'] == 'global'
+
+    class EntryReader(HTTPSPoolStartupRepairAPI):
+        def qualify_closed(self):
+            self._qualify_binding()
+
+    monkeypatch.setattr(target, 'HTTPSPoolStartupRepairAPI', EntryReader)
+    assert target.run_pool_operation(parent=parent, tokens=context.tokens, action='preflight', repair_binding=binding) == {
+        'status': 'preflight_qualified', 'operation_id': context.operation['operation_id']}
+    assert api.calls == ['stop', 'template', 'start']
+
+
+@pytest.mark.parametrize('when', ['before', 'during'])
+def test_repair_private_drift_at_retained_barrier_rejects_without_later_effects(private_repair, when):
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_repair_entry import _RepairChecks, load_pool_repair_inputs
+
+    operation, _, _ = private_repair
+    context = load_pool_repair_inputs(operation)
+    path = Path(operation['inputs_path'])
+    calls = []
+
+    def check(request):
+        assert request == context.original.request
+        calls.append('read-only-prerequisites')
+        if when == 'during':
+            path.write_bytes(path.read_bytes() + b'\n')
+
+    checks = _RepairChecks(SimpleNamespace(preflight=check), context)
+    if when == 'before':
+        path.write_bytes(path.read_bytes() + b'\n')
+    with pytest.raises(EntryError):
+        checks.preflight(context.original.request)
+    assert calls == ([] if when == 'before' else ['read-only-prerequisites'])
