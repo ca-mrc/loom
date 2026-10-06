@@ -24,7 +24,6 @@ from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement_live import _patch_result
 from scripts.ops.nebius_pool_role_fencing import role_fence_documents, role_fence_review_scope
 from scripts.ops.nebius_pool_startup import (
-    _observe_workloads,
     _startup_record,
     closed_startup_documents,
 )
@@ -67,6 +66,7 @@ class HTTPSPoolStartupAPI:
         """Mode-independent identity/permission proof shared with recovery."""
         from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
         from scripts.ops.nebius_pool_role_restoration import restored_role_options
+        from scripts.ops.nebius_pool_startup_repair import qualify_repair_configuration
 
         parent = self.parent
         if restored_role_options(self.request, state=self.state, anchor=self.anchor) is None:
@@ -90,6 +90,9 @@ class HTTPSPoolStartupAPI:
                 if (actual is None or _uid(actual) != item["uid"]
                         or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options)):
                     raise ValueError
+        qualify_repair_configuration(self.request, state=self.state, anchor=self.anchor,
+            read=lambda config: parent._request('GET', '/api/v1/namespaces/' + config['metadata']['namespace']
+                + '/configmaps/' + config['metadata']['name']))
 
     def qualify_legacy_roles(self) -> None:
         """Qualify anchored partial restoration without recursive gateway drain.
@@ -127,12 +130,16 @@ class HTTPSPoolStartupAPI:
             raise ValueError('pool_legacy_roles_unqualified') from None
 
     def _started_workloads(self) -> dict[str, dict[str, Any]]:
+        from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
+        from scripts.ops.nebius_pool_startup_repair import qualify_completed_startup_repair
+
         self._scope()
         _, record = _startup_record(self.request, state=self.state, anchor=self.anchor,
             closed=self.closed, targets=self.targets)
         if record is None or any(item['phase'] != 'started' for item in record['workloads'].values()):
             raise ValueError
-        return _observe_workloads(self, self.closed, self.targets, record)
+        qualify_completed_startup_repair(self.request, state=self.state, anchor=self.anchor)
+        return observe_recovery_workloads(self.request, self, state=self.state, anchor=self.anchor)
 
     def qualify_database_runtimes(self) -> None:
         """Probe only completed, journal-selected successors under closed admission.

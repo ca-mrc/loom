@@ -43,6 +43,7 @@ from scripts.ops.nebius_pool_startup import (
 )
 from scripts.ops.nebius_pool_startup_fence import (
     _fence_record,
+    _fence_sources,
     marked_startup_document,
     observe_recovery_workloads,
     startup_fence_patches,
@@ -554,15 +555,24 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 closed=self.closed, targets=self.targets)
             _, record = _fence_record(self.request, state=self.state, anchor=self.anchor,
                 closed=self.closed, targets=self.targets, startup=startup)
-            if (startup is None or record is None or key not in record['workloads']
+            sources, _ = _fence_sources(self.request, state=self.state, anchor=self.anchor,
+                closed=self.closed, targets=self.targets, startup=startup)
+            if (record is None or key not in record['workloads'] or key not in sources
                     or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent', 'expected': None}
-                    or startup['workloads'][key]['phase'] != 'intent'
-                    or before['metadata']['resourceVersion'] != startup['workloads'][key]['before_resource_version']):
+                    or sources[key][0] is None or before['metadata']['resourceVersion'] != sources[key][0]):
                 raise ValueError
             operation = self.request.fencing.retirement.migration.registration.spec.operation_id
-            if _stable(desired) != _stable(marked_startup_document(self.closed[key], operation)):
+            if _stable(desired) != _stable(marked_startup_document(sources[key][1][0], operation)):
                 raise ValueError
-            patches = startup_fence_patches(self.closed[key], before, operation)
+            from scripts.ops.nebius_pool_startup_repair import (
+                repair_fence_patches,
+                startup_repair_exists,
+            )
+
+            if key == _key(self.request.manager) and startup_repair_exists(self.request, state=self.state, anchor=self.anchor):
+                patches = repair_fence_patches(self.request, before, state=self.state, anchor=self.anchor)
+            else:
+                patches = startup_fence_patches(self.closed[key], before, operation)
             self.verify_retained()
             if self.pool_state() != 'fenced' or any(self.guard_state(str(row.participant_id)) != 'fenced'
                     for row in self.request.fencing.retirement.migration.guards):

@@ -130,6 +130,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     collector_config: dict[str, Any]
     collector_credential: PoolCollectorCredential
     application_source_credential: ApplicationSourceCredentialPin | None = None
+    source_delivery_version: Literal['v1', 'v2'] = Field(default='v1', exclude_if=lambda value: value == 'v1')
     platform_authority: PoolPlatformAuthority
     profiles: dict[UUID, ServiceExecutionRuntimeProfileV1]
     machine_token_files: dict[UUID, Path]
@@ -216,7 +217,7 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
             raise ValueError
         if inputs.application_source_credential is not None:
             application_delivery = ApplicationBuildDeliveryRequest(predecessor.deployment, inputs.profile,
-                original.upgrade.setup.repo_root, inputs.application_source_credential)
+                original.upgrade.setup.repo_root, inputs.application_source_credential, inputs.source_delivery_version)
         if inputs.platform_consumers:
             from scripts.ops.nebius_management_stage import _qualified_defaulted
 
@@ -735,6 +736,9 @@ def execute_pool_cutover(context: PoolCutoverContext, action: str) -> dict[str, 
     """Bind the complete fixed direction to freshly qualified private inputs."""
     if action not in {'preflight', 'install', 'rollback'} or load_pool_cutover_inputs(context.operation) != context:
         raise EntryError('pool operation private binding differs')
+    if (action == 'install' and context.request.application_delivery is not None
+            and context.inputs.source_delivery_version != 'v2'):
+        raise EntryError('historical source delivery requires a protected repair continuation')
     try:
         with connected_pool_api(context) as parent:
             result = run_pool_operation(parent=parent, tokens=context.tokens, action=action)

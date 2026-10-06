@@ -1300,7 +1300,12 @@ Use a new nonzero UUID and private
 `nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The
 `loom.nebius-pool-cutover-private-inputs.v1` contract contains that complete
 retained scope, installation/catalog, dedicated machine-token file references
-and original/predecessor selectors. Keep those inputs and credentials on the
+and original/predecessor selectors. New builder-enabled preparations must set
+`source_delivery_version` to `v2`, selecting the canonical private source spool.
+An omitted version retains the historical `v1` contract for exact evidence
+reconstruction; ordinary forward installation refuses it. Do not edit an existing
+operation's version, candidate or journal to substitute newer rendering.
+Keep those inputs and credentials on the
 operator host. The public `loom.nebius-pool-cutover-operation.v1` metadata contains
 only `operation_id`, identical integrated `source_sha` and `candidate`,
 `installation_id`, `namespace`, the three private paths and `inputs_sha256`.
@@ -1393,6 +1398,59 @@ A completed global outcome cannot be rolled back by rewriting that same history;
 a new transition needs new protected authority. Actual concurrent-owner builds,
 tasks/results, isolation, teardown/redeploy and scale-to-zero are separate live
 acceptance requirements.
+
+### Repair an original source-spool initializer before opening
+
+For a historical `v1` application delivery stopped at runtime qualification, use
+the separate protected `management-pool-repair-preflight`,
+`management-pool-repair-install`, and `management-pool-repair-rollback` actions.
+This is a fixed source-spool correction, not an arbitrary manifest patch or a
+replacement pool registration. All startup writes must be settled, admission
+opening and guard release must still be prepared, and there must be no recovery
+or completion descendant when repair is first anchored.
+
+Prepare a new `loom.nebius-pool-startup-repair-operation.v1` envelope with a
+distinct nonzero `operation_id`, the retained `original_operation_id`, and a new
+integrated `source_sha` equal to its tooling `candidate`. Its private paths are
+`nebius-management/pool-repair/<uuid>/{inputs.json,state,anchor}`. The private
+`loom.nebius-pool-startup-repair-private-inputs.v1` document contains the exact
+original operation metadata and a `binding` of the new operation/source to the
+original metadata's canonical JSON SHA-256, original input SHA-256, and retained
+`cutover.json`, `startup.json`, and prepared `activation.json` SHA-256 values.
+Original inputs, image digests, pool identity, credentials and journals are not
+replaced. Preserve the original authority bundle as evidence.
+
+Build and byte-qualify the new tooling bundle, then install its grant through the
+reviewed operator-only installer. Bind its metadata to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON` and its dedicated key to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_SSH_KEY` in the protected environment. Neither
+value falls back to the original pool or management authority. Preflight performs
+read-only qualification; install takes the original operation's dispatch lock.
+
+Repair stages one immutable application ConfigMap, stops and proves actual Pod
+drain for only the manager, changes the fixed source initializer and spool path
+to `/run/loom-application-source/spool`, then restarts it. Each write has durable
+intent and exact object identity/version checks; an uncertain response permits
+readback, not a new write. The original prepared activation bytes are retained in
+the repair anchor. Normal runtime, settings, capacity and gateway checks must
+then pass before the original activation can advance and open admission.
+
+A `pending` repair result or `pool_startup_repair` failure is not readiness.
+Retain all evidence and inspect the named phase. Repair rollback fences uncertain
+manager writes before the existing stop/restore/reopen sequence. Completion
+records the repair ancestry and both operation identities in the protected
+report, but still reports `acceptance_verified: false`. Collector failures and
+concurrent-owner acceptance require their own evidence; a repaired manager is
+not proof that either has passed.
+
+If retained original tooling already wrote rollback evidence after repair entry,
+keep those bytes. Updated recovery recognizes its original empty startup fence
+only while repair stop is prepared or unresolved and template/start have not
+begun. Shutdown must prove the exact manager stopped at a changed object version
+before restoration; a late stop is observed, not dispatched twice. An original
+legacy completion receipt stays unchanged, with the separately qualified repair
+ancestry included in historical loading. Later repair phases or altered old
+evidence reject this compatibility path; do not reset either journal.
 
 ## Refresh the retained application manager
 

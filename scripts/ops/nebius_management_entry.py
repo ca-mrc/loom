@@ -250,10 +250,22 @@ def main(operation_path: str, action: str) -> int:
             elif operation['schema'] == 'loom.nebius-pool-cutover-operation.v1':
                 from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
 
+            elif operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v1':
+                from scripts.ops.nebius_pool_repair_entry import load_pool_repair_inputs
+
             print(json.dumps({"status": "tooling_qualified"}))
             return 0
         result: dict[str, Any]
-        if operation['schema'] == 'loom.nebius-pool-cutover-operation.v1':
+        if operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v1':
+            from scripts.ops.nebius_pool_repair_entry import (
+                execute_pool_repair,
+                load_pool_repair_inputs,
+            )
+
+            repair = load_pool_repair_inputs(operation)
+            qualified = operation
+            result = execute_pool_repair(repair, action)
+        elif operation['schema'] == 'loom.nebius-pool-cutover-operation.v1':
             from scripts.ops.nebius_pool_cutover_entry import (
                 execute_pool_cutover,
                 load_pool_cutover_inputs,
@@ -334,8 +346,11 @@ def main(operation_path: str, action: str) -> int:
                 stage = "operation"
             failure = {"status": "blocked", "stage": stage,
                        **{key: qualified[key] for key in ("source_sha", "candidate", "installation_id", "namespace")}}
-            if qualified['schema'] in {'loom.nebius-management-refresh-operation.v1', 'loom.nebius-pool-cutover-operation.v1'}:
+            if qualified['schema'] in {'loom.nebius-management-refresh-operation.v1', 'loom.nebius-pool-cutover-operation.v1',
+                    'loom.nebius-pool-startup-repair-operation.v1'}:
                 failure['operation_id'] = qualified['operation_id']
+            if qualified['schema'] == 'loom.nebius-pool-startup-repair-operation.v1':
+                failure['original_operation_id'] = qualified['original_operation_id']
             if qualified['schema'] == 'loom.nebius-management-refresh-operation.v1':
                 capacity = getattr(error, 'capacity', None)
                 if stage == 'refresh_platform_capacity' and isinstance(capacity, dict):

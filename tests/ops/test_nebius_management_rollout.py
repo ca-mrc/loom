@@ -22,6 +22,7 @@ from tests.ops.test_nebius_management_gateway import (
     startup_report,
     upgrade_operation,
 )
+from tests.ops.test_nebius_pool_repair_authority import repair_operation
 
 
 def module():
@@ -84,8 +85,12 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     assert not Path(metadata['inputs_path']).exists()
 
 
-@pytest.mark.parametrize('missing', [None, 'nebius_management_refresh_connected', 'nebius_pool_cutover_entry'])
-def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, missing):
+@pytest.mark.parametrize('metadata_factory,missing', [
+    (refresh_operation, missing) for missing in (None, 'nebius_management_refresh_connected', 'nebius_pool_cutover_entry')
+] + [
+    (repair_operation, missing) for missing in (None, 'nebius_pool_repair_entry', 'nebius_pool_startup_repair_live')
+])
+def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, metadata_factory, missing):
     """A qualified bundle must include the entry's deferred pool dependencies."""
     import os
     import sys
@@ -98,7 +103,7 @@ def test_actual_tooling_qualification_loads_refresh_dependencies_without_private
     wheels.mkdir()
     for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
         (wheels / name).write_bytes(b'fixture wheel')
-    metadata = refresh_operation(tmp_path)
+    metadata = metadata_factory(tmp_path)
     content = module().build_bundle(metadata, uv=uv, requirements=requirements, wheels=wheels)
     release = tmp_path / 'isolated'
     with zipfile.ZipFile(io.BytesIO(content)) as packed:
@@ -312,9 +317,9 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
 
 
 @pytest.mark.parametrize('authority,action', [
-    (authority, action) for authority in ('initial', 'diagnostic', 'recovery', 'refresh', 'pool')
+    (authority, action) for authority in ('initial', 'diagnostic', 'recovery', 'refresh', 'pool', 'pool-repair')
     for action in ('preflight', 'install')
-] + [('pool', 'rollback')])
+] + [('pool', 'rollback'), ('pool-repair', 'rollback')])
 def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action):
     import os
 
@@ -339,12 +344,16 @@ def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path
     if authority == 'pool':
         assert selector['env']['NEBIUS_MANAGEMENT_POOL_OPERATION_JSON'] == '${{ vars.NEBIUS_MANAGEMENT_POOL_OPERATION_JSON }}'
         assert runner['env']['POOL_SSH_KEY'] == '${{ secrets.NEBIUS_MANAGEMENT_POOL_SSH_KEY }}'
+    if authority == 'pool-repair':
+        assert selector['env']['NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON'] == '${{ vars.NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON }}'
+        assert runner['env']['POOL_REPAIR_SSH_KEY'] == '${{ secrets.NEBIUS_MANAGEMENT_POOL_REPAIR_SSH_KEY }}'
     original, probe = operation(tmp_path), diagnostic_operation(tmp_path)
     probe["source_sha"] = "d" * 40
     recovery = recovery_operation(tmp_path) | {"source_sha": "e" * 40}
     refresh = refresh_operation(tmp_path)
     pool = pool_operation(tmp_path)
-    selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh, 'pool': pool}[authority]
+    repair = repair_operation(tmp_path)
+    selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh, 'pool': pool, 'pool-repair': repair}[authority]
     bindir = tmp_path / "bin"
     bindir.mkdir()
     # Fake only external executables; run the actual checked-in shell/Python
@@ -366,6 +375,7 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
         "NEBIUS_MANAGEMENT_RECOVERY_OPERATION_JSON": json.dumps(recovery), "RECOVERY_SSH_KEY": "private-recovery-key",
         'NEBIUS_MANAGEMENT_REFRESH_OPERATION_JSON': json.dumps(refresh), 'REFRESH_SSH_KEY': 'private-refresh-key',
         'NEBIUS_MANAGEMENT_POOL_OPERATION_JSON': json.dumps(pool), 'POOL_SSH_KEY': 'private-pool-key',
+        'NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON': json.dumps(repair), 'POOL_REPAIR_SSH_KEY': 'private-pool-repair-key',
         "DEPLOY_SSH_KEY": "private-original-key", "DIAGNOSTIC_SSH_KEY": "private-diagnostic-key",
         "DEPLOY_KNOWN_HOSTS": "fixture-host", "LOOM_DEPLOY_SSH_TARGET": "fixture-target", "RUNNER_TEMP": str(tmp_path),
         "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": selected["source_sha"], "EXPECTED_ACTION": action,
@@ -380,12 +390,12 @@ pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selecte
     if authority != "initial":
         (tmp_path / "transport-invoked").unlink()
         # Missing diagnostic key must fail, never use the original install key.
-        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | {authority.upper() + "_SSH_KEY": ""},
+        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | {authority.upper().replace('-', '_') + "_SSH_KEY": ""},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0 and not (tmp_path / "transport-invoked").exists()
         # A diagnostic action cannot select an original retirement/install schema.
         result = subprocess.run(["bash", "-e", "-c", selector["run"]],
-            env=env | {"NEBIUS_MANAGEMENT_" + authority.upper() + "_OPERATION_JSON": json.dumps(original)},
+            env=env | {"NEBIUS_MANAGEMENT_" + authority.upper().replace('-', '_') + "_OPERATION_JSON": json.dumps(original)},
             cwd=root, capture_output=True, text=True, timeout=20)
         assert result.returncode != 0
         result = subprocess.run(["bash", "-e", "-c", selector["run"]],

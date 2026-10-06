@@ -132,6 +132,10 @@ pins = [
   # live refresh and connected refresh separately on the shorter root8/root4.
   { path = "tests/ops/test_nebius_pool_predecessor_live.py", shard_index = 7 },
   { path = "tests/ops/test_nebius_pool_refresh_connected.py", shard_index = 3 },
+  # Run37424250256: root1 reached36m before completing the repair module.
+  # Keep all four full rollback cases together on the measured12m root5,
+  # separate from repair phase/old-tooling checks; retain all timeout limits.
+  { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 4 },
 ]
 
 [[test_sharding]]

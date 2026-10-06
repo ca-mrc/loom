@@ -25,6 +25,14 @@ from scripts.ops.nebius_pool_shutdown import stop_pool_successors
 from scripts.ops.nebius_pool_startup import stage_pool_startup, startup_workload_options
 from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
 from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
+from scripts.ops.nebius_pool_startup_repair import (
+    PoolStartupRepairBinding,
+    _repair_record,
+    qualify_completed_startup_repair,
+    repair_pool_startup,
+    startup_repair_exists,
+)
+from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI
 from scripts.ops.nebius_pool_template_restoration import restore_pool_templates
 
 _RECOVERY = ('startup-fence', 'shutdown', 'machine-retirement', 'gateway-retirement',
@@ -56,7 +64,8 @@ class PoolOperationError(RuntimeError):
         super().__init__('pool operation unconfirmed; preserve private evidence')
 
 
-def run_pool_operation(*, parent: HTTPSPoolCutoverAPI, tokens: dict[UUID, str], action: str) -> dict[str, Any]:
+def run_pool_operation(*, parent: HTTPSPoolCutoverAPI, tokens: dict[UUID, str], action: str,
+                       repair_binding: PoolStartupRepairBinding | None = None) -> dict[str, Any]:
     """Run a complete fixed direction or resume its newest journaled phase.
 
 The caller must use the private-input-qualified parent and keep its transports
@@ -75,6 +84,8 @@ own original journal lock and validates its predecessor before any side effect.
             raise ValueError
         request = parent.request
         operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+        if repair_binding is not None:
+            _repair_record(request, state=state, anchor=anchor, binding=repair_binding)
 
         def present(name: str) -> bool:
             # An orphaned marker is evidence, not permission to restart a stage.
@@ -96,6 +107,8 @@ own original journal lock and validates its predecessor before any side effect.
 
         if action == 'preflight':
             phase = 'preflight'
+            if repair_binding is not None and not startup_repair_exists(request, state=state, anchor=anchor):
+                HTTPSPoolStartupRepairAPI(parent=parent, binding=repair_binding).qualify_closed()
             if any(present(name) for name in ('startup', 'activation', 'completion', *_RECOVERY)):
                 # Validate the whole selected chain, without creating a missing
                 # child or using initial idle checks against reopened owners.
@@ -115,6 +128,11 @@ own original journal lock and validates its predecessor before any side effect.
 
         private_state._private_directory(anchor)
         with private_state._locked_state(anchor / 'dispatch'):
+            repaired = startup_repair_exists(request, state=state, anchor=anchor)
+            if action == 'install' and repaired and repair_binding is None:
+                raise ValueError  # Only the separately bound continuation may open.
+            if repair_binding is not None:
+                _repair_record(request, state=state, anchor=anchor, binding=repair_binding)
             if present('completion'):
                 phase = 'completion'
                 record = activation_record(request, state_dir=state, anchor_dir=anchor)
@@ -126,6 +144,20 @@ own original journal lock and validates its predecessor before any side effect.
             if action == 'install':
                 if any(present(name) for name in _RECOVERY):
                     raise ValueError
+                if repair_binding is not None:
+                    ready = False
+                    if repaired:
+                        try:
+                            qualify_completed_startup_repair(request, state=state, anchor=anchor)
+                            ready = True
+                        except ValueError:
+                            pass
+                    if not ready:
+                        pending = advance('startup-repair', 'pool_startup_repaired_closed', lambda: repair_pool_startup(
+                            request=request, binding=repair_binding,
+                            api=HTTPSPoolStartupRepairAPI(parent=parent, binding=repair_binding), state_dir=state, anchor_dir=anchor))
+                        if pending is not None:
+                            return pending
                 if present('activation'):
                     record = activation_record(request, state_dir=state, anchor_dir=anchor)
                     if record is None or record['cancellation'] != 'prepared':

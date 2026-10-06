@@ -28,7 +28,8 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
 
 
 @pytest.mark.timeout(600)
-def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
+@pytest.mark.parametrize('transition', ['fresh', 'repair'])
+def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, transition):
     from loom_service.application_management.build_deployment import (
         SOURCE_CREDENTIALS_PATH,
         SOURCE_SPOOL_PATH,
@@ -60,10 +61,13 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
             'containers': [{'name': 'spool-user', 'image': image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                     'capabilities': {'drop': ['ALL']}},
-                'command': ['python', '-c', 'import os,stat,sys; from pathlib import Path; '
+                # Avoid an HTML-sensitive ampersand in this synthetic command:
+                # Kubernetes JSON-Patch compares its encoded string differently.
+                # The production initializer itself has no such character.
+                'command': ['python', '-c', 'import os,stat,sys; from operator import and_; from pathlib import Path; '
                     'from loom_service.application_management.source_upload import ApplicationSourceUploader; '
                     'p=Path(sys.argv[1]); '
-                    'assert p.parent.stat().st_mode & stat.S_ISGID; '
+                    'assert and_(p.parent.stat().st_mode,stat.S_ISGID); '
                     'assert os.getuid()==p.stat().st_uid==1000; '
                     'assert stat.S_IMODE(p.stat().st_mode)==0o700; '
                     'assert ApplicationSourceUploader(None,None,spool_directory=p).directory==p; '
@@ -72,6 +76,9 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
         mount_application_source(pod, settings=ApplicationSourceUploadSettings(
             credentials_file=Path(SOURCE_CREDENTIALS_PATH) / 'credentials.json',
             spool_directory=Path(SOURCE_SPOOL_PATH)), secret_name='source-credentials', service_image=image)
+        if transition == 'repair':
+            _repair_actual_source_initializer(core, namespace, pod)
+            return
         core.create_namespaced_pod(namespace, {'apiVersion': 'v1', 'kind': 'Pod',
             'metadata': {'name': 'source-spool', 'namespace': namespace}, 'spec': pod})
         deadline = time.monotonic() + 90
@@ -93,6 +100,103 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
         if cluster is not None:
             cluster.stop()
         subprocess.run(['docker', 'image', 'rm', tag], capture_output=True, check=False)
+
+
+def _repair_actual_source_initializer(core, namespace, pod):
+    """Real v1 failure, manager stop/drain, exact CAS, then canonical startup."""
+    from kubernetes.client.exceptions import ApiException
+    from scripts.ops.nebius_pool_application_history import (
+        LEGACY_SOURCE_COMMAND,
+        LEGACY_SOURCE_VOLUME,
+    )
+    from scripts.ops.nebius_pool_retirement import qualify_closed_workload_drain
+
+    def call(path, method='GET', body=None):
+        return core.api_client.call_api(path, method, body=body, response_type='object',
+            auth_settings=['BearerToken'], _return_http_data_only=True,
+            header_params={'Content-Type': 'application/json-patch+json' if method == 'PATCH' else 'application/json'})
+
+    pod['restartPolicy'] = 'Always'
+    pod['containers'][0]['command'][2] += '; print("private-spool-ready", flush=True); import time; time.sleep(600)'
+    template = {'metadata': {'labels': {'app': 'source-spool'}}, 'spec': pod}
+    original_template = copy.deepcopy(template)
+    original_pod = original_template['spec']
+    initializer, = original_pod['initContainers']
+    initializer['command'] = list(LEGACY_SOURCE_COMMAND)
+    for container in (*original_pod['containers'], initializer):
+        for mount in container.get('volumeMounts', []):
+            if mount['name'] == 'application-source':
+                mount['mountPath'] = LEGACY_SOURCE_VOLUME
+    collection = '/apis/apps/v1/namespaces/' + namespace + '/deployments'
+    path = collection + '/source-spool'
+    original = call(collection, 'POST', {'apiVersion': 'apps/v1', 'kind': 'Deployment',
+        'metadata': {'name': 'source-spool', 'namespace': namespace}, 'spec': {
+            'replicas': 1, 'strategy': {'type': 'Recreate'}, 'selector': {'matchLabels': {'app': 'source-spool'}},
+            'template': original_template}})
+
+    def wait_for(observe):
+        deadline = time.monotonic() + 90
+        while True:
+            result = observe()
+            if result:
+                return result
+            assert time.monotonic() < deadline, 'source repair observation timed out'
+            time.sleep(0.2)
+
+    def old_failed():
+        rows = core.list_namespaced_pod(namespace, label_selector='app=source-spool').items
+        return any(status.name == 'prepare-application-source' and
+            ((status.state.terminated and status.state.terminated.exit_code == 1) or
+             (status.last_state.terminated and status.last_state.terminated.exit_code == 1))
+            for row in rows for status in (row.status.init_container_statuses or []))
+
+    wait_for(old_failed)
+
+    def cas(field, value):
+        for attempt in range(10):
+            before = call(path)
+            assert before['metadata']['uid'] == original['metadata']['uid']
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': before['metadata']['uid']},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': before['metadata']['resourceVersion']},
+                {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+                {'op': 'test', 'path': '/spec', 'value': before['spec']},
+                {'op': 'replace', 'path': field, 'value': value}]
+            try:
+                return call(path, 'PATCH', patches)
+            except ApiException as error:
+                # Only explicit conflicts are repeatable in the disposable fixture.
+                assert error.status in (409, 422)
+                if attempt == 9:
+                    probes = {}
+                    for omitted in ('/metadata', '/spec'):
+                        try:
+                            call(path + '?dryRun=All', 'PATCH', [row for row in patches if row['path'] != omitted])
+                            probes[omitted] = 'accepted'
+                        except ApiException as diagnostic:
+                            probes[omitted] = diagnostic.status
+                    raise AssertionError({'failed_field': field, 'dry_run_without': probes}) from error
+        raise AssertionError('CAS did not settle')
+
+    stopped = cas('/spec/replicas', 0)
+    wait_for(lambda: qualify_closed_workload_drain(original=original, desired=stopped, current=call(path),
+        children=call('/apis/apps/v1/namespaces/' + namespace + '/replicasets'),
+        pods=call('/api/v1/namespaces/' + namespace + '/pods')))
+    replaced = cas('/spec/template', template)
+    assert replaced['spec']['replicas'] == 0
+    for group in ('containers', 'initContainers'):
+        assert [row['image'] for row in replaced['spec']['template']['spec'][group]] == [
+            row['image'] for row in original['spec']['template']['spec'][group]]
+    cas('/spec/replicas', 1)
+
+    def repaired_ready():
+        rows = core.list_namespaced_pod(namespace, label_selector='app=source-spool').items
+        for row in rows:
+            if row.status.phase == 'Running' and all(status.ready for status in (row.status.container_statuses or [])):
+                return 'private-spool-ready' in core.read_namespaced_pod_log(row.metadata.name, namespace, container='spool-user')
+        return False
+
+    wait_for(repaired_ready)
+    assert call(path)['metadata']['uid'] == original['metadata']['uid']
 
 
 @pytest.mark.timeout(600)
