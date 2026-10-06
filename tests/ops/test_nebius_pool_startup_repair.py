@@ -149,6 +149,46 @@ def test_repair_refuses_foreign_or_nonhistorical_manager(historical_cutover, dam
         source_repair_documents(request, original)
 
 
+def test_repair_projection_bounds_duplicate_derivation_without_aliasing_or_hiding_drift(historical_cutover, monkeypatch):
+    from scripts.ops import nebius_pool_cutover as cutover
+    from scripts.ops.nebius_pool_startup_repair import source_repair_documents
+
+    context, original, _ = historical_cutover
+    derive = cutover._cutover_documents
+    calls = []
+
+    def counted(request):
+        calls.append(request.application_delivery.source_delivery_version)
+        return derive(request)
+
+    monkeypatch.setattr(cutover, '_cutover_documents', counted)
+    first, config = source_repair_documents(context.request, original)
+    pristine = copy.deepcopy(first), copy.deepcopy(config)
+    first['spec']['replicas'] = 99
+    config['data']['installation.json'] = '{}'
+    assert source_repair_documents(context.request, original) == pristine
+    assert source_repair_documents(context.request, copy.deepcopy(original)) == pristine
+    assert calls == ['v1', 'v2']
+    original['metadata']['uid'] = str(uuid4())
+    with pytest.raises(ValueError):
+        source_repair_documents(context.request, original)
+
+
+def test_reused_repair_projection_still_checks_current_image_admission(historical_cutover, monkeypatch):
+    from scripts.ops import nebius_pool_cutover as cutover
+    from scripts.ops.nebius_pool_startup_repair import source_repair_documents
+
+    context, original, _ = historical_cutover
+    source_repair_documents(context.request, original)
+
+    def expired(request):
+        raise ValueError('expired admission')
+
+    monkeypatch.setattr(cutover, 'qualify_cutover_image_admission', expired)
+    with pytest.raises(ValueError, match='pool_source_repair_projection_unqualified'):
+        source_repair_documents(context.request, original)
+
+
 @pytest.fixture
 def prepared_repair(historical_cutover):
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
