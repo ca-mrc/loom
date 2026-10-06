@@ -72,6 +72,9 @@ func main() {
 			os.Exit(2)
 		}
 	}
+	runSetupCacheStep(ctx, "fetch", func(ctx context.Context) error {
+		return broker.fetchSetupCache(ctx, p, filepath.Clean(*workspace))
+	})
 	executionContext, stopMonitor := monitorPrivateSandboxes(ctx, p)
 	defer stopMonitor()
 	broker.setPhase("", time.Time{})
@@ -89,7 +92,7 @@ func main() {
 		}
 	}
 	stopTaskEgress := func() {}
-	if p.TaskEgress != nil {
+	if p.TaskEgress != nil || p.SetupEgress != nil {
 		diagnosticDirectory := filepath.Join(filepath.Clean(*workspace), filepath.Dir(taskEgressOutput.SourcePath))
 		if err := secureInputDirectory(filepath.Clean(*workspace), diagnosticDirectory); err != nil {
 			fmt.Fprintln(os.Stderr, "prepare task egress evidence:", err)
@@ -108,7 +111,11 @@ func main() {
 				break
 			}
 		}
-		proxy, stop, err := startEgress(executionContext, p.TaskEgress, p.RuntimeContractSHA256, evidence, p.MaxArtifactBytes, p.MaxLogBytesPerStream)
+		policy := phasedEgressPolicy{broker: broker, setup: p.SetupEgress}
+		if p.TaskEgress != nil {
+			policy.task = p.TaskEgress.taskEgressPolicy
+		}
+		proxy, stop, err := startEgress(executionContext, policy, p.RuntimeContractSHA256, evidence, p.MaxArtifactBytes, p.MaxLogBytesPerStream)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "start task egress:", err)
 			os.Exit(2)
@@ -132,6 +139,9 @@ func main() {
 	)
 	stopTaskEgress()
 	stopMonitor()
+	runSetupCacheStep(ctx, "store", func(ctx context.Context) error {
+		return broker.storeSetupCache(ctx, p, filepath.Clean(*workspace))
+	})
 	captureErr := captureDeclaredOutputs(p, filepath.Clean(*workspace), cleanOutput, &result)
 	if captureErr != nil {
 		result.FinishedAt = time.Now().UTC()

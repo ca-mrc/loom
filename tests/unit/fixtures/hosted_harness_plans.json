@@ -72,6 +72,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [],
     "task_egress": null,
     "task_image_materialization_id": null,
@@ -181,6 +183,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [],
     "task_egress": null,
     "task_image_materialization_id": null,
@@ -290,6 +294,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [],
     "task_egress": null,
     "task_image_materialization_id": null,
@@ -429,6 +435,8 @@
     "runtime_volume_mib": 1024,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [
@@ -683,6 +691,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [
@@ -851,6 +861,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [
@@ -1053,6 +1065,8 @@
     "runtime_volume_mib": 1024,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [
@@ -1319,6 +1333,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [
@@ -1499,6 +1515,8 @@
     "runtime_volume_mib": 32,
     "schema_version": "loom.execution-runtime-plan.v1",
     "setup": [],
+    "setup_cache": null,
+    "setup_egress": null,
     "sidecars": [
       {
         "argv": [

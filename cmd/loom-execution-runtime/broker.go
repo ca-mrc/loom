@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -215,6 +216,12 @@ func (b *workloadBroker) setPhase(role string, deadline time.Time) {
 	b.expires = time.Time{}
 }
 
+func (b *workloadBroker) currentPhaseRole() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.phaseRole
+}
+
 func (b *workloadBroker) currentToken(ctx context.Context) (string, error) {
 	// Serialize refreshes without blocking phase changes on Gateway IO.
 	b.tokenMu.Lock()
@@ -293,7 +300,7 @@ func (b *workloadBroker) startProxy(ctx context.Context, modelLifetime ...contex
 				b.serveCallLedger(writer, request)
 				return
 			}
-			if !allowedGatewayRequest(request.Method, request.URL.Path) {
+			if !allowedGatewayRequest(request.Method, request.URL) {
 				http.Error(writer, "gateway route unavailable", http.StatusForbidden)
 				return
 			}
@@ -404,8 +411,16 @@ func (b *workloadBroker) serveCallLedger(writer http.ResponseWriter, request *ht
 	_, _ = writer.Write(body)
 }
 
-func allowedGatewayRequest(method, path string) bool {
-	if method != http.MethodPost {
+// allowedGatewayRequest admits only canonical model routes. Task-sandbox
+// processes share the Pod loopback, so the broker must never become a path to
+// other Gateway endpoints: encoded or dot/empty segments are rejected before
+// the prefix-matched Gemini routes are considered (#2310).
+func allowedGatewayRequest(method string, target *url.URL) bool {
+	if method != http.MethodPost || target.RawPath != "" || target.Opaque != "" {
+		return false
+	}
+	path := target.Path
+	if pathpkg.Clean(path) != path || strings.Contains(path, "//") {
 		return false
 	}
 	switch path {

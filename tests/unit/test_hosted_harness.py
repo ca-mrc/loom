@@ -172,13 +172,37 @@ def test_harness_features_stay_with_the_harness() -> None:
 
 
 @pytest.mark.usefixtures("_registered")
-@pytest.mark.parametrize("name", ["streaming-agent", "unavailable-agent"])
-def test_unsupported_driver_operation_or_unavailable_harness_fails_closed(name: str) -> None:
+def test_unavailable_harness_fails_closed() -> None:
     task, _, _ = _inputs()
 
-    assert not hosted_harness(name).natively_runnable  # type: ignore[union-attr]
-    reasons = automatic_service_execution_rejections(task, _trial(name), source_provenance=_provenance())
+    assert not hosted_harness("unavailable-agent").natively_runnable  # type: ignore[union-attr]
+    reasons = automatic_service_execution_rejections(
+        task, _trial("unavailable-agent"), source_provenance=_provenance(),
+    )
     assert "direct_completion_required" in reasons
+
+
+@pytest.mark.usefixtures("_registered")
+def test_streaming_harness_runs_natively_but_not_on_guests_yet() -> None:
+    from tests.unit.test_guest_execution_materialization import _guest_inputs
+
+    task, _, _ = _inputs()
+    assert hosted_harness("streaming-agent").natively_runnable  # type: ignore[union-attr]
+    assert automatic_service_execution_rejections(
+        task, _trial("streaming-agent"), source_provenance=_provenance(),
+    ) == ()
+
+    guest_task, _, guest_profile = _guest_inputs("nested_docker")
+    reasons = automatic_service_execution_rejections(
+        guest_task, _trial("streaming-agent"), source_provenance=_provenance(),
+        supported_capabilities=guest_profile.supported_guest_capabilities,
+    )
+    assert "guest_driver_capabilities_unsupported" in reasons
+    # Workspace harnesses without streaming keep their guest admission.
+    assert "guest_driver_capabilities_unsupported" not in automatic_service_execution_rejections(
+        guest_task, _trial("future-agent"), source_provenance=_provenance(),
+        supported_capabilities=guest_profile.supported_guest_capabilities,
+    )
 
 
 def test_controller_image_comes_from_the_spec_binding() -> None:

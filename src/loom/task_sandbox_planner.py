@@ -32,11 +32,17 @@ from loom.execution_runtime_contract import (
     ProcessPhaseV1,
     RuntimeHandoffInputV1,
     RuntimeOutputDeclarationV1,
+    RuntimeSetupCacheV1,
     RuntimeTaskInputV1,
     SidecarContainerV1,
 )
-from loom.hosted_harness import SANDBOX_CONTROLLER_MODULE, HostedHarnessSpec
-from loom.models.networking import NetworkPolicy, hosted_http_egress
+from loom.hosted_harness import (
+    HARNESS_SETUP_PHASE,
+    MAX_SETUP_CACHE_BYTES,
+    SANDBOX_CONTROLLER_MODULE,
+    HostedHarnessSpec,
+)
+from loom.models.networking import NetworkPolicy, WebAllowlist, WebDestination, hosted_http_egress
 from loom.models.task import TaskConfig
 from loom.models.trial import TrialConfig
 from loom.sandbox_identity import resolve_sandbox_identity
@@ -158,7 +164,8 @@ def _sandbox_sidecars(
     env = task.environment
     assert env.docker_image
     agent_timeout, verifier_timeout = _timeouts(task, request.trial)
-    exec_limit = str(math.ceil(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, agent_timeout, verifier_timeout)))
+    setup_timeout = request.spec.setup.timeout_seconds if request.spec.setup is not None else 0
+    exec_limit = str(math.ceil(max(_MIN_SANDBOX_EXEC_LIMIT_SECONDS, agent_timeout, verifier_timeout, setup_timeout)))
     sidecars = list(fixture_sidecars(task))
     for role in topology.sandbox_roles:
         socket = f"/loom/sandboxes/{role}/sandbox.sock"
@@ -195,6 +202,10 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
         ("agent/usage.json", "accounting/usage.json", "usage", True),
         ("agent/exception.json", "diagnostics/agent-exception.json", "agent_native", False),
         ("verifier/exception.json", "diagnostics/verifier-exception.json", "verifier", False),
+        *((("setup/exception.json", "diagnostics/setup-exception.json", "agent_native", False),)
+          if request.spec.setup is not None else ()),
+        *((("harness-cache/outcome.json", "diagnostics/harness-cache.json", "agent_native", False),)
+          if request.spec.setup is not None and request.spec.setup.cacheable else ()),
         *native,
         ("workspace.tar", "artifacts/workspace.tar", "task_artifact", True),
         ("verifier/output.json", "verifier/output.json", "verifier", topology.verifier_output_required),
@@ -219,7 +230,8 @@ def _output_declarations(request: TaskSandboxPlanRequest, topology: _Topology) -
                 source_path=f".loom/mutable-paths/{name}",
                 relative_path=f"artifacts/mutable-paths/{name}", kind="task_artifact", required=True,
             ))
-    if hosted_http_egress(request.effective_network_policy) is not None:
+    # Task egress and setup-only install egress share one audited proxy.
+    if hosted_http_egress(request.effective_network_policy) is not None or request.spec.setup is not None:
         outputs.insert(0, TASK_EGRESS_OUTPUT)
     return tuple(outputs)
 
@@ -251,6 +263,24 @@ def _controller_envelope(
     return controller, requests
 
 
+def _setup_egress(spec: HostedHarnessSpec) -> WebAllowlist | None:
+    """The spec's install sources, frozen into the plan for setup phases only."""
+    if spec.setup is None:
+        return None
+    return WebAllowlist(destinations=tuple(
+        WebDestination(host=source.host, protocol=source.protocol) for source in spec.setup.sources
+    ))
+
+
+def _setup_cache(spec: HostedHarnessSpec) -> RuntimeSetupCacheV1 | None:
+    if spec.setup is None or spec.setup.install_root is None:
+        return None
+    return RuntimeSetupCacheV1(
+        identity_sha256=spec.setup.cache_identity(spec.name),
+        install_root=spec.setup.install_root, max_bytes=MAX_SETUP_CACHE_BYTES,
+    )
+
+
 def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRuntimePlanV1:
     task, trial, profile, spec = request.task, request.trial, request.profile, request.spec
     env = task.environment
@@ -279,7 +309,7 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         del phase_env["LOOM_TASK_ARTIFACTS_JSON"]
         phase_env["LOOM_TASK_ARTIFACTS_FROM_INPUT"] = "1"
 
-    def phase(role: Literal["agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
+    def phase(role: Literal["setup", "agent", "verifier"], mode: str, timeout: float) -> ProcessPhaseV1:
         return ProcessPhaseV1(
             role=role, argv=sandbox_phase_argv(mode, spec.controller_module),
             working_directory="/app", timeout_seconds=round(timeout), environment=phase_env,
@@ -315,6 +345,11 @@ def compile_task_sandbox_plan(request: TaskSandboxPlanRequest) -> ExecutionRunti
         ),
         output_declarations=_output_declarations(request, topology),
         sidecars=tuple(_sandbox_sidecars(request, topology, resources)),
+        setup=(
+            (phase("setup", HARNESS_SETUP_PHASE, spec.setup.timeout_seconds),) if spec.setup is not None else ()
+        ),
+        setup_egress=_setup_egress(spec),
+        setup_cache=_setup_cache(spec),
         main=phase("agent", spec.controller_phase, agent_timeout),
         verifier_execution="in_attempt" if topology.colocated_verifier else "separate_execution",
         verifier_after_agent_timeout=topology.in_place_verifier,
@@ -383,6 +418,7 @@ def compile_deferred_verifier_plan(
 
 
 __all__ = [
+    "HARNESS_SETUP_PHASE",
     "SANDBOX_RUNTIME_BINARY",
     "TASK_SANDBOX",
     "VERIFIER_SANDBOX",

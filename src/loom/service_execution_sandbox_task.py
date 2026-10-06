@@ -18,9 +18,10 @@ import signal
 import sys
 import tempfile
 import tomllib
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from glob import escape
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from uuid import UUID
 
 import httpx
@@ -31,7 +32,14 @@ from loom.driver.service_sandbox import SandboxRPCError, ServiceSandboxDriver
 from loom.errors import AgentError, DriverError, exception_info
 from loom.execution_requirements import ALL_GUEST_EXECUTION_CAPABILITIES
 from loom.harbor_verifier_script import VERIFIER_SCRIPT_PATH, offline_verifier_run_sh_bytes
-from loom.hosted_harness import HostedHarnessSpec, hosted_harness, workspace_controller_phases
+from loom.hosted_harness import (
+    HARNESS_SETUP_PHASE,
+    MAX_SETUP_CACHE_BYTES,
+    HarnessSetup,
+    HostedHarnessSpec,
+    hosted_harness,
+    workspace_controller_phases,
+)
 from loom.models.capabilities import Capabilities
 from loom.models.networking import NetworkPolicy, hosted_http_egress
 from loom.models.task import TaskConfig, normalize_steps
@@ -187,6 +195,178 @@ def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
     if spec is None or not spec.workspace or spec.controller_phase not in CONTROLLER_PHASES:
         raise ServiceExecutionTaskError("selected agent has no workspace controller phase")
     return spec
+
+
+# The runtime broker replaces any caller credential with the Pod's workload
+# token, so installed agents only ever hold this fixed placeholder.
+WORKLOAD_PROXY_API_KEY = "loom_workload_proxy"
+
+
+def installed_agent_model_environment(
+    spec: HostedHarnessSpec, *, base_url_env: str, api_key_env: str,
+) -> dict[str, str]:
+    """Model access for an installed agent inside the task sandbox (#2310).
+
+    The agent reaches the Pod-local runtime broker over the shared loopback.
+    The broker forwards only canonical model routes, only during the agent
+    phase and before its deadline, with the Pod's own workload token. That
+    token is bound to the Trial's Provider Connection and never leaves the
+    trusted controller. Revocation is the end of the agent phase. Provider,
+    control-plane and grading credentials are never passed to the sandbox.
+    """
+    from urllib.parse import urlsplit
+
+    if spec.model != "required" or spec.gateway_protocol is None:
+        raise ServiceExecutionTaskError("selected harness does not use a model")
+    gateway = os.environ.get("LOOM_GATEWAY_URL", "")
+    url = urlsplit(gateway)
+    if url.scheme != "http" or url.hostname not in {"127.0.0.1", "::1"} or not url.port or url.path.strip("/"):
+        raise ServiceExecutionTaskError("installed agent model access requires the loopback broker")
+    # Both OpenAI protocols are served under /v1 (chat/completions, responses).
+    return {base_url_env: gateway.rstrip("/") + "/v1", api_key_env: WORKLOAD_PROXY_API_KEY}
+
+
+def _setup_proxy_environment() -> dict[str, str]:
+    """The runtime's loopback egress proxy, which admits only install sources
+    while the setup phase runs (#2310)."""
+    from urllib.parse import urlsplit
+
+    proxy = os.environ.get("LOOM_TASK_EGRESS_PROXY", "")
+    url = urlsplit(proxy)
+    if url.scheme != "http" or url.hostname != "127.0.0.1" or not url.port:
+        raise ServiceExecutionTaskError("harness setup egress is unavailable")
+    environment = {name: proxy for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")}
+    environment.update(no_proxy="localhost,127.0.0.1,::1", NO_PROXY="localhost,127.0.0.1,::1")
+    return environment
+
+
+# Controller-workspace files the runtime exchanges with the Gateway (#2310).
+SETUP_CACHE_RESTORE = PurePosixPath(".loom/harness-cache/restore.tar.gz")
+SETUP_CACHE_STORE = PurePosixPath(".loom/harness-cache/store.tar.gz")
+SETUP_CACHE_OUTCOME = PurePosixPath(".loom/harness-cache/outcome.json")
+_SANDBOX_CACHE_ARCHIVE = PurePosixPath("/tmp/loom-harness-cache.tar.gz")
+
+
+def _remaining(deadline: AttemptDeadline | None, fallback: float) -> float:
+    return deadline.remaining() if deadline else fallback
+
+
+async def _check_install(driver: ServiceSandboxDriver, setup: HarnessSetup, timeout: float) -> bool:
+    result = await driver.exec(shlex.join(setup.check), timeout_sec=timeout)
+    return result.return_code == 0
+
+
+async def _restore_cached_install(
+    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+) -> str:
+    """Restore a fetched entry and prove it works; any problem means reinstall."""
+    archive = workspace / SETUP_CACHE_RESTORE
+    if not archive.is_file():
+        return "miss"
+    assert setup.install_root is not None
+    root = shlex.quote(setup.install_root)
+    remote = shlex.quote(str(_SANDBOX_CACHE_ARCHIVE))
+    try:
+        await driver.upload(archive, _SANDBOX_CACHE_ARCHIVE)
+        extracted = await driver.exec(
+            f"rm -rf -- {root} && mkdir -p -- {root} && tar -xzf {remote} -C {root}; status=$?; rm -f -- {remote}; exit $status",
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
+        )
+        if extracted.return_code == 0 and await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
+            return "hit"
+    except DriverError:
+        pass
+    await driver.exec(f"rm -rf -- {root}", timeout_sec=_remaining(deadline, setup.timeout_seconds))
+    return "restore_rejected"
+
+
+async def _archive_install(
+    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup, deadline: AttemptDeadline | None,
+) -> str:
+    """Archive a fresh, checked install for the runtime to store."""
+    assert setup.install_root is not None
+    remote = shlex.quote(str(_SANDBOX_CACHE_ARCHIVE))
+    target = workspace / SETUP_CACHE_STORE
+    try:
+        packed = await driver.exec(
+            f"tar -czf {remote} -C {shlex.quote(setup.install_root)} .",
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
+        )
+        if packed.return_code != 0:
+            return "store_unavailable"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        await driver.download(_SANDBOX_CACHE_ARCHIVE, target)
+    except (DriverError, OSError):
+        target.unlink(missing_ok=True)
+        return "store_unavailable"
+    finally:
+        await driver.exec(f"rm -f -- {remote}", timeout_sec=_remaining(deadline, setup.timeout_seconds))
+    if not 0 < target.stat().st_size <= MAX_SETUP_CACHE_BYTES:
+        target.unlink(missing_ok=True)
+        return "store_unavailable"
+    return "stored"
+
+
+async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
+    """Run the selected harness's pinned install inside the task sandbox.
+
+    Only the install runs here: no task inputs are staged, no task command
+    runs and no model call is possible (the broker refuses non-agent phases).
+    Its output becomes this phase's logs; a non-zero exit is a setup failure.
+    A cacheable install is first restored from the runtime-fetched entry for
+    this team and task image when one exists, and archived after a fresh
+    install otherwise.
+    """
+    spec = hosted_harness(trial.agent_name)
+    if spec is None or not spec.workspace or spec.setup is None:
+        raise ServiceExecutionTaskError("selected harness declares no setup")
+    setup = spec.setup
+    raw_deadline = os.environ.get("LOOM_EXECUTION_PHASE_DEADLINE")
+    deadline = AttemptDeadline.from_wall_deadline(float(raw_deadline)) if raw_deadline else None
+    environment = _setup_proxy_environment()
+    loop = asyncio.get_running_loop()
+    current = asyncio.current_task()
+    assert current is not None
+    loop.add_signal_handler(signal.SIGTERM, current.cancel)
+    driver = sandbox_driver("task-sandbox", task)
+    # {"restore": hit|miss|restore_rejected, "store": stored|store_unavailable}
+    outcome: dict[str, str] = {}
+    try:
+        await driver.start()
+        if setup.cacheable:
+            outcome["restore"] = await _restore_cached_install(driver, workspace, setup, deadline)
+            if outcome["restore"] == "hit":
+                return
+        handle = await driver.exec_streaming(
+            list(setup.install), env_vars=environment, cwd=task.environment.workdir,
+            timeout_sec=_remaining(deadline, setup.timeout_seconds),
+        )
+        try:
+            async def forward(stream: AsyncIterator[bytes], sink: BinaryIO) -> None:
+                async for chunk in stream:
+                    sink.write(chunk)
+                    sink.flush()
+
+            await asyncio.gather(
+                forward(handle.stdout, sys.stdout.buffer), forward(handle.stderr, sys.stderr.buffer),
+            )
+            code = await handle.wait()
+        except BaseException:
+            await handle.kill()
+            raise
+        if code != 0:
+            raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
+        if setup.cacheable:
+            if not await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
+                raise ServiceExecutionTaskError("harness install check failed")
+            outcome["store"] = await _archive_install(driver, workspace, setup, deadline)
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+        await driver.stop()
+        if outcome:
+            _write_json_atomic(workspace / SETUP_CACHE_OUTCOME, {
+                "schema_version": "loom.harness-cache-outcome.v1", **outcome,
+            })
 
 
 class AgentTimeoutFinalizedError(TimeoutError):
@@ -577,7 +757,7 @@ async def _run_verifier(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=(*workspace_controller_phases(), "verify-sandbox"))
+    parser.add_argument("phase", choices=(*workspace_controller_phases(), HARNESS_SETUP_PHASE, "verify-sandbox"))
     parser.add_argument("--workspace", required=True, type=Path)
     args = parser.parse_args()
     workspace = args.workspace
@@ -588,16 +768,17 @@ def main() -> None:
     with (workspace / "task.toml").open("rb") as stream:
         task = normalize_steps(TaskConfig.model_validate(tomllib.load(stream)))
     trial = TrialConfig.model_validate_json(os.environ["LOOM_TASK_TRIAL_JSON"])
-    agent_phase = args.phase != "verify-sandbox"
+    setup_phase = args.phase == HARNESS_SETUP_PHASE
+    agent_phase = args.phase not in {HARNESS_SETUP_PHASE, "verify-sandbox"}
     if agent_phase and args.phase != _workspace_spec(trial).controller_phase:
         raise ServiceExecutionTaskError("execution phase does not match the selected agent")
-    phase = run_agent if agent_phase else run_verifier
+    phase = run_setup if setup_phase else run_agent if agent_phase else run_verifier
     try:
         asyncio.run(phase(workspace, task, trial))
     except AgentTimeoutFinalizedError:
         raise
     except Exception as exc:
-        directory = "agent" if agent_phase else "verifier"
+        directory = "setup" if setup_phase else "agent" if agent_phase else "verifier"
         path = workspace / ".loom" / directory / "exception.json"
         # An agent failure is captured before cleanup, which can also fail.
         # Keep that original identity instead of replacing it during unwinding.

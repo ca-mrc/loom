@@ -31,17 +31,24 @@ HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource
 # the deployment's digest-pinned controller image (or a pinned version's).
 ControllerImage = Literal["service-runner", "harness-controller"]
 # The Gateway wire format the harness speaks; None for a model-free harness.
-GatewayProtocol = Literal["openai-chat-completions"]
+GatewayProtocol = Literal["openai-chat-completions", "openai-responses"]
 Readiness = Literal["ready", "unavailable"]
 
 # Trusted controller entry points. The sandbox module also owns the fixed
 # `verify-sandbox` phase, so every workspace harness runs through it.
 RESPONSE_RUNNER_MODULE = "loom.service_execution_task"
 SANDBOX_CONTROLLER_MODULE = "loom.service_execution_sandbox_task"
+# The controller phase that runs a harness's pinned install (#2310).
+HARNESS_SETUP_PHASE = "setup"
 
 # Operations `ServiceSandboxDriver` implements today. A harness that needs
-# more (e.g. `exec_streaming` for launcher agents) is not natively runnable.
+# more is not natively runnable.
 NATIVE_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
+    {"exec", "exec_streaming", "upload", "download"},
+)
+# Operations the QEMU guest sandbox path is qualified for. Supervised
+# processes (#2310) are not yet validated through the guest channel.
+GUEST_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
     {"exec", "upload", "download"},
 )
 
@@ -54,6 +61,76 @@ class NativeOutput:
     relative_path: str
     kind: str
     required: bool
+
+
+@dataclass(frozen=True)
+class InstallSource:
+    """An HTTP(S) origin the pinned install may download from during setup."""
+
+    host: str
+    protocol: Literal["http", "https"] = "https"
+
+
+# Bounds for the setup phase's own deadline, separate from the agent's.
+MAX_SETUP_TIMEOUT_SECONDS = 1800
+# A cached install travels through the sandbox file API, which bounds one
+# transfer at 256 MiB.
+MAX_SETUP_CACHE_BYTES = 256 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class HarnessSetup:
+    """The pinned installation an installed harness runs before its agent (#2310).
+
+    `install` runs inside the task sandbox during the setup phase only. It may
+    reach only `sources`, through the Gateway task-egress proxy; no task
+    command or model call runs in setup, and the egress window closes before
+    the agent phase.
+    """
+
+    install: tuple[str, ...]
+    sources: tuple[InstallSource, ...]
+    timeout_seconds: int
+    # Absolute sandbox directory the install writes everything into. With
+    # `check`, it makes the install cacheable: the directory is archived after
+    # a fresh install and restored instead of reinstalling (#2310).
+    install_root: str | None = None
+    # Command proving an install (fresh or restored) is usable, e.g. `--version`.
+    check: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.install or not all(self.install):
+            raise ValueError("harness setup requires a non-empty install command")
+        if not self.sources:
+            raise ValueError("harness setup requires declared install sources")
+        if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
+            raise ValueError("harness setup timeout is out of range")
+        if (self.install_root is None) != (not self.check):
+            raise ValueError("a cacheable harness setup declares both install_root and check")
+        if self.install_root is not None and (
+            not self.install_root.startswith("/") or self.install_root.rstrip("/") in {"", "/tmp", "/usr", "/home"}
+            or ".." in self.install_root.split("/") or "//" in self.install_root
+        ):
+            raise ValueError("harness setup install_root must be a dedicated absolute directory")
+
+    @property
+    def cacheable(self) -> bool:
+        return self.install_root is not None
+
+    def cache_identity(self, harness: str) -> str:
+        """Digest of everything that determines the installed bytes; part of
+        the cache key alongside the team and the exact task image."""
+        import hashlib
+        import json
+
+        document = {
+            "schema_version": "loom.harness-setup-cache-identity.v1",
+            "harness": harness, "install": list(self.install),
+            "sources": [[source.protocol, source.host] for source in self.sources],
+            "install_root": self.install_root, "check": list(self.check),
+        }
+        payload = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -77,6 +154,9 @@ class HostedHarnessSpec:
     features: frozenset[HarnessFeature] = frozenset()
     required_driver_capabilities: frozenset[DriverCapability] = frozenset()
     native_outputs: tuple[NativeOutput, ...] = ()
+    # How the harness gets into the task sandbox; None means it is already
+    # there (task image or trusted controller).
+    setup: HarnessSetup | None = None
     names: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -96,6 +176,10 @@ class HostedHarnessSpec:
             raise ValueError(f"{self.name}: a workspace harness must declare its driver operations")
         if self.stages_solution and self.model != "forbidden":
             raise ValueError(f"{self.name}: only a model-free harness may receive solution/")
+        if self.setup is not None and (
+            self.execution_kind != "workspace" or "exec_streaming" not in self.required_driver_capabilities
+        ):
+            raise ValueError(f"{self.name}: setup installs into a task sandbox through exec_streaming")
         object.__setattr__(self, "names", frozenset({self.name, *self.aliases}))
 
     @property
@@ -203,7 +287,11 @@ def workspace_controller_phases() -> tuple[str, ...]:
 
 __all__ = [
     "DIRECT_COMPLETION",
+    "GUEST_SANDBOX_DRIVER_CAPABILITIES",
+    "HARNESS_SETUP_PHASE",
     "HOSTED_HARNESSES",
+    "MAX_SETUP_CACHE_BYTES",
+    "MAX_SETUP_TIMEOUT_SECONDS",
     "NATIVE_EXECUTION_AGENT_NAMES",
     "NATIVE_SANDBOX_DRIVER_CAPABILITIES",
     "ORACLE",
@@ -215,7 +303,9 @@ __all__ = [
     "ExecutionKind",
     "GatewayProtocol",
     "HarnessFeature",
+    "HarnessSetup",
     "HostedHarnessSpec",
+    "InstallSource",
     "ModelUse",
     "NativeOutput",
     "Readiness",

@@ -11,6 +11,7 @@ from starlette.requests import HTTPConnection
 from starlette.responses import Response, StreamingResponse
 
 from loom.db.schema import ServiceExecutionLease, ServiceExecutionTarget, Trial
+from loom.execution_runtime_contract import ExecutionRuntimePlanV1
 from loom.llm_call_ledger import read_service_execution_llm_calls as read_lease_calls
 from loom.pipeline.artifact_commit import ArtifactCommitError
 from loom_control_plane.service_execution_output import (
@@ -26,6 +27,13 @@ from loom_control_plane.service_execution_output import (
     mint_service_execution_peer_token,
     resolve_service_execution_handoff,
     resolve_service_execution_input,
+)
+from loom_llm_gateway.harness_cache import (
+    HarnessCacheEntry,
+    HarnessCacheError,
+    harness_cache_entry,
+    read_entry_digest,
+    store_entry,
 )
 
 router = APIRouter(prefix="/internal/service-execution", tags=["service-execution"])
@@ -432,3 +440,55 @@ async def commit_service_execution_output(
 
 
 __all__ = ["router"]
+
+
+async def _harness_cache_entry(request: Request, identity: ServiceExecutionPeerV1) -> HarnessCacheEntry:
+    """The lease and its frozen plan alone determine the entry (#2310)."""
+    lease = await _authorize(request, identity, purpose="input")
+    try:
+        plan = ExecutionRuntimePlanV1.model_validate(lease.runtime_contract_json)
+        return harness_cache_entry(team_id=lease.team_id, plan=plan)
+    except (HarnessCacheError, ValueError) as exc:
+        raise HTTPException(status_code=403, detail="harness_cache_not_declared") from exc
+
+
+@router.get("/harness-cache")
+async def get_harness_cache(
+    request: Request, lease_id: LeaseIdHeader, generation: GenerationHeader, role: RoleHeader,
+) -> StreamingResponse:
+    entry = await _harness_cache_entry(request, _peer(lease_id, generation, role))
+    store, bucket = request.app.state.artifact_store, request.app.state.settings.artifacts_bucket
+    digest = await read_entry_digest(store, bucket=bucket, entry=entry)
+    if digest is None:
+        raise HTTPException(status_code=404, detail="harness_cache_miss")
+    try:
+        facts = await store.stat_object(bucket=bucket, key=entry.archive_key)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="harness_cache_miss") from exc
+    if not 0 < facts.content_length <= entry.max_bytes:
+        raise HTTPException(status_code=404, detail="harness_cache_miss")
+    return StreamingResponse(
+        store.stream_object(bucket=bucket, key=entry.archive_key, chunk_size=1024 * 1024),
+        media_type="application/gzip",
+        headers={"Content-Length": str(facts.content_length), "X-Loom-Content-SHA256": digest},
+    )
+
+
+@router.put("/harness-cache", status_code=204)
+async def put_harness_cache(
+    request: Request, lease_id: LeaseIdHeader, generation: GenerationHeader, role: RoleHeader,
+    content_sha256: ContentSha256Header,
+) -> Response:
+    entry = await _harness_cache_entry(request, _peer(lease_id, generation, role))
+    try:
+        size = int(request.headers.get("content-length", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=411, detail="harness_cache_size_invalid") from exc
+    try:
+        await store_entry(
+            request.app.state.artifact_store, bucket=request.app.state.settings.artifacts_bucket,
+            entry=entry, body=request.stream(), declared_size=size, declared_digest=content_sha256,
+        )
+    except HarnessCacheError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return Response(status_code=204)

@@ -46,6 +46,7 @@ from loom.execution_runtime_contract import (
     TaskExecutionResourceRequestsV1,
 )
 from loom.hosted_harness import (
+    GUEST_SANDBOX_DRIVER_CAPABILITIES,
     NATIVE_EXECUTION_AGENT_NAMES,
     harnesses_supporting,
     hosted_harness,
@@ -439,6 +440,8 @@ def automatic_service_execution_rejections(
         if not controller:
             reasons.append("isolation_guest_response_only" if trial.isolation == "guest"
                            else "guest_private_sandboxes_required")
+        elif spec is not None and not spec.required_driver_capabilities <= GUEST_SANDBOX_DRIVER_CAPABILITIES:
+            reasons.append("guest_driver_capabilities_unsupported")
         # The guest path grades in a fresh verifier guest, not the agent's live
         # sandbox. Reject an explicit request for that until it is supported;
         # task-authored shared guest tasks keep their historical topology.

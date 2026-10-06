@@ -52,7 +52,12 @@ async def task_egress(websocket: WebSocket) -> None:
         if (canonical_digest(plan.canonical_payload()) != lease.runtime_contract_sha256
             or websocket.headers.get("x-loom-runtime-contract-sha256") != lease.runtime_contract_sha256):
             raise EgressDeniedError("task_egress_contract_mismatch")
-        if plan.task_egress is None:
+        # The trusted runtime names the phase it is serving. Setup may reach only
+        # the plan's frozen install sources; every other phase only the task's
+        # own egress (#2310).
+        setup_phase = websocket.headers.get("x-loom-execution-phase") == "setup"
+        allowed = plan.setup_egress if setup_phase else plan.task_egress
+        if allowed is None:
             raise EgressDeniedError("task_egress_not_declared")
         lease_key = str(lease.id)
         runtime.acquire(lease_key)
@@ -62,8 +67,7 @@ async def task_egress(websocket: WebSocket) -> None:
         if len(text) > 1024:
             raise EgressDeniedError("task_egress_request_invalid")
         destination = WebDestination.model_validate(json.loads(text))
-        if (isinstance(plan.task_egress, WebAllowlist)
-                and destination not in plan.task_egress.destinations):
+        if isinstance(allowed, WebAllowlist) and destination not in allowed.destinations:
             raise EgressDeniedError("task_egress_destination_denied")
         phase_deadline = datetime.fromisoformat(websocket.headers.get("x-loom-phase-deadline", ""))
         if phase_deadline.tzinfo is None:

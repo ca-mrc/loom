@@ -136,8 +136,12 @@ type nodeResourceAllocation struct {
 }
 
 type plan struct {
-	NodeResourceAllocation     *nodeResourceAllocation    `json:"node_resource_allocation,omitempty"`
-	TaskEgress                 *storedTaskEgress          `json:"task_egress,omitempty"`
+	NodeResourceAllocation *nodeResourceAllocation `json:"node_resource_allocation,omitempty"`
+	TaskEgress             *storedTaskEgress       `json:"task_egress,omitempty"`
+	// Install sources reachable only while a setup phase runs (#2310).
+	SetupEgress *webAllowlist `json:"setup_egress,omitempty"`
+	// A cacheable harness install keyed by the Gateway (#2310).
+	SetupCache                 *setupCache                `json:"setup_cache,omitempty"`
 	EffectiveNetworkPolicy     json.RawMessage            `json:"effective_network_policy,omitempty"`
 	SchemaVersion              string                     `json:"schema_version"`
 	CandidateSHA               string                     `json:"candidate_sha"`
@@ -238,7 +242,23 @@ func (p plan) validate() error {
 	if err := p.validateGuestExecution(); err != nil {
 		return err
 	}
-	if p.TaskEgress != nil {
+	if p.SetupEgress != nil {
+		if len(p.Setup) == 0 {
+			return fmt.Errorf("setup egress requires a setup phase")
+		}
+		if err := p.SetupEgress.validate(); err != nil {
+			return err
+		}
+	}
+	if p.SetupCache != nil {
+		if len(p.Setup) == 0 {
+			return fmt.Errorf("a setup cache requires a setup phase")
+		}
+		if err := p.SetupCache.validate(); err != nil {
+			return err
+		}
+	}
+	if p.TaskEgress != nil || p.SetupEgress != nil {
 		declared := false
 		for _, output := range p.OutputDeclarations {
 			if output == taskEgressOutput {
@@ -248,8 +268,10 @@ func (p plan) validate() error {
 		if !declared {
 			return fmt.Errorf("task egress requires its immutable diagnostic output declaration")
 		}
-		if err := p.TaskEgress.validate(); err != nil {
-			return err
+		if p.TaskEgress != nil {
+			if err := p.TaskEgress.validate(); err != nil {
+				return err
+			}
 		}
 	}
 	if err := p.validateEffectiveNetworkPolicy(); err != nil {
