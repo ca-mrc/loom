@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, text, tuple_
+from sqlalchemy import func, select, text, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.db.nebius_pool_outbox_schema import NebiusPoolExecutionOutbox
@@ -44,6 +44,7 @@ from loom_control_plane.service_execution import (
 )
 from loom_control_plane.service_execution_scheduler import (
     _SERVICE_TRIAL_BY_ID,
+    ServiceExecutionConfigurationError,
     _compile_service_candidate,
 )
 from loom_execution_actuator.contracts import KubernetesJobObservation, NormalizedJobState
@@ -206,8 +207,20 @@ class PoolExecutionOutbox:
             target = await session.get(ServiceExecutionTarget, target_id, with_for_update=True, populate_existing=True)
             if target is None or target.spec_json["namespace_name"] != self.participant.execution_namespace.name:
                 raise PoolHandoffError
-            compiled = await _compile_service_candidate(session, row=candidate, environment=self.environment,
-                pool_id=self.logical_pool_id, maximum_deadline_seconds=self.maximum_deadline_seconds, current_time=now)
+            try:
+                async with session.begin_nested():
+                    compiled = await _compile_service_candidate(session, row=candidate, environment=self.environment,
+                        pool_id=self.logical_pool_id, maximum_deadline_seconds=self.maximum_deadline_seconds,
+                        current_time=now)
+            except ServiceExecutionConfigurationError as error:
+                # Roll back partial compilation but retain the source/Trial
+                # locks acquired before the savepoint. A separate transaction
+                # could fail a corrected candidate or race cancellation.
+                await session.execute(update(Trial).where(Trial.id == trial_id, Trial.state == "queued",
+                    Trial.cancellation_requested_at.is_(None)).values(state="failed",
+                    failure_reason="service_execution_configuration_invalid", failure_message=str(error),
+                    finished_at=now, next_attempt_at=None, scheduling_observation=None))
+                return None
             if compiled is None:
                 # Compilation may have finished an image-failed queued Trial.
                 # Commit that existing terminal behavior without claiming work.

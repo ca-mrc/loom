@@ -162,3 +162,95 @@ def test_fixed_operation_refuses_concurrent_dispatch_or_unknown_action(operation
         with pytest.raises(PoolOperationError):
             state.run()
     assert not state.parent.state_dir.exists() and state.startup is None
+
+
+@pytest.mark.parametrize(('message', 'stage'), [
+    ('pool_retained_writer_binding_inventory_unqualified', 'writer_bindings'),
+    ('pool_retained_writer_workload_inventory_unqualified', 'writer_workloads'),
+    ('pool cutover connected prerequisites unqualified', 'connected_prerequisites'),
+    ('pool cutover initial capacity unqualified', 'capacity'),
+    ('pool cutover inputs changed', 'scope'),
+    ('pool cutover namespace differs', 'scope'),
+    ('pool_cutover_database_report_unqualified', 'database_report'),
+    ('pool_cutover_pending_source_unqualified', 'pending_source'),
+    ('pool_cutover_pending_page_unqualified', 'pending_page'),
+    ('pool_management_history_origin_unqualified', 'origin_history'),
+    ('private credential: never-export', None),
+    ('pool_retained_writer_binding_inventory_unqualified private-value', None),
+])
+def test_preflight_reports_only_exact_fixed_failure_codes_without_writes(operation, monkeypatch, message, stage):
+    from scripts.ops.nebius_pool_operation import PoolOperationError
+
+    def fail(request):
+        raise ValueError(message)
+
+    monkeypatch.setattr(operation.parent, 'preflight', fail)
+    with pytest.raises(PoolOperationError) as error:
+        operation.run('preflight')
+    assert error.value.stage == 'pool_preflight' + ('_' + stage if stage else '')
+    assert 'private-value' not in str(error.value) and 'never-export' not in str(error.value)
+    assert not operation.parent.state_dir.exists() and not operation.parent.anchor_dir.exists()
+
+
+@pytest.mark.parametrize(('detail', 'stage'), [
+    ('cutover_readiness', 'database_readiness'),
+    ('management_origin_history', 'origin_history'),
+    ('private-value', None),
+])
+def test_preflight_reports_only_allowlisted_database_adapter_stages(operation, monkeypatch, detail, stage):
+    from scripts.ops.nebius_pool_migration import PoolMigrationError
+    from scripts.ops.nebius_pool_operation import PoolOperationError
+
+    def fail(request):
+        raise PoolMigrationError(detail)
+
+    monkeypatch.setattr(operation.parent, 'preflight', fail)
+    with pytest.raises(PoolOperationError) as error:
+        operation.run('preflight')
+    assert error.value.stage == 'pool_preflight' + ('_' + stage if stage else '')
+    assert not operation.parent.state_dir.exists() and not operation.parent.anchor_dir.exists()
+
+
+def test_install_keeps_its_mutating_phase_even_for_recognized_preflight_error(operation, monkeypatch):
+    from scripts.ops.nebius_pool_operation import PoolOperationError
+
+    def fail(request):
+        raise ValueError('pool_retained_writer_binding_inventory_unqualified')
+
+    monkeypatch.setattr(operation.parent, 'preflight', fail)
+    with pytest.raises(PoolOperationError) as error:
+        operation.run('install')
+    assert error.value.stage == 'pool_cutover'
+
+
+@pytest.mark.parametrize(('damage', 'stage'), [('binding', 'writer_bindings'), ('database', 'database_report')])
+def test_real_readonly_preflight_failure_reaches_the_protected_gateway(
+        operation, cutover_inputs, cutover_binding_inventory, tmp_path, monkeypatch, damage, stage):
+    import json
+
+    from scripts.ops.nebius_management_gateway import safe_report
+    from scripts.ops.nebius_pool_operation import PoolOperationError
+    from tests.ops.test_nebius_management_gateway import pool_operation
+    from tests.ops.test_nebius_pool_cutover import binding_preflight
+
+    request, tokens = cutover_inputs
+    if damage == 'binding':
+        cutover_binding_inventory['rolebindings'][0]['subjects'] = []
+
+    def invalid_database(target, *, after):
+        return {'status': 'observed', 'schema_revision': '0000', 'rows': []}
+
+    def preflight(actual):
+        assert actual == request
+        binding_preflight(request, tokens, cutover_binding_inventory,
+            database_read=invalid_database if damage == 'database' else None)
+
+    monkeypatch.setattr(operation.parent, 'preflight', preflight)
+    with pytest.raises(PoolOperationError) as error:
+        operation.run('preflight')
+    metadata = pool_operation(tmp_path)
+    report = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report.update(status='blocked', stage=error.value.stage)
+    assert safe_report(json.dumps(safe_report(json.dumps(report).encode(), metadata)).encode(), metadata)['stage'] == (
+        'pool_preflight_' + stage)
+    assert not operation.parent.state_dir.exists() and not operation.parent.anchor_dir.exists()

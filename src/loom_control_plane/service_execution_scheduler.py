@@ -277,6 +277,27 @@ async def _compile_service_candidate(
     maximum_deadline_seconds: int,
     current_time: datetime,
 ) -> CompiledServiceExecution | None:
+    try:
+        return await _compile_service_candidate_plan(session, row=row, environment=environment,
+            pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
+    except ValidationError:
+        # Pydantic messages include input values. Both local and shared-pool
+        # callers receive the same safe error before any attempt or reservation.
+        raise ServiceExecutionConfigurationError(
+            "Native execution configuration violates the runtime contract; review task and trial "
+            "settings and the selected runtime profile. No execution attempt was started."
+        ) from None
+
+
+async def _compile_service_candidate_plan(
+    session: AsyncSession,
+    *,
+    row: Any,
+    environment: str,
+    pool_id: str,
+    maximum_deadline_seconds: int,
+    current_time: datetime,
+) -> CompiledServiceExecution | None:
     # Architecture records are alternatives. Nebius's current execution class
     # uses x86_64; an unused arm64 build must not hold up admission.
     prerequisites = list((await session.execute(
@@ -391,16 +412,8 @@ async def _reserve_service_candidate(
     maximum_deadline_seconds: int,
     current_time: datetime,
 ) -> ServiceExecutionLease | None:
-    try:
-        compiled = await _compile_service_candidate(session, row=row, environment=environment,
-            pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
-    except ValidationError:
-        # Pydantic messages include input values. Do not persist or log them.
-        # This boundary precedes every attempt, capacity and spend reservation.
-        raise ServiceExecutionConfigurationError(
-            "Native execution configuration violates the runtime contract; review task and trial "
-            "settings and the selected runtime profile. No execution attempt was started."
-        ) from None
+    compiled = await _compile_service_candidate(session, row=row, environment=environment,
+        pool_id=pool_id, maximum_deadline_seconds=maximum_deadline_seconds, current_time=current_time)
     if compiled is None:
         return None
     runtime_plan, requirements = compiled.runtime_plan, compiled.requirements

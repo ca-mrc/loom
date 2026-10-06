@@ -27,8 +27,18 @@ historical guest capabilities. Historical class definitions remain unchanged.
 A deployment profile opts in with `guest_runtime = "qemu-tcg-v1"`, task identity
 support and at least 1024 MiB of runtime volume. `guest_runtime_volume_mib` and
 `guest_max_artifact_bytes` override these budgets for guest tasks while leaving
-ordinary plan budgets unchanged. Only tasks declaring a guest
+ordinary plan budgets unchanged. By default only tasks declaring a guest
 capability select a guest class; ordinary tasks retain their original class.
+`TrialConfig.isolation` (#2314) can change that per batch: `guest` forces a
+plain guest (no guest capabilities) on an ordinary task, and `container`
+keeps an ordinary task in a pod but is rejected as
+`isolation_container_unsatisfiable` when the task declares guest capabilities.
+`auto` is the default and is normalized away, so existing plans are unchanged.
+`effective_guest_capabilities` is the single rule the planner, workload
+requirements and admission share. A forced guest also requires the Terminus
+controller (`isolation_guest_response_only`) and, until shared grading inside a
+forced guest is qualified, rejects an explicitly requested shared verifier
+(`isolation_guest_shared_unsupported`).
 The compiler requires the Terminus controller with two private sandboxes and
 explicit root task/verifier identities. Unresolved prerequisites and external
 cluster, general PKCS#11 or DPDK requirements remain admission rejections.
@@ -42,7 +52,9 @@ installed qualification before enabling admission.
 
 Each sidecar carries `guest_execution` with schema
 `loom.guest-execution.v1`, runtime `qemu-tcg-v1`, and the sorted, unique declared
-capabilities. Python and Go both validate the exact class, two private roles,
+capabilities. A plain guest carries an empty list; Go rejects a missing
+(`null`) list, and an empty one adds no `--nested-docker` or other capability
+setup. Python and Go both validate the exact class, two private roles,
 matching task images/resources, root identities, private socket/probe paths,
 timeouts and payload reservation. Historical requirements cannot silently
 upgrade into a guest. Nonroot guest identities are currently rejected.

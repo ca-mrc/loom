@@ -7,7 +7,8 @@ from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
 from loom_service.application_management.installation import ApplicationSourceUploadSettings
 
 SOURCE_CREDENTIALS_PATH = "/var/run/loom-application-source-credentials"
-SOURCE_VOLUME_PATH = "/var/run/loom-application-source"
+# Alpine's /var/run is a symlink; the private uploader requires a canonical path.
+SOURCE_VOLUME_PATH = "/run/loom-application-source"
 SOURCE_SPOOL_PATH = SOURCE_VOLUME_PATH + "/spool"
 
 
@@ -46,9 +47,10 @@ def mount_application_source(pod: dict[str, Any], *, settings: ApplicationSource
     ])
     pod.setdefault("initContainers", []).append({"name": "prepare-application-source", "image": service_image,
         "command": ["python", "-c", "import os,stat,sys; from pathlib import Path; "
-            "p=Path(sys.argv[1]); p.mkdir(mode=0o700,exist_ok=True); s=p.lstat(); "
-            "assert p.resolve(strict=True)==p and stat.S_ISDIR(s.st_mode) and "
-            "s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o700", SOURCE_SPOOL_PATH],
+            "p=Path(sys.argv[1]); p.mkdir(mode=0o700,exist_ok=True); assert p.resolve(strict=True)==p; "
+            "fd=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW); s=os.fstat(fd); "
+            "assert stat.S_ISDIR(s.st_mode) and s.st_uid==os.getuid() and "
+            "stat.S_IMODE(s.st_mode) in (0o700,0o2700); os.fchmod(fd,0o700); os.close(fd)", SOURCE_SPOOL_PATH],
         "securityContext": {"runAsUser": uid, "runAsGroup": uid, "runAsNonRoot": True,
             "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}},
         "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},

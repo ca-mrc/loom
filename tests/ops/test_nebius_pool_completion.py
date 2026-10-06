@@ -38,6 +38,32 @@ def load(api, checksum):
         anchor_dir=api.root / 'cutover-anchor', completion_sha256=checksum)
 
 
+def test_receipt_readback_rejects_supplemental_history_drift(tmp_path):
+    """The final reader must retain the full hash set qualified by its caller."""
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_pool_completion import _identity, _phase_hashes, _qualified
+
+    state, anchor = tmp_path / 'state', tmp_path / 'anchor'
+    state.mkdir(mode=0o700)
+    anchor.mkdir(mode=0o700)
+    operation = str(uuid4())
+    # This test isolates final byte binding after terminal-chain qualification;
+    # the full original-writer regression exercises that qualification itself.
+    before_repair = _phase_hashes(operation, state, anchor)
+    repair = state / 'startup-repair.json'
+    private_state._atomic_json(repair, {'retained': 'first'})
+    phases = _phase_hashes(operation, state, anchor)
+    receipt = {'schema': 'loom.nebius-pool-completion.v1', 'operation_id': operation,
+        'state_dir': str(state), 'outcome': 'legacy', 'workloads': {}, 'phase_sha256': before_repair}
+    private_state._atomic_json(state / 'completion.json', receipt)
+    private_state._atomic_json(anchor / (operation + '-completion.json'), _identity(receipt))
+    loaded = _qualified(receipt, state, anchor, phases=phases)
+    assert loaded.history[repair] == hashlib.sha256(b'{"retained": "first"}').hexdigest()
+    private_state._atomic_json(repair, {'retained': 'changed'})
+    with pytest.raises(ValueError):
+        _qualified(receipt, state, anchor, phases=phases)
+
+
 @pytest.mark.timeout(420)
 def test_global_completion_binds_terminal_journals_and_uids_without_closed_mode_probe(closed_startup):
     from scripts.ops.nebius_pool_completion import complete_pool_cutover

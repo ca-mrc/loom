@@ -276,6 +276,67 @@ def qualify_retained_writer_bindings(request: PoolRoleFenceRequest,
         raise ValueError("pool_retained_writer_binding_inventory_unqualified") from None
 
 
+def _terminal_platform_job(job: dict[str, Any], pods: list[dict[str, Any]],
+                           identities: dict[str, tuple[str, str]]) -> bool:
+    """Prove a native singleton Job and every associated process are inert.
+
+    This is census evidence only: no adoption, deletion or retirement target.
+    The caller limits it to retained CP identities outside worker namespaces.
+    """
+    uid, spec, status = _uid(job), job["spec"], job.get("status", {})
+    if (job["metadata"].get("ownerReferences", []) != []
+            or spec.get("managedBy", "kubernetes.io/job-controller") != "kubernetes.io/job-controller"
+            or spec.get("manualSelector", False) is not False
+            or spec.get("completionMode", "NonIndexed") != "NonIndexed"
+            or any(type(spec.get(field, 1)) is not int or spec.get(field, 1) != 1
+                for field in ("parallelism", "completions"))
+            or spec["template"]["spec"].get("restartPolicy") != "Never"
+            or any(type(status.get(field, 0)) is not int or status.get(field, 0) != 0
+                for field in ("active", "terminating"))):
+        return False
+    terminal = [row["type"] for row in status.get("conditions", [])
+        if row.get("type") in {"Complete", "Failed"} and row.get("status") == "True"]
+    if len(terminal) != 1:
+        return False
+    selector = spec["selector"]
+    labels = selector.get("matchLabels", {})
+    if (set(selector) - {"matchLabels", "matchExpressions"} or selector.get("matchExpressions", []) != []
+            or not labels or set(labels) - {"controller-uid", "batch.kubernetes.io/controller-uid"}
+            or any(value != uid for value in labels.values())
+            or any(spec["template"]["metadata"].get("labels", {}).get(key) != value for key, value in labels.items())):
+        return False
+    identity = identities[uid]
+    for pod in pods:
+        owners = pod["metadata"].get("ownerReferences", [])
+        selected = pod["metadata"]["namespace"] == identity[0] and all(
+            pod["metadata"].get("labels", {}).get(key) == value for key, value in labels.items())
+        if not selected and not any(owner.get("uid") == uid for owner in owners):
+            continue
+        if len(owners) != 1 or identities[_uid(pod)] != identity:
+            return False
+        owner = dict(owners[0])
+        blocking = owner.pop("blockOwnerDeletion", False)
+        if (type(blocking) is not bool or owner != {"apiVersion": "batch/v1", "kind": "Job",
+                "name": job["metadata"]["name"], "uid": uid, "controller": True}
+                or pod["spec"].get("restartPolicy") != "Never"
+                or pod.get("status", {}).get("phase") not in {"Succeeded", "Failed"}
+                or not pod["spec"].get("containers")):
+            return False
+        for field, status_field in (("containers", "containerStatuses"), ("initContainers", "initContainerStatuses"),
+                ("ephemeralContainers", "ephemeralContainerStatuses")):
+            containers = pod["spec"].get(field, [])
+            expected = {row["name"] for row in containers}
+            statuses = pod["status"].get(status_field, [])
+            if (len(expected) != len(containers) or len(statuses) != len(expected)
+                    or {row["name"] for row in statuses} != expected):
+                return False
+            for row in statuses:
+                state = row.get("state", {})
+                if set(state) != {"terminated"} or type(state["terminated"].get("exitCode")) is not int:
+                    return False
+    return True
+
+
 def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                                       inventory: dict[str, list[dict[str, Any]]], *,
                                       originals: dict[str, dict[str, Any]],
@@ -285,7 +346,8 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
 
     Exact retained roots and typed UID ancestry qualify ownership, not process
     shutdown or workload contents. Inert historical descendants still count;
-    the retirement phase independently proves their drain. Unrelated accounts
+    the retirement phase independently proves their drain. Standalone native
+    platform Jobs qualify only with complete terminal process proof. Unrelated accounts
     remain untouched. This does not attest external tokens or custom controllers.
     """
     try:
@@ -339,6 +401,14 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                 raise ValueError
             roots.add(uid)
 
+        controllers = {_uid(guard.controller) for guard in request.retirement.migration.guards}
+        other_subjects = {identities[_uid(row)] for row in retired.values() if _uid(row) not in controllers}
+        history_subjects = {identities[uid] for uid in controllers if identities[uid][0] not in writer_namespaces} - other_subjects
+        for row in inventory["jobs"]:
+            uid = _uid(row)
+            if identities[uid] in history_subjects and _terminal_platform_job(row, inventory["pods"], identities):
+                roots.add(uid)
+
         for uid, identity in identities.items():
             if (documents[uid]["kind"] == "CronJob" and identity[0] in writer_namespaces
                     and uid not in roots):
@@ -367,7 +437,8 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                         or owner != {"apiVersion": parent["apiVersion"], "kind": parent["kind"],
                             "name": parent["metadata"]["name"], "uid": parent_uid, "controller": True}
                         or (row["kind"], parent["kind"]) not in {
-                            ("Pod", "ReplicaSet"), ("Pod", "Job"), ("ReplicaSet", "Deployment"), ("Job", "CronJob")}
+                            ("Pod", "ReplicaSet"), ("Pod", "Job"), ("Pod", "StatefulSet"),
+                            ("ReplicaSet", "Deployment"), ("Job", "CronJob")}
                         or identities[parent_uid] != identity):
                     raise ValueError
                 uid = parent_uid

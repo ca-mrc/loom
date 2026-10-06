@@ -643,6 +643,8 @@ class InClusterKubernetesCapacityReader:
             target = (_target_pod(pod, namespace=namespace, target_id=target_id, target_scope=target_scope)
                       if pool is None else pool.registered(pod))
             include_pending = target if pool is None else pool.includes_pending(pod)
+            if pool is not None:
+                target = target and include_pending
             managed = (_managed_placement(pod) if target else None) if pool is None else pool.managed(pod)
             if managed is not None:
                 reservation = managed.lease_id if pool is not None else f"{managed.lease_id}:{managed.generation}"

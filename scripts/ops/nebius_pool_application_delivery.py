@@ -12,7 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -55,6 +55,7 @@ class ApplicationBuildDeliveryRequest:
     profile: dict[str, Any]
     repo_root: Path
     source_credential: ApplicationSourceCredentialPin
+    source_delivery_version: Literal['v1', 'v2'] = 'v2'
 
 
 def source_material_json(material: dict[str, str], pin: ApplicationSourceCredentialPin) -> str:
@@ -181,13 +182,20 @@ class RenderedApplicationBuildDelivery:
 
 def render_application_build_delivery(*, before: ManagementDeployment, pool: PoolInstallation,
         active: dict[str, Any], candidate: dict[str, Any], profile: dict[str, Any],
-        repo_root: Path) -> RenderedApplicationBuildDelivery:
+        repo_root: Path, source_delivery_version: Literal['v1', 'v2'] = 'v2') -> RenderedApplicationBuildDelivery:
     """Derive fixed first-cutover resources, retaining the old material identity.
 
     Only the protected parent can supply the completed predecessor and exact
     catalog. This projection grants no permission to stage or start the result.
     """
     try:
+        if source_delivery_version == 'v1':
+            from scripts.ops.nebius_pool_application_history import render_legacy_source_delivery
+
+            return render_legacy_source_delivery(before=before, pool=pool, active=active,
+                candidate=candidate, profile=profile, repo_root=repo_root)
+        if source_delivery_version != 'v2':
+            raise ValueError
         render_refresh(ManagementRefreshRenderRequest(before, before, active, candidate, profile, repo_root))
         after = derive_application_build_deployment(before, pool)
         rendered = render_management(after, candidate=candidate, profile=profile, repo_root=repo_root)

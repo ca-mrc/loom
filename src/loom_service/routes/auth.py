@@ -50,6 +50,7 @@ from loom_service.session_auth import (
     revoke_session,
     rotate_csrf_token,
     session_cookie_options,
+    session_csrf_token,
     switch_session_team,
     verify_session_cookie,
 )
@@ -896,9 +897,11 @@ async def login_complete(
 
 
 @router.get("/me")
-async def me(sc: SessionAndCtx) -> dict[str, Any]:
+async def me(request: Request, sc: SessionAndCtx) -> dict[str, Any]:
     session, ctx = sc
-    csrf_token = await rotate_csrf_token(session, ctx)
+    csrf_token = session_csrf_token(
+        ctx, request.cookies.get(request.app.state.settings.session_cookie_name),
+    )
     await session.commit()
     return await _serialize_me(session, ctx, csrf_token=csrf_token)
 

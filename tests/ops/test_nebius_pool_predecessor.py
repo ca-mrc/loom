@@ -477,6 +477,8 @@ def pool_refresh_http(bound):
     objects = {_key(row): copy.deepcopy(row) for rows in
         cutover_binding_inventory.__wrapped__((request, tokens)).values() for row in rows}
     objects.update({key: copy.deepcopy(rows[0]) for key, rows in bound.workload_options().items()})
+    objects.update({_key(guard.database.statefulset): copy.deepcopy(guard.database.statefulset)
+        for guard in migration.guards if guard.database is not None})
     roles = restored_role_options(request, state=state, anchor=anchor)
     for original in request.fencing.originals:
         key = _key(original)

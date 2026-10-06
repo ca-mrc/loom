@@ -70,11 +70,13 @@ def startup_http(closed_startup, cutover_binding_inventory):
     for row in closed.resources.resources.values():
         if row['kind'] in collections:
             inventories[collections[row['kind']]].append(copy.deepcopy(row))
-    objects = {**copy.deepcopy(closed.resources.resources), **external.documents}
+    objects = {**copy.deepcopy(closed.resources.resources), **external.documents,
+        **{_key(guard.database.statefulset): copy.deepcopy(guard.database.statefulset)
+            for guard in migration.guards if guard.database is not None}}
     paths = {}
     for key, row in objects.items():
         kind = row['kind']
-        resource = {'Deployment': 'deployments', 'CronJob': 'cronjobs', 'ConfigMap': 'configmaps',
+        resource = {'Deployment': 'deployments', 'StatefulSet': 'statefulsets', 'CronJob': 'cronjobs', 'ConfigMap': 'configmaps',
             'Secret': 'secrets', 'ServiceAccount': 'serviceaccounts', **collections}[kind]
         prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
         paths[prefix + ('/namespaces/' + row['metadata']['namespace'] if row['metadata'].get('namespace') else '')
@@ -239,6 +241,8 @@ def test_fixed_https_startup_uses_scalar_cas_and_never_retries_unknown_outcomes(
             state.calls.clear()
             assert run() == result and all(call.method == 'GET' for call in state.calls)
         assert all(state.objects[_key(row)] == before[_key(row)] for row in (dormant.actuator, dormant.collector))
+        assert all(state.objects[_key(guard.database.statefulset)] == before[_key(guard.database.statefulset)]
+            for guard in request.fencing.retirement.migration.guards if guard.database is not None)
 
 
 def test_live_scope_checks_exact_inputs_and_fresh_identity_without_rerendering(startup_http, closed_startup, monkeypatch):

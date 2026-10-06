@@ -8,6 +8,7 @@ export interface AdvancedState {
   forceBuild: boolean;
   deleteEnv: boolean;
   verifierEnvMode: "" | "shared" | "separate";
+  isolation: "" | "container" | "guest";
   networkPolicy: "" | "gateway-only" | "web-allowlist" | "public-web";
   allowedWebsites: string;
   skipVerifier: boolean;
@@ -38,6 +39,7 @@ export const INITIAL_ADVANCED: AdvancedState = {
   forceBuild: false,
   deleteEnv: true,
   verifierEnvMode: "",
+  isolation: "",
   networkPolicy: "",
   allowedWebsites: "",
   skipVerifier: false,
@@ -108,6 +110,7 @@ export function buildAdvancedConfig(
   if (!s.deleteEnv) out.delete_env = false;
   if (s.skipVerifier) out.skip_verifier = true;
   if (s.verifierEnvMode) out.verifier_env_mode = s.verifierEnvMode;
+  if (s.isolation) out.isolation = s.isolation;
   const networkPolicy = buildNetworkPolicyOverride(s);
   if (!networkPolicy.ok) return networkPolicy;
   if (networkPolicy.value !== null) out.baseline_network_policy_override = networkPolicy.value;

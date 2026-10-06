@@ -3131,6 +3131,7 @@ export interface components {
             effective_usage_reporting_status?: string;
             /** Estimated Cost Usd */
             estimated_cost_usd?: number | null;
+            execution_selection?: components["schemas"]["BatchExecutionSelection"];
             /** Expected Trial Count */
             expected_trial_count: number;
             /** Failure Message */
@@ -3289,6 +3290,10 @@ export interface components {
         BatchDetailServiceExecutionSummaryVariant0: {
             /** Canonical Ready Count */
             canonical_ready_count: number;
+            /** Execution States */
+            execution_states?: {
+                [key: string]: number;
+            };
             /** Lease Count */
             lease_count: number;
             /** Lifecycle Stages */
@@ -3303,6 +3308,14 @@ export interface components {
             output_commit_states: {
                 [key: string]: number;
             };
+        } & {
+            [key: string]: unknown;
+        };
+        /** BatchExecutionSelection */
+        BatchExecutionSelection: {
+            /** Effective */
+            effective: components["schemas"]["EffectiveExecutionSelection"][];
+            requested: components["schemas"]["RequestedExecutionSelection"];
         } & {
             [key: string]: unknown;
         };
@@ -4109,6 +4122,31 @@ export interface components {
             task_id: string;
             /** Trials */
             trials: components["schemas"]["ResolvedExecutionSelection"][];
+        } & {
+            [key: string]: unknown;
+        };
+        /** EffectiveExecutionSelection */
+        EffectiveExecutionSelection: {
+            /** Execution Class Id */
+            execution_class_id: string;
+            /** Fresh Sandbox Grading */
+            fresh_sandbox_grading: boolean;
+            /**
+             * Isolation
+             * @enum {string}
+             */
+            isolation: "container" | "guest";
+            /** Network Policy */
+            network_policy?: {
+                [key: string]: unknown;
+            } | null;
+            /** Trial Count */
+            trial_count?: number;
+            /**
+             * Verification
+             * @enum {string}
+             */
+            verification: "shared" | "separate" | "skipped";
         } & {
             [key: string]: unknown;
         };
@@ -6382,6 +6420,25 @@ export interface components {
              */
             wire_api: "messages";
         };
+        /** RequestedExecutionSelection */
+        RequestedExecutionSelection: {
+            harness: components["schemas"]["ResolvedHarness"] | null;
+            /** Harnesses */
+            harnesses?: components["schemas"]["ResolvedHarness"][];
+            /**
+             * Isolation
+             * @enum {string}
+             */
+            isolation: "auto" | "container" | "guest";
+            /** Network Policy */
+            network_policy: {
+                [key: string]: unknown;
+            } | null;
+            /** Verification */
+            verification: ("shared" | "separate") | null;
+        } & {
+            [key: string]: unknown;
+        };
         /** RerunPlan */
         RerunPlan: {
             /** Auto Safe */
@@ -7574,6 +7631,7 @@ export interface components {
             /** Estimated Cost Usd */
             estimated_cost_usd?: number | null;
             execution_phases?: components["schemas"]["TrialExecutionPhases"] | null;
+            execution_selection?: components["schemas"]["TrialExecutionSelection"];
             /** Failure Reason */
             failure_reason: string | null;
             /** Finished At */
@@ -7914,6 +7972,13 @@ export interface components {
             verifier_execution: string | null;
             /** Verifier State */
             verifier_state: string | null;
+        } & {
+            [key: string]: unknown;
+        };
+        /** TrialExecutionSelection */
+        TrialExecutionSelection: {
+            effective: components["schemas"]["EffectiveExecutionSelection"] | null;
+            requested: components["schemas"]["RequestedExecutionSelection"];
         } & {
             [key: string]: unknown;
         };

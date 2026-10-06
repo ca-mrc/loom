@@ -8,6 +8,13 @@ Nebius is the image publication path for both development and production.
 Use the candidate publication output as the source of image references; never
 substitute a mutable branch tag during promotion.
 
+The service image includes the `cluster` runtime dependencies as well as the
+pinned `nebius-gateway` SDK: the management application builder uses the Python
+Kubernetes client with its projected ServiceAccount identity. The image build
+checks both SDK imports; the disposable Kubernetes service-image test also
+constructs the builder transport and checks token refresh as the runtime user.
+Tests in a developer environment alone do not qualify these image dependencies.
+
 Production still requires separately reviewed environment inputs, release-owner
 and Production Environment approval. Run
 `scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
@@ -118,6 +125,11 @@ builder token and shared-build read permissions through the protected operation.
 The management renderer reserves 2 GiB of temporary disk per concurrent source
 upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
 Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+The private spool is mounted at `/run/loom-application-source/spool`; startup
+clears inherited setgid only on an otherwise owner-only directory. It continues
+to reject symlinks, foreign ownership and broader permissions. Apply renderer
+changes through a qualified protected transition, never by editing a retained
+cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
 Subsequent lifecycle changes use the same management context:
@@ -183,6 +195,12 @@ It excludes Secret values, arbitrary Pod environment/commands, annotations, kube
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
+Pod `container_statuses` and `init_container_statuses` report readiness, restart
+counts, and current/previous container states from that same inventory. Waiting
+and termination reasons are allowlisted; messages, image/container IDs and unknown
+reason strings are not exported. Missing status is unknown, not healthy or zero
+restarts. These diagnostics do not qualify runtime readiness or permit a retry.
+
 `controller_inventory` adds Deployment/CronJob identities, declared ServiceAccounts,
 selected execution target/pool/group identifiers and database Secret references.
 Referenced `envFrom` ConfigMaps are projected through the same field allowlist;
@@ -205,6 +223,20 @@ or proof that two databases are the same. It does not prove running Pods match
 templates, cover every possible workload writer, or establish effective fencing.
 Use it to prepare exact migration inputs, not as permission to stop foreign work.
 An unreadable or partially paginated resource list fails inspection.
+
+`pool_startup_diagnostics` observes at most one failed manager, pool gateway and
+pooled collector. Selection is bound to the configured management installation,
+the selected platform execution namespace, current Deployment/ReplicaSet or
+CronJob/Job ancestry, and matching container configuration. At most three
+candidates per role are checked. For each selected Pod, inspection reads only
+the failed current or previous container's last 100 lines / 32 KiB, then rechecks
+the Pod and controller identity; replacement or restart drift makes the result
+`unavailable`. Output contains only fixed exception/stage/component enums and
+numeric source line locations, never messages, raw logs, source lines, SQL,
+credential values or arbitrary paths. Missing metadata is `not_configured`;
+missing or unsupported diagnostics are `unavailable`. These are startup symptoms,
+not readiness, root-cause proof, or permission to retry a write. No Secret reads,
+Pod exec, workload changes or new authority are added by this diagnostic.
 
 The `kube-system/coredns` Service entry also includes fixed `dns_checks`
 booleans for deletion/ownership, native or legacy selector matching, a usable
@@ -1264,6 +1296,22 @@ Pin all production, staging and shared-development participants, dormant consume
 actual namespace/workload/credential identities, provider pool and quota scope,
 effective writer permissions, and the protected candidate/runtime publication.
 Preserve the original management upgrade and immediate completed predecessor.
+When the standalone foundation's web, gateway and backup share the control-plane
+ServiceAccount, retain those exact Deployment/CronJob observations in the private
+`platform_consumers` roster. They must match the predecessor's foundation namespace
+and the selected candidate's rendered templates. Their UIDs/templates are checked
+without stopping or changing them; do not add unknown schedulers or execution
+writers to this roster. A candidate mismatch requires a normal protected platform
+rollout and fresh observations, not rewriting live image or revision fields.
+Participant PostgreSQL StatefulSets need no extra roster entry: preflight uses
+their existing migration database bindings as read-only roots, checking exact
+UIDs/templates and same-namespace/account Pod ancestry without stopping the database.
+Completed standalone migration/configuration/predeploy Jobs need no roster entry
+or cleanup. Preflight qualifies only native singleton terminal platform Jobs with
+automatic UID selectors and complete terminated-Pod evidence from the same API
+snapshot. Active Jobs, incomplete container status, ambiguous ancestry, custom
+controllers and execution/build identities still block; do not bypass this by
+dropping terminal Pods from the inventory or adopting unknown roots.
 Include both configured execution-only guest targets, including the emulated-auth
 target, in the same participant's retained actuator roster and execution profiles.
 They share the ordinary collector and capacity authority; do not omit a running
@@ -1273,7 +1321,12 @@ Use a new nonzero UUID and private
 `nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The
 `loom.nebius-pool-cutover-private-inputs.v1` contract contains that complete
 retained scope, installation/catalog, dedicated machine-token file references
-and original/predecessor selectors. Keep those inputs and credentials on the
+and original/predecessor selectors. New builder-enabled preparations must set
+`source_delivery_version` to `v2`, selecting the canonical private source spool.
+An omitted version retains the historical `v1` contract for exact evidence
+reconstruction; ordinary forward installation refuses it. Do not edit an existing
+operation's version, candidate or journal to substitute newer rendering.
+Keep those inputs and credentials on the
 operator host. The public `loom.nebius-pool-cutover-operation.v1` metadata contains
 only `operation_id`, identical integrated `source_sha` and `candidate`,
 `installation_id`, `namespace`, the three private paths and `inputs_sha256`.
@@ -1301,6 +1354,13 @@ failures remain `pool_connection`. These codes contain no exception text,
 credential, resource payload or retry authority; investigate the identified
 prerequisite before another operation. They do not change installation ordering
 or authorize retries of uncertain writes.
+
+After connection, known preflight failures retain `pool_preflight_` categories:
+`writer_bindings`, `writer_workloads`, `connected_prerequisites`, `capacity`,
+`scope`, `database_report`, `pending_source`, `pending_page`, `origin_history`,
+or `database_readiness`. These classify existing checks, not additional authority
+or successful qualification of earlier checks. Unknown failures remain
+`pool_preflight`; install and rollback failures keep their journaled phase.
 
 Telemetry failures further identify fixed `pool_runtime_telemetry_...` categories:
 binding, Pod, node inventory, probe delivery, identity recheck, settings, client
@@ -1359,6 +1419,112 @@ A completed global outcome cannot be rolled back by rewriting that same history;
 a new transition needs new protected authority. Actual concurrent-owner builds,
 tasks/results, isolation, teardown/redeploy and scale-to-zero are separate live
 acceptance requirements.
+
+### Repair an original source-spool initializer before opening
+
+For a historical `v1` application delivery stopped at runtime qualification, use
+the separate protected `management-pool-repair-preflight`,
+`management-pool-repair-install`, and `management-pool-repair-rollback` actions.
+This is a fixed source-spool correction, not an arbitrary manifest patch or a
+replacement pool registration. All startup writes must be settled, admission
+opening and guard release must still be prepared, and there must be no recovery
+or completion descendant when repair is first anchored.
+
+Prepare a new `loom.nebius-pool-startup-repair-operation.v1` envelope with a
+distinct nonzero `operation_id`, the retained `original_operation_id`, and a new
+integrated `source_sha` equal to its tooling `candidate`. Its private paths are
+`nebius-management/pool-repair/<uuid>/{inputs.json,state,anchor}`. The private
+`loom.nebius-pool-startup-repair-private-inputs.v1` document contains the exact
+original operation metadata and a `binding` of the new operation/source to the
+original metadata's canonical JSON SHA-256, original input SHA-256, and retained
+`cutover.json`, `startup.json`, and prepared `activation.json` SHA-256 values.
+Original inputs, image digests, pool identity, credentials and journals are not
+replaced. Preserve the original authority bundle as evidence.
+
+Build and byte-qualify the new tooling bundle, then install its grant through the
+reviewed operator-only installer. Bind its metadata to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON` and its dedicated key to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_SSH_KEY` in the protected environment. Neither
+value falls back to the original pool or management authority. Preflight performs
+read-only qualification; install takes the original operation's dispatch lock.
+
+Repair stages one immutable application ConfigMap, stops and proves actual Pod
+drain for only the manager, changes the fixed source initializer and spool path
+to `/run/loom-application-source/spool`, then restarts it. Each write has durable
+intent and exact object identity/version checks; an uncertain response permits
+readback, not a new write. The original prepared activation bytes are retained in
+the repair anchor. Normal runtime, settings, capacity and gateway checks must
+then pass before the original activation can advance and open admission.
+
+A `pending` repair result or `pool_startup_repair` failure is not readiness.
+Retain all evidence and inspect the named phase. Repair rollback fences uncertain
+manager writes before the existing stop/restore/reopen sequence. Completion
+records the repair ancestry and both operation identities in the protected
+report, but still reports `acceptance_verified: false`. Collector failures and
+concurrent-owner acceptance require their own evidence; a repaired manager is
+not proof that either has passed.
+
+If retained original tooling already wrote rollback evidence after repair entry,
+keep those bytes. Updated recovery recognizes its original empty startup fence
+only while repair stop is prepared or unresolved and template/start have not
+begun. Shutdown must prove the exact manager stopped at a changed object version
+before restoration; a late stop is observed, not dispatched twice. An original
+legacy completion receipt stays unchanged, with the separately qualified repair
+ancestry included in historical loading. Later repair phases or altered old
+evidence reject this compatibility path; do not reset either journal.
+
+### Correct the manager image before first opening
+
+If source delivery is qualified but the manager image cannot start, use the same
+three protected pool-repair actions with a new
+`loom.nebius-pool-startup-repair-operation.v2` envelope and dedicated grant. Do not
+change the original cutover or source-repair inputs. This transition changes only
+the manager's main and initializer image references, not configuration, Secrets,
+execution images, pool registration, permissions, application releases or schema.
+
+The private `loom.nebius-pool-manager-image-private-inputs.v1` document contains
+`original_operation` and `binding`. The binding carries the original operation,
+input, closure, settled-startup and prepared-activation hashes used by source
+repair, plus `ordinal`, `source_repair_sha256` (null if none),
+`predecessor_sha256` (null for the first image correction), and the exact
+`publication`, `candidate` and `profile`. Source repair, if present, must be
+complete. A new correction requires closed admission, held guards and no
+recovery or completion descendant.
+
+The tooling source and protected publication source must be the same integrated
+commit. The bundle builder derives its single Alembic head from that source and
+binds `manager-schema.json` in the immutable bundle. Entry requires the existing
+pool's manager revision `0174`; a different head requires a separate migration,
+which this action cannot perform. The retained publication reader and keyring
+must verify the new image before operator connections are opened.
+
+Install uses the original dispatch lock, first adds a Deployment-only metadata
+isolation marker, stops the manager, proves actual Pod
+drain, replaces only image references using exact identity/version/template
+checks, and restarts it while removing the marker. The marker changes no Pod
+template, but makes retained older tooling reject activation before a delayed
+stop can exist. Unknown writes are observed, never resent. An interrupted
+local enrollment with only its valid anchor may finish recording the same
+all-prepared state; an existing write intent is never reset. Up to eight completed
+corrections can form an append-only chain before first opening. A pending tail
+cannot be replaced by a new operation.
+
+Only the bound image continuation may advance installation afterward. Normal
+runtime qualification and activation remain mandatory. The existing rollback
+fences any outstanding image write before shutdown and restoration. Completion
+preserves all correction records/anchors and supplies the final manager image to
+later refreshes, while keeping the original execution profile. A successful image
+correction alone is not installed multi-owner acceptance.
+
+Older rollback tooling may save its fence before the first isolation request
+commits. Updated recovery accepts those unchanged bytes only before any image
+stop/template/start intent. Shutdown removes a late isolation marker and proves
+a changed object version, invalidating any still-delayed isolation request. If
+the isolate invalidated an older pending shutdown CAS, its original version is
+retained and a separate nested stop intent is recorded; an uncertain nested stop
+is readback-only. Existing legacy completion receipts remain unchanged while
+historical readers include the separately qualified image ancestry. This narrow
+compatibility path cannot cover a later correction or destructive image phase.
 
 ## Refresh the retained application manager
 

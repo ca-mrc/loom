@@ -1073,6 +1073,11 @@ installation fingerprints.
 The management renderer binds configured source uploads to a revision-named,
 source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
 initializer verifies the spool directory's ownership and mode on every Pod start.
+The spool mount uses canonical `/run/loom-application-source`, not Alpine's
+symlinked `/var/run`, preserving the uploader's rejection of symlinked paths.
+It clears an inherited setgid bit from an otherwise owner-only directory using
+a no-follow directory descriptor, leaving exactly `0700`; symlinks, foreign
+ownership and broader permissions remain errors rather than being repaired.
 The spool is capped at 2 GiB per admitted concurrent upload (4 GiB at the default
 concurrency of two), included in the manager's ephemeral-storage request and limit,
 and disappears with the Pod; it creates no PVC or backup requirement. Archive
@@ -1846,10 +1851,16 @@ that receipt. Labels alone, a lost create receipt, or a same-named replacement J
 never establish ownership. Reservation UUIDs form placement-only keys, so the
 same local claim ID in different environment databases cannot alias.
 
-Foreign resident Pods and terminating nonterminal Pods remain charged. Pending
-Pods are also charged unless an unregistered Pod has a hard node selector that
-contradicts the selected pool. Unknown affinity or tolerations do not establish
-exclusion; this can conservatively delay admission. Duplicate native node IDs,
+Foreign resident Pods and terminating nonterminal Pods remain charged. A
+registered namespace can also host platform controllers and collectors; namespace
+membership alone does not place those processes on execution nodes. Pending Pods
+are charged unless a Pod without a protected gateway Job receipt has a hard node
+selector that contradicts the selected pool. Such explicitly excluded Pods may
+run outside the pool, including in registered namespaces. A protected Job UID
+keeps its Pods in scope even with conflicting selectors or damaged ownership
+labels. Actual resident usage is always charged regardless of selector.
+Unknown affinity or tolerations do not establish exclusion; this can conservatively
+delay admission. Duplicate native node IDs,
 Pod UIDs or live Pods for one reservation fail closed, as does registered work
 scheduled outside the pool. The existing resource arithmetic retains Pod slots,
 restartable init sidecars and init peaks. The pool reader preserves Pod-level
@@ -2242,6 +2253,13 @@ the Trial, consume an attempt, reserve admission/cost/capacity, or append a comm
 The legacy scheduler immediately reserves the compiled candidate. A global
 consumer must durably freeze its selected target and runtime before prepare, then
 recheck local authority when attaching the grant; compilation alone is not a lease.
+Both schedulers classify runtime-contract validation and unsupported deadlines as
+`service_execution_configuration_invalid`, without retaining private validation
+input. Shared-pool proposal compilation uses a savepoint: partial compiler writes
+roll back, and the terminal update clears stale scheduling diagnostics while the
+same transaction still locks the Trial, task and batch profile. No proposal,
+attempt or reservation is created for that failure, and later eligible work can
+proceed. Stale selections and temporary provisioning failures remain deferred.
 The execution outbox now retains that pre-claim proposal, including its prospective
 lease UUID, immutable request and Trial/source/target snapshot. Exact grant
 attachment rechecks eligibility and preserves existing local admission, image and
@@ -2548,14 +2566,43 @@ installed qualification remain required; this is not full runtime acceptance.
 
 The same snapshot also inventories Deployments, ReplicaSets, StatefulSets,
 DaemonSets, ReplicationControllers, CronJobs, Jobs and Pods. Terminal Pods are
-included; zero replicas, suspension and completion do not exempt an unregistered
+included; zero replicas, suspension and Pod phase alone do not exempt an unregistered
 consumer of a retiring ServiceAccount. Every retained root must match its original
 UID and exact original or journal-qualified recovery template. A descendant must
 resolve through an exact same-namespace, same-ServiceAccount controller chain:
-Deployment → ReplicaSet → Pod or CronJob → Job → Pod. Dangling, replaced, cyclic
+Deployment → ReplicaSet → Pod, CronJob → Job → Pod or retained database
+StatefulSet → Pod. Dangling, replaced, cyclic
 or contradictory ownership rejects preflight. Historical descendants can remain
 without deletion; this check establishes identity consumers, not execution health
 or shutdown. The existing drain and effective-permission barriers still apply.
+The standalone foundation's web, LLM gateway and platform-backup roots may be
+retained separately as `platform_consumers`: they share the control plane's
+tokenless account but are not retiring writers. The protected entry qualifies
+their fixed names, namespace and templates against the completed predecessor's
+foundation configuration and the selected protected candidate/profile/keyring.
+The cutover contract then pins their UIDs and complete stable observed snapshots;
+the same live inventory and typed ancestry checks cover them and their descendants.
+They are never mutation or drain targets. Unknown control-plane copies, changed
+consumer templates, execution/build identity reuse and additional Kubernetes
+grants still fail qualification. No blanket account or tokenless-Pod exemption
+is introduced. An empty roster retains the previous journal contract.
+Participant PostgreSQL StatefulSets are also read-only census roots, derived from
+the existing migration database bindings rather than an additional consumer roster.
+Their already-pinned UIDs and stable templates must match the same live snapshot;
+their Pods require exact typed, same-namespace/account ancestry. They never become
+producer, retirement, runtime, drain or mutation targets. Unbound or copied
+StatefulSets using a retiring account remain rejected.
+Completed standalone platform migration/configuration/backup Jobs are census-only
+history when the native non-indexed singleton Job has exactly one true `Complete`
+or `Failed` condition, no active/terminating count, no owner, an automatic UID
+selector and `restartPolicy: Never`. Only retained CP identities outside execution/
+build namespaces qualify; any identity also used by an actuator, collector or
+dormant writer is excluded. The same snapshot must prove every Pod owning that
+Job UID or matching its selector has exact same-namespace/account Job ancestry,
+a terminal phase and complete, uniquely matched terminated regular/init/ephemeral
+container statuses. Native-controller non-restart behavior is covered by disposable
+Kubernetes tests. This adds no retained input, mutation, deletion or drain target;
+ambiguous, active, custom-managed and indexed Job history remains rejected.
 Unrelated identities remain untouched. External credentials and custom-controller
 authority still require the parent's separate installed qualification.
 

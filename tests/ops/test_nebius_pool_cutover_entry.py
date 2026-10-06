@@ -166,6 +166,52 @@ def private_cutover(completed_upgrade, cutover_inputs, database_guard):
     return metadata, payload, root
 
 
+@pytest.mark.parametrize("damage", [None, "image", "command", "env", "namespace", "unknown", "duplicate"])
+def test_private_platform_consumers_require_fixed_rendered_roles(private_cutover, damage):
+    from scripts.ops import nebius_pool_cutover_entry as entry
+
+    from loom.nebius_platform_render import build_platform
+
+    metadata, inputs, root = private_cutover
+    config = root.deployment.installation.foundation.platform_config
+    # This fixture's abstract participant namespace differs from the actual
+    # foundation; bind one complete retained participant to the foundation.
+    old_namespace = inputs["guards"][0]["namespace"]
+    namespace = config["namespace"]
+    inputs = json.loads(json.dumps(inputs, default=lambda value: asdict(value) if hasattr(value, "__dataclass_fields__") else str(value)))
+    for field in ("guards", "services"):
+        inputs[field] = json.loads(json.dumps(inputs[field]).replace(old_namespace, namespace))
+    files = build_platform(config, inputs["candidate"], inputs["profile"], root.deployment.installation.keyring,
+        repo_root=root.upgrade.setup.repo_root)
+    consumers = [row for rows in files.values() for row in rows if (row["kind"], row["metadata"]["name"]) in {
+        ("Deployment", "loom-web"), ("Deployment", "loom-llm-gateway"), ("CronJob", "loom-platform-backup")}]
+    for row in consumers:
+        row["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+    inputs["platform_consumers"] = consumers
+    web = next(row for row in consumers if row["metadata"]["name"] == "loom-web")
+    container = web["spec"]["template"]["spec"]["containers"][0]
+    if damage == "image":
+        container["image"] = inputs["candidate"]["images"]["control_plane"]["image_ref"]
+    elif damage == "command":
+        container["command"] = ["python", "-m", "loom_control_plane.main"]
+    elif damage == "env":
+        container["env"].append({"name": "LOOM_CP_DB_URL", "valueFrom": {
+            "secretKeyRef": {"name": "loom-platform-db", "key": "control-plane-url"}}})
+    elif damage == "namespace":
+        web["metadata"]["namespace"] = "another-platform"
+    elif damage == "unknown":
+        web["metadata"]["name"] = "unregistered-web"
+    elif damage == "duplicate":
+        consumers.append(copy.deepcopy(web))
+    save_private(metadata, inputs)
+    if damage is None:
+        context = entry.load_pool_cutover_inputs(metadata)
+        assert context.request.platform_consumers == tuple(consumers)
+    else:
+        with pytest.raises(entry.EntryError, match="private inputs unqualified"):
+            entry.load_pool_cutover_inputs(metadata)
+
+
 @pytest.fixture
 def publication_http(private_cutover, monkeypatch):
     """Double GitHub/blob HTTPS only; the real catalog checks every proof."""

@@ -33,6 +33,7 @@ from scripts.ops.nebius_pool_cutover import (
     _contract,
     cutover_documents,
     cutover_material_documents,
+    platform_consumer_documents,
     qualify_cutover_image_admission,
     retained_cutover_workloads,
 )
@@ -355,7 +356,14 @@ class HTTPSPoolCutoverAPI(HTTPSManagementStageAPI):
                 for api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
             observed = {_key(row): row for resource in ("deployments", "cronjobs") for row in workloads[resource]}
             expected = self._retained_workload_projection(observed)
-            qualify_retained_writer_workloads(self.request.fencing, workloads, originals=self.originals, expected=expected,
+            consumers = platform_consumer_documents(self.request)
+            # Backends already have exact UID/template bindings in the migration
+            # contract. Account for their platform identity without adding them
+            # to producer downtime, writer retirement or runtime mutation targets.
+            consumers.update({_key(guard.database.statefulset): guard.database.statefulset
+                for guard in self.guards.request.guards if guard.database is not None})
+            qualify_retained_writer_workloads(self.request.fencing, workloads,
+                originals={**self.originals, **consumers}, expected={**expected, **consumers},
                 platform_subjects=platform_controller_subjects(self.request.platform_authority))
             if self._retained_workload_projection(observed) != expected:
                 raise ValueError

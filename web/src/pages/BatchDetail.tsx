@@ -4,7 +4,7 @@ import { ProgressSummary } from "../components/TrialProgress";
 /**
  * Batch detail — one batch's aggregate stats + per-state trial
  * counts + the original filter/config that submitted it. Live-polls
- * while the batch is active, stops once terminal.
+ * until its children, output transfer and execution cleanup settle.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
@@ -13,6 +13,7 @@ import { Link, useParams, useLocation } from "react-router-dom";
 import { api } from "../api";
 import type { components } from "../api/schema";
 import { BatchDeliveryExport } from "../components/BatchDeliveryExport";
+import { ExecutionSelectionSection } from "../components/ExecutionSelectionSection";
 import { Button } from "../components/Button";
 import { Card } from "../components/Card";
 import { DestructiveActionDialog } from "../components/DestructiveActionDialog";
@@ -42,6 +43,20 @@ import {
 } from "../lib/usageCost";
 
 const ACTIVE_STATES = new Set(["submitted", "running"]);
+const TERMINAL_TRIAL_STATES = new Set(["succeeded", "failed", "cancelled"]);
+
+function needsRefresh(batch: components["schemas"]["BatchDetail"]): boolean {
+  if (ACTIVE_STATES.has(batch.state)) return true;
+  if (Object.entries(batch.trial_summary).some(([state, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(state))) return true;
+  if (Object.entries(batch.progress?.stages ?? {}).some(([stage, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(stage))) return true;
+  const execution = batch.service_execution_summary;
+  if (!execution) return false;
+  return Object.entries(execution.lifecycle_stages).some(([stage, count]) => count > 0 && !TERMINAL_TRIAL_STATES.has(stage) && stage !== "output_unavailable")
+    || (execution.materialization_states.pending ?? 0) > 0
+    || (execution.materialization_states.running ?? 0) > 0
+    || (execution.output_commit_states.uploading ?? 0) > 0
+    || Object.entries(execution.execution_states ?? {}).some(([state, count]) => count > 0 && state !== "deleted");
+}
 
 function comboSummary(
   combo: {
@@ -127,8 +142,8 @@ export default function BatchDetail(): JSX.Element {
     queryFn: () => api.getBatch(batchId!),
     enabled: !!batchId,
     refetchInterval: (q) => {
-      const data = q.state.data as { state: string } | undefined;
-      if (!data || !ACTIVE_STATES.has(data.state)) return false;
+      const data = q.state.data;
+      if (!data || !needsRefresh(data)) return false;
       return polling.refetchInterval;
     },
   });
@@ -329,6 +344,15 @@ export default function BatchDetail(): JSX.Element {
                 </p>
               ) : null}
             </section>
+          ) : null}
+
+          {c.execution_selection ? (
+            <div className="border-b border-slate-200 pb-3">
+              <ExecutionSelectionSection
+                requested={c.execution_selection.requested}
+                effective={c.execution_selection.effective}
+              />
+            </div>
           ) : null}
 
           {c.failure_reason ? (

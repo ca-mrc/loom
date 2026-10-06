@@ -37,7 +37,7 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_management_refresh_resources", "nebius_management_refresh_evidence", "nebius_management_refresh_backup",
     "nebius_management_refresh_install", "nebius_management_refresh_predecessor", "nebius_management_refresh_connected",
     "nebius_management_refresh_entry", "nebius_management_refresh_supersession",
-    "deploy_nebius_platform", "nebius_pool_application_delivery", "nebius_pool_activation_database", "nebius_pool_activation_live",
+    "deploy_nebius_platform", "nebius_pool_application_delivery", "nebius_pool_application_history", "nebius_pool_activation_database", "nebius_pool_activation_live",
     "nebius_pool_activation_stage", "nebius_pool_completion", "nebius_pool_cutover",
     "nebius_pool_cutover_entry", "nebius_pool_cutover_live", "nebius_pool_dormant",
     "nebius_pool_gateway_authority", "nebius_pool_gateway_probe", "nebius_pool_gateway_retirement",
@@ -45,20 +45,25 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_pool_legacy_restart", "nebius_pool_legacy_settings", "nebius_pool_machine_database",
     "nebius_pool_machine_retirement", "nebius_pool_material", "nebius_pool_migration",
     "nebius_pool_migration_guard", "nebius_pool_operation", "nebius_pool_origin_history", "nebius_pool_platform_authority",
-    "nebius_pool_predecessor", "nebius_pool_projection", "nebius_pool_recovery_database", "nebius_pool_recovery_release",
+    "nebius_pool_predecessor", "nebius_pool_projection", "nebius_pool_recovery_database", "nebius_pool_recovery_release", "nebius_pool_repair_entry",
+    "nebius_pool_manager_image", "nebius_pool_manager_image_history", "nebius_pool_manager_image_stage",
+    "nebius_pool_manager_image_live", "nebius_pool_image_entry",
     "nebius_pool_refresh", "nebius_pool_refresh_live", "nebius_pool_registration",
     "nebius_pool_retirement", "nebius_pool_retirement_live", "nebius_pool_role_fencing",
     "nebius_pool_role_fencing_live", "nebius_pool_role_restoration", "nebius_pool_runtime",
     "nebius_pool_runtime_settings", "nebius_pool_shutdown", "nebius_pool_startup",
     "nebius_pool_startup_capacity", "nebius_pool_startup_database", "nebius_pool_startup_fence",
-    "nebius_pool_startup_live", "nebius_pool_template_restoration",
+    "nebius_pool_startup_live", "nebius_pool_startup_repair", "nebius_pool_startup_repair_live",
+    "nebius_pool_template_restoration",
 )), "deploy/k8s/nebius-execution-actuator.yaml", "deploy/k8s/nebius-capacity-collector.yaml")
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
           "requirements.txt": 262144, "operation.json": 16384, "manifest.json": 16384}
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install",
     "loom-nebius-pool-rollback-v1": "rollback"}
-POOL_PHASES = frozenset({'cutover', 'startup', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
+POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1', 'loom.nebius-pool-startup-repair-operation.v2'})
+MANAGER_SCHEMA_PROOF = 'manager-schema.json'
+POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'manager-image', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
     'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
 REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
     "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
@@ -92,6 +97,9 @@ DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_ide
     *("refresh_" + stage for stage in REFRESH_RETAINED_PREFLIGHT_STAGES),
     *('pool_' + stage.replace('-', '_') for stage in POOL_PHASES | {
         'operation', 'connection', 'preflight', 'cancellation', 'completion',
+        *('preflight_' + detail for detail in {
+            'writer_bindings', 'writer_workloads', 'connected_prerequisites', 'capacity',
+            'scope', 'database_report', 'pending_source', 'pending_page', 'origin_history', 'database_readiness'}),
         'publication', 'operator_readers', 'runtime_databases', 'runtime_telemetry',
         *('runtime_telemetry_' + detail for detail in {
             'binding', 'pod', 'nodes', 'probe', 'recheck', 'settings', 'client', 'tls',
@@ -112,7 +120,10 @@ def validate_operation(value: dict[str, Any]) -> None:
         fields = {"schema", "source_sha", "candidate", "installation_id", "namespace",
                   "state_dir", "anchor_dir", "inputs_path", "inputs_sha256"}
         refresh = value.get('schema') == 'loom.nebius-management-refresh-operation.v1'
-        pool = value.get('schema') == 'loom.nebius-pool-cutover-operation.v1'
+        repair = value.get('schema') in POOL_REPAIR_SCHEMAS
+        pool = value.get('schema') == 'loom.nebius-pool-cutover-operation.v1' or repair
+        if repair:
+            fields.add('original_operation_id')
         if refresh or pool:
             fields.add('operation_id')
         if set(value) != fields or any(not isinstance(item, str) or not 0 < len(item) <= 1024 for item in value.values()):
@@ -121,7 +132,8 @@ def validate_operation(value: dict[str, Any]) -> None:
                                    "loom.nebius-management-retirement-operation.v1",
                                    "loom.nebius-management-retirement-diagnostic-operation.v1",
                                    "loom.nebius-management-retirement-recovery-operation.v1",
-                                   "loom.nebius-management-refresh-operation.v1", "loom.nebius-pool-cutover-operation.v1"}:
+                                   "loom.nebius-management-refresh-operation.v1", "loom.nebius-pool-cutover-operation.v1",
+                                   *POOL_REPAIR_SCHEMAS}:
             raise ValueError()
         if any(not re.fullmatch(r"[0-9a-f]{40}", value[key]) for key in ("source_sha", "candidate")):
             raise ValueError()
@@ -140,7 +152,11 @@ def validate_operation(value: dict[str, Any]) -> None:
         if refresh or pool:
             operation_id = UUID(value['operation_id'])
             if (not operation_id.int or str(operation_id) != value['operation_id'] or root.name != str(operation_id)
-                    or root.parent.name != ('pool-cutover' if pool else 'refresh') or value['source_sha'] != value['candidate']):
+                    or root.parent.name != ('pool-repair' if repair else 'pool-cutover' if pool else 'refresh')
+                    or value['source_sha'] != value['candidate']):
+                raise ValueError()
+            if repair and (str(UUID(value['original_operation_id'])) != value['original_operation_id']
+                    or not UUID(value['original_operation_id']).int or value['original_operation_id'] == value['operation_id']):
                 raise ValueError()
             root = root.parent.parent
         separated = {"loom.nebius-management-upgrade-operation.v1": "upgrade",
@@ -162,7 +178,8 @@ def validate_operation(value: dict[str, Any]) -> None:
 def validate_action(action: str, operation: dict[str, Any]) -> None:
     validate_operation(operation)
     if (action not in {'qualify', 'preflight', 'install', 'rollback'}
-            or (action == 'rollback' and operation['schema'] != 'loom.nebius-pool-cutover-operation.v1')):
+            or (action == 'rollback' and operation['schema'] not in {
+                'loom.nebius-pool-cutover-operation.v1', *POOL_REPAIR_SCHEMAS})):
         raise GatewayError('management action outside fixed authority')
 
 
@@ -174,11 +191,17 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
             entries = archive.infolist()
             names = [entry.filename for entry in entries]
             wheels = {name for name in names if name.startswith("wheels/")}
-            if (len(names) != len(set(names)) or set(names) != set(LIMITS) | wheels or len(wheels) != 2
+            if len(names) != len(set(names)) or archive.getinfo('operation.json').file_size > LIMITS['operation.json']:
+                raise ValueError()
+            operation = json.loads(archive.read('operation.json'))
+            validate_operation(operation)
+            image_repair = operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v2'
+            limits = {**LIMITS, **({MANAGER_SCHEMA_PROOF: 4096} if image_repair else {})}
+            if (set(names) != set(limits) | wheels or len(wheels) != 2
                     or not all(sum(bool(re.fullmatch(r"wheels/" + package + r"-[0-9][0-9.]*-py3-none-any\.whl", name))
                                    for name in wheels) == 1 for package in ("loom", "loom_bundle_checksum"))):
                 raise ValueError()
-            if any(entry.file_size > LIMITS.get(entry.filename, MAX_WHEEL) or entry.is_dir()
+            if any(entry.file_size > limits.get(entry.filename, MAX_WHEEL) or entry.is_dir()
                    or stat.S_ISLNK(entry.external_attr >> 16) for entry in entries):
                 raise ValueError()
             files = {entry.filename: archive.read(entry) for entry in entries}
@@ -188,6 +211,13 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
             raise ValueError()
         operation = json.loads(files["operation.json"])
         validate_operation(operation)
+        if image_repair:
+            proof = json.loads(files[MANAGER_SCHEMA_PROOF])
+            if (not isinstance(proof, dict) or set(proof) != {'schema', 'source_sha', 'revision'}
+                    or proof['schema'] != 'loom.nebius-manager-schema.v1' or proof['source_sha'] != operation['source_sha']
+                    or not isinstance(proof['revision'], str) or re.fullmatch(r'[a-zA-Z0-9_]{1,64}', proof['revision']) is None
+                    or files[MANAGER_SCHEMA_PROOF] != json.dumps(proof, sort_keys=True).encode()):
+                raise ValueError()
         return files, operation
     except Exception:
         raise GatewayError("invalid management tooling bundle") from None
@@ -408,7 +438,8 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
         diagnostic = operation["schema"] == "loom.nebius-management-retirement-diagnostic-operation.v1"
         recovery = operation["schema"] == "loom.nebius-management-retirement-recovery-operation.v1"
         refresh = operation['schema'] == 'loom.nebius-management-refresh-operation.v1'
-        pool = operation['schema'] == 'loom.nebius-pool-cutover-operation.v1'
+        repair = operation['schema'] in POOL_REPAIR_SCHEMAS
+        pool = operation['schema'] == 'loom.nebius-pool-cutover-operation.v1' or repair
         success = ('pool_cutover_completed' if pool else "retirement_recovered" if recovery else "retirement_diagnostic_observed" if diagnostic else "management_retired" if retirement
             else "management_refreshed" if refresh else "management_upgraded" if upgrade else "management_installed")
         if status not in {"preflight_qualified", "pending", success, "blocked"}:
@@ -422,6 +453,10 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
             if value.get('operation_id') != operation['operation_id']:
                 raise ValueError()
             result['operation_id'] = value['operation_id']
+        if repair:
+            if value.get('original_operation_id') != operation['original_operation_id']:
+                raise ValueError()
+            result['original_operation_id'] = value['original_operation_id']
         if status == "blocked":
             if not isinstance(value["stage"], str) or value["stage"] not in DIAGNOSTIC_STAGES:
                 raise ValueError()

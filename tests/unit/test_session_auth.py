@@ -12,6 +12,7 @@ from loom_service.session_auth import (
     browser_origin_allowed,
     hash_secret,
     session_cookie_options,
+    session_csrf_token,
     verify_csrf,
 )
 
@@ -36,6 +37,23 @@ def test_hash_secret_matches_sha256_bytes() -> None:
 
 def test_verify_csrf_accepts_matching_session_header() -> None:
     verify_csrf(_session_ctx(), "csrf-token")
+
+
+def test_read_proof_is_stable_cookie_bound_and_invalidated_by_nonce_rotation() -> None:
+    ctx = _session_ctx()
+    proof = session_csrf_token(ctx, "session-token")
+    assert proof == session_csrf_token(ctx, "session-token")
+    verify_csrf(ctx, proof, raw_session="session-token")
+    verify_csrf(ctx, "csrf-token", raw_session="session-token")
+    for invalid_ctx, cookie, token in (
+        (ctx, "another-cookie", proof),
+        (_session_ctx("rotated-token"), "session-token", proof),
+        (ctx, None, proof),
+        (ctx, "session-token", "invalid-非ascii"),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            verify_csrf(invalid_ctx, token, raw_session=cookie)
+        assert exc.value.status_code == 403
 
 
 def test_verify_csrf_rejects_missing_session_header() -> None:

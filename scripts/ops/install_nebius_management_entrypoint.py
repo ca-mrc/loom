@@ -139,12 +139,16 @@ def install(content: bytes, *, expected_sha256: str, public_key: str, apply: boo
                      "loom.nebius-management-retirement-operation.v1": "retirement",
                      "loom.nebius-management-retirement-diagnostic-operation.v1": "retirement-diagnostic",
                      "loom.nebius-management-retirement-recovery-operation.v1": "retirement-recovery"}
-        pool = config['schema'] == 'loom.nebius-pool-cutover-operation.v1'
+        repair = config['schema'] in {'loom.nebius-pool-startup-repair-operation.v1', 'loom.nebius-pool-startup-repair-operation.v2'}
+        pool = config['schema'] == 'loom.nebius-pool-cutover-operation.v1' or repair
         if config["schema"] == "loom.nebius-management-refresh-operation.v1" or pool:
             operation_id = UUID(config["operation_id"])
             if (not operation_id.int or str(operation_id) != config["operation_id"]
-                    or root.name != str(operation_id) or root.parent.name != ('pool-cutover' if pool else 'refresh')
+                    or root.name != str(operation_id) or root.parent.name != ('pool-repair' if repair else 'pool-cutover' if pool else 'refresh')
                     or config["source_sha"] != config["candidate"]):
+                raise ValueError()
+            if repair and (str(UUID(config['original_operation_id'])) != config['original_operation_id']
+                    or not UUID(config['original_operation_id']).int or config['original_operation_id'] == config['operation_id']):
                 raise ValueError()
             root = root.parent.parent
         elif config["schema"] in separated:

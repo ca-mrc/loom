@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
+from scripts.ops.nebius_pool_manager_image_history import IMAGE_MARKER, original_recovery_image
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_startup import (
     PoolWorkloadReader,
@@ -22,6 +23,7 @@ from scripts.ops.nebius_pool_startup import (
     closed_startup_documents,
 )
 from scripts.ops.nebius_pool_startup_fence import _fence_record, observe_recovery_workloads
+from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 
 from loom.nebius_platform_render import digest
 
@@ -58,8 +60,8 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
     # Reverse startup order: retire adapters/collector before gateway/manager.
     for key in reversed(targets):
         phase = 'prepared' if startup is None else startup['workloads'][key]['phase']
-        value = (closed[key] if phase == 'prepared' else targets[key] if phase == 'started'
-            else fence['workloads'][key]['expected'])
+        value = (fence['workloads'][key]['expected'] if key in fence['workloads'] else
+            closed[key] if phase == 'prepared' else targets[key])
         original[key] = _stable(value)
     desired = copy.deepcopy(original)
     for value in desired.values():
@@ -83,7 +85,9 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
             or not isinstance(record['workloads'], dict) or set(record['workloads']) != set(desired)):
         raise ValueError
     for key, item in record['workloads'].items():
-        if not isinstance(item, dict) or set(item) != {'phase', 'before_resource_version'} or item['phase'] not in {'prepared', 'intent', 'stopped'}:
+        if (not isinstance(item, dict) or set(item) not in (
+                {'phase', 'before_resource_version'}, {'phase', 'before_resource_version', 'isolation_stop'})
+                or item['phase'] not in {'prepared', 'intent', 'stopped'}):
             raise ValueError
         version = item['before_resource_version']
         if item['phase'] == 'prepared' or (item['phase'] == 'stopped' and original[key] == desired[key]):
@@ -91,6 +95,22 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                 raise ValueError
         elif not isinstance(version, str) or not 0 < len(version) <= 128 or original[key] == desired[key]:
             raise ValueError
+        if 'isolation_stop' in item:
+            image = original_recovery_image(request, state=state, anchor=anchor)
+            retry = item['isolation_stop']
+            if (image is None or image.record is None or key != _key(request.manager)
+                    or image.record['phases']['isolate'] != {'phase': 'intent', 'before_resource_version': version}
+                    or item['phase'] not in {'intent', 'stopped'}
+                    or not isinstance(retry, dict) or set(retry) != {'phase', 'before_resource_version'}
+                    or retry['phase'] not in {'prepared', 'intent', 'stopped'}
+                    or (item['phase'] == 'stopped') != (retry['phase'] == 'stopped')):
+                raise ValueError
+            extra_version = retry['before_resource_version']
+            if retry['phase'] == 'prepared':
+                if extra_version is not None:
+                    raise ValueError
+            elif not isinstance(extra_version, str) or not 0 < len(extra_version) <= 128 or extra_version == version:
+                raise ValueError
     return closed, original, desired, identity, record
 
 
@@ -101,8 +121,24 @@ def shutdown_workload_options(request: PoolCutoverRequest, *, state: Path, ancho
     _, original, desired, _, record = _shutdown_record(request, state=state, anchor=anchor)
     if record is None:
         raise ValueError
+    repair = original_recovery_repair(request, state=state, anchor=anchor)
+    image = original_recovery_image(request, state=state, anchor=anchor)
     result = dict(choices)
     for key, item in record['workloads'].items():
+        if (image is not None and image.record is not None and key == _key(request.manager)
+                and image.record['phases']['isolate']['phase'] == 'intent'):
+            if (tuple(_stable(row) for row in choices[key]) != tuple(_stable(row) for row in image.documents[:2])
+                    or original[key] != _stable(image.documents[0])):
+                raise ValueError
+            result[key] = ((desired[key],) if item['phase'] == 'stopped' else choices[key]
+                if item['phase'] == 'prepared' else (*choices[key], desired[key]))
+            continue
+        if (repair is not None and repair['phases']['stop']['phase'] == 'intent'
+                and key == _key(request.manager)):
+            if tuple(_stable(row) for row in choices[key]) != (original[key], desired[key]):
+                raise ValueError
+            result[key] = (desired[key],) if item['phase'] == 'stopped' else (original[key], desired[key])
+            continue
         if len(choices[key]) != 1 or _stable(choices[key][0]) != original[key]:
             raise ValueError
         result[key] = ((original[key],) if item['phase'] == 'prepared' else (desired[key],)
@@ -116,6 +152,8 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         with private_state._locked_state(anchor):
             closed, original, desired, identity, record = _shutdown_record(request, state=state, anchor=anchor)
+            repair = original_recovery_repair(request, state=state, anchor=anchor)
+            image = original_recovery_image(request, state=state, anchor=anchor)
 
             def result(status: str) -> dict[str, Any]:
                 return {'status': status, 'operation_id': identity['operation_id'], 'legacy_restore_allowed': False}
@@ -147,8 +185,37 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
                 actual = observe()[key]
                 if not drained():
                     return result('pending_pool_cleanup')
+                primary = item
+                if (image is not None and image.record is not None and key == _key(request.manager)
+                        and item['phase'] == 'intent' and 'isolation_stop' not in item
+                        and item['before_resource_version'] == image.record['phases']['isolate']['before_resource_version']
+                        and _matches(actual, image.documents[1], _uid(closed[key]))):
+                    # A late metadata-only isolate proves the original full-CAS
+                    # stop impossible. Retain that attempt and journal a distinct
+                    # stop removing the marker; never resend an ambiguous CAS.
+                    if (image.record['phases']['isolate'] != {'phase': 'intent',
+                            'before_resource_version': item['before_resource_version']}
+                            or actual['metadata']['resourceVersion'] == item['before_resource_version']):
+                        raise ValueError
+                    item['isolation_stop'] = {'phase': 'prepared', 'before_resource_version': None}
+                    private_state._atomic_json(state / 'shutdown.json', record)
+                if 'isolation_stop' in item:
+                    item = item['isolation_stop']
+                if (item['phase'] == 'prepared' and repair is not None and key == _key(request.manager)
+                        and repair['phases']['stop']['phase'] == 'intent'
+                        and _matches(actual, target, _uid(closed[key]))):
+                    version = repair['phases']['stop']['before_resource_version']
+                    if actual['metadata']['resourceVersion'] == version:
+                        raise ValueError
+                    # The delayed repair stop already reached this exact target.
+                    # Retain its CAS version; do not issue a duplicate stop.
+                    item.update(phase='stopped', before_resource_version=version)
+                    private_state._atomic_json(state / 'shutdown.json', record)
+                    continue
                 if item['phase'] == 'prepared' and original[key] != target:
                     proposed = _snapshot(actual)
+                    if image is not None and key == _key(request.manager):
+                        proposed['metadata'].get('annotations', {}).pop(IMAGE_MARKER, None)
                     field = 'suspend' if proposed['kind'] == 'CronJob' else 'replicas'
                     proposed['spec'][field] = target['spec'][field]
                     preview = api.preview_stop(key, actual, proposed)
@@ -174,12 +241,14 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
                         return result('pending_shutdown_update')
                     actual = api.read_workload(key)
                 if not _matches(actual, target, _uid(closed[key])):
-                    if item['phase'] == 'intent' and _matches(actual, original[key], _uid(closed[key])):
+                    allowed = (original[key],) if image is None or key != _key(request.manager) else image.documents[:2]
+                    if item['phase'] == 'intent' and any(_matches(actual, row, _uid(closed[key])) for row in allowed):
                         return result('pending_shutdown_outcome')
                     raise ValueError
                 if item['phase'] == 'intent' and actual['metadata']['resourceVersion'] == item['before_resource_version']:
                     raise ValueError
                 item['phase'] = 'stopped'
+                primary['phase'] = 'stopped'
                 private_state._atomic_json(state / 'shutdown.json', record)
             observe()
             if not drained():

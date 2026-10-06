@@ -69,8 +69,8 @@
       "gzipBytes": 9805
     },
     "src/pages/BatchDetail.tsx": {
-      "bytes": 83569,
-      "gzipBytes": 30475
+      "bytes": 92266,
+      "gzipBytes": 33302
     },
     "src/pages/Benchmarks.tsx": {
       "bytes": 28905,
@@ -195,6 +195,15 @@
     "src/pages/newBatch/BatchExportDialog.tsx": {
       "bytes": 12350,
       "gzipBytes": 5783
+    },
+    "src/pages/newBatch/ExecutionSelectionEditor.tsx": {
+      "bytes": 10104,
+      "gzipBytes": 3852,
+      "files": [
+        "assets/BTPdeK-M.js",
+        "assets/CFz1KnPa.js",
+        "assets/CPziM_ZQ2.js"
+      ]
     }
   }
 }

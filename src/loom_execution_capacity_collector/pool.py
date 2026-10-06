@@ -136,7 +136,12 @@ class PoolPodClassifier:
         return pod.metadata.namespace in self.namespaces
 
     def includes_pending(self, pod: Any) -> bool:
-        if self.registered(pod):
+        # A namespace also hosts platform-resident controllers and collectors.
+        # Only a protected Job receipt overrides a contradictory pool selector.
+        # Preserve fail-closed handling even if that Job's Pod has damaged owner
+        # or workload labels and cannot receive a managed-reservation discount.
+        if any((pod.metadata.namespace, getattr(owner, "uid", None)) in self.jobs
+               for owner in (getattr(pod.metadata, "owner_references", None) or [])):
             return True
         selector = getattr(pod.spec, "node_selector", None) or {}
         # Only a contradictory hard equality on a pool label proves exclusion.

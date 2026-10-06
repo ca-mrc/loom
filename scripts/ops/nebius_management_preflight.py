@@ -26,6 +26,7 @@ from scripts.ops.deploy_nebius_platform import (  # noqa: E402
 )
 from scripts.ops.nebius_controller_inventory import controller_inventory  # noqa: E402
 from scripts.ops.nebius_ingress_preflight import inspect_ingress  # noqa: E402
+from scripts.ops.nebius_pool_startup_inspection import pool_startup_diagnostics  # noqa: E402
 from scripts.ops.nebius_refresh_probe_inspection import failed_refresh_probes  # noqa: E402
 
 RESOURCE_KEYS = ("cpu", "memory", "ephemeral-storage", "pods")
@@ -349,6 +350,42 @@ def _containers(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
              **_fields(item, ("restartPolicy",))} for item in items]
 
 
+def _container_state(value: Any) -> dict[str, Any]:
+    kinds = [key for key in ("waiting", "running", "terminated")
+             if isinstance(value, dict) and isinstance(value.get(key), dict)]
+    if len(kinds) != 1:
+        return {"state": "unknown"}
+    kind, = kinds
+    result: dict[str, Any] = {"state": kind}
+    if kind == "running":
+        return result
+    reason = value[kind].get("reason")
+    known = {"PodInitializing", "ContainerCreating", "CreateContainerConfigError", "CreateContainerError",
+             "RunContainerError", "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CrashLoopBackOff",
+             "Error", "OOMKilled", "Completed", "ContainerCannotRun", "StartError"}
+    result["reason"] = reason if isinstance(reason, str) and reason in known else "Other"
+    exit_code = value[kind].get("exitCode")
+    if kind == "terminated" and type(exit_code) is int and 0 <= exit_code < 2**31:
+        result["exit_code"] = exit_code
+    return result
+
+
+def _container_statuses(items: Any, *, names: set[str]) -> list[dict[str, Any]]:
+    """Use only existing Pod reads; never export messages, IDs or arbitrary reasons."""
+    if not isinstance(items, list):
+        return []
+    result = []
+    for row in items:
+        if (not isinstance(row, dict) or not isinstance(row.get("name"), str)
+                or row["name"] not in names):
+            continue
+        ready, restarts = row.get("ready"), row.get("restartCount")
+        result.append({"name": row["name"], "ready": ready if type(ready) is bool else None,
+            "restart_count": restarts if type(restarts) is int and 0 <= restarts < 2**31 else None,
+            "current": _container_state(row.get("state")), "previous": _container_state(row.get("lastState"))})
+    return result
+
+
 def _storage_class(item: dict[str, Any]) -> dict[str, Any]:
     """Observe public driver options, never arbitrary parameter/credential data."""
     allowed = {"type": {"NETWORK_SSD", "NETWORK_SSD_IO_M3"}, "csi.storage.k8s.io/fstype": {"ext4", "xfs"}}
@@ -390,6 +427,9 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
         "execution_namespace": config["execution_namespace"], "configured_candidate_sha": candidate,
         "failed_bootstrap_jobs": _failed_bootstrap_jobs(kube, pods, namespace),
         "failed_refresh_probes": failed_refresh_probes(kube, pods, namespace),
+        "pool_startup_diagnostics": pool_startup_diagnostics(kube, pods,
+            operation_json=os.environ.get("NEBIUS_MANAGEMENT_OPERATION_JSON", ""),
+            execution_namespace=config["execution_namespace"]),
         "failed_retirement_jobs": _failed_retirement_jobs(kube, pods,
             {row["metadata"]["name"]: row["metadata"]["uid"] for row in namespaces}),
         "ingress_preflight": inspect_ingress(kube, os.environ.get("NEBIUS_INGRESS_INSTALLATION_JSON", ""),
@@ -410,6 +450,10 @@ def inspect(kube: Kubectl, *, namespace: str, expected_cluster_id: str) -> dict[
             "phase": item.get("status", {}).get("phase"),
             "containers": _containers(item["spec"].get("containers", [])),
             "init_containers": _containers(item["spec"].get("initContainers", [])),
+            "container_statuses": _container_statuses(item.get("status", {}).get("containerStatuses"),
+                names={row["name"] for row in item["spec"].get("containers", [])}),
+            "init_container_statuses": _container_statuses(item.get("status", {}).get("initContainerStatuses"),
+                names={row["name"] for row in item["spec"].get("initContainers", [])}),
             "overhead": _resources(item["spec"].get("overhead", {})),
             "pod_requests": _resources(item["spec"].get("resources", {}).get("requests", {})),
         } for item in pods],

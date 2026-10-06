@@ -190,8 +190,10 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
         legacy_restart_exists,
         restarted_legacy_options,
     )
+    from scripts.ops.nebius_pool_manager_image_history import manager_image_options
     from scripts.ops.nebius_pool_shutdown import shutdown_exists, shutdown_workload_options
     from scripts.ops.nebius_pool_startup_fence import fenced_startup_options, startup_fence_exists
+    from scripts.ops.nebius_pool_startup_repair import repaired_startup_options
     from scripts.ops.nebius_pool_template_restoration import (
         restored_template_options,
         template_restoration_exists,
@@ -212,6 +214,8 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
         phase = ({} if record is None else record["workloads"]).get(key, {"phase": "prepared"})["phase"]
         choices[key] = ((original,) if phase == "prepared" else (targets[key],) if phase == "started"
             else (original, targets[key]))
+    choices = repaired_startup_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
+    choices = manager_image_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
     choices = fenced_startup_options(request, state=state_dir, anchor=anchor_dir,
         closed=closed, targets=targets, startup=record, choices=choices)
     choices = shutdown_workload_options(request, state=state_dir, anchor=anchor_dir, choices=choices)

@@ -82,6 +82,53 @@ def test_inventory_projects_capacity_and_routes_without_claiming_installation_re
     assert "effective_writer_fencing" in result["controller_inventory"]["unverified"]
 
 
+@pytest.mark.parametrize("state,expected", [
+    ({"waiting": {"reason": "CreateContainerConfigError", "message": "private-message"}},
+     {"state": "waiting", "reason": "CreateContainerConfigError"}),
+    ({"waiting": {"reason": "private-reason", "message": "private-message"}},
+     {"state": "waiting", "reason": "Other"}),
+    ({"terminated": {"reason": "OOMKilled", "exitCode": 137, "message": "private-message",
+                     "containerID": "private-id"}},
+     {"state": "terminated", "reason": "OOMKilled", "exit_code": 137}),
+    ({"running": {"startedAt": "private-unchecked"}}, {"state": "running"}),
+    ({}, {"state": "unknown"}),
+])
+def test_inventory_reports_safe_container_states_without_extra_reads(state, expected):
+    baseline = Cluster()
+    preflight.inspect(baseline, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    cluster = Cluster()
+    cluster.lists["pods"][0]["status"] = {"phase": "Pending", "message": "private-pod-message",
+        "containerStatuses": [{"name": "service", "ready": False, "restartCount": 3,
+            "state": state, "lastState": {"terminated": {"reason": "Error", "exitCode": 1,
+                "message": "private-last-message"}}, "imageID": "private-image-id"}],
+        "initContainerStatuses": [{"name": "init", "ready": True, "restartCount": 0,
+            "state": {"terminated": {"reason": "Completed", "exitCode": 0}}, "lastState": {}}]}
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    pod = result["pods"][0]
+    assert pod["container_statuses"] == [{"name": "service", "ready": False, "restart_count": 3,
+        "current": expected, "previous": {"state": "terminated", "reason": "Error", "exit_code": 1}}]
+    assert pod["init_container_statuses"] == [{"name": "init", "ready": True, "restart_count": 0,
+        "current": {"state": "terminated", "reason": "Completed", "exit_code": 0},
+        "previous": {"state": "unknown"}}]
+    assert "private-" not in json.dumps(result)
+    assert cluster.calls == baseline.calls
+
+
+def test_inventory_does_not_treat_missing_or_malformed_container_status_as_healthy():
+    cluster = Cluster()
+    baseline = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert baseline["pods"][0]["container_statuses"] == []
+    assert baseline["pods"][0]["init_container_statuses"] == []
+    cluster.lists["pods"][0]["status"]["containerStatuses"] = [{"name": "service",
+        "ready": "private-ready", "restartCount": "private-count",
+        "state": {"terminated": {"reason": "private-reason", "exitCode": "private-exit"}}}]
+    result = preflight.inspect(cluster, namespace="loom-nebius-platform", expected_cluster_id="mk8scluster-test")
+    assert result["pods"][0]["container_statuses"] == [{"name": "service", "ready": None,
+        "restart_count": None, "current": {"state": "terminated", "reason": "Other"},
+        "previous": {"state": "unknown"}}]
+    assert "private-" not in json.dumps(result)
+
+
 @pytest.mark.parametrize("case,changes", [
     ("native", {}),
     ("owned", {"no_owner_references": False}),
@@ -229,6 +276,7 @@ def test_protected_manual_inventory_cannot_select_rollout_or_unprotected_environ
         "management-recovery-preflight", "management-recovery-install",
         "management-refresh-preflight", "management-refresh-install",
         "management-pool-preflight", "management-pool-install", "management-pool-rollback",
+        "management-pool-repair-preflight", "management-pool-repair-install", "management-pool-repair-rollback",
     ]
     assert "inputs.operation == 'rollout'" in workflow["jobs"]["rollout"]["if"]
     job = workflow["jobs"]["inspect"]

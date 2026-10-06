@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -398,7 +400,7 @@ def source_management_inputs(application_management_inputs):
     data = application_management_inputs[0]
     data['installation']['applications']['runtime']['source_upload'] = {
         'credentials_file': '/var/run/loom-application-source-credentials/credentials.json',
-        'spool_directory': '/var/run/loom-application-source/spool', 'max_inflight': 2,
+        'spool_directory': '/run/loom-application-source/spool', 'max_inflight': 2,
     }
     return application_management_inputs
 
@@ -428,7 +430,8 @@ def builder_management_inputs(source_management_inputs, build_inputs):
     return source_management_inputs
 
 
-def test_source_runtime_has_private_bounded_spool_and_management_only_material(source_management_inputs, tmp_path):
+@pytest.mark.parametrize('parent_mode', [0o700, 0o2770])
+def test_source_runtime_has_private_bounded_spool_and_management_only_material(source_management_inputs, tmp_path, parent_mode):
     result = render(source_management_inputs)
     docs = documents(result)
     service, = [doc for doc in docs if doc['kind'] == 'Deployment']
@@ -445,6 +448,7 @@ def test_source_runtime_has_private_bounded_spool_and_management_only_material(s
     assert initializer['securityContext']['runAsNonRoot'] is True
     assert not initializer['securityContext']['allowPrivilegeEscalation']
     command = initializer['command']
+    tmp_path.chmod(parent_mode)
     directory = tmp_path / 'private-spool'
     subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)
     directory.chmod(0o755)
@@ -460,12 +464,25 @@ def test_source_runtime_has_private_bounded_spool_and_management_only_material(s
     # Compare equal Recreate strategies: rolling management also reserves surge.
     without_source[0]['pool_catalog_operation_id'] = str(uuid4())
     assert result.platform_envelope.ephemeral_storage_mib == render(without_source).platform_envelope.ephemeral_storage_mib + 4096
-    assert directory.stat().st_mode & 0o777 == 0o700
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
     # Restarting an init container must preserve the private directory safely.
     subprocess.run([sys.executable, *command[1:-1], str(directory)], check=True)
     for doc in docs:
         if doc['kind'] in {'StatefulSet', 'Job', 'CronJob'}:
             assert not any(item['name'].startswith('application-source') for item in pod(doc)['volumes'])
+
+
+@pytest.mark.parametrize('mode', [0o2700, 0o2750, 0o1700])
+def test_source_initializer_only_clears_safe_inherited_setgid(source_management_inputs, tmp_path, mode):
+    service, = [doc for doc in documents(render(source_management_inputs)) if doc['kind'] == 'Deployment']
+    initializer, = [item for item in pod(service)['initContainers'] if item['name'] == 'prepare-application-source']
+    directory = tmp_path / 'retained-spool'
+    directory.mkdir()
+    directory.chmod(mode)
+    result = subprocess.run([sys.executable, *initializer['command'][1:-1], str(directory)], capture_output=True)
+    assert (result.returncode == 0) is (mode == 0o2700)
+    assert stat.S_IMODE(directory.stat().st_mode) == (0o700 if mode == 0o2700 else mode)
+    assert directory.stat().st_uid == os.getuid()
 
 
 def test_builder_runtime_uses_dedicated_private_token_and_readonly_native_observation(builder_management_inputs):
