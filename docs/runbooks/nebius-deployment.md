@@ -217,6 +217,20 @@ templates, cover every possible workload writer, or establish effective fencing.
 Use it to prepare exact migration inputs, not as permission to stop foreign work.
 An unreadable or partially paginated resource list fails inspection.
 
+`pool_startup_diagnostics` observes at most one failed manager and one failed
+pooled collector. Selection is bound to the configured management installation,
+the selected platform execution namespace, current Deployment/ReplicaSet or
+CronJob/Job ancestry, and matching container configuration. At most three
+candidates per role are checked. For each selected Pod, inspection reads only
+the failed current or previous container's last 100 lines / 32 KiB, then rechecks
+the Pod and controller identity; replacement or restart drift makes the result
+`unavailable`. Output contains only fixed exception/stage/component enums and
+numeric source line locations, never messages, raw logs, source lines, SQL,
+credential values or arbitrary paths. Missing metadata is `not_configured`;
+missing or unsupported diagnostics are `unavailable`. These are startup symptoms,
+not readiness, root-cause proof, or permission to retry a write. No Secret reads,
+Pod exec, workload changes or new authority are added by this diagnostic.
+
 The `kube-system/coredns` Service entry also includes fixed `dns_checks`
 booleans for deletion/ownership, native or legacy selector matching, a usable
 cluster IP, and TCP/UDP port 53. These reuse the existing Service inventory read;
