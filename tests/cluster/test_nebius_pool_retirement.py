@@ -58,8 +58,16 @@ async def test_native_terminal_job_history_qualifies_and_spec_edits_cannot_resta
         async def snapshots():
             jobs = await asyncio.to_thread(batch.list_namespaced_job, namespace)
             pods = await asyncio.to_thread(core.list_namespaced_pod, namespace)
-            return (core.api_client.sanitize_for_serialization(jobs)["items"],
-                core.api_client.sanitize_for_serialization(pods)["items"])
+            result = []
+            for collection, api, kind in ((jobs, "batch/v1", "Job"), (pods, "v1", "Pod")):
+                rows = core.api_client.sanitize_for_serialization(collection)["items"]
+                # Kubernetes list items omit TypeMeta; the production inventory
+                # reader qualifies it from each enclosing typed collection.
+                for row in rows:
+                    row.setdefault("apiVersion", api)
+                    row.setdefault("kind", kind)
+                result.append(rows)
+            return tuple(result)
 
         async def wait_terminal(names):
             deadline = time.monotonic() + 120
