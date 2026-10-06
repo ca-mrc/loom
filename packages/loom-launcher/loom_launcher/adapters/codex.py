@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -204,7 +205,10 @@ class CodexAdapter:
         workdir: PurePosixPath,
         model: ModelSpec,
         env: dict[str, str],
+        extra_config: tuple[str, ...] = (),
     ) -> list[str]:
+        """`extra_config` adds trusted `-c key=value` overrides, e.g. native
+        execution disabling Codex's provider-side `web_search` tool."""
         # Codex 0.141+ refuses to create PATH-alias helper binaries
         # under `/tmp` (it logs "Refusing to create helper binaries
         # under temporary dir" and exits rc=1). Place CODEX_HOME under
@@ -232,7 +236,9 @@ class CodexAdapter:
             "printf '%s' \"$4\" | exec codex exec --ignore-user-config --json "
             '--model "$1" --cd "$2" --skip-git-repo-check '
             "--sandbox danger-full-access --ignore-rules "
-            '-c \'model_provider="loom"\' -c "$3" -'
+            '-c \'model_provider="loom"\''
+            + "".join(f" -c {shlex.quote(item)}" for item in extra_config)
+            + ' -c "$3" -'
         )
         argv = [
             "sh",

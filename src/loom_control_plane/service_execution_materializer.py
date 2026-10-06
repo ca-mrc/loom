@@ -64,6 +64,7 @@ from loom.pipeline.artifact_commit import (
     ArtifactManifestV1,
 )
 from loom.pipeline.keys import canonical_document
+from loom.service_execution_codex import codex_usage, parse_codex_events
 from loom.service_execution_oracle import oracle_usage, parse_oracle_events
 from loom.service_execution_terminus_trace import (
     matches_terminus_usage,
@@ -270,6 +271,15 @@ def validate_usage_accounting(
         if not matches_terminus_usage(document, terminus_usage(events, trial_config)):
             raise MaterializationIntegrityError("usage_output_identity_drift")
         return
+    if trace_format == "codex":
+        try:
+            events = parse_codex_events(trace_body, trial=trial_config)
+        except ValueError as exc:
+            raise MaterializationIntegrityError("trajectory_invalid") from exc
+        # Same roundoff-tolerant comparison; the expected document carries the schema.
+        if not matches_terminus_usage(document, codex_usage(events, trial_config)):
+            raise MaterializationIntegrityError("usage_output_identity_drift")
+        return
     calls = _parse_trace_calls(trace_body)
     usages = [call.get("usage") for call in calls]
     if (
@@ -346,7 +356,8 @@ def build_canonical_events(
     trace_format = _trace_format(trial_config.agent_name)
     terminus = trace_format == "terminus"
     oracle = trace_format == "oracle"
-    calls = [] if terminus or oracle else _parse_trace_calls(trace_body)
+    codex = trace_format == "codex"
+    calls = [] if terminus or oracle or codex else _parse_trace_calls(trace_body)
     if oracle and gateway_calls:
         # A no-model solver that reached the Gateway is not an Oracle run.
         raise MaterializationIntegrityError("oracle_model_calls_present")
@@ -360,9 +371,16 @@ def build_canonical_events(
                 )
         elif oracle and trace_body is not None:
             native_events = parse_oracle_events(trace_body, trial_id=trial_id)
+        elif codex:
+            native_events = parse_codex_events(trace_body, trial=trial_config, trial_id=trial_id)
+            if gateway_calls is not None:
+                # The DB ledger, not the runtime's copy, owns model accounting.
+                native_events = reconcile_terminus_ledger(
+                    native_events, gateway_calls, trial_config, trial_id,
+                )
     except ValueError as exc:
         raise MaterializationIntegrityError("trajectory_invalid") from exc
-    step_id = "agent" if terminus or oracle else task_config.steps[0].name if task_config.steps else "main"
+    step_id = "agent" if terminus or oracle or codex else task_config.steps[0].name if task_config.steps else "main"
     emitted = runtime_result.started_at
     events: list[TrajectoryEvent] = [
         TrialStartEvent(
@@ -1109,7 +1127,7 @@ class ServiceExecutionMaterializer:
                 raise MaterializationIntegrityError("verifier_handoff_missing")
             gateway_calls = (await read_service_execution_llm_calls(
                 session, lease, generation=lease.output_generation,
-            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle"} else None
+            )) if _trace_format(trial.config.get("agent_name")) in {"terminus", "oracle", "codex"} else None
             trial_config_raw = trial.config
             trial_result_raw = trial.result
             trial_task_id = trial.task_id
@@ -1195,12 +1213,15 @@ class ServiceExecutionMaterializer:
             gateway_calls=gateway_calls,
             exception_info=exception_info,
         )
-        if gateway_calls is not None and _trace_format(trial_config.agent_name) == "terminus":
+        ledger_format = _trace_format(trial_config.agent_name)
+        if gateway_calls is not None and ledger_format in {"terminus", "codex"}:
             # Preserve the immutable runtime projection as source evidence. The
             # canonical accounting is independently derived from the DB ledger.
             corrected = {
                 _TRACE_PATH: _canonical_jsonl(events),
-                _USAGE_PATH: canonical_document(terminus_usage(list(events), trial_config)),
+                _USAGE_PATH: canonical_document(
+                    (codex_usage if ledger_format == "codex" else terminus_usage)(list(events), trial_config),
+                ),
                 "accounting/gateway-calls.json": canonical_document({
                     "schema_version": "loom.gateway-lease-ledger.v1", "calls": gateway_calls,
                 }),

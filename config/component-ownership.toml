@@ -627,6 +627,7 @@ source_paths = [
   "deploy/Dockerfile.harbor-runtime",
   "deploy/harbor-runtime-requirements.txt",
   "deploy/patches/**",
+  "packages/loom-launcher/loom_launcher/**",
   "scripts/ops/prepare_harbor_model_cost_map.py",
   "src/loom/**",
 ]
@@ -925,6 +926,7 @@ exclude_paths = [
   "tests/integration/test_workspace_acls_docker.py",
   "tests/integration/test_sandbox_process_streaming_docker.py",
   "tests/integration/test_harness_cache_docker.py",
+  "tests/integration/test_codex_native_docker.py",
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
   "tests/integration/test_quality_declaration_handoff.py",
@@ -995,6 +997,7 @@ include_paths = [
   "tests/integration/test_workspace_acls_docker.py",
   "tests/integration/test_sandbox_process_streaming_docker.py",
   "tests/integration/test_harness_cache_docker.py",
+  "tests/integration/test_codex_native_docker.py",
   "tests/integration/test_mutable_paths_docker.py",
   "tests/integration/test_task_identity_installation_docker.py",
   "tests/integration/test_quality_declaration_handoff.py",

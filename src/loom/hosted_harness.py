@@ -23,7 +23,7 @@ ExecutionKind = Literal["response-only", "workspace"]
 ModelUse = Literal["required", "forbidden"]
 DriverCapability = Literal["exec", "exec_streaming", "upload", "download"]
 # How the materializer validates the harness trace and usage documents.
-TraceFormat = Literal["completion-calls", "terminus", "oracle"]
+TraceFormat = Literal["completion-calls", "terminus", "oracle", "codex"]
 # Behaviour that only some harnesses implement, independent of topology.
 HarnessFeature = Literal["agent_continuation", "pinned_versions", "task_resource_requests"]
 # Which trusted image runs the controller phase. `service-runner`: the
@@ -78,17 +78,59 @@ MAX_SETUP_TIMEOUT_SECONDS = 1800
 MAX_SETUP_CACHE_BYTES = 256 * 1024 * 1024
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
+class PinnedArchive:
+    """A release archive the trusted controller fetches and verifies (#2311).
+
+    The controller downloads it through the setup-only egress proxy, checks
+    its npm-style `sha512-<base64>` integrity before any byte reaches the
+    sandbox, uploads it and extracts it into `install_root`. Nothing in the
+    task image participates except `tar`/`gzip`.
+    """
+
+    url: str
+    integrity: str
+    # Leading path components to drop when extracting (`package/vendor/...`).
+    strip_components: int = 0
+
+    def __post_init__(self) -> None:
+        import base64
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(self.url)
+        if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
+            raise ValueError("pinned archive requires a plain https URL")
+        algorithm, _, digest = self.integrity.partition("-")
+        try:
+            raw = base64.b64decode(digest, validate=True)
+        except ValueError:
+            raw = b""
+        if algorithm != "sha512" or len(raw) != 64:
+            raise ValueError("pinned archive integrity must be sha512-<base64>")
+        if not 0 <= self.strip_components <= 8:
+            raise ValueError("pinned archive strip_components out of range")
+
+    @property
+    def host(self) -> str:
+        from urllib.parse import urlsplit
+
+        return urlsplit(self.url).hostname or ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class HarnessSetup:
     """The pinned installation an installed harness runs before its agent (#2310).
 
-    `install` runs inside the task sandbox during the setup phase only. It may
+    Exactly one of `install` (a command run inside the task sandbox) or
+    `archive` (a release fetched and verified by the trusted controller, then
+    extracted in the sandbox) runs during the setup phase only. Either may
     reach only `sources`, through the Gateway task-egress proxy; no task
     command or model call runs in setup, and the egress window closes before
     the agent phase.
     """
 
-    install: tuple[str, ...]
+    install: tuple[str, ...] = ()
+    archive: PinnedArchive | None = None
     sources: tuple[InstallSource, ...]
     timeout_seconds: int
     # Absolute sandbox directory the install writes everything into. With
@@ -99,8 +141,15 @@ class HarnessSetup:
     check: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.install or not all(self.install):
+        if (self.archive is None) == (not self.install):
+            raise ValueError("harness setup declares exactly one of an install command or a pinned archive")
+        if self.install and not all(self.install):
             raise ValueError("harness setup requires a non-empty install command")
+        if self.archive is not None:
+            if self.install_root is None:
+                raise ValueError("a pinned archive is extracted into a declared install_root")
+            if self.archive.host not in {source.host for source in self.sources if source.protocol == "https"}:
+                raise ValueError("pinned archive host must be a declared https install source")
         if not self.sources:
             raise ValueError("harness setup requires declared install sources")
         if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
@@ -126,6 +175,8 @@ class HarnessSetup:
         document = {
             "schema_version": "loom.harness-setup-cache-identity.v1",
             "harness": harness, "install": list(self.install),
+            **({"archive": [self.archive.url, self.archive.integrity, self.archive.strip_components]}
+               if self.archive is not None else {}),
             "sources": [[source.protocol, source.host] for source in self.sources],
             "install_root": self.install_root, "check": list(self.check),
         }
@@ -258,7 +309,41 @@ def _index(specs: Iterable[HostedHarnessSpec]) -> Mapping[str, HostedHarnessSpec
     return MappingProxyType(index)
 
 
-HOSTED_HARNESSES: Mapping[str, HostedHarnessSpec] = _index((DIRECT_COMPLETION, TERMINUS_2, ORACLE))
+# Codex CLI runs inside the task sandbox from the pinned, statically linked
+# release (#2311). Its home and temp directory stay outside both the task
+# workdir and the cached install root; Codex refuses a home under TMPDIR.
+CODEX_VERSION = "0.146.0"
+CODEX_INSTALL_ROOT = "/tmp/loom-harness/codex"
+CODEX_HOME = "/tmp/loom-harness/codex-home"
+CODEX_TMPDIR = "/tmp/loom-harness/tmp"
+CODEX = HostedHarnessSpec(
+    name="codex",
+    execution_kind="workspace",
+    controller_module=SANDBOX_CONTROLLER_MODULE,
+    controller_phase="codex",
+    controller_image="harness-controller",
+    model="required",
+    gateway_protocol="openai-responses",
+    trace_format="codex",
+    required_driver_capabilities=frozenset({"exec", "exec_streaming", "upload", "download"}),
+    native_outputs=(
+        NativeOutput("agent/codex/events.jsonl", "artifacts/codex/events.jsonl", "agent_native", True),
+    ),
+    setup=HarnessSetup(
+        archive=PinnedArchive(
+            url=f"https://registry.npmjs.org/@openai/codex/-/codex-{CODEX_VERSION}-linux-x64.tgz",
+            integrity="sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==",
+            # package/vendor/x86_64-unknown-linux-musl/{bin,codex-path,codex-resources}
+            strip_components=3,
+        ),
+        sources=(InstallSource("registry.npmjs.org"),),
+        timeout_seconds=900,
+        install_root=CODEX_INSTALL_ROOT,
+        check=(f"{CODEX_INSTALL_ROOT}/bin/codex", "--version"),
+    ),
+)
+
+HOSTED_HARNESSES: Mapping[str, HostedHarnessSpec] = _index((DIRECT_COMPLETION, TERMINUS_2, ORACLE, CODEX))
 
 # Names and aliases the native execution path can run today. OpenHands and
 # Codex are supported product entries without a hosted spec yet (#2054).
@@ -286,6 +371,11 @@ def workspace_controller_phases() -> tuple[str, ...]:
 
 
 __all__ = [
+    "CODEX",
+    "CODEX_HOME",
+    "CODEX_INSTALL_ROOT",
+    "CODEX_TMPDIR",
+    "CODEX_VERSION",
     "DIRECT_COMPLETION",
     "GUEST_SANDBOX_DRIVER_CAPABILITIES",
     "HARNESS_SETUP_PHASE",
@@ -308,6 +398,7 @@ __all__ = [
     "InstallSource",
     "ModelUse",
     "NativeOutput",
+    "PinnedArchive",
     "Readiness",
     "TraceFormat",
     "harnesses_supporting",

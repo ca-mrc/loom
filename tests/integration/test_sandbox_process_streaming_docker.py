@@ -7,6 +7,7 @@ sidecar does, and the driver talks to it only through its Unix socket.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import PurePosixPath
 from uuid import uuid4
@@ -26,8 +27,9 @@ _IMAGE = "python:3.12-slim"
 _WORKDIR = PurePosixPath("/tmp")
 
 
-@pytest.fixture
-async def driver(native_binary, tmp_path):  # noqa: F811
+@contextlib.asynccontextmanager
+async def locked_down_sandbox(runtime_binary, tmp_path, *, exec_timeout_seconds: int = 60):
+    """A native task sidecar: unprivileged, no network, reached only by socket."""
     import docker
 
     client = docker.from_env()
@@ -35,10 +37,10 @@ async def driver(native_binary, tmp_path):  # noqa: F811
     socket.mkdir(mode=0o777)
     socket.chmod(0o2777)
     container = client.containers.run(
-        _IMAGE, ["--socket", "/socket/sandbox.sock", "--exec-timeout-seconds", "60"], detach=True,
-        entrypoint="/loom/bin/loom-sandbox-runtime", user="65532:65532",
+        _IMAGE, ["--socket", "/socket/sandbox.sock", "--exec-timeout-seconds", str(exec_timeout_seconds)],
+        detach=True, entrypoint="/loom/bin/loom-sandbox-runtime", user="65532:65532",
         network_mode="none", cap_drop=["ALL"], security_opt=["no-new-privileges"],
-        volumes={str(native_binary): {"bind": "/loom/bin/loom-sandbox-runtime", "mode": "ro"},
+        volumes={str(runtime_binary): {"bind": "/loom/bin/loom-sandbox-runtime", "mode": "ro"},
                  str(socket): {"bind": "/socket", "mode": "rw"}},
     )
     sandbox = ServiceSandboxDriver(socket / "sandbox.sock", capabilities=Capabilities(
@@ -59,6 +61,12 @@ async def driver(native_binary, tmp_path):  # noqa: F811
         await sandbox.stop(delete=True)
         container.remove(force=True)
         client.close()
+
+
+@pytest.fixture
+async def driver(native_binary, tmp_path):  # noqa: F811
+    async with locked_down_sandbox(native_binary, tmp_path) as sandbox:
+        yield sandbox
 
 
 async def _collect(stream) -> bytes:

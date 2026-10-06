@@ -15,12 +15,12 @@ from loom_service.agent_catalog import (
 )
 
 
-@pytest.mark.parametrize("name", ["direct-completion", "litellm", "terminus-2", "oracle"])
+@pytest.mark.parametrize("name", ["direct-completion", "litellm", "terminus-2", "oracle", "codex"])
 def test_natively_runnable_agents_have_no_error(name: str) -> None:
     assert native_execution_error(name) is None
 
 
-@pytest.mark.parametrize("name", ["codex", "openhands-sdk", "openhands"])
+@pytest.mark.parametrize("name", ["openhands-sdk", "openhands"])
 def test_unconnected_agents_explain_why(name: str) -> None:
     err = native_execution_error(name)
 
@@ -38,7 +38,7 @@ def test_unknown_agent_is_left_to_catalog_validation() -> None:
 
 
 def test_native_set_is_the_admission_set() -> None:
-    assert frozenset({"direct-completion", "litellm", "terminus-2", "oracle"}) == NATIVE_EXECUTION_AGENT_NAMES
+    assert frozenset({"direct-completion", "litellm", "terminus-2", "oracle", "codex"}) == NATIVE_EXECUTION_AGENT_NAMES
 
 
 def test_selection_agents_reads_models_dicts_and_single_selection() -> None:
@@ -57,12 +57,12 @@ def test_selection_agents_reads_models_dicts_and_single_selection() -> None:
 
 
 def test_native_selections_error_names_the_first_blocked_selection() -> None:
-    selections = [("combinations[0]", "oracle"), ("combinations[1]", "codex")]
+    selections = [("combinations[0]", "oracle"), ("combinations[1]", "openhands")]
 
     err = native_selections_error(NEBIUS_BACKEND, selections)
 
-    assert err is not None and err.startswith("combinations[1]: agent 'codex'")
+    assert err is not None and err.startswith("combinations[1]: agent 'openhands'")
 
 
 def test_other_backends_are_unaffected() -> None:
-    assert native_selections_error("docker", [("trial_config", "codex")]) is None
+    assert native_selections_error("docker", [("trial_config", "openhands")]) is None
