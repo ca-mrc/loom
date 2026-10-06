@@ -27,6 +27,73 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
     reason="requires explicitly disposable Kubernetes")
 
 
+@pytest.mark.timeout(180)
+def test_actual_platform_controller_does_not_block_zero_node_pool_but_bound_job_does(tmp_path):
+    from kubernetes import client
+
+    from loom_execution_capacity_collector.kubernetes import (
+        InClusterKubernetesCapacityReader,
+        KubernetesObservationError,
+    )
+    from loom_execution_capacity_collector.pool import PoolObservationScope
+
+    cluster = _start_k3s(ephemeral_storage_floor="1Gi")
+    try:
+        _, core, _ = _load_client(cluster)
+        apps = client.AppsV1Api(core.api_client)
+        batch = client.BatchV1Api(core.api_client)
+        namespace = "pool-controller-observation"
+        core.create_namespace({"metadata": {"name": namespace}})
+        deadline = time.monotonic() + 45
+        while not (nodes := core.list_node().items):
+            if time.monotonic() >= deadline:
+                raise AssertionError("disposable node did not register")
+            time.sleep(0.1)
+        node, = nodes
+        core.patch_node(node.metadata.name, {"metadata": {"labels": {"loom.nebius/node-role": "system"}}})
+        pod_spec = {"nodeSelector": {"loom.nebius/node-role": "system"}, "containers": [{
+            "name": "controller", "image": "busybox:1.36", "command": ["sleep", "3600"],
+            "resources": {"requests": {"cpu": "10m", "memory": "16Mi"}}}]}
+        apps.create_namespaced_deployment(namespace, {"apiVersion": "apps/v1", "kind": "Deployment",
+            "metadata": {"name": "platform-controller"}, "spec": {"replicas": 1,
+                "selector": {"matchLabels": {"app": "platform-controller"}},
+                "template": {"metadata": {"labels": {"app": "platform-controller"}}, "spec": pod_spec}}})
+
+        def scheduled(selector):
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                pods = core.list_namespaced_pod(namespace, label_selector=selector).items
+                if len(pods) == 1 and pods[0].spec.node_name == node.metadata.name:
+                    return pods[0]
+                time.sleep(0.1)
+            raise AssertionError("disposable platform Pod was not scheduled")
+
+        controller = scheduled("app=platform-controller")
+        environment, incarnation = uuid4(), uuid4()
+        scope = PoolObservationScope.model_validate({
+            "node_selector": {"loom.nebius/node-role": "execution"},
+            "environments": [{"environment_id": environment, "incarnation": incarnation,
+                "execution_namespace": namespace, "build_namespace": namespace + "-build", "target_ids": ["native"]}],
+            "jobs": []})
+        reader = InClusterKubernetesCapacityReader(core_api=core, apps_api=apps)
+        snapshot = asyncio.run(reader.capture_pool(scope=scope))
+        assert snapshot.active_nodes == snapshot.ready_nodes == 0
+        assert all(row.uid != controller.metadata.uid for row in snapshot.pending_pods)
+
+        job = batch.create_namespaced_job(namespace, {"apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": "misplaced-pool-work"}, "spec": {"template": {
+                "spec": {**copy.deepcopy(pod_spec), "restartPolicy": "Never"}}}})
+        scheduled("job-name=misplaced-pool-work")
+        bound = scope.model_dump()
+        bound["jobs"] = [{"reservation_id": uuid4(), "environment_id": environment, "incarnation": incarnation,
+            "namespace": namespace, "job_name": job.metadata.name, "job_uid": job.metadata.uid,
+            "target_id": "native", "workload_kind": "trial", "lease_id": "protected-work", "generation": 1}]
+        with pytest.raises(KubernetesObservationError, match="outside"):
+            asyncio.run(reader.capture_pool(scope=PoolObservationScope.model_validate(bound)))
+    finally:
+        cluster.stop()
+
+
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize('transition', ['fresh', 'repair'])
 def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, transition):

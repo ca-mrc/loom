@@ -1851,10 +1851,16 @@ that receipt. Labels alone, a lost create receipt, or a same-named replacement J
 never establish ownership. Reservation UUIDs form placement-only keys, so the
 same local claim ID in different environment databases cannot alias.
 
-Foreign resident Pods and terminating nonterminal Pods remain charged. Pending
-Pods are also charged unless an unregistered Pod has a hard node selector that
-contradicts the selected pool. Unknown affinity or tolerations do not establish
-exclusion; this can conservatively delay admission. Duplicate native node IDs,
+Foreign resident Pods and terminating nonterminal Pods remain charged. A
+registered namespace can also host platform controllers and collectors; namespace
+membership alone does not place those processes on execution nodes. Pending Pods
+are charged unless a Pod without a protected gateway Job receipt has a hard node
+selector that contradicts the selected pool. Such explicitly excluded Pods may
+run outside the pool, including in registered namespaces. A protected Job UID
+keeps its Pods in scope even with conflicting selectors or damaged ownership
+labels. Actual resident usage is always charged regardless of selector.
+Unknown affinity or tolerations do not establish exclusion; this can conservatively
+delay admission. Duplicate native node IDs,
 Pod UIDs or live Pods for one reservation fail closed, as does registered work
 scheduled outside the pool. The existing resource arithmetic retains Pod slots,
 restartable init sidecars and init peaks. The pool reader preserves Pod-level
