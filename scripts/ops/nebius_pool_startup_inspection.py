@@ -211,9 +211,7 @@ def _collector_completion(kube: Kubectl, pods: list[dict[str, Any]], *, namespac
                         or any(type(row.get('state', {}).get('terminated', {}).get('exitCode')) is not int
                             or row['state']['terminated']['exitCode'] != 0 for row in observed)):
                     raise ValueError
-                if any(row.get(key) != desired.get(key)
-                        for row, desired in zip(actual, wanted, strict=True)
-                        for key in ('name', 'image', 'command', 'args', 'env', 'envFrom', 'volumeMounts')):
+                if actual != wanted:
                     raise ValueError
             current = kube.get('pod', pod['metadata']['name'], namespace)
             if (current != pod or _parent(kube, current, 'Job') != job
