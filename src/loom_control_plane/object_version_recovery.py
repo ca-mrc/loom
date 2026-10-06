@@ -305,8 +305,17 @@ def _plan(
     _require(len(json.dumps([storage, index]).encode()) <= MAX_METADATA_BYTES, "metadata_limit_exceeded")
     _require(metadata_digest(storage) == request.expected_storage_sha256
         and metadata_digest(index) == request.expected_index_sha256, "published_metadata_drift")
+    # Legacy schema-1 indexes omitted this redundant field. The retained lease,
+    # canonical storage and every exact object path still bind the attempt below.
+    # Preserve the omission; an explicit value must never be inferred or coerced.
+    index_attempt = index.get("attempt")
+    index_attempt_matches = (
+        type(index_attempt) is int and index_attempt == lease.attempt
+        if "attempt" in index else index.get("schema_version") == "1"
+    )
     _require(storage.get("schema_version") == "loom.canonical-trial-bundle-storage.v1"
-        and storage.get("attempt") == index.get("attempt") == lease.attempt
+        and type(storage.get("attempt")) is int
+        and storage.get("attempt") == lease.attempt and index_attempt_matches
         and storage.get("source_upload_session_id") == str(state.upload.id)
         and index.get("trial_id") == str(trial.id) and index.get("team_id") == str(trial.team_id)
         and index.get("task_id") == trial.task_id, "published_owner_conflict")

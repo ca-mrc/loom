@@ -261,6 +261,12 @@ manifest, Artifact record and runtime producer must agree; source-spool objects
 need not still exist. This operation adopts a **verified surviving
 version**; it cannot prove the original upload's missing version receipt.
 
+Legacy trajectory indexes with string `schema_version: "1"` may omit `attempt`.
+Recovery preserves that omission and verifies the attempt against the retained
+lease, canonical storage and every exact artifact/trajectory path. An explicitly
+published attempt must be an integer matching the lease; null, booleans, strings
+and conflicting attempts are rejected. Other index schemas cannot omit it.
+
 1. Read the complete Artifact `storage`, Trial `trajectory_index`, owning lease,
    source upload identity and exact lifecycle registry IDs using authorized
    inspection. Preserve the original outcome and retention evidence. Select at

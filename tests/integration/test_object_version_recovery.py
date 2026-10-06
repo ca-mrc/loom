@@ -18,6 +18,7 @@ from botocore.exceptions import ClientError
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm.attributes import flag_modified
 
 from loom.db.schema import (
     AdminAuditEvent,
@@ -149,6 +150,8 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             for rows in (storage["files"], storage["source_evidence"], index["artifacts"]):
                 for row in rows:
                     row.pop("version_id")
+        if getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("legacy_index_attempt"):
+            index.pop("attempt")
         state = "running" if getattr(request.node, "callspec", SimpleNamespace(params={})).params.get(
             "change") == "nonterminal" else "failed"
         trial.state, trial.failure_reason, trial.result = state, "verifier_error", {"reward": 0}
@@ -214,7 +217,10 @@ async def snapshot(r):
 
 
 @pytest.mark.parametrize("historical_fields", [False, True])
-async def test_preview_apply_and_replay_repair_every_published_mirror(recovery, historical_fields):
+@pytest.mark.parametrize("legacy_index_attempt", [False, True])
+async def test_preview_apply_and_replay_repair_every_published_mirror(
+    recovery, historical_fields, legacy_index_attempt,
+):
     r = recovery
     before = await snapshot(r)
     response = await r.client.post(URL, headers=HEADERS, json=r.payload)
@@ -234,6 +240,7 @@ async def test_preview_apply_and_replay_repair_every_published_mirror(recovery, 
     assert after[1]["artifacts"][0]["version_id"] == r.versions[0]
     assert after[1]["trajectory_version_id"] == r.versions[2]
     assert after[1]["atif_version_id"] == r.versions[3]
+    assert ("attempt" not in after[1]) is legacy_index_attempt
     assert after[2] == r.versions
     assert len(after[3]) == 1
     assert str(after[3][0][0]) == r.payload["operation_id"]
@@ -242,6 +249,70 @@ async def test_preview_apply_and_replay_repair_every_published_mirror(recovery, 
     assert replay.status_code == 200, replay.text
     assert replay.json()["status"] == "replayed"
     assert await snapshot(r) == after
+
+
+@pytest.mark.parametrize("index_attempt", [None, True, False, 1.0, "1", 0, 2])
+async def test_explicit_index_attempt_must_be_exact_integer(recovery, index_attempt):
+    r = recovery
+    async with r.sessions() as session:
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        trial.trajectory_index = {**trial.trajectory_index, "attempt": index_attempt}
+        flag_modified(trial, "trajectory_index")
+        r.payload["expected_index_sha256"] = digest(trial.trajectory_index)
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "published_owner_conflict"
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("storage_attempt", [True, 1.0])
+async def test_legacy_index_requires_integer_canonical_storage_attempt(recovery, storage_attempt):
+    r = recovery
+    async with r.sessions() as session:
+        artifact = await session.get(Artifact, UUID(r.payload["artifact_id"]))
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        artifact.storage = {**artifact.storage, "attempt": storage_attempt}
+        flag_modified(artifact, "storage")
+        trial.trajectory_index = {key: value for key, value in trial.trajectory_index.items() if key != "attempt"}
+        r.payload["expected_storage_sha256"] = digest(artifact.storage)
+        r.payload["expected_index_sha256"] = digest(trial.trajectory_index)
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "published_owner_conflict"
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("change", ["schema", "trial", "team", "task", "trajectory", "atif", "bundle"])
+async def test_legacy_index_attempt_omission_preserves_identity_guards(recovery, change):
+    r = recovery
+    async with r.sessions() as session:
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        artifact = await session.get(Artifact, UUID(r.payload["artifact_id"]))
+        index = copy.deepcopy(trial.trajectory_index)
+        index.pop("attempt")
+        if change == "schema":
+            index["schema_version"] = "2"
+        elif change in {"trial", "team", "task"}:
+            index[change + "_id"] = str(uuid4())
+        elif change in {"trajectory", "atif"}:
+            index[change + "_uri"] = index[change + "_uri"].replace("/attempts/1/", "/attempts/2/")
+        else:
+            storage = copy.deepcopy(artifact.storage)
+            storage["files"][0]["key"] = storage["files"][0]["key"].replace("/attempts/1/", "/attempts/2/")
+            artifact.storage = storage
+            index["artifacts"] = copy.deepcopy(storage["files"])
+            r.payload["expected_storage_sha256"] = digest(storage)
+        trial.trajectory_index = index
+        r.payload["expected_index_sha256"] = digest(index)
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
 
 
 async def applying(r):
