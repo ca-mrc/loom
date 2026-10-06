@@ -1399,6 +1399,50 @@ a new transition needs new protected authority. Actual concurrent-owner builds,
 tasks/results, isolation, teardown/redeploy and scale-to-zero are separate live
 acceptance requirements.
 
+### Repair an original source-spool initializer before opening
+
+For a historical `v1` application delivery stopped at runtime qualification, use
+the separate protected `management-pool-repair-preflight`,
+`management-pool-repair-install`, and `management-pool-repair-rollback` actions.
+This is a fixed source-spool correction, not an arbitrary manifest patch or a
+replacement pool registration. All startup writes must be settled, admission
+opening and guard release must still be prepared, and there must be no recovery
+or completion descendant when repair is first anchored.
+
+Prepare a new `loom.nebius-pool-startup-repair-operation.v1` envelope with a
+distinct nonzero `operation_id`, the retained `original_operation_id`, and a new
+integrated `source_sha` equal to its tooling `candidate`. Its private paths are
+`nebius-management/pool-repair/<uuid>/{inputs.json,state,anchor}`. The private
+`loom.nebius-pool-startup-repair-private-inputs.v1` document contains the exact
+original operation metadata and a `binding` of the new operation/source to the
+original metadata's canonical JSON SHA-256, original input SHA-256, and retained
+`cutover.json`, `startup.json`, and prepared `activation.json` SHA-256 values.
+Original inputs, image digests, pool identity, credentials and journals are not
+replaced. Preserve the original authority bundle as evidence.
+
+Build and byte-qualify the new tooling bundle, then install its grant through the
+reviewed operator-only installer. Bind its metadata to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_OPERATION_JSON` and its dedicated key to
+`NEBIUS_MANAGEMENT_POOL_REPAIR_SSH_KEY` in the protected environment. Neither
+value falls back to the original pool or management authority. Preflight performs
+read-only qualification; install takes the original operation's dispatch lock.
+
+Repair stages one immutable application ConfigMap, stops and proves actual Pod
+drain for only the manager, changes the fixed source initializer and spool path
+to `/run/loom-application-source/spool`, then restarts it. Each write has durable
+intent and exact object identity/version checks; an uncertain response permits
+readback, not a new write. The original prepared activation bytes are retained in
+the repair anchor. Normal runtime, settings, capacity and gateway checks must
+then pass before the original activation can advance and open admission.
+
+A `pending` repair result or `pool_startup_repair` failure is not readiness.
+Retain all evidence and inspect the named phase. Repair rollback fences uncertain
+manager writes before the existing stop/restore/reopen sequence. Completion
+records the repair ancestry and both operation identities in the protected
+report, but still reports `acceptance_verified: false`. Collector failures and
+concurrent-owner acceptance require their own evidence; a repaired manager is
+not proof that either has passed.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

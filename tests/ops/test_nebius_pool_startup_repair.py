@@ -724,7 +724,8 @@ def test_management_entry_runs_repair_and_reports_both_identities(private_repair
             if action == 'blocked':
                 raise operation_runner.PoolOperationError('startup_repair') from RuntimeError('private-payload')
             yield SimpleNamespace(request=original.request, state_dir=state, anchor_dir=anchor, refresh=None,
-                checks=SimpleNamespace(), guards=SimpleNamespace(telemetry_report=lambda: []))
+                checks=SimpleNamespace(), guards=SimpleNamespace(telemetry_report=lambda: {
+                    'status': 'available', 'checks': 1, 'unavailable': 0, 'reasons': []}))
         finally:
             connection_events.append('close')
 
@@ -736,7 +737,7 @@ def test_management_entry_runs_repair_and_reports_both_identities(private_repair
     report = json.loads(capsys.readouterr().out)
     assert report['operation_id'] == operation['operation_id']
     assert report['original_operation_id'] == original.operation['operation_id']
-    assert report['status'] == ('blocked' if action == 'blocked' else 'pool_cutover_completed')
+    assert report['status'] == ('blocked' if action == 'blocked' else 'pool_cutover_completed'), report
     if action == 'blocked':
         assert report['stage'] == 'pool_startup_repair'
         assert api.calls == []
