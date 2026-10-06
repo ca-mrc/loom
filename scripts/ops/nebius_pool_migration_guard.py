@@ -803,7 +803,8 @@ class KubectlPoolGuardAPI:
                 component = 'actuator'
             else:
                 raise ValueError
-            machine, = (row for row in self.request.registration.spec.machines if row.participant_id == target.participant_id)
+            machine, = (row for row in self.request.registration.spec.machines
+                if row.participant_id == target.participant_id and row.workload_scope == 'environment')
             wanted = expected_pool_runtime_settings(component, expected,
                 token_sha256=None if component == 'service' else machine.token_sha256)
             if component == 'service':
