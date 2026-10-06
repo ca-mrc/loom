@@ -222,6 +222,14 @@ def repaired_startup_options(request: PoolCutoverRequest, *, state: Path, anchor
     return {**choices, key: _manager_options(documents, record)}
 
 
+def qualify_completed_startup_repair(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> None:
+    """A partial repair is a recovery projection, never an activation target."""
+    if startup_repair_exists(request, state=state, anchor=anchor):
+        _, _, _, record = _repair_record(request, state=state, anchor=anchor)
+        if record is None or any(row['phase'] != 'applied' for row in record['phases'].values()):
+            raise ValueError('pool_startup_repair_incomplete')
+
+
 def repair_pool_startup(*, request: PoolCutoverRequest, binding: PoolStartupRepairBinding,
         api: PoolStartupRepairAPI, state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Stop/drain/replace/start only the manager; every uncertain write is observed."""
