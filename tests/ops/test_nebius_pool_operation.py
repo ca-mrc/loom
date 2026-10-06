@@ -149,6 +149,27 @@ def test_fixed_operation_rolls_back_partial_startup_and_resumes_pending_legacy_r
     assert not [call for call in runtime.calls if call[0] == 'open']
 
 
+@pytest.mark.timeout(600)
+def test_shutdown_pending_receipt_distinguishes_fixed_reasons_without_exporting_unknown_text(operation, monkeypatch):
+    from scripts.ops import nebius_pool_operation as target
+
+    state = operation
+    state.startup_failure = 'before'
+    assert state.run()['phase'] == 'startup'
+    operation_id = str(state.parent.request.fencing.retirement.migration.registration.spec.operation_id)
+    for reason in ('pending_pool_cleanup', 'pending_shutdown_update',
+            'pending_shutdown_outcome', 'pending_successor_drain', 'pending_private-marker'):
+        monkeypatch.setattr(target, 'stop_pool_successors',
+            lambda status=reason, **kwargs: {'status': status, 'operation_id': operation_id})
+        result = state.run('rollback')
+        assert result['status'] == 'pending' and result['phase'] == 'shutdown'
+        if reason == 'pending_private-marker':
+            assert 'pending_reason' not in result and 'private-marker' not in str(result)
+        else:
+            assert result['pending_reason'] == reason
+        assert not (state.parent.state_dir / 'completion.json').exists()
+
+
 def test_fixed_operation_refuses_concurrent_dispatch_or_unknown_action(operation):
     from scripts.ops import nebius_certificates as private_state
     from scripts.ops.nebius_pool_operation import PoolOperationError
