@@ -65,6 +65,23 @@ def image_repair_case(prepared_repair):
     return context, api, state, anchor, binding
 
 
+def runtime_binding(fixture, target, predecessor=None, *, image_digit="9"):
+    from scripts.ops import nebius_pool_manager_image_history as history
+
+    # A missing versioned binding is an explicit unsupported behavior, not a
+    # fixture/import error; the retained legacy model must stay strict.
+    assert hasattr(history, "RuntimeImageRepairBinding"), "targeted image corrections are unsupported"
+    binding = fixture[-1]
+    data = binding.model_dump(mode="json")
+    data.update(schema_version="loom.nebius-pool-runtime-image-binding.v2", target=target,
+        operation_id=str(uuid4()), ordinal=1 if predecessor is None else predecessor.binding.ordinal + 1,
+        predecessor_sha256=None if predecessor is None else hashlib.sha256(predecessor.path.read_bytes()).hexdigest())
+    component = "execution_actuator" if target == "collector" else "service"
+    image = data["candidate"]["images"][component]["image_ref"]
+    data["candidate"]["images"][component]["image_ref"] = image.split("@")[0] + "@sha256:" + image_digit * 64
+    return history.RuntimeImageRepairBinding.model_validate(data)
+
+
 def entry(fixture):
     from scripts.ops.nebius_pool_manager_image_history import manager_image_entry
 
@@ -107,6 +124,105 @@ def test_anchored_enrollment_prefix_can_be_loaded_without_inventing_write_intent
     assert load_manager_image_chain(context.request, state=state, anchor=anchor) == (loaded,)
     persist(loaded)
     assert all(row["phase"] == "prepared" for row in entry(image_repair_case).record["phases"].values())
+
+
+@pytest.mark.parametrize("target,kind,component", [
+    ("collector", "CronJob", "execution_actuator"), ("gateway", "Deployment", "service"),
+])
+def test_targeted_image_entry_uses_retained_workload_and_exact_component(image_repair_case, target, kind, component):
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_manager_image_history import ManagerImageRepairBinding
+    from scripts.ops.nebius_pool_startup import closed_startup_documents, startup_workload_options
+
+    context, api, state, anchor, _ = image_repair_case
+    first = entry(image_repair_case)
+    persist(first, complete=True)
+    retained = first.path.read_bytes(), first.marker.read_bytes()
+    binding = runtime_binding(image_repair_case, target, first)
+    with pytest.raises(ValueError):
+        ManagerImageRepairBinding.model_validate(binding.model_dump())
+    value = entry((context, api, state, anchor, binding))
+    assert value.documents[0]["kind"] == kind
+    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+    key = _key(value.documents[0])
+    assert key != _key(context.request.manager)
+    assert value.documents[0] == targets[key]
+    assert value.documents[0]["metadata"]["name"] == (
+        "loom-execution-capacity-collector" if target == "collector" else "loom-pool-gateway")
+    desired = copy.deepcopy(value.documents[0])
+    pod = (desired["spec"]["template"]["spec"] if kind == "Deployment"
+        else desired["spec"]["jobTemplate"]["spec"]["template"]["spec"])
+    for container in (*pod["containers"], *pod.get("initContainers", [])):
+        container["image"] = binding.candidate["images"][component]["image_ref"]
+    assert value.documents[-1] == desired
+    field = "suspend" if kind == "CronJob" else "replicas"
+    assert [row["spec"][field] for row in value.documents] == (
+        [False, False, True, True, False] if kind == "CronJob" else [1, 1, 0, 0, 1])
+    persist(value, complete=True)
+    options = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
+    assert options[key] == (desired,)
+    assert options[_key(context.request.manager)] == (first.documents[-1],)
+    assert retained == (first.path.read_bytes(), first.marker.read_bytes())
+    assert closed[key]["metadata"]["uid"] == desired["metadata"]["uid"]
+
+
+def test_mixed_image_history_folds_each_key_and_fences_only_pending_tail(image_repair_case):
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
+    from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents, startup_workload_options
+    from scripts.ops.nebius_pool_startup_fence import _fence_sources
+
+    context, api, state, anchor, _ = image_repair_case
+    manager = entry(image_repair_case)
+    persist(manager, complete=True)
+    collector = entry((context, api, state, anchor, runtime_binding(image_repair_case, "collector", manager)))
+    persist(collector, complete=True)
+    gateway = entry((context, api, state, anchor, runtime_binding(image_repair_case, "gateway", collector)))
+    persist(gateway, complete=True)
+    last = entry((context, api, state, anchor, runtime_binding(image_repair_case, "collector", gateway, image_digit="a")))
+    assert last.documents[0] == collector.documents[-1]
+    persist(last)
+    options = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
+    assert options[_key(manager.documents[0])] == (manager.documents[-1],)
+    assert options[_key(gateway.documents[0])] == (gateway.documents[-1],)
+    assert options[_key(collector.documents[0])] == (collector.documents[-1],)
+    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+    _, startup = _startup_record(context.request, state=state, anchor=anchor, closed=closed, targets=targets)
+    sources, history = _fence_sources(context.request, state=state, anchor=anchor,
+        closed=closed, targets=targets, startup=startup)
+    for completed in (manager, collector, gateway):
+        assert sources[_key(completed.documents[0])] == (None, (completed.documents[-1],))
+    assert history["manager_image_sha256"] is not None
+    assert len(load_manager_image_chain(context.request, state=state, anchor=anchor)) == 4
+
+
+def test_targeted_image_correction_rejects_first_enrollment(image_repair_case):
+    binding = runtime_binding(image_repair_case, "collector")
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((*image_repair_case[:-1], binding))
+
+
+@pytest.mark.parametrize("damage", ["unknown_target", "unknown_version", "foreign_registry", "same_image"])
+def test_targeted_image_correction_rejects_unqualified_target(image_repair_case, damage):
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    context, api, state, anchor, _ = image_repair_case
+    first = entry(image_repair_case)
+    persist(first, complete=True)
+    binding = runtime_binding(image_repair_case, "collector", first)
+    if damage in {"unknown_target", "unknown_version"}:
+        binding = binding.model_copy(update={"target" if damage == "unknown_target" else "schema_version": "unknown"})
+    else:
+        candidate = copy.deepcopy(binding.candidate)
+        if damage == "foreign_registry":
+            candidate["images"]["execution_actuator"]["image_ref"] = "foreign/collector@sha256:" + "a" * 64
+        else:
+            _, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+            collector, = (row for row in targets.values() if row["kind"] == "CronJob")
+            candidate["images"]["execution_actuator"]["image_ref"] = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
+        binding = binding.model_copy(update={"candidate": candidate})
+    with pytest.raises(ValueError, match="manager_image"):
+        entry((context, api, state, anchor, binding))
 
 
 @pytest.mark.parametrize("damage", ["activation", "source_repair", "ordinal", "prior", "foreign_image", "signature"])
