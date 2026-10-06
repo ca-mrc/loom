@@ -396,6 +396,50 @@ def selected_image_case(fixture, target):
     return (*fixture[:-1], runtime_binding(fixture, target, entry(fixture)))
 
 
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+def test_image_switch_uses_latest_qualified_version_after_preview(image_repair_case, target):
+    from scripts.ops.nebius_ingress_stage import _key
+
+    fixture = selected_image_case(image_repair_case, target)
+
+    class StatusUpdatingAPI(ImageAPI):
+        def preview_repair(self, phase, before, desired):
+            result = super().preview_repair(phase, before, desired)
+            # A controller updates status after dry-run succeeds. The subsequent
+            # qualified observation sees this version; do not discard it.
+            current = self.startup.documents[_key(before)]
+            current["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 100)
+            return result
+
+    api = StatusUpdatingAPI(fixture)
+    assert switch(fixture, api)["status"] == "pool_manager_image_repaired_closed"
+    assert api.calls == ["isolate", "stop", "template", "start"]
+    assert all(row["phase"] == "applied" for row in entry(fixture).record["phases"].values())
+
+
+@pytest.mark.parametrize("drift", ["uid", "spec"])
+def test_image_switch_fresh_observation_rejects_identity_or_spec_drift(image_repair_case, drift):
+    from scripts.ops.nebius_ingress_stage import _key
+
+    fixture = selected_image_case(image_repair_case, "collector")
+
+    class ChangedWorkloadAPI(ImageAPI):
+        def preview_repair(self, phase, before, desired):
+            result = super().preview_repair(phase, before, desired)
+            current = self.startup.documents[_key(before)]
+            if drift == "uid":
+                current["metadata"]["uid"] = str(uuid4())
+            else:
+                current["spec"]["schedule"] = "0 * * * *"
+            return result
+
+    api = ChangedWorkloadAPI(fixture)
+    with pytest.raises(ValueError, match="manager_image"):
+        switch(fixture, api)
+    assert api.calls == []
+    assert all(row["phase"] == "prepared" for row in entry(fixture).record["phases"].values())
+
+
 def test_manager_image_switch_waits_for_actual_drain(image_repair_case):
     api = ImageAPI(image_repair_case)
     api.drained = False
