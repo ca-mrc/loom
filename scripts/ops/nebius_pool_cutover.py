@@ -160,7 +160,8 @@ def _cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     else:
         delivered = render_application_build_delivery(before=application.before, pool=spec,
             active=request.manager, candidate=migration.registration.candidate,
-            profile=application.profile, repo_root=application.repo_root)
+            profile=application.profile, repo_root=application.repo_root,
+            source_delivery_version=application.source_delivery_version)
         manager = delivered.deployment
         application_configuration = delivered.configuration
     runtime = {_key(request.manager): manager}
