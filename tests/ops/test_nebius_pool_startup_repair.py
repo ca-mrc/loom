@@ -369,3 +369,118 @@ def test_completed_repair_binds_ancestry_and_remains_a_valid_refresh_predecessor
     child.write_bytes(child.read_bytes() + b'\n')
     with pytest.raises(ValueError):
         load_completed_pool(predecessor, original=context.original)
+
+
+@pytest.mark.parametrize('phase', ['stop', 'template', 'start', 'complete'])
+@pytest.mark.parametrize('late_commit', [False, True])
+def test_rollback_settles_every_repair_projection_before_successor_shutdown(prepared_repair, phase, late_commit):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, _, repair_api, state, anchor = prepared_repair
+    if phase != 'complete':
+        repair_api.failure = (phase, 'before')
+    repair(prepared_repair)
+    pending = repair_api.pending
+    if late_commit and pending is not None:
+        before, desired = pending
+        desired = copy.deepcopy(desired)
+        desired['metadata'].update(uid=before['metadata']['uid'],
+            resourceVersion=str(int(before['metadata']['resourceVersion']) + 1))
+        repair_api.startup.documents[_key(before)] = desired
+    api = ShutdownAPI((context.request, None, None, repair_api.startup, None, state.parent))
+    api.state = state
+    assert advance_pool_activation(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor, cancel=True)['status'] == 'pool_activation_cancelled'
+    assert fence_pool_startup(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor)['status'] == 'startup_writes_fenced'
+    if pending is not None:
+        assert api.read_workload(_key(context.request.manager))['metadata']['resourceVersion'] != pending[0]['metadata']['resourceVersion']
+    assert api.fence_calls == ([_key(context.request.manager)] if pending is not None and not late_commit else [])
+    assert stop_pool_successors(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor)['status'] == 'pool_successors_stopped'
+    assert api.read_workload(_key(context.request.manager))['spec']['replicas'] == 0
+    with pytest.raises(ValueError):
+        repair(prepared_repair)
+
+
+@pytest.mark.parametrize('failure', ['before', 'after', 'conflict'])
+def test_uncertain_repair_fence_does_not_enable_shutdown_or_duplicate_writes(prepared_repair, failure):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, _, repair_api, state, anchor = prepared_repair
+    repair_api.failure = ('start', 'before')
+    repair(prepared_repair)
+    api = ShutdownAPI((context.request, None, None, repair_api.startup, None, state.parent))
+    api.state, api.fence_failure = state, failure
+    advance_pool_activation(request=context.request, api=api, state_dir=state, anchor_dir=anchor, cancel=True)
+    arguments = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    first = fence_pool_startup(**arguments)
+    api.fence_failure = None
+    if failure == 'before':
+        assert first['status'] == 'pending_startup_fence'
+        assert fence_pool_startup(**arguments) == first and len(api.fence_calls) == 1
+        with pytest.raises(ValueError):
+            stop_pool_successors(**arguments)
+        # Either original request can win. A later resourceVersion invalidates
+        # both old-version CAS requests without permitting a second fence write.
+        before, desired = repair_api.pending
+        desired['metadata'].update(uid=before['metadata']['uid'],
+            resourceVersion=str(int(before['metadata']['resourceVersion']) + 1))
+        repair_api.startup.documents[_key(before)] = desired
+    assert fence_pool_startup(**arguments)['status'] == 'startup_writes_fenced'
+    assert len(api.fence_calls) == (2 if failure == 'conflict' else 1)
+    assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
+
+
+@pytest.mark.parametrize('phase', ['stop', 'start'])
+def test_repair_fence_https_tests_exact_pending_uid_version_metadata_and_spec(prepared_repair, phase):
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+
+    context, _, repair_api, state, anchor = prepared_repair
+    repair_api.failure = (phase, 'before')
+    repair(prepared_repair)
+    remote = repair_api.activation
+    advance_pool_activation(request=context.request, api=remote, state_dir=state, anchor_dir=anchor, cancel=True)
+    key = _key(context.request.manager)
+    writes = []
+
+    def respond(message):
+        assert message.method == 'PATCH'
+        assert message.url.path == '/apis/apps/v1/namespaces/' + context.request.manager['metadata']['namespace'] + '/deployments/loom-service'
+        before = remote.read_workload(key)
+        patches = json.loads(message.content)
+        assert patches[:4] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': before['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': before['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+            {'op': 'test', 'path': '/spec', 'value': before['spec']}]
+        assert len(patches) == 5 and patches[-1]['op'] == 'add' and patches[-1]['path'] == '/metadata/annotations'
+        desired = copy.deepcopy(before)
+        desired['metadata']['annotations'] = patches[-1]['value']
+        if message.url.params:
+            assert dict(message.url.params) == {'dryRun': 'All'}
+        else:
+            assert json.loads((state / 'startup-fence.json').read_bytes())['workloads'][key]['phase'] == 'intent'
+            desired['metadata']['resourceVersion'] = str(int(before['metadata']['resourceVersion']) + 1)
+            remote.startup.documents[key] = desired
+            writes.append(key)
+        return httpx.Response(200, json=desired)
+
+    with httpx.Client(base_url='https://kubernetes.invalid', transport=httpx.MockTransport(respond)) as client:
+        parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, client=client, _scope=lambda: None)
+        api = HTTPSPoolActivationAPI(parent=parent)
+        api.verify_retained, api.read_workload = remote.verify_retained, remote.read_workload
+        api.pool_state, api.guard_state = remote.pool_state, remote.guard_state
+        assert fence_pool_startup(request=context.request, api=api, state_dir=state, anchor_dir=anchor)['status'] == 'startup_writes_fenced'
+    assert writes == [key]
