@@ -7,12 +7,26 @@ from dataclasses import replace
 import pytest
 from tests.ops.test_nebius_management_refresh import (
     application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     build_inputs as build_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     builder_management_inputs as builder_management_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     builder_refresh_request as builder_refresh_request,
+)
+from tests.ops.test_nebius_management_refresh import (
     management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     runtime_inputs as runtime_inputs,
+)
+from tests.ops.test_nebius_management_refresh import (
     source_management_inputs as source_management_inputs,
 )
 
