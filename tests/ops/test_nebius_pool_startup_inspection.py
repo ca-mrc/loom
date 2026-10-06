@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import traceback
 from uuid import uuid4
 
 import pytest
@@ -189,3 +190,87 @@ def test_startup_requests_are_bounded_even_with_many_stale_candidates(cluster):
     cluster.lists["pods"] = [copy.deepcopy(stale) for _ in range(100)]
     assert inspect(cluster)["workloads"] == []
     assert sum(call[:2] == ("get", "replicaset") for call in cluster.calls) <= 3
+
+
+def test_recovered_manager_is_not_a_current_startup_failure(cluster):
+    cluster.manager_pod["status"]["containerStatuses"][0].update(ready=True, state={"running": {}})
+    assert all(row["role"] != "manager" for row in inspect(cluster)["workloads"])
+
+
+def test_old_replicaset_with_same_image_but_changed_volume_is_not_current(cluster):
+    cluster.manager["spec"]["template"]["spec"]["volumes"] = [{"name": "source", "configMap": {"name": "new-config"}}]
+    assert all(row["role"] != "manager" for row in inspect(cluster)["workloads"])
+
+
+def test_real_python_exception_group_is_reduced_to_fixed_public_symbols(cluster):
+    source = compile('raise ExceptionGroup("private-group", [ValueError("private-value"), PermissionError("private-path")])',
+        "/app/src/loom_service/application_management/service_runtime.py", "exec")
+    try:
+        exec(source, {})
+    except ExceptionGroup as exc:
+        cluster.log = "".join(traceback.format_exception(exc))
+    result = inspect(cluster)
+    diagnostic = result["workloads"][0]["diagnostic"]
+    assert set(diagnostic["errors"]) == {"ExceptionGroup", "ValueError", "PermissionError"}
+    assert diagnostic["locations"] == [{"component": "application_runtime", "line": 1}]
+    assert "private" not in json.dumps(result)
+
+
+def test_restart_during_log_read_is_not_attributed_to_observed_instance(cluster, monkeypatch):
+    original = cluster.run
+
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if args[0] == "logs":
+            cluster.manager_pod["status"]["containerStatuses"][0]["restartCount"] += 1
+        return result
+
+    monkeypatch.setattr(cluster, "run", changed)
+    manager = next(row for row in inspect(cluster)["workloads"] if row["role"] == "manager")
+    assert manager["diagnostic"] == {"status": "unavailable"}
+
+
+@pytest.mark.parametrize("mutation", [None, "unexpected_mount", "wrong_projection", "not_requested"])
+def test_collector_standard_serviceaccount_projection_only(cluster, mutation):
+    templates = [cluster.job["spec"]["template"]["spec"],
+        cluster.cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]]
+    for spec in templates:
+        spec["automountServiceAccountToken"] = mutation != "not_requested"
+    pod = cluster.collector_pod["spec"]
+    name = "kube-api-access-abcde"
+    pod["volumes"] = [{"name": name, "projected": {"defaultMode": 420, "sources": [
+        {"serviceAccountToken": {"expirationSeconds": 3607, "path": "token"}},
+        {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+        {"downwardAPI": {"items": [{"path": "namespace", "fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}]}},
+    ]}}]
+    pod["containers"][0]["volumeMounts"] = [{"name": name, "readOnly": True,
+        "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount"}]
+    if mutation == "wrong_projection":
+        pod["volumes"][0]["projected"]["sources"][1]["configMap"]["name"] = "private-config"
+    elif mutation == "unexpected_mount":
+        pod["containers"][0]["volumeMounts"][0]["mountPath"] = "/private"
+    result = inspect(cluster)
+    collector = [row for row in result["workloads"] if row["role"] == "collector"]
+    assert bool(collector) == (mutation is None)
+    if collector:
+        assert collector[0]["diagnostic"]["status"] == "observed"
+
+
+@pytest.mark.parametrize("role", ["manager", "collector"])
+@pytest.mark.parametrize("change", ["annotation", "label", "native_labels"])
+def test_template_metadata_separates_old_rollouts_from_native_controller_labels(cluster, role, change):
+    parent = cluster.rs if role == "manager" else cluster.job
+    root = cluster.manager["spec"] if role == "manager" else cluster.cron["spec"]["jobTemplate"]["spec"]
+    if change == "annotation":
+        root["template"]["metadata"] = {"annotations": {"kubectl.kubernetes.io/restartedAt": "new-revision"}}
+        parent["spec"]["template"]["metadata"] = {"annotations": {"kubectl.kubernetes.io/restartedAt": "old-revision"}}
+    elif change == "label":
+        root["template"]["metadata"] = {"labels": {"configuration-version": "new"}}
+        parent["spec"]["template"]["metadata"] = {"labels": {"configuration-version": "old"}}
+    else:
+        labels = {"pod-template-hash": "abc123"} if role == "manager" else {
+            "batch.kubernetes.io/controller-uid": parent["metadata"]["uid"],
+            "controller-uid": parent["metadata"]["uid"], "job-name": parent["metadata"]["name"],
+            "batch.kubernetes.io/job-name": parent["metadata"]["name"]}
+        parent["spec"]["template"]["metadata"] = {"labels": labels}
+    assert any(row["role"] == role for row in inspect(cluster)["workloads"]) == (change == "native_labels")
