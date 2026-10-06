@@ -37,7 +37,7 @@ def runtime_image_repair_operation(tmp_path):
     return repair_operation(tmp_path, 'v3')
 
 
-@pytest.mark.parametrize('version', ['v2', 'v3'])
+@pytest.mark.parametrize('version', ['v2', 'v3', 'v4'])
 def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path, version):
     import hashlib
 

@@ -586,6 +586,96 @@ def test_image_entry_binds_original_history_and_packaged_schema_before_connectio
     assert Path(original.operation["inputs_path"]).read_bytes() == before
 
 
+def tooling_continuation(private_image_repair, image_repair_case, target="manager"):
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    previous, payload, proof, _ = private_image_repair
+    previous, payload = copy.deepcopy(previous), copy.deepcopy(payload)
+    fixture = image_repair_case
+    if target != "manager":
+        persist(entry(fixture), complete=True)
+        binding = runtime_binding(fixture, target, entry(fixture))
+        fixture = (*fixture[:-1], binding)
+        old_id = previous["operation_id"]
+        previous.update(schema="loom.nebius-pool-startup-repair-operation.v3", operation_id=str(binding.operation_id))
+        for name in ("inputs_path", "state_dir", "anchor_dir"):
+            previous[name] = previous[name].replace(old_id, str(binding.operation_id))
+        private_state._private_directory(Path(previous["inputs_path"]).parent)
+        payload.update(schema_version="loom.nebius-pool-runtime-image-private-inputs.v2",
+            binding=binding.model_dump(mode="json"))
+        save_private(previous, payload)
+    persist(entry(fixture))
+    operation = copy.deepcopy(previous)
+    operation.update(schema="loom.nebius-pool-startup-repair-operation.v4", operation_id=str(uuid4()),
+        source_sha="c" * 40, candidate="c" * 40)
+    for name in ("inputs_path", "state_dir", "anchor_dir"):
+        operation[name] = operation[name].replace(previous["operation_id"], operation["operation_id"])
+    private_state._private_directory(Path(operation["inputs_path"]).parent)
+    wrapper = {"schema_version": "loom.nebius-pool-image-tooling-private-inputs.v1", "repair_operation": previous}
+    save_private(operation, wrapper)
+    private_state._atomic_json(proof, {"schema": "loom.nebius-manager-schema.v1", "source_sha": "c" * 40,
+        "revision": "0174"})
+    return operation, wrapper, fixture
+
+
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+def test_new_tooling_continues_anchored_image_without_replacing_binding_or_history(
+        private_image_repair, image_repair_case, target):
+    from pathlib import Path
+
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+
+    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case, target)
+    retained = entry(fixture)
+    paths = (retained.path, retained.marker, Path(wrapper["repair_operation"]["inputs_path"]))
+    before = {path: path.read_bytes() for path in paths}
+    context = load_image_repair_inputs(operation)
+    assert context.operation == operation and context.original == fixture[0]
+    assert context.inputs.binding == fixture[-1]
+    assert context.inputs.binding.source_sha != operation["source_sha"]
+    assert {path: path.read_bytes() for path in paths} == before
+
+
+@pytest.mark.parametrize("damage", ["unanchored", "recursive", "private_drift", "same_id", "same_source",
+    "other_parent", "injected_binding", "old_schema_proof"])
+def test_tooling_continuation_rejects_unbound_or_replaced_repair(
+        private_image_repair, image_repair_case, damage):
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
+    previous = wrapper["repair_operation"]
+    if damage == "unanchored":
+        retained = entry(fixture)
+        retained.path.unlink()
+        retained.marker.unlink()
+    elif damage == "recursive":
+        previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
+    elif damage == "private_drift":
+        Path(previous["inputs_path"]).write_bytes(b"{}")
+    elif damage == "same_id":
+        operation["operation_id"] = previous["operation_id"]
+    elif damage == "same_source":
+        operation["source_sha"] = operation["candidate"] = previous["source_sha"]
+    elif damage == "other_parent":
+        operation["original_operation_id"] = str(uuid4())
+    elif damage == "injected_binding":
+        wrapper["binding"] = fixture[-1].model_dump(mode="json")
+    else:
+        private_state._atomic_json(private_image_repair[2], {"schema": "loom.nebius-manager-schema.v1",
+            "source_sha": previous["source_sha"], "revision": "0174"})
+    save_private(operation, wrapper)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
+
+
 @pytest.mark.parametrize("damage", [None, "old_operation", "old_private", "legacy_binding"])
 def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
         private_image_repair, image_repair_case, damage):
