@@ -1,0 +1,759 @@
+{
+  "active": {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+      "labels": {
+        "loom.nebius/management-installation": "30000000-0000-4000-8000-000000000001"
+      },
+      "name": "loom-service",
+      "namespace": "loom-nebius-management",
+      "resourceVersion": "41",
+      "uid": "0d2b3d42-6e46-4af9-8b85-d0da1e1eb663"
+    },
+    "spec": {
+      "replicas": 1,
+      "selector": {
+        "matchLabels": {
+          "app": "loom-service"
+        }
+      },
+      "strategy": {
+        "rollingUpdate": {
+          "maxSurge": 1,
+          "maxUnavailable": 0
+        },
+        "type": "RollingUpdate"
+      },
+      "template": {
+        "metadata": {
+          "annotations": {
+            "loom.nebius/configuration-revision": "sha256:68a3f190ef258353b87a23876da0db6669288d14e3738f27f332859087d7bbb4"
+          },
+          "labels": {
+            "app": "loom-service",
+            "loom.nebius/management-installation": "30000000-0000-4000-8000-000000000001"
+          }
+        },
+        "spec": {
+          "automountServiceAccountToken": false,
+          "containers": [
+            {
+              "env": [
+                {
+                  "name": "LOOM_ENV",
+                  "value": "development"
+                },
+                {
+                  "name": "LOOM_NAMESPACE",
+                  "value": "loom-nebius-management"
+                },
+                {
+                  "name": "LOOM_SVC_SERVICE_MODE",
+                  "value": "management"
+                },
+                {
+                  "name": "LOOM_SVC_BIND_HOST",
+                  "value": "0.0.0.0"
+                },
+                {
+                  "name": "LOOM_SVC_BIND_PORT",
+                  "value": "8090"
+                },
+                {
+                  "name": "LOOM_SVC_PUBLIC_BASE_URL",
+                  "value": "https://manage.example.com"
+                },
+                {
+                  "name": "LOOM_SVC_AUTH_LOCAL_HTTP",
+                  "value": "false"
+                },
+                {
+                  "name": "LOOM_SVC_TEAM_REGISTRATION_OPEN",
+                  "value": "false"
+                },
+                {
+                  "name": "LOOM_SVC_ADMIN_SECRET_FILE",
+                  "value": "/var/run/loom/admin/secrets.toml"
+                },
+                {
+                  "name": "LOOM_SVC_ENVIRONMENT_MANAGEMENT_CONFIG_FILE",
+                  "value": "/var/run/loom-management/installation.json"
+                },
+                {
+                  "name": "LOOM_SVC_DB_URL",
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "key": "service-url",
+                      "name": "loom-platform-db"
+                    }
+                  }
+                },
+                {
+                  "name": "LOOM_SECRET_STORE_MASTER_KEY",
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "key": "secret-store-master-key",
+                      "name": "loom-platform-auth"
+                    }
+                  }
+                },
+                {
+                  "name": "LOOM_SVC_ENVIRONMENT_MANAGEMENT_GITHUB_TOKEN",
+                  "valueFrom": {
+                    "secretKeyRef": {
+                      "key": "token",
+                      "name": "loom-management-publications"
+                    }
+                  }
+                }
+              ],
+              "image": "cr.eu-north1.nebius.cloud/test/service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "imagePullPolicy": "IfNotPresent",
+              "name": "loom-service",
+              "ports": [
+                {
+                  "containerPort": 8090
+                }
+              ],
+              "readinessProbe": {
+                "httpGet": {
+                  "path": "/api/v1/health/ready",
+                  "port": 8090
+                },
+                "periodSeconds": 5
+              },
+              "resources": {
+                "limits": {
+                  "cpu": "1",
+                  "ephemeral-storage": "256Mi",
+                  "memory": "1Gi"
+                },
+                "requests": {
+                  "cpu": "100m",
+                  "ephemeral-storage": "256Mi",
+                  "memory": "256Mi"
+                }
+              },
+              "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                  "drop": [
+                    "ALL"
+                  ]
+                }
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/var/run/loom-db",
+                  "name": "db-ca",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom/admin",
+                  "name": "admin-owned",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom-management",
+                  "name": "management-config",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom-management-kubernetes",
+                  "name": "management-kubernetes",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom-applications-cloud",
+                  "name": "management-cloud",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom-applications-shared",
+                  "name": "application-shared",
+                  "readOnly": true
+                }
+              ]
+            }
+          ],
+          "initContainers": [
+            {
+              "command": [
+                "python",
+                "-c",
+                "from pathlib import Path; p=Path('/var/run/loom-admin-owned/secrets.toml'); p.write_bytes(Path('/var/run/loom-admin-source/secrets.toml').read_bytes()); p.chmod(0o400)"
+              ],
+              "image": "cr.eu-north1.nebius.cloud/test/service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "name": "prepare-admin-secret",
+              "resources": {
+                "limits": {
+                  "cpu": "100m",
+                  "ephemeral-storage": "256Mi",
+                  "memory": "64Mi"
+                },
+                "requests": {
+                  "cpu": "10m",
+                  "ephemeral-storage": "256Mi",
+                  "memory": "32Mi"
+                }
+              },
+              "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "capabilities": {
+                  "drop": [
+                    "ALL"
+                  ]
+                }
+              },
+              "volumeMounts": [
+                {
+                  "mountPath": "/var/run/loom-admin-source",
+                  "name": "admin-source",
+                  "readOnly": true
+                },
+                {
+                  "mountPath": "/var/run/loom-admin-owned",
+                  "name": "admin-owned"
+                }
+              ]
+            }
+          ],
+          "nodeSelector": {
+            "loom.nebius/node-role": "system",
+            "loom.nebius/platform": "integration"
+          },
+          "securityContext": {
+            "fsGroup": 1000,
+            "runAsGroup": 1000,
+            "runAsNonRoot": true,
+            "runAsUser": 1000,
+            "seccompProfile": {
+              "type": "RuntimeDefault"
+            }
+          },
+          "serviceAccountName": "loom-application-provisioner",
+          "tolerations": [
+            {
+              "effect": "NoSchedule",
+              "key": "loom.nebius/platform",
+              "operator": "Equal",
+              "value": "integration"
+            }
+          ],
+          "volumes": [
+            {
+              "name": "db-ca",
+              "secret": {
+                "defaultMode": 288,
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "secretName": "loom-platform-db"
+              }
+            },
+            {
+              "name": "admin-source",
+              "secret": {
+                "defaultMode": 288,
+                "items": [
+                  {
+                    "key": "secrets.toml",
+                    "path": "secrets.toml"
+                  }
+                ],
+                "secretName": "loom-admin-secret"
+              }
+            },
+            {
+              "emptyDir": {
+                "medium": "Memory"
+              },
+              "name": "admin-owned"
+            },
+            {
+              "configMap": {
+                "items": [
+                  {
+                    "key": "installation.json",
+                    "path": "installation.json"
+                  }
+                ],
+                "name": "loom-management-applications-68a3f190ef25"
+              },
+              "name": "management-config"
+            },
+            {
+              "name": "management-kubernetes",
+              "projected": {
+                "defaultMode": 288,
+                "sources": [
+                  {
+                    "serviceAccountToken": {
+                      "expirationSeconds": 3600,
+                      "path": "token"
+                    }
+                  },
+                  {
+                    "configMap": {
+                      "items": [
+                        {
+                          "key": "ca.crt",
+                          "path": "ca.crt"
+                        }
+                      ],
+                      "name": "kube-root-ca.crt"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "name": "management-cloud",
+              "secret": {
+                "defaultMode": 288,
+                "items": [
+                  {
+                    "key": "credentials.json",
+                    "path": "credentials.json"
+                  }
+                ],
+                "secretName": "loom-applications-cloud-68a3f190ef25"
+              }
+            },
+            {
+              "name": "application-shared",
+              "secret": {
+                "defaultMode": 288,
+                "items": [
+                  {
+                    "key": "manager-dsn",
+                    "path": "manager-dsn"
+                  },
+                  {
+                    "key": "shared.json",
+                    "path": "shared.json"
+                  },
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "secretName": "loom-applications-shared-68a3f190ef25"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "before": {
+    "backup_bucket": "loom-management-backup",
+    "installation": {
+      "applications": {
+        "authority": {
+          "cluster_id": "test-cluster-id",
+          "data_environment_id": "20000000-0000-4000-8000-000000000009",
+          "installation_id": "30000000-0000-4000-8000-000000000001",
+          "namespace": "loom-nebius-management",
+          "schema_version": "loom.nebius-application-authority.v1",
+          "shared_namespace": "loom-nebius-platform"
+        },
+        "releases": [
+          {
+            "release_id": "59d78e5d-ad0a-4f32-ac49-c81fee194e96",
+            "schema_revision": "0159",
+            "schema_version": "loom.nebius-application-release.v1",
+            "service_image_ref": "cr.eu-north1.nebius.cloud/test/personal-api@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "source_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "web_image_ref": "cr.eu-north1.nebius.cloud/test/personal-web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        ],
+        "runtime": {
+          "cloud_credentials_file": "/var/run/loom-applications-cloud/credentials.json",
+          "concurrency": 4,
+          "database_connection_file": "/var/run/loom-applications-shared/manager-dsn",
+          "kubernetes": {
+            "ca_file": "/var/run/loom-management-kubernetes/ca.crt",
+            "endpoint": "https://api.cluster.test",
+            "kind": "projected_service_account",
+            "token_file": "/var/run/loom-management-kubernetes/token"
+          },
+          "poll_seconds": 5,
+          "shared_credentials_file": "/var/run/loom-applications-shared/shared.json"
+        },
+        "shared": {
+          "cluster_id": "test-cluster-id",
+          "data_environment_id": "20000000-0000-4000-8000-000000000009",
+          "platform_namespace": "loom-nebius-platform",
+          "runtime_profile_json": "{\"schema_version\":\"loom.service-execution-runtime-profile.v1\",\"logical_pool_id\":\"nebius-cpu\",\"candidate_sha\":\"1111111111111111111111111111111111111111\",\"execution_class_id\":\"linux-amd64-cpu-pod-v1\",\"task_image_ref\":\"registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"agent_image_ref\":null,\"agent_runtime_bindings\":[],\"controller_resources\":null,\"runtime_image_ref\":\"registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"runtime_binary_sha256\":\"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"image_admission\":{\"schema_version\":\"loom.execution-image-admission.v1\",\"admissions\":[{\"statement\":{\"schema_version\":\"loom.image-admission-statement.v1\",\"image_ref\":\"registry.example/task@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"platform\":\"linux/x86_64\",\"sbom_sha256\":\"sha256:b356d946affac02f0c0c5e12bf617f689ad2771b439689d6014adbe4eb634a19\",\"provenance_sha256\":\"sha256:b0975bb994bb32d3f0f53d6f17057d0080f3d399a827315fdf6ef6cb29133be1\",\"vulnerability_report_sha256\":\"sha256:97179bfcde2821b8e3d34f988664ba63981bd3a39a5bf414c7740d21c33101e7\",\"policy_sha256\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"highest_vulnerability_severity\":\"medium\",\"issued_at\":\"2026-10-06T04:40:18.665312Z\",\"expires_at\":\"2026-10-06T05:40:18.665312Z\"},\"signing_key_id\":\"test-builder\",\"signature_base64\":\"TQrdAvhmxYjuX6y99PiSkLmjw3sKkBZHOhsKxCmBd/IAOJrMHTFTt2ABVw3nxM6g0JApWBflkHCZafydM5TaAQ==\"},{\"statement\":{\"schema_version\":\"loom.image-admission-statement.v1\",\"image_ref\":\"registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"platform\":\"linux/x86_64\",\"sbom_sha256\":\"sha256:f0dc713e73e225946199adfc74083d0ab75dd7f80e78d3882694f8d8177d6be8\",\"provenance_sha256\":\"sha256:e6740ce7e795bb0ba7d183dbb14b040fbbe1dcc53f0a93b249d11b521488d912\",\"vulnerability_report_sha256\":\"sha256:3890be18352a57d0983607baefd4eed7375c2300d2e8601b0d520f50b1335658\",\"policy_sha256\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"highest_vulnerability_severity\":\"medium\",\"issued_at\":\"2026-10-06T04:40:18.665312Z\",\"expires_at\":\"2026-10-06T05:40:18.665312Z\"},\"signing_key_id\":\"test-builder\",\"signature_base64\":\"5yIvW6DWH9g5Y57VBN4a3EmsndbY3T6xjnOXn8hHwl3hfElATrtGSBxU8eT/Y2HUge77sTLKJ5kOG1GKF6XkDA==\"}]},\"run_as_user\":65532,\"run_as_group\":65532,\"fs_group\":65532,\"runtime_volume_mib\":32,\"termination_grace_seconds\":30,\"max_log_bytes_per_stream\":10485760,\"max_artifact_bytes\":1073741824}",
+          "schema_revision": "0159",
+          "schema_version": "loom.nebius-shared-development.v1"
+        },
+        "storage": {
+          "data_environment_id": "20000000-0000-4000-8000-000000000009",
+          "data_group_id": "group-shared-data",
+          "project_id": "project-managed-storage",
+          "source_group_id": "group-shared-source"
+        }
+      },
+      "foundation": {
+        "generated_postgres_storage_gi": null,
+        "ingress_class_name": "loom-shared",
+        "ingress_controller_label": "loom-ingress",
+        "ingress_namespace": "loom-ingress",
+        "min_nodes": 0,
+        "namespace_authority": null,
+        "platform_config_json": "{\"schema_version\": \"loom.nebius-platform.v1\", \"namespace\": \"loom-nebius-platform\", \"execution_namespace\": \"loom-nebius-platform-execution\", \"environment\": \"development\", \"target_id\": \"nebius-eu-north1-integration\", \"cluster_scope_id\": \"nebius-eu-north1-shared\", \"region\": \"eu-north1\", \"public_host\": \"nebius.yylx.world\", \"public_allocation_id\": \"test-public-allocation-id\", \"project_id\": \"project-test\", \"quota_parent_id\": \"tenant-test\", \"execution_node_group_id\": \"test-execution-node-group-id\", \"public_tls_bootstrap\": false, \"tls_secret_name\": \"loom-platform-public-tls\", \"db_tls_secret_name\": \"loom-platform-db-tls\", \"storage_class\": \"compute-csi-default-sc\", \"postgres_image\": \"cr.eu-north1.nebius.cloud/test/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"backup_image\": \"cr.eu-north1.nebius.cloud/test/postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"postgres_storage_gi\": 50, \"storage_endpoint\": \"https://storage.eu-north1.nebius.cloud\", \"buckets\": {\"artifacts\": \"loom-integration-artifacts\", \"trajectories\": \"loom-integration-trajectories\", \"source\": \"loom-integration-source\", \"backup\": \"loom-integration-backup\"}, \"model_provider_base_url\": \"https://yibuapi.com/v1\", \"max_concurrent\": null, \"capacity_policy\": {\"enabled\": true, \"max_nodes\": 100, \"max_vcpu_millis\": 1600000, \"max_memory_mib\": 6553600, \"max_storage_mib\": 8192000, \"node_cpu_millis\": 16000, \"node_memory_mib\": 65536, \"node_storage_mib\": 65536, \"max_pending_jobs\": 6400, \"max_unschedulable_jobs\": 6400, \"max_image_pull_backoff_jobs\": 0, \"max_create_per_minute\": 4, \"observation_max_age_seconds\": 300, \"reason\": \"Native technical envelope; CP follows current quota, task fit and explicit operator limits.\"}, \"cluster_id\": \"test-cluster-id\", \"kubernetes_api_server\": \"https://api.cluster.test\", \"execution_price\": {\"provider\": \"nebius\", \"region\": \"eu-north1\", \"sku\": \"cpu-e2-16vcpu-64gb\", \"source\": \"nebius-price-list\", \"source_version\": \"2026-09-08-cpu-e2-eu-north1\", \"source_uri\": \"https://docs.nebius.com/compute/resources/pricing\", \"effective_at\": \"2026-09-08T00:00:00+00:00\", \"observed_at\": \"2026-09-08T00:00:00+00:00\", \"base_microusd_per_hour\": 0, \"vcpu_microusd_per_hour\": 1000, \"memory_gib_microusd_per_hour\": 3200, \"ephemeral_storage_gib_microusd_per_hour\": 98}}",
+        "provisioning_project_id": "project-managed-storage",
+        "public_dns_zone": "dev.example.com"
+      },
+      "keyring": {
+        "keys": [],
+        "schema_version": 1
+      },
+      "platform_budget": {
+        "cpu_millis": 2000,
+        "ephemeral_storage_mib": 30000,
+        "memory_mib": 6000,
+        "storage_mib": 30000
+      },
+      "provider_runtime": null,
+      "publications": [],
+      "registry_prefix": "cr.eu-north1.nebius.cloud/test",
+      "schema_version": "loom.nebius-management-installation.v1"
+    },
+    "installation_id": "30000000-0000-4000-8000-000000000001",
+    "namespace": "loom-nebius-management",
+    "postgres_storage_gi": 10,
+    "public_host": "manage.example.com",
+    "schema_version": "loom.nebius-management-deployment.v1"
+  },
+  "candidate": {
+    "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "images": {
+      "control_plane": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/control_plane@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "execution_actuator": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/execution_actuator@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "execution_runtime": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/execution_runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "gateway": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "service": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "web": {
+        "image_ref": "cr.eu-north1.nebius.cloud/test/web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "registry_prefix": "cr.eu-north1.nebius.cloud/test",
+    "repository": "qianyi-sun/loom",
+    "run_id": 123,
+    "schema_version": "loom.nebius-candidate.v1",
+    "source_ref": "refs/heads/dev",
+    "workflow_path": ".github/workflows/nebius-candidate.yml"
+  },
+  "pool": {
+    "admission": {
+      "build_concurrency_limit": 2,
+      "max_create_per_minute": 10,
+      "max_image_pull_backoff_jobs": 0,
+      "max_pending_jobs": 10,
+      "max_unschedulable_jobs": 0,
+      "observation_max_age_seconds": 60
+    },
+    "admission_epoch": 2,
+    "cluster_id": "test-cluster-id",
+    "installation_id": "30000000-0000-4000-8000-000000000001",
+    "machines": [
+      {
+        "credential_epoch": 1,
+        "expires_at": "2026-11-05T04:40:18.918672Z",
+        "issued_at": "2026-10-06T04:40:18.918664Z",
+        "machine_id": "1c04d30b-bf53-4037-8ae9-520ec2613be0",
+        "participant_id": null,
+        "role": "gateway",
+        "token_sha256": "f2d32ed78c20435a4c0752227bbabd30f3d54f94d773ab4acfdd175178d13a7c"
+      },
+      {
+        "credential_epoch": 1,
+        "expires_at": "2026-11-05T04:40:18.918680Z",
+        "issued_at": "2026-10-06T04:40:18.918679Z",
+        "machine_id": "12cc5445-c6a6-4161-a90c-1e6e75351c67",
+        "participant_id": null,
+        "role": "observer",
+        "token_sha256": "02d67ab4a2605fb95cfb7f260221be5889252cd23d910e32ac26a49913a64c15"
+      },
+      {
+        "credential_epoch": 1,
+        "expires_at": "2026-11-05T04:40:18.918685Z",
+        "issued_at": "2026-10-06T04:40:18.918684Z",
+        "machine_id": "7e0ca7dc-420a-4676-ba5a-98aa7f4de6db",
+        "participant_id": "3a3eecfa-e2c2-4838-b031-4fa7cd18ecb3",
+        "role": "participant",
+        "token_sha256": "75f466c42b9186a460796a5f3accee838934a83f7459f892c343c12714a08baa"
+      },
+      {
+        "credential_epoch": 1,
+        "expires_at": "2026-11-05T04:40:18.918685Z",
+        "issued_at": "2026-10-06T04:40:18.918684Z",
+        "machine_id": "85e318c2-08b0-4b5f-b2c7-7eea2e55fba1",
+        "participant_id": "3a3eecfa-e2c2-4838-b031-4fa7cd18ecb3",
+        "role": "participant",
+        "token_sha256": "0751c876ab6028a8ad86fe6ad76e9d8a339ed31e6eedb139394623dcbb0a876b",
+        "workload_scope": "application_builder"
+      }
+    ],
+    "node_group_id": "test-execution-node-group-id",
+    "node_selector": {
+      "loom.nebius/node-arch": "amd64",
+      "loom.nebius/node-os": "linux",
+      "nebius.com/node-group-id": "test-execution-node-group-id"
+    },
+    "operation_id": "d8313034-93dd-46bc-9d1d-2988446ee3fa",
+    "participants": [
+      {
+        "admission_epoch": 2,
+        "binding_revision": 1,
+        "build_namespace": {
+          "name": "loom-nebius-platform-execution-build",
+          "uid": "24d0f074-3a35-4d7d-af2a-d61a2227ea70"
+        },
+        "environment_class": "development",
+        "environment_id": "20000000-0000-4000-8000-000000000009",
+        "execution_namespace": {
+          "name": "loom-nebius-platform-execution",
+          "uid": "42f3dcda-b62b-42e7-83f2-81d663b040bf"
+        },
+        "incarnation": "067db3ec-914c-4acb-982c-2028e472f59d",
+        "installation_id": "30000000-0000-4000-8000-000000000001",
+        "participant_id": "3a3eecfa-e2c2-4838-b031-4fa7cd18ecb3",
+        "pool_id": "95431acd-6db9-48bf-bedd-b799461f4353",
+        "schema_version": "loom.pool-participant.v1",
+        "targets": [
+          {
+            "profile_id": "eb735afa-afe9-478c-9494-aa530313c0b8",
+            "target_id": "native",
+            "workload_kinds": [
+              "trial",
+              "task_image_build"
+            ]
+          },
+          {
+            "profile_id": "71b17827-febd-4a51-9da7-515a686dab0d",
+            "target_id": "application-builder",
+            "workload_kinds": [
+              "application_image_build"
+            ]
+          }
+        ]
+      }
+    ],
+    "policy_revision": 1,
+    "pool_id": "95431acd-6db9-48bf-bedd-b799461f4353",
+    "profiles": {
+      "application_images": [
+        {
+          "profile_id": "71b17827-febd-4a51-9da7-515a686dab0d",
+          "recipe": {
+            "buildkit_image_ref": "docker.io/moby/buildkit:v0.33.0-rootless@sha256:80b15f0735e87bab7bf59ec4d695dfb4a7cfb25521cf56dc75d6f256285b63ef",
+            "cpu_arch": "x86_64",
+            "export_cache_mode": "max",
+            "oci_export_format": "archive",
+            "schema_revision": "0159",
+            "schema_version": "loom.application-image-recipe.v1",
+            "snapshotter": "overlayfs",
+            "trusted_image_ref": "registry.example/service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "runtime_class_overhead": null,
+          "settings": {
+            "active_deadline_seconds": 1800,
+            "cache_bucket": "cache",
+            "cache_secret_name": "cache-access",
+            "cache_transfer": "blobs",
+            "compatible_revision_cache": "off",
+            "cpu_millis": 1000,
+            "ephemeral_storage_mib": 16384,
+            "export_cache_mode": "max",
+            "max_concurrent": 1,
+            "max_processes": 512,
+            "memory_mib": 2048,
+            "namespace": "loom-nebius-platform-execution-build",
+            "oci_export_format": "archive",
+            "pool_id": "nebius-cpu",
+            "registry_auth_kind": "nebius",
+            "registry_repository": "cr.eu-north1.nebius.cloud/registryid/personal-apps",
+            "registry_secret_name": "registry-writer",
+            "service_image": "registry.example/service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "snapshotter": "overlayfs",
+            "source_bucket": "loom-integration-source",
+            "source_secret_name": "source-reader",
+            "storage_endpoint": "https://storage.eu-north1.nebius.cloud",
+            "storage_region": "eu-north1"
+          },
+          "target": {
+            "credential_broker_url": "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution",
+            "namespace": "loom-nebius-platform-execution-build",
+            "node_selector": {
+              "loom.nebius/node-arch": "amd64",
+              "loom.nebius/node-os": "linux",
+              "nebius.com/node-group-id": "test-execution-node-group-id"
+            },
+            "pod_identity_audience": null,
+            "runtime_class_name": null,
+            "service_account_name": "build-sa",
+            "target_id": "application-builder",
+            "tolerations": []
+          }
+        }
+      ],
+      "execution": [
+        {
+          "candidate_sha": "1111111111111111111111111111111111111111",
+          "execution_class": {
+            "class_id": "linux-amd64-cpu-pod-v1",
+            "cpu_architecture": "x86_64",
+            "gpu_vendor": "none",
+            "isolation_level": "shared_kernel",
+            "maximum_cpu_millis": null,
+            "maximum_ephemeral_storage_mib": null,
+            "maximum_memory_mib": null,
+            "maximum_sidecars": 8,
+            "network_access": [
+              "approved_allowlist",
+              "gateway_only",
+              "none"
+            ],
+            "operating_system": "linux",
+            "permits_host_devices": false,
+            "permits_host_network": false,
+            "permits_host_path": false,
+            "permits_nested_containers": false,
+            "permits_privileged": false,
+            "requires_immutable_image": true,
+            "schema_version": "loom.execution-class.v1",
+            "supports_custom_dns": false,
+            "supports_extra_hosts": false,
+            "supports_separate_verifier": true,
+            "supports_task_image_build": false,
+            "supports_tmpfs": true
+          },
+          "execution_class_id": "linux-amd64-cpu-pod-v1",
+          "profile_id": "eb735afa-afe9-478c-9494-aa530313c0b8",
+          "runtime": {
+            "credential_broker_url": "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution",
+            "namespace": "loom-nebius-platform-execution",
+            "node_selector": {
+              "loom.nebius/node-arch": "amd64",
+              "loom.nebius/node-os": "linux",
+              "nebius.com/node-group-id": "test-execution-node-group-id"
+            },
+            "pod_identity_audience": null,
+            "runtime_class_name": null,
+            "service_account_name": "build-sa",
+            "target_id": "native",
+            "tolerations": []
+          },
+          "runtime_binary_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "runtime_class_overhead": null,
+          "runtime_image_ref": "registry.example/runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      ],
+      "image_admission_keyring": {
+        "keys": [
+          {
+            "public_key_base64": "1UIH2hlJd9z0atv+wrwudbUtWopCGE/t/cAAJPDj6No=",
+            "signing_key_id": "test-builder"
+          }
+        ],
+        "schema_version": 1
+      },
+      "schema_version": "loom.pool-profiles.v1",
+      "task_images": [
+        {
+          "cpu_arch": "x86_64",
+          "profile_id": "eb735afa-afe9-478c-9494-aa530313c0b8",
+          "runtime_class_overhead": null,
+          "settings": {
+            "active_deadline_seconds": 1800,
+            "cache_bucket": "cache",
+            "cache_secret_name": "cache-access",
+            "cache_transfer": "blobs",
+            "compatible_revision_cache": "off",
+            "cpu_millis": 1000,
+            "ephemeral_storage_mib": 16384,
+            "export_cache_mode": "max",
+            "max_concurrent": 1,
+            "max_processes": 512,
+            "memory_mib": 2048,
+            "namespace": "loom-nebius-platform-execution-build",
+            "oci_export_format": "archive",
+            "pool_id": "nebius-cpu",
+            "registry_auth_kind": "nebius",
+            "registry_repository": "cr.eu-north1.nebius.cloud/registryid/personal-apps",
+            "registry_secret_name": "registry-writer",
+            "service_image": "registry.example/service@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "snapshotter": "overlayfs",
+            "source_bucket": "loom-integration-source",
+            "source_secret_name": "source-reader",
+            "storage_endpoint": "https://storage.eu-north1.nebius.cloud",
+            "storage_region": "eu-north1"
+          },
+          "target": {
+            "credential_broker_url": "http://loom-llm-gateway.loom.svc.cluster.local:9100/internal/service-execution",
+            "namespace": "loom-nebius-platform-execution-build",
+            "node_selector": {
+              "loom.nebius/node-arch": "amd64",
+              "loom.nebius/node-os": "linux",
+              "nebius.com/node-group-id": "test-execution-node-group-id"
+            },
+            "pod_identity_audience": null,
+            "runtime_class_name": null,
+            "service_account_name": "build-sa",
+            "target_id": "native",
+            "tolerations": []
+          }
+        }
+      ]
+    },
+    "quota_identities": {
+      "nodes": [
+        "parent",
+        "eu-north1",
+        "compute",
+        "nodes",
+        "count"
+      ],
+      "storage": [
+        "parent",
+        "eu-north1",
+        "compute",
+        "storage",
+        "MiB"
+      ],
+      "vcpu": [
+        "parent",
+        "eu-north1",
+        "compute",
+        "vcpu",
+        "milli-vcpu"
+      ]
+    },
+    "schema_version": "loom.pool-installation.v1"
+  },
+  "profile": {
+    "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+    "runtime_image_ref": "cr.eu-north1.nebius.cloud/test/execution_runtime@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "task_image_ref": "cr.eu-north1.nebius.cloud/test/service@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "rendered_sha256": "916b764fb70c29463d146473a6ee8947d29b78325d36e24e080ab43f8519cda3",
+  "source_commit": "80c12bbd2509e62ebdcec83a0b68ccaed1c1c9f5"
+}
