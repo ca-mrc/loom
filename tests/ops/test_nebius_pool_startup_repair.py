@@ -615,3 +615,36 @@ def test_connected_repair_creates_only_fixed_config_and_uses_exact_manager_cas(p
             assert repair_pool_startup(**arguments) == result and writes == before
             assert writes == (['config', 'stop', 'template'] if failure == 'template-before'
                 else ['config', 'stop', 'template', 'start'])
+
+
+def test_bound_operation_repairs_then_qualifies_and_completes_original_pool(prepared_repair, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+
+    context, binding, api, state, anchor = prepared_repair
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(target, 'HTTPSPoolStartupRepairAPI', lambda **kwargs: api, raising=False)
+    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: api.activation)
+    api.activation.ready = True
+    result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='install', repair_binding=binding)
+    assert result['status'] == 'pool_cutover_completed' and result['outcome'] == 'global'
+    assert result['operation_id'] == context.operation['operation_id']
+    assert api.calls == ['stop', 'template', 'start'] and api.activation.runtime_checks == 2
+    assert target.run_pool_operation(parent=parent, tokens=context.tokens, action='install', repair_binding=binding) == result
+    assert api.calls == ['stop', 'template', 'start']
+
+
+def test_unbound_dispatch_cannot_advance_an_anchored_repair(prepared_repair, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+
+    context, _, api, state, anchor = prepared_repair
+    repair(prepared_repair)
+    api.activation.ready = True
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: api.activation)
+    with pytest.raises(target.PoolOperationError):
+        target.run_pool_operation(parent=parent, tokens=context.tokens, action='install')
+    assert api.activation.calls == []
