@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -18,6 +19,7 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_stage import (
     ManagementStageAPI,
+    _comparison_snapshot,
     _qualified_defaulted,
     _stage_fixed_documents,
     _validate_record,
@@ -228,6 +230,54 @@ def qualify_completed_startup_repair(request: PoolCutoverRequest, *, state: Path
         _, _, _, record = _repair_record(request, state=state, anchor=anchor)
         if record is None or any(row['phase'] != 'applied' for row in record['phases'].values()):
             raise ValueError('pool_startup_repair_incomplete')
+
+
+def qualify_repair_configuration(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+        read: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+    """Read-only exact config identity, including harmless unresolved CREATEs."""
+    if not startup_repair_exists(request, state=state, anchor=anchor):
+        return
+    _, config, _, record = _repair_record(request, state=state, anchor=anchor)
+    if record is None:
+        raise ValueError
+    child = _configuration_record(request, config, state)
+    actual = read(config)
+    if child is None:
+        if actual is not None:
+            raise ValueError
+        return
+    item = child['resources'][_key(config)]
+    if item['status'] == 'prepared':
+        if actual is not None:
+            raise ValueError
+    elif actual is None:
+        if item['status'] == 'created':
+            raise ValueError
+    elif (_comparison_snapshot(actual) != item['expected'] or (item['status'] == 'created'
+            and (_uid(actual) != item['uid'] or _snapshot(actual) != item['observed']))):
+        raise ValueError
+
+
+def repair_fence_patches(request: PoolCutoverRequest, before: dict[str, Any], *, state: Path, anchor: Path
+                         ) -> list[dict[str, Any]]:
+    """Invalidate the one uncertain manager CAS, including a still-running stop."""
+    from scripts.ops.nebius_pool_startup_fence import marked_startup_document
+
+    documents, _, _, record = _repair_record(request, state=state, anchor=anchor)
+    if record is None:
+        raise ValueError
+    phase, = (index for index, name in enumerate(_STEPS) if record['phases'][name]['phase'] == 'intent')
+    version = record['phases'][_STEPS[phase]]['before_resource_version']
+    if (not _matches(before, documents[phase], _uid(request.manager))
+            or before['metadata']['resourceVersion'] != version):
+        raise ValueError
+    operation = request.fencing.retirement.migration.registration.spec.operation_id
+    desired = marked_startup_document(before, operation)
+    return [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(request.manager)},
+        {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+        {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+        {'op': 'test', 'path': '/spec', 'value': before['spec']},
+        {'op': 'add', 'path': '/metadata/annotations', 'value': desired['metadata']['annotations']}]
 
 
 def repair_pool_startup(*, request: PoolCutoverRequest, binding: PoolStartupRepairBinding,

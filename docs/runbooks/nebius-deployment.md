@@ -1300,7 +1300,12 @@ Use a new nonzero UUID and private
 `nebius-management/pool-cutover/<uuid>/{inputs.json,state,anchor}` paths. The
 `loom.nebius-pool-cutover-private-inputs.v1` contract contains that complete
 retained scope, installation/catalog, dedicated machine-token file references
-and original/predecessor selectors. Keep those inputs and credentials on the
+and original/predecessor selectors. New builder-enabled preparations must set
+`source_delivery_version` to `v2`, selecting the canonical private source spool.
+An omitted version retains the historical `v1` contract for exact evidence
+reconstruction; ordinary forward installation refuses it. Do not edit an existing
+operation's version, candidate or journal to substitute newer rendering.
+Keep those inputs and credentials on the
 operator host. The public `loom.nebius-pool-cutover-operation.v1` metadata contains
 only `operation_id`, identical integrated `source_sha` and `candidate`,
 `installation_id`, `namespace`, the three private paths and `inputs_sha256`.

@@ -66,6 +66,7 @@ class HTTPSPoolStartupAPI:
         """Mode-independent identity/permission proof shared with recovery."""
         from scripts.ops.nebius_pool_gateway_retirement import gateway_retirement_options
         from scripts.ops.nebius_pool_role_restoration import restored_role_options
+        from scripts.ops.nebius_pool_startup_repair import qualify_repair_configuration
 
         parent = self.parent
         if restored_role_options(self.request, state=self.state, anchor=self.anchor) is None:
@@ -89,6 +90,9 @@ class HTTPSPoolStartupAPI:
                 if (actual is None or _uid(actual) != item["uid"]
                         or not any(_snapshot(actual) == _snapshot(wanted) for wanted in options)):
                     raise ValueError
+        qualify_repair_configuration(self.request, state=self.state, anchor=self.anchor,
+            read=lambda config: parent._request('GET', '/api/v1/namespaces/' + config['metadata']['namespace']
+                + '/configmaps/' + config['metadata']['name']))
 
     def qualify_legacy_roles(self) -> None:
         """Qualify anchored partial restoration without recursive gateway drain.

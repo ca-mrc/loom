@@ -58,8 +58,8 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
     # Reverse startup order: retire adapters/collector before gateway/manager.
     for key in reversed(targets):
         phase = 'prepared' if startup is None else startup['workloads'][key]['phase']
-        value = (closed[key] if phase == 'prepared' else targets[key] if phase == 'started'
-            else fence['workloads'][key]['expected'])
+        value = (fence['workloads'][key]['expected'] if key in fence['workloads'] else
+            closed[key] if phase == 'prepared' else targets[key])
         original[key] = _stable(value)
     desired = copy.deepcopy(original)
     for value in desired.values():
