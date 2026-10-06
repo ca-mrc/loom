@@ -122,6 +122,12 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
         self.qualify_closed()
         return drained
 
+    def _replacement_template(self, before: dict[str, Any]) -> dict[str, Any]:
+        running = copy.deepcopy(before)
+        running['spec']['replicas'] = 1
+        fixed, _ = source_repair_documents(self.request, running)
+        return fixed['spec']['template']
+
     def _patch_repair(self, phase: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
         try:
             record = self._qualify_binding()
@@ -139,10 +145,7 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
             proposed = _snapshot(before)
             if phase == 'template':
                 # Preserve server representation of every unrelated field.
-                running = copy.deepcopy(before)
-                running['spec']['replicas'] = 1
-                fixed, _ = source_repair_documents(self.request, running)
-                proposed['spec']['template'] = fixed['spec']['template']
+                proposed['spec']['template'] = self._replacement_template(before)
                 field, value = '/spec/template', proposed['spec']['template']
             else:
                 proposed['spec']['replicas'] = desired['spec']['replicas']
