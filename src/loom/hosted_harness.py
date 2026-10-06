@@ -46,10 +46,11 @@ HARNESS_SETUP_PHASE = "setup"
 NATIVE_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
     {"exec", "exec_streaming", "upload", "download"},
 )
-# Operations the QEMU guest sandbox path is qualified for. Supervised
-# processes (#2310) are not yet validated through the guest channel.
+# Operations the QEMU guest sandbox path is qualified for. The guest's
+# outer socket proxies the same sandbox API over its RPC channel, and
+# supervised processes are qualified through it (#2362).
 GUEST_SANDBOX_DRIVER_CAPABILITIES: frozenset[DriverCapability] = frozenset(
-    {"exec", "upload", "download"},
+    {"exec", "exec_streaming", "upload", "download"},
 )
 
 
@@ -139,6 +140,9 @@ class HarnessSetup:
     install_root: str | None = None
     # Command proving an install (fresh or restored) is usable, e.g. `--version`.
     check: tuple[str, ...] = ()
+    # Peak sandbox disk the setup needs: installed bytes plus any transient
+    # archive. Admission rejects a task whose sandbox cannot hold it (#2362).
+    disk_mib: int = 0
 
     def __post_init__(self) -> None:
         if (self.archive is None) == (not self.install):
@@ -154,6 +158,8 @@ class HarnessSetup:
             raise ValueError("harness setup requires declared install sources")
         if not 0 < self.timeout_seconds <= MAX_SETUP_TIMEOUT_SECONDS:
             raise ValueError("harness setup timeout is out of range")
+        if not 0 <= self.disk_mib <= 1_048_576:
+            raise ValueError("harness setup disk requirement is out of range")
         if (self.install_root is None) != (not self.check):
             raise ValueError("a cacheable harness setup declares both install_root and check")
         if self.install_root is not None and (
@@ -340,6 +346,10 @@ CODEX = HostedHarnessSpec(
         timeout_seconds=900,
         install_root=CODEX_INSTALL_ROOT,
         check=(f"{CODEX_INSTALL_ROOT}/bin/codex", "--version"),
+        # 350 MiB unpacked plus the 131 MiB archive while it is extracted or
+        # re-archived for the install cache, plus filesystem overhead (a
+        # guest's disk is ext4) and room for Codex's own session files.
+        disk_mib=768,
     ),
 )
 

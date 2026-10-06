@@ -124,6 +124,10 @@ listener. That listener retains the same destination allowlist, phase deadline,
 Gateway authorization and concurrency bounds. No active authorized listener
 means no daemon registry egress. Package tools inside build steps must use the
 authorized proxy; root in the guest does not authorize additional destinations.
+Installed harnesses (Codex) reach the Pod-local model broker and, during
+setup, the same egress proxy at `10.0.2.2` in the same way, and run through
+the supervised-process API proxied over the RPC channel; see
+[installed harnesses](hosted-agent-harness.md#model-access).
 
 The immutable plan's `max_artifact_bytes` bounds guest file transfers and output
 capture. Uploads and downloads stream bounded chunks. The configured artifact

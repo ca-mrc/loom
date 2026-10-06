@@ -106,7 +106,7 @@ def test_plan_freezes_a_setup_phase_and_its_install_sources() -> None:
 
 
 @pytest.mark.usefixtures("_registered")
-def test_installed_harness_is_not_admitted_on_guests_yet() -> None:
+def test_installed_harness_is_admitted_on_guests() -> None:
     from tests.unit.test_guest_execution_materialization import _guest_inputs
 
     task, _, profile = _guest_inputs("nested_docker")
@@ -114,7 +114,7 @@ def test_installed_harness_is_not_admitted_on_guests_yet() -> None:
         task, _trial(), source_provenance=_provenance(),
         supported_capabilities=profile.supported_guest_capabilities,
     )
-    assert "guest_driver_capabilities_unsupported" in reasons
+    assert "guest_driver_capabilities_unsupported" not in reasons
 
 
 # --- controller -------------------------------------------------------------------
@@ -152,7 +152,7 @@ class _FakeSandbox:
 
 async def _run_setup(monkeypatch, sandbox: _FakeSandbox, tmp_path: Path) -> None:
     task, _, _ = _inputs()
-    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task: sandbox)
+    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task, trial: sandbox)
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:41234")
     await controller.run_setup(tmp_path, task, _trial())
 
@@ -201,7 +201,7 @@ async def test_cancelled_setup_kills_the_install(monkeypatch, tmp_path) -> None:
 @pytest.mark.usefixtures("_registered")
 async def test_setup_refuses_without_the_runtime_egress_proxy(monkeypatch, tmp_path) -> None:
     task, _, _ = _inputs()
-    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task: _FakeSandbox())
+    monkeypatch.setattr(controller, "sandbox_driver", lambda role, task, trial: _FakeSandbox())
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://evil.example.org:8080")
 
     with pytest.raises(ServiceExecutionTaskError, match="setup egress is unavailable"):

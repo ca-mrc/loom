@@ -128,14 +128,41 @@ def test_codex_plan_freezes_setup_egress_cache_and_native_evidence() -> None:
     assert int(sandbox.argv[sandbox.argv.index("--exec-timeout-seconds") + 1]) >= 900
 
 
-def test_codex_is_rejected_on_guest_execution() -> None:
+def _with_storage(task, storage_mb: int):
+    return task.model_copy(update={"environment": task.environment.model_copy(update={"storage_mb": storage_mb})})
+
+
+@pytest.mark.parametrize("isolation", ["auto", "guest"])
+def test_codex_is_admitted_on_guests(isolation: str) -> None:
     from tests.unit.test_guest_execution_materialization import _guest_inputs
 
     task, _, profile = _guest_inputs("nested_docker")
+    if isolation == "guest":
+        # A forced plain guest on an ordinary task.
+        task, _, _ = _inputs()
+    trial = _trial().model_copy(update={"isolation": isolation})
     reasons = automatic_service_execution_rejections(
-        task, _trial(), source_provenance=_provenance(), supported_capabilities=profile.supported_guest_capabilities,
+        task, trial, source_provenance=_provenance(), supported_capabilities=profile.supported_guest_capabilities,
     )
-    assert "guest_driver_capabilities_unsupported" in reasons
+    assert "guest_driver_capabilities_unsupported" not in reasons
+    assert "harness_setup_storage_insufficient" not in reasons
+
+
+@pytest.mark.parametrize(("isolation", "reserve"), [("container", 0), ("guest", 32)])
+def test_codex_needs_sandbox_disk_for_its_install(isolation: str, reserve: int) -> None:
+    # A guest's disk is its storage less the launcher's 32 MiB.
+    assert CODEX.setup is not None
+    fits = CODEX.setup.disk_mib + reserve
+    task, _, _ = _inputs()
+    trial = _trial().model_copy(update={"isolation": isolation})
+
+    def reasons(storage_mb: int) -> tuple[str, ...]:
+        return automatic_service_execution_rejections(
+            _with_storage(task, storage_mb), trial, source_provenance=_provenance(),
+        )
+
+    assert "harness_setup_storage_insufficient" not in reasons(fits)
+    assert "harness_setup_storage_insufficient" in reasons(fits - 1)
 
 
 # --- install ------------------------------------------------------------------------

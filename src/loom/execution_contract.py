@@ -534,6 +534,11 @@ def _task_declares_guest_execution(task: TaskConfig) -> bool:
     return bool(ALL_GUEST_EXECUTION_CAPABILITIES.intersection(declared.capabilities if declared else ()))
 
 
+# Of a guest sandbox's storage allocation, the launcher keeps this much for
+# its own metadata and initramfs; the rest is the guest's private disk.
+GUEST_LAUNCHER_STORAGE_MIB = 32
+
+
 def effective_guest_capabilities(
     task: TaskConfig, trial: TrialConfig | None,
 ) -> frozenset[GuestExecutionCapability] | None:

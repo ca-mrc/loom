@@ -140,13 +140,13 @@ async def test_command_receives_proxy_environment_without_changing_model_gateway
 
     from loom.service_execution_sandbox_task import sandbox_driver
 
-    task, _, _ = _inputs()
+    task, trial, _ = _inputs()
     task = task.model_copy(update={"environment": task.environment.model_copy(update={
         "baseline_network_policy": policy(),
     })})
     monkeypatch.setenv("LOOM_TASK_EGRESS_PROXY", "http://127.0.0.1:12345")
     monkeypatch.setenv("LOOM_EFFECTIVE_NETWORK_POLICY_JSON", policy().model_dump_json())
-    driver = sandbox_driver("task-sandbox", task)
+    driver = sandbox_driver("task-sandbox", task, trial)
     response = Mock()
     response.json.return_value = {"return_code": 0, "stdout": "", "stderr": "", "duration_sec": 0}
     driver._request = AsyncMock(return_value=response)

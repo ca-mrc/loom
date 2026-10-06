@@ -25,8 +25,9 @@ pytestmark = [pytest.mark.integration, pytest.mark.docker]
 
 
 @contextlib.contextmanager
-def guest(*, docker: bool = False, plugin_layout: str | None = None,
-          wait_ready: bool = True) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
+def guest(*, docker: bool = False, plugin_layout: str | None = None, wait_ready: bool = True,
+          root_image: str | None = None, storage_mib: int | None = None,
+          exec_timeout_seconds: int = 60) -> Iterator[tuple[httpx.Client, subprocess.Popen[bytes], Path]]:
     configured = os.environ.get("LOOM_GUEST_PAYLOAD")
     if configured is None:
         if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -38,14 +39,18 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None,
     with tempfile.TemporaryDirectory(prefix="loom-guest-", dir="/tmp") as temporary:
         directory = Path(temporary)
         root = directory / "root"
-        for item in ("bin", "etc", "tmp", "proc", "sys", "dev", "var", "lib", "usr"):
-            (root / item).mkdir(parents=True)
+        if root_image is not None:
+            # A real task image's filesystem as the guest's read-only root.
+            _export_image_root(root_image, root)
+        else:
+            for item in ("bin", "etc", "tmp", "proc", "sys", "dev", "var", "lib", "usr"):
+                (root / item).mkdir(parents=True)
+            for applet in ("sh", "cat", "sleep", "uname", "kill", "reboot", "ls", "test"):
+                (root / "bin" / applet).symlink_to("busybox")
+            # Standard distro absolute link must resolve inside the task root.
+            (root / "var/run").symlink_to("/run")
         shutil.copyfile(payload / "bin/busybox", root / "bin/busybox")
         (root / "bin/busybox").chmod(0o755)
-        for applet in ("sh", "cat", "sleep", "uname", "kill", "reboot", "ls", "test"):
-            (root / "bin" / applet).symlink_to("busybox")
-        # Standard distro absolute link must resolve inside the task root.
-        (root / "var/run").symlink_to("/run")
         if plugin_layout:
             plugins = root / "usr/local/lib/docker/cli-plugins"
             plugins.parent.mkdir(parents=True)
@@ -59,8 +64,9 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None,
         command = [
             str(payload / "bin/loom-guest-runtime"), "--payload", str(payload),
             "--root", str(root), "--state", str(state), "--socket", str(socket),
-            "--memory-mib", "2048" if docker else "1024", "--storage-mib", "1024" if docker else "512", "--cpu-millis", "1000",
-            "--exec-timeout-seconds", "60",
+            "--memory-mib", "2048" if docker else "1024",
+            "--storage-mib", str(storage_mib or (1024 if docker else 512)), "--cpu-millis", "1000",
+            "--exec-timeout-seconds", str(exec_timeout_seconds),
         ]
         if docker:
             command.append("--nested-docker")
@@ -92,6 +98,18 @@ def guest(*, docker: bool = False, plugin_layout: str | None = None,
                         process.kill()
                         process.wait(timeout=5)
                         pytest.fail("guest launcher did not terminate its guest on cancellation")
+
+
+def _export_image_root(image: str, root: Path) -> None:
+    container = subprocess.run(["docker", "create", image], check=True, capture_output=True, text=True).stdout.strip()
+    try:
+        exported = subprocess.Popen(["docker", "export", container], stdout=subprocess.PIPE)
+        assert exported.stdout is not None
+        with tarfile.open(fileobj=exported.stdout, mode="r|") as stream:
+            stream.extractall(root, filter="tar")
+        assert exported.wait() == 0
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True, check=False)
 
 
 def execute(client: httpx.Client, command: str) -> str:
@@ -457,3 +475,127 @@ def test_large_archive_restore_survives_full_guest_page_cache(tmp_path: Path) ->
         counts = dict(line.split() for line in events.splitlines())
         assert counts["oom"] == counts["oom_kill"] == "0", events
         assert execute(client, "echo alive") == "alive\n"
+
+
+def _guest_driver(directory: Path):
+    from loom.driver.service_sandbox import ServiceSandboxDriver
+    from loom.models.capabilities import Capabilities
+    from loom.models.networking import NoNetwork
+
+    return ServiceSandboxDriver(directory / "sandbox.sock", capabilities=Capabilities(
+        os="linux", gpu_vendor="none", network_policies=frozenset({"no-network"}),
+        dynamic_network_policy=False, mounted_fs=False, resource_modes=frozenset({"limit"}),
+    ), network_policy=NoNetwork())
+
+
+async def _collect(stream) -> bytes:
+    return b"".join([chunk async for chunk in stream])
+
+
+def test_supervised_processes_through_the_guest_channel() -> None:
+    """#2362: the guest's outer socket proxies `/processes` over its RPC
+    channel to the same sandbox server, so `exec_streaming` behaves as it
+    does on a native sandbox."""
+    import asyncio
+    from pathlib import PurePosixPath
+
+    cwd = PurePosixPath("/tmp")
+
+    async def scenario(driver) -> None:
+        await driver.start()
+        try:
+            handle = await driver.exec_streaming(
+                ["/bin/sh", "-c", 'printf "$GREETING"; printf oops >&2; exit 7'],
+                env_vars={"GREETING": "hello"}, cwd=cwd,
+            )
+            assert await asyncio.gather(_collect(handle.stdout), _collect(handle.stderr)) == [b"hello", b"oops"]
+            assert await handle.wait() == 7
+
+            # An output long-poll held open across the channel while idle.
+            handle = await driver.exec_streaming(["/bin/sh", "-c", "echo first; sleep 3; echo second"],
+                                                 env_vars={}, cwd=cwd)
+            assert await _collect(handle.stdout) == b"first\nsecond\n"
+            assert await handle.wait() == 0
+
+            # Lossless and ordered beyond one 4 MiB server-side window.
+            size = 6 * 1024 * 1024
+            handle = await driver.exec_streaming(
+                ["/bin/sh", "-c", f"/bin/busybox yes 012345678 | /bin/busybox head -c {size}"], env_vars={}, cwd=cwd,
+            )
+            stdout, stderr = await asyncio.gather(_collect(handle.stdout), _collect(handle.stderr))
+            assert stderr == b"" and stdout == (b"012345678\n" * (size // 10 + 1))[:size]
+            assert await handle.wait() == 0
+
+            # Kill reaches the whole process group inside the guest.
+            handle = await driver.exec_streaming(["/bin/sh", "-c", "sleep 300 & echo started; sleep 300"],
+                                                 env_vars={}, cwd=cwd)
+            assert await anext(handle.stdout) == b"started\n"
+            await handle.kill()
+            assert await asyncio.wait_for(handle.wait(), 15) == 137
+            assert await asyncio.wait_for(_collect(handle.stdout), 15) == b""
+
+            handle = await driver.exec_streaming(["sleep", "300"], env_vars={}, cwd=cwd, timeout_sec=0.5)
+            assert await asyncio.wait_for(handle.wait(), 15) == 124
+        finally:
+            await driver.stop()
+
+    with guest() as (_, _, directory):
+        asyncio.run(scenario(_guest_driver(directory)))
+
+
+def test_installed_agent_reaches_the_pod_loopback_broker_from_a_guest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2362: an installed agent in a guest reaches the Pod-local model broker
+    through QEMU user networking, with exactly the environment the controller
+    gives it."""
+    import asyncio
+    import http.server
+    import threading
+    from pathlib import PurePosixPath
+
+    from loom.hosted_harness import CODEX
+    from loom.service_execution_sandbox_task import installed_agent_model_environment
+
+    seen: list[tuple[str, str | None]] = []
+
+    class Broker(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            seen.append((self.path, self.headers.get("authorization")))
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    broker = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Broker)
+    thread = threading.Thread(target=broker.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("LOOM_GATEWAY_URL", f"http://127.0.0.1:{broker.server_address[1]}")
+    environment = installed_agent_model_environment(
+        CODEX, base_url_env="OPENAI_BASE_URL", api_key_env="OPENAI_API_KEY", guest=True,
+    )
+
+    async def scenario(driver) -> bytes:
+        await driver.start()
+        try:
+            handle = await driver.exec_streaming([
+                "/bin/sh", "-c", '/bin/busybox wget -qO- --post-data "{}" '
+                '--header "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/responses"',
+            ], env_vars=environment, cwd=PurePosixPath("/tmp"))
+            stdout, stderr = await asyncio.gather(_collect(handle.stdout), _collect(handle.stderr))
+            assert await handle.wait() == 0, stderr
+            return stdout
+        finally:
+            await driver.stop()
+
+    try:
+        with guest() as (_, _, directory):
+            assert asyncio.run(scenario(_guest_driver(directory))) == b'{"ok":true}'
+        assert seen == [("/v1/responses", "Bearer loom_workload_proxy")]
+    finally:
+        broker.shutdown()
+        broker.server_close()
+        thread.join(timeout=5)

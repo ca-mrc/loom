@@ -185,7 +185,7 @@ def test_unavailable_harness_fails_closed() -> None:
 
 
 @pytest.mark.usefixtures("_registered")
-def test_streaming_harness_runs_natively_but_not_on_guests_yet() -> None:
+def test_streaming_harness_runs_natively_and_on_guests() -> None:
     from tests.unit.test_guest_execution_materialization import _guest_inputs
 
     task, _, _ = _inputs()
@@ -199,8 +199,8 @@ def test_streaming_harness_runs_natively_but_not_on_guests_yet() -> None:
         guest_task, _trial("streaming-agent"), source_provenance=_provenance(),
         supported_capabilities=guest_profile.supported_guest_capabilities,
     )
-    assert "guest_driver_capabilities_unsupported" in reasons
-    # Workspace harnesses without streaming keep their guest admission.
+    # Supervised processes are qualified through the guest channel (#2362).
+    assert "guest_driver_capabilities_unsupported" not in reasons
     assert "guest_driver_capabilities_unsupported" not in automatic_service_execution_rejections(
         guest_task, _trial("future-agent"), source_provenance=_provenance(),
         supported_capabilities=guest_profile.supported_guest_capabilities,

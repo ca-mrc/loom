@@ -204,9 +204,10 @@ supervised-process endpoints in `loom-sandbox-runtime`:
 
 Exit status is known even when a background descendant keeps the output pipes
 open; that descendant is killed after a one-second drain grace, the same rule
-as `/exec`. The guest (QEMU) path is not yet qualified for supervised
-processes: harnesses requiring `exec_streaming` are rejected there with
-`guest_driver_capabilities_unsupported`.
+as `/exec`. On guest (QEMU) execution the outer socket proxies the same API
+over the guest's RPC channel to the same server inside the guest, so
+supervised processes behave identically there; the real-payload guest lane
+qualifies them ([#2362](https://github.com/qianyi-sun/loom/issues/2362)).
 
 ### Setup phase
 
@@ -268,8 +269,7 @@ runtime image instead (follow-up).
 
 Codex CLI is the first installed harness (`CODEX` in `hosted_harness.py`,
 [#2311](https://github.com/qianyi-sun/loom/issues/2311)). It is selectable on
-native (non-guest) execution; guest execution rejects it until
-`exec_streaming` is qualified there.
+native container and guest (QEMU) execution (#2362).
 
 - **Install.** A `PinnedArchive`: the npm release tarball for Linux x64,
   pinned by version and `sha512` integrity. The trusted controller downloads
@@ -278,7 +278,11 @@ native (non-guest) execution; guest execution rejects it until
   `/tmp/loom-harness/codex` (`--strip-components=3`). The binaries are
   statically linked, so the task image needs only `tar`, `gzip` and `bash`
   (Codex runs commands through `/bin/bash`). The install is cacheable per team
-  and task image.
+  and task image. It declares `disk_mib=768`: 350 MiB installed plus the
+  131 MiB archive while extracting or re-archiving, ext4 overhead in a guest,
+  and Codex's own session files. Admission rejects a task whose sandbox
+  cannot hold it (`harness_setup_storage_insufficient`); a guest's disk is
+  its storage less the launcher's 32 MiB.
 - **Run.** The `codex` controller phase runs the existing `CodexAdapter`
   invocation inside the sandbox through `exec_streaming`, with
   `installed_agent_model_environment` (Responses API through the broker).
@@ -328,8 +332,16 @@ Known limits, deliberate and shared with Terminus-2:
   Every installed harness's `trace_format` must keep that check.
 - **The broker's ledger route** (`/internal/loom/llm-calls`) is readable from
   the sandbox. It returns only this Trial's own Gateway calls.
-- Guest (QEMU) sandboxes do not share the Pod loopback. Installed harnesses are
-  not admitted there.
+- **Guests** (#2362) do not share the Pod network namespace. QEMU user
+  networking maps the Pod loopback to `10.0.2.2` inside the guest, so the
+  controller gives a guest agent the broker at that address, and an install
+  command the setup proxy there (the controller's own archive download keeps
+  its loopback). `10.0.2.2` is added to `no_proxy`, so model calls never go
+  through a web task's egress proxy. The controller decides "guest" by the
+  planner's rule (`effective_guest_capabilities`), which includes plain guests
+  forced with `isolation: guest`. QEMU forwards only IPv4 loopback, so a guest
+  requires the broker on `127.0.0.1`. Every Pod-loopback listener is as
+  reachable from a guest as from a native sandbox; nothing new is exposed.
 
 
 ## Selecting the four axes together (#2314)

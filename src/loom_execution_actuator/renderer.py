@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from loom.db.schema import ServiceExecutionLease
-from loom.execution_contract import WorkloadRequirementsV1
+from loom.execution_contract import GUEST_LAUNCHER_STORAGE_MIB, WorkloadRequirementsV1
 from loom.execution_image_admission import (
     ImageAdmissionError,
     validate_execution_image_admission_bundle,
@@ -174,7 +174,7 @@ def _sidecar(
                 "--root", "/", "--state", "/loom/guest-state/incarnation",
                 "--socket", f"/loom/sandboxes/{value.role_name}/sandbox.sock",
                 "--memory-mib", str(value.resources.memory_mib),
-                "--storage-mib", str(value.resources.ephemeral_storage_mib - 32),
+                "--storage-mib", str(value.resources.ephemeral_storage_mib - GUEST_LAUNCHER_STORAGE_MIB),
                 "--cpu-millis", str(value.resources.cpu_millis),
                 "--max-transfer-bytes", str(max_artifact_bytes),
                 "--exec-timeout-seconds", value.argv[-1],
