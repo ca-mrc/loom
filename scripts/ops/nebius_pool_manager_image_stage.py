@@ -13,11 +13,12 @@ from scripts.ops.nebius_pool_manager_image_history import (
     STEPS,
     ManagerImageEntry,
     ManagerImageRepairBinding,
+    image_phase_options,
     manager_image_entry,
     prepared_image_record,
 )
 from scripts.ops.nebius_pool_migration import _hash
-from scripts.ops.nebius_pool_startup_repair import _RECOVERY, _exists, _manager_options
+from scripts.ops.nebius_pool_startup_repair import _RECOVERY, _exists
 
 
 class ManagerImageAPI(Protocol):
@@ -53,7 +54,7 @@ def repair_manager_image(*, request: PoolCutoverRequest, binding: ManagerImageRe
                 qualify_image_entry_closed(current, state=state, anchor=anchor)
                 api.qualify_closed()
                 actual = api.read_workload(key)
-                if not any(_matches(actual, option, uid) for option in _manager_options(entry.documents, record)):
+                if not any(_matches(actual, option, uid) for option in image_phase_options(entry.documents, record)):
                     raise ValueError
                 return actual
 

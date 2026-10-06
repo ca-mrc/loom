@@ -115,6 +115,19 @@ def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[d
     # always bind the complete repair history directly.
     marker = anchor / (operation + '-completion.json')
     if outcome == 'legacy' and _exists(marker):
+        from scripts.ops.nebius_pool_manager_image_history import (
+            manager_image_paths,
+            original_recovery_image,
+        )
+
+        image_paths = {str(path) for path in manager_image_paths(operation, state=state, anchor=anchor)}
+        image_historical = {**receipt, 'phase_sha256': {
+            name: value for name, value in before.items() if name not in image_paths}}
+        if (image_historical != receipt
+                and json.loads(private_state._private_read(marker)) == _identity(image_historical)):
+            if original_recovery_image(request, state=state, anchor=anchor) is None:
+                raise ValueError
+            return image_historical, before
         repair_paths = {str(path) for path in _repair_paths(operation, state, anchor)}
         historical = {**receipt, 'phase_sha256': {name: value for name, value in before.items() if name not in repair_paths}}
         if historical != receipt and json.loads(private_state._private_read(marker)) == _identity(historical):

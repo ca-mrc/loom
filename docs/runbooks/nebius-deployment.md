@@ -1498,9 +1498,12 @@ pool's manager revision `0174`; a different head requires a separate migration,
 which this action cannot perform. The retained publication reader and keyring
 must verify the new image before operator connections are opened.
 
-Install uses the original dispatch lock, stops the manager, proves actual Pod
+Install uses the original dispatch lock, first adds a Deployment-only metadata
+isolation marker, stops the manager, proves actual Pod
 drain, replaces only image references using exact identity/version/template
-checks, and restarts it. Unknown writes are observed, never resent. An interrupted
+checks, and restarts it while removing the marker. The marker changes no Pod
+template, but makes retained older tooling reject activation before a delayed
+stop can exist. Unknown writes are observed, never resent. An interrupted
 local enrollment with only its valid anchor may finish recording the same
 all-prepared state; an existing write intent is never reset. Up to eight completed
 corrections can form an append-only chain before first opening. A pending tail
@@ -1512,6 +1515,16 @@ fences any outstanding image write before shutdown and restoration. Completion
 preserves all correction records/anchors and supplies the final manager image to
 later refreshes, while keeping the original execution profile. A successful image
 correction alone is not installed multi-owner acceptance.
+
+Older rollback tooling may save its fence before the first isolation request
+commits. Updated recovery accepts those unchanged bytes only before any image
+stop/template/start intent. Shutdown removes a late isolation marker and proves
+a changed object version, invalidating any still-delayed isolation request. If
+the isolate invalidated an older pending shutdown CAS, its original version is
+retained and a separate nested stop intent is recorded; an uncertain nested stop
+is readback-only. Existing legacy completion receipts remain unchanged while
+historical readers include the separately qualified image ancestry. This narrow
+compatibility path cannot cover a later correction or destructive image phase.
 
 ## Refresh the retained application manager
 

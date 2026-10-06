@@ -6,6 +6,8 @@ from typing import Any
 
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
 from scripts.ops.nebius_pool_manager_image_history import (
+    IMAGE_MARKER,
+    STEPS,
     ManagerImageRepairBinding,
     manager_image_entry,
 )
@@ -16,6 +18,9 @@ from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAP
 
 class HTTPSPoolManagerImageAPI(HTTPSPoolStartupRepairAPI):
     """No configuration writer; retain the existing parent's authority and client."""
+
+    steps = STEPS
+    drain_slice = slice(2, 4)
 
     def __init__(self, *, parent: HTTPSPoolCutoverAPI, binding: ManagerImageRepairBinding):
         HTTPSPoolStartupAPI.__init__(self, parent=parent)
@@ -37,3 +42,20 @@ class HTTPSPoolManagerImageAPI(HTTPSPoolStartupRepairAPI):
         for container in (*pod['containers'], *pod.get('initContainers', [])):
             container['image'] = self.image_binding.candidate['images']['service']['image_ref']
         return template
+
+    def _repair_changes(self, phase: str, before: dict[str, Any], desired: dict[str, Any]
+            ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from scripts.ops.nebius_ingress_stage import _snapshot
+
+        if phase == 'isolate':
+            proposed = _snapshot(before)
+            proposed['metadata'].setdefault('annotations', {})[IMAGE_MARKER] = str(self.image_binding.operation_id)
+            return proposed, [{'op': 'add', 'path': '/metadata/annotations',
+                'value': proposed['metadata']['annotations']}]
+        proposed, changes = super()._repair_changes(phase, before, desired)
+        if phase == 'start':
+            del proposed['metadata']['annotations'][IMAGE_MARKER]
+            changes.append({'op': 'remove', 'path': '/metadata/annotations/loom.nebius~1manager-image-repair'})
+            if not proposed['metadata']['annotations']:
+                del proposed['metadata']['annotations']
+        return proposed, changes

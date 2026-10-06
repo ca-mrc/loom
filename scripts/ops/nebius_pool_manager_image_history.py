@@ -27,7 +27,6 @@ from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_docu
 from scripts.ops.nebius_pool_startup_repair import (
     PoolStartupRepairBinding,
     _exists,
-    _manager_options,
     _repair_record,
     startup_repair_exists,
 )
@@ -40,7 +39,8 @@ from loom.execution_image_admission import (
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import ProtectedPublication
 
-STEPS = ('stop', 'template', 'start')
+STEPS = ('isolate', 'stop', 'template', 'start')
+IMAGE_MARKER = 'loom.nebius/manager-image-repair'
 MAX_CORRECTIONS = 8
 
 
@@ -75,6 +75,14 @@ def _completed(entry: ManagerImageEntry) -> bool:
 
 def prepared_image_record(identity: dict[str, Any]) -> dict[str, Any]:
     return {**identity, 'phases': {name: {'phase': 'prepared', 'before_resource_version': None} for name in STEPS}}
+
+
+def image_phase_options(documents: tuple[dict[str, Any], ...], record: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    for index, name in enumerate(STEPS):
+        phase = record['phases'][name]['phase']
+        if phase != 'applied':
+            return (documents[index],) if phase == 'prepared' else (documents[index], documents[index + 1])
+    return (documents[-1],)
 
 
 def _read(path: Path) -> dict[str, Any]:
@@ -169,9 +177,14 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
         request.fencing.retirement.migration.registration.spec)
     desired = manager_image_target(ManagementRefreshRenderRequest(deployment, deployment,
         original, binding.candidate, binding.profile, delivery.repo_root))
-    stopped, replaced = _snapshot(original), copy.deepcopy(desired)
+    if IMAGE_MARKER in original['metadata'].get('annotations', {}):
+        raise ValueError
+    isolated = _snapshot(original)
+    isolated['metadata'].setdefault('annotations', {})[IMAGE_MARKER] = str(binding.operation_id)
+    stopped, replaced = copy.deepcopy(isolated), copy.deepcopy(desired)
+    replaced['metadata'].setdefault('annotations', {})[IMAGE_MARKER] = str(binding.operation_id)
     stopped['spec']['replicas'] = replaced['spec']['replicas'] = 0
-    documents = (_snapshot(original), stopped, replaced, desired)
+    documents = (_snapshot(original), isolated, stopped, replaced, desired)
     identity = {'schema': 'loom.nebius-pool-manager-image.v1', 'operation_id': str(operation),
         'state_dir': str(state), 'binding': binding.model_dump(mode='json'),
         'activation_entry': activation_entry, 'workloads_sha256': digest(documents)}
@@ -233,12 +246,41 @@ def manager_image_options(request: PoolCutoverRequest, *, state: Path, anchor: P
     if len(choices[key]) != 1 or _stable(choices[key][0]) != _stable(chain[0].documents[0]):
         raise ValueError('pool_manager_image_projection_differs')
     tail = chain[-1]
-    return {**choices, key: _manager_options(tail.documents, tail.record or prepared_image_record(tail.identity))}
+    return {**choices, key: image_phase_options(tail.documents, tail.record or prepared_image_record(tail.identity))}
 
 
 def qualify_completed_manager_images(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> None:
     if any(not _completed(row) for row in load_manager_image_chain(request, state=state, anchor=anchor)):
         raise ValueError('pool_manager_image_incomplete')
+
+
+def original_recovery_image(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> ManagerImageEntry | None:
+    """An old rollback may win only before the first image's destructive intent.
+
+    Its fence remains byte-for-byte authoritative. A pending metadata isolate
+    is invalidated by shutdown, whose exact projection also removes that marker.
+    The normal fence reader still validates the full retained identity/record.
+    """
+    operation = request.fencing.retirement.migration.registration.spec.operation_id
+    marker = anchor / (str(operation) + '-startup-fence.json')
+    if not _exists(marker) or 'manager_image_sha256' in _read(marker):
+        return None
+    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    if not chain:
+        return None
+    _read(state / 'startup-fence.json')
+    if len(chain) != 1:
+        raise ValueError('pool_manager_image_legacy_recovery_unqualified')
+    entry = chain[0]
+    record = entry.record or prepared_image_record(entry.identity)
+    _, cancellation = _activation_record(request, state=state, anchor=anchor)
+    if (record['phases']['isolate']['phase'] not in {'prepared', 'intent'}
+            or any(record['phases'][phase] != {'phase': 'prepared', 'before_resource_version': None}
+                for phase in ('stop', 'template', 'start'))
+            or cancellation is None or cancellation['cancellation'] != 'fenced'
+            or any(row['fence'] != 'fenced' for row in cancellation['guards'].values())):
+        raise ValueError('pool_manager_image_legacy_recovery_unqualified')
+    return entry
 
 
 def manager_image_paths(operation: str, *, state: Path, anchor: Path) -> tuple[Path, ...]:

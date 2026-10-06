@@ -129,14 +129,26 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
 
     def _stop_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
         try:
+            from scripts.ops.nebius_pool_manager_image_history import (
+                IMAGE_MARKER,
+                original_recovery_image,
+            )
+
             self._scope()
             closed, originals, targets, _, record = _shutdown_record(self.request, state=self.state, anchor=self.anchor)
+            image = original_recovery_image(self.request, state=self.state, anchor=self.anchor)
             version = before['metadata']['resourceVersion']
+            options = (originals[key],)
+            if image is not None and image.record is not None and key == _key(self.request.manager):
+                if image.record['phases']['isolate']['phase'] == 'intent':
+                    options = image.documents[:2]
+            item = {} if record is None else record['workloads'][key]
+            item = item.get('isolation_stop', item)
             if (closed != self.closed or record is None or key not in targets
-                    or originals[key] == targets[key] or not _matches(before, originals[key], _uid(closed[key]))
+                    or originals[key] == targets[key] or not any(_matches(before, row, _uid(closed[key])) for row in options)
                     or _stable(desired) != targets[key]
                     or not isinstance(version, str) or not 0 < len(version) <= 128
-                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
+                    or item != {'phase': 'prepared' if preview else 'intent',
                         'before_resource_version': None if preview else version}):
                 raise ValueError
             if self.recovery_drained() is not True:
@@ -149,6 +161,8 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
                 {'op': 'test', 'path': '/spec', 'value': before['spec']},
                 {'op': 'replace', 'path': '/spec/' + field, 'value': targets[key]['spec'][field]}]
+            if image is not None and key == _key(self.request.manager) and IMAGE_MARKER in before['metadata'].get('annotations', {}):
+                patches.append({'op': 'remove', 'path': '/metadata/annotations/loom.nebius~1manager-image-repair'})
             with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
                     json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
                 return _patch_result(response, desired=desired, uid=_uid(closed[key]))
