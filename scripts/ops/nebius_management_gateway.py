@@ -61,7 +61,7 @@ LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install",
     "loom-nebius-pool-rollback-v1": "rollback"}
-IMAGE_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'})
+IMAGE_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3', 'loom.nebius-pool-startup-repair-operation.v4'})
 POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1', *IMAGE_REPAIR_SCHEMAS})
 MANAGER_SCHEMA_PROOF = 'manager-schema.json'
 POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'manager-image', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
