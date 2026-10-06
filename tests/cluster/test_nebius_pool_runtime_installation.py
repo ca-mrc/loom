@@ -60,13 +60,15 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path):
             'containers': [{'name': 'spool-user', 'image': image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                     'capabilities': {'drop': ['ALL']}},
-                'command': ['python', '-c', 'import os,stat; from pathlib import Path; '
-                    'p=Path("/var/run/loom-application-source/spool"); '
+                'command': ['python', '-c', 'import os,stat,sys; from pathlib import Path; '
+                    'from loom_service.application_management.source_upload import ApplicationSourceUploader; '
+                    'p=Path(sys.argv[1]); '
                     'assert p.parent.stat().st_mode & stat.S_ISGID; '
                     'assert os.getuid()==p.stat().st_uid==1000; '
                     'assert stat.S_IMODE(p.stat().st_mode)==0o700; '
+                    'assert ApplicationSourceUploader(None,None,spool_directory=p).directory==p; '
                     '(p/"upload").write_bytes(b"private source"); '
-                    'assert (p/"upload").read_bytes()==b"private source"']} ]}
+                    'assert (p/"upload").read_bytes()==b"private source"', SOURCE_SPOOL_PATH]}]}
         mount_application_source(pod, settings=ApplicationSourceUploadSettings(
             credentials_file=Path(SOURCE_CREDENTIALS_PATH) / 'credentials.json',
             spool_directory=Path(SOURCE_SPOOL_PATH)), secret_name='source-credentials', service_image=image)

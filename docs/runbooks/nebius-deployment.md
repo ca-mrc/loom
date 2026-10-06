@@ -118,6 +118,11 @@ builder token and shared-build read permissions through the protected operation.
 The management renderer reserves 2 GiB of temporary disk per concurrent source
 upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
 Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+The private spool is mounted at `/run/loom-application-source/spool`; startup
+clears inherited setgid only on an otherwise owner-only directory. It continues
+to reject symlinks, foreign ownership and broader permissions. Apply renderer
+changes through a qualified protected transition, never by editing a retained
+cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
 Subsequent lifecycle changes use the same management context:

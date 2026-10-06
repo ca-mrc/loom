@@ -7,7 +7,8 @@ from loom.nebius_application_authority import ApplicationNamespaceAuthorityV1
 from loom_service.application_management.installation import ApplicationSourceUploadSettings
 
 SOURCE_CREDENTIALS_PATH = "/var/run/loom-application-source-credentials"
-SOURCE_VOLUME_PATH = "/var/run/loom-application-source"
+# Alpine's /var/run is a symlink; the private uploader requires a canonical path.
+SOURCE_VOLUME_PATH = "/run/loom-application-source"
 SOURCE_SPOOL_PATH = SOURCE_VOLUME_PATH + "/spool"
 
 

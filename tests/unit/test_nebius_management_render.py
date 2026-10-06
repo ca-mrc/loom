@@ -400,7 +400,7 @@ def source_management_inputs(application_management_inputs):
     data = application_management_inputs[0]
     data['installation']['applications']['runtime']['source_upload'] = {
         'credentials_file': '/var/run/loom-application-source-credentials/credentials.json',
-        'spool_directory': '/var/run/loom-application-source/spool', 'max_inflight': 2,
+        'spool_directory': '/run/loom-application-source/spool', 'max_inflight': 2,
     }
     return application_management_inputs
 

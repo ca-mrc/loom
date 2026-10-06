@@ -1073,6 +1073,8 @@ installation fingerprints.
 The management renderer binds configured source uploads to a revision-named,
 source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
 initializer verifies the spool directory's ownership and mode on every Pod start.
+The spool mount uses canonical `/run/loom-application-source`, not Alpine's
+symlinked `/var/run`, preserving the uploader's rejection of symlinked paths.
 It clears an inherited setgid bit from an otherwise owner-only directory using
 a no-follow directory descriptor, leaving exactly `0700`; symlinks, foreign
 ownership and broader permissions remain errors rather than being repaired.
