@@ -8,6 +8,13 @@ Nebius is the image publication path for both development and production.
 Use the candidate publication output as the source of image references; never
 substitute a mutable branch tag during promotion.
 
+The service image includes the `cluster` runtime dependencies as well as the
+pinned `nebius-gateway` SDK: the management application builder uses the Python
+Kubernetes client with its projected ServiceAccount identity. The image build
+checks both SDK imports; the disposable Kubernetes service-image test also
+constructs the builder transport and checks token refresh as the runtime user.
+Tests in a developer environment alone do not qualify these image dependencies.
+
 Production still requires separately reviewed environment inputs, release-owner
 and Production Environment approval. Run
 `scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
