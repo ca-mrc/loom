@@ -1559,6 +1559,13 @@ Normal activation still requires fresh capacity evidence under the existing pool
 transaction. For installed verification, observe a newly scheduled, successful
 collector Job and its Pods using the corrected image; a patched CronJob alone is
 not proof of execution. Preserve all original execution profiles and configuration.
+Protected `inspect` exposes `pool_startup_diagnostics.collector_completion` when
+it observes a successful Pod and Job bound to the current pooled CronJob template.
+Compare its controller UID with the retained collector and its `image_sha256`
+with the selected publication's execution-actuator digest. The observation includes
+Job/Pod identities, checks successful main and initializer containers, and rejects
+readback drift; `null` is not success. Only the digest is exported, not image URLs,
+configuration or logs. This readout is evidence to inspect, not activation authority.
 Cancellation fences the outstanding target's image write; shutdown and completion
 retain the full mixed-target image history. This remains image repair, not
 permission to open admission without qualification or a multi-owner acceptance claim.

@@ -170,6 +170,65 @@ def _instance(pod: dict[str, Any], name: str) -> str | None:
     return None
 
 
+def _collector_completion(kube: Kubectl, pods: list[dict[str, Any]], *, namespace: str,
+                          installation: str) -> dict[str, Any] | None:
+    """Bounded read-only observation, not publication or activation authority."""
+    from scripts.ops.nebius_pool_migration_guard import _runtime_pod_spec
+
+    attempts = 0
+    for pod in sorted(pods, key=lambda row: row['metadata'].get('creationTimestamp', ''), reverse=True):
+        if (pod['metadata'].get('namespace') != namespace or pod.get('status', {}).get('phase') != 'Succeeded'
+                or not any(row.get('name') == 'collector' for row in pod['spec'].get('containers', []))):
+            continue
+        if attempts == 3:
+            break
+        attempts += 1
+        try:
+            if pod['metadata'].get('deletionTimestamp'):
+                raise ValueError
+            root = _bound(kube, pod, 'collector', installation)
+            job = _parent(kube, pod, 'Job')
+            status = job.get('status', {})
+            complete = [row for row in status.get('conditions', []) if row.get('type') == 'Complete']
+            if len(complete) != 1 or complete[0].get('status') != 'True':
+                raise ValueError
+            if (status.get('active', 0) != 0 or type(status.get('succeeded')) is not int or status['succeeded'] < 1
+                    or any(row.get('type') == 'Failed' and row.get('status') == 'True' for row in status.get('conditions', []))):
+                raise ValueError
+            expected = root['spec']['jobTemplate']['spec']['template']['spec']
+            normalized = _runtime_pod_spec(pod['spec'], expected)
+            image = _container(expected, 'collector')['image']
+            match = re.fullmatch(r'[^@\s]+@sha256:([0-9a-f]{64})', image)
+            if match is None:
+                raise ValueError
+            for field, statuses in (('containers', 'containerStatuses'), ('initContainers', 'initContainerStatuses')):
+                actual, wanted = normalized.get(field, []), expected.get(field, [])
+                observed = pod['status'].get(statuses, [])
+                names = [row['name'] for row in wanted]
+                if (sorted(row['name'] for row in actual) != sorted(names)
+                        or sorted(row['name'] for row in observed) != sorted(names)
+                        or any(row.get('image') != image for row in (*actual, *wanted))
+                        or any(type(row.get('state', {}).get('terminated', {}).get('exitCode')) is not int
+                            or row['state']['terminated']['exitCode'] != 0 for row in observed)):
+                    raise ValueError
+                if any(row.get(key) != desired.get(key)
+                        for row, desired in zip(actual, wanted, strict=True)
+                        for key in ('name', 'image', 'command', 'args', 'env', 'envFrom', 'volumeMounts')):
+                    raise ValueError
+            current = kube.get('pod', pod['metadata']['name'], namespace)
+            if (current != pod or _parent(kube, current, 'Job') != job
+                    or _bound(kube, current, 'collector', installation) != root):
+                raise ValueError
+            return {'status': 'observed', 'namespace': namespace,
+                'pod': pod['metadata']['name'], 'pod_uid': pod['metadata']['uid'],
+                'job': job['metadata']['name'], 'job_uid': job['metadata']['uid'],
+                'controller': root['metadata']['name'], 'controller_uid': root['metadata']['uid'],
+                'image_sha256': match[1]}
+        except Exception:
+            continue
+    return None
+
+
 def pool_startup_diagnostics(kube: Kubectl, pods: list[dict[str, Any]], *, operation_json: str,
                              execution_namespace: str) -> dict[str, Any]:
     if not operation_json:
@@ -218,4 +277,5 @@ def pool_startup_diagnostics(kube: Kubectl, pods: list[dict[str, Any]], *, opera
         workloads.append({"role": role, "namespace": metadata["namespace"], "pod": metadata["name"],
             "pod_uid": metadata["uid"], "controller": root["metadata"]["name"], "controller_uid": root["metadata"]["uid"],
             "container": name, "log_instance": instance, "diagnostic": diagnostic})
-    return {"status": "observed", "workloads": workloads}
+    return {"status": "observed", "workloads": workloads,
+        "collector_completion": _collector_completion(kube, pods, namespace=execution_namespace, installation=installation)}
