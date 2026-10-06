@@ -1392,6 +1392,8 @@ def test_manifest_root_shard_salt_is_bound_to_measured_collection_balance() -> N
         ("tests/ops/test_nebius_pool_startup_repair_rollback.py", 4),
         ("tests/ops/test_nebius_pool_image_cancellation.py", 7),
         ("tests/ops/test_nebius_pool_image_transport.py", 6),
+        ("tests/ops/test_nebius_pool_image_cancellation_collector.py", 1),
+        ("tests/ops/test_nebius_pool_image_cancellation_gateway.py", 3),
     }
 
 
