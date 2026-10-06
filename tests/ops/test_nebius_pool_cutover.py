@@ -796,6 +796,131 @@ def platform_consumer_inventory(request):
     return rows
 
 
+def terminal_platform_job(request):
+    """A completed native one-shot Job, as retained by normal platform rollouts."""
+    guard = request.fencing.retirement.migration.guards[0]
+    uid = str(uuid4())
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {
+        "name": "loom-platform-migrate-history", "namespace": guard.namespace, "uid": uid, "resourceVersion": "1"},
+        "spec": {"parallelism": 1, "completions": 1, "completionMode": "NonIndexed",
+            "selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": uid}},
+            "template": {"metadata": {"labels": {"batch.kubernetes.io/controller-uid": uid}}, "spec": {
+                "serviceAccountName": "loom-platform", "restartPolicy": "Never", "automountServiceAccountToken": False,
+                "containers": [{"name": "migration", "image": "registry.example/service@sha256:" + "a" * 64}]}}},
+        "status": {"active": 0, "succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}]}}
+    pod = writer_descendant(job, "Pod")
+    pod["metadata"]["labels"] = copy.deepcopy(job["spec"]["selector"]["matchLabels"])
+    pod["status"] = {"phase": "Succeeded", "containerStatuses": [
+        {"name": "migration", "state": {"terminated": {"exitCode": 0}}}]}
+    return job, pod
+
+
+@pytest.mark.parametrize("terminal", ["Complete", "Failed"])
+def test_terminal_platform_job_history_qualifies_without_mutation(
+        platform_consumer_inputs, cutover_binding_inventory, terminal):
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    job, pod = terminal_platform_job(request)
+    if terminal == "Failed":
+        job["status"] = {"failed": 1, "conditions": [{"type": "Failed", "status": "True"}]}
+        pod["status"]["phase"] = "Failed"
+        pod["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = 1
+    rows["jobs"].append(job)
+    rows["pods"].append(pod)
+    before = copy.deepcopy(rows)
+    calls = binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+    assert calls and all(call.method == "GET" for call in calls)
+    assert rows == before
+
+
+@pytest.mark.parametrize("damage", ["unfinished_job", "active_job", "terminating_job", "pod_running", "pod_status_missing",
+    "init_running", "ephemeral_running", "foreign_account", "owner_uid", "owner_namespace", "owner_kind",
+    "unowned_matching_pod", "job_owner", "manual_selector", "wrong_selector", "custom_controller", "indexed",
+    "parallelism", "restart_always", "restart_on_failure", "execution_identity", "duplicate_status",
+    "duplicate_container", "extra_status", "missing_container", "ambiguous_terminal", "early_terminal",
+    "selector_expression", "boolean_counter", "completions", "foreign_matching_pod"])
+def test_terminal_history_never_exempts_restartable_or_unproven_processes(
+        platform_consumer_inputs, cutover_binding_inventory, damage):
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    job, pod = terminal_platform_job(request)
+    if damage == "unfinished_job":
+        job["status"]["conditions"] = []
+    elif damage == "active_job":
+        job["status"]["active"] = 1
+    elif damage == "terminating_job":
+        job["status"]["terminating"] = 1
+    elif damage == "pod_running":
+        pod["status"]["phase"] = "Running"
+    elif damage == "pod_status_missing":
+        pod["status"]["containerStatuses"] = []
+    elif damage in {"init_running", "ephemeral_running"}:
+        field = "init" if damage == "init_running" else "ephemeral"
+        pod["spec"][field + "Containers"] = [{"name": "still-running"}]
+        pod["status"][field + "ContainerStatuses"] = [{"name": "still-running", "state": {"running": {}}}]
+    elif damage == "foreign_account":
+        pod["spec"]["serviceAccountName"] = "unrelated"
+    elif damage == "owner_uid":
+        pod["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    elif damage == "owner_namespace":
+        pod["metadata"]["namespace"] = "unrelated"
+    elif damage == "owner_kind":
+        pod["metadata"]["ownerReferences"][0]["kind"] = "CronJob"
+    elif damage == "unowned_matching_pod":
+        pod["metadata"].pop("ownerReferences")
+    elif damage == "job_owner":
+        job["metadata"]["ownerReferences"] = [copy.deepcopy(pod["metadata"]["ownerReferences"][0])]
+    elif damage == "manual_selector":
+        job["spec"]["manualSelector"] = True
+    elif damage == "wrong_selector":
+        job["spec"]["selector"]["matchLabels"] = {"app": "migration"}
+    elif damage == "custom_controller":
+        job["spec"]["managedBy"] = "custom.example/controller"
+    elif damage == "indexed":
+        job["spec"]["completionMode"] = "Indexed"
+    elif damage == "parallelism":
+        job["spec"]["parallelism"] = 2
+    elif damage == "restart_always":
+        job["spec"]["template"]["spec"]["restartPolicy"] = "Always"
+    elif damage == "restart_on_failure":
+        job["spec"]["template"]["spec"]["restartPolicy"] = "OnFailure"
+    elif damage == "duplicate_status":
+        pod["status"]["containerStatuses"] *= 2
+    elif damage == "duplicate_container":
+        pod["spec"]["containers"] *= 2
+    elif damage == "extra_status":
+        pod["status"]["containerStatuses"].append({"name": "extra", "state": {"terminated": {"exitCode": 0}}})
+    elif damage == "missing_container":
+        pod["spec"]["containers"] = []
+        pod["status"]["containerStatuses"] = []
+    elif damage == "ambiguous_terminal":
+        job["status"]["conditions"].append({"type": "Failed", "status": "True"})
+    elif damage == "early_terminal":
+        job["status"]["conditions"][0]["type"] = "SuccessCriteriaMet"
+    elif damage == "selector_expression":
+        job["spec"]["selector"]["matchExpressions"] = [{"key": "extra", "operator": "Exists"}]
+    elif damage == "boolean_counter":
+        job["status"]["active"] = False
+    elif damage == "completions":
+        job["spec"]["completions"] = 2
+    elif damage == "foreign_matching_pod":
+        extra = copy.deepcopy(pod)
+        extra["metadata"].update(name="unrelated", uid=str(uuid4()))
+        extra["metadata"].pop("ownerReferences")
+        extra["spec"]["serviceAccountName"] = "unrelated"
+        rows["pods"].append(extra)
+    else:
+        actuator = request.fencing.retirement.actuators[0]
+        for row in (job, pod):
+            row["metadata"]["namespace"] = actuator["metadata"]["namespace"]
+        for spec in (job["spec"]["template"]["spec"], pod["spec"]):
+            spec["serviceAccountName"] = actuator["spec"]["template"]["spec"]["serviceAccountName"]
+    rows["jobs"].append(job)
+    rows["pods"].append(pod)
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
 def test_exact_platform_consumers_are_read_only_roots_not_retirement_targets(
         platform_consumer_inputs, cutover_binding_inventory):
     from scripts.ops.nebius_pool_cutover import _contract, cutover_documents
