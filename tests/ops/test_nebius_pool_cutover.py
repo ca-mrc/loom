@@ -748,6 +748,8 @@ def writer_workload_inventory(request, *, originals=None):
         originals = (*retirement_documents(request.fencing.retirement).values(), request.manager, *request.services)
     for document in originals:
         rows["cronjobs" if document["kind"] == "CronJob" else "deployments"].append(copy.deepcopy(document))
+    rows["statefulsets"].extend(copy.deepcopy(guard.database.statefulset)
+        for guard in request.fencing.retirement.migration.guards if guard.database is not None)
     return rows
 
 
@@ -823,9 +825,10 @@ def test_retained_database_is_a_readonly_census_root_with_exact_pod_ancestry(
         request = replace(request, fencing=replace(request.fencing, retirement=replace(request.fencing.retirement,
             migration=replace(migration, guards=(guard, *migration.guards[1:])))))
     rows = platform_consumer_inventory(request)
-    observed = copy.deepcopy(database)
+    if damage == "unbound":
+        rows["statefulsets"].append(copy.deepcopy(database))
+    observed, = rows["statefulsets"]
     pod = writer_descendant(observed, "Pod", name="loom-postgres-0")
-    rows["statefulsets"].append(observed)
     rows["pods"].append(pod)
     if damage == "missing":
         rows["statefulsets"].clear()

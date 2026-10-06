@@ -2559,7 +2559,8 @@ included; zero replicas, suspension and Pod phase alone do not exempt an unregis
 consumer of a retiring ServiceAccount. Every retained root must match its original
 UID and exact original or journal-qualified recovery template. A descendant must
 resolve through an exact same-namespace, same-ServiceAccount controller chain:
-Deployment → ReplicaSet → Pod or CronJob → Job → Pod. Dangling, replaced, cyclic
+Deployment → ReplicaSet → Pod, CronJob → Job → Pod or retained database
+StatefulSet → Pod. Dangling, replaced, cyclic
 or contradictory ownership rejects preflight. Historical descendants can remain
 without deletion; this check establishes identity consumers, not execution health
 or shutdown. The existing drain and effective-permission barriers still apply.
@@ -2574,6 +2575,12 @@ They are never mutation or drain targets. Unknown control-plane copies, changed
 consumer templates, execution/build identity reuse and additional Kubernetes
 grants still fail qualification. No blanket account or tokenless-Pod exemption
 is introduced. An empty roster retains the previous journal contract.
+Participant PostgreSQL StatefulSets are also read-only census roots, derived from
+the existing migration database bindings rather than an additional consumer roster.
+Their already-pinned UIDs and stable templates must match the same live snapshot;
+their Pods require exact typed, same-namespace/account ancestry. They never become
+producer, retirement, runtime, drain or mutation targets. Unbound or copied
+StatefulSets using a retiring account remain rejected.
 Completed standalone platform migration/configuration/backup Jobs are census-only
 history when the native non-indexed singleton Job has exactly one true `Complete`
 or `Failed` condition, no active/terminating count, no owner, an automatic UID
