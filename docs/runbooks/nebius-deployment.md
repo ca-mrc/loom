@@ -183,6 +183,12 @@ It excludes Secret values, arbitrary Pod environment/commands, annotations, kube
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
 
+Pod `container_statuses` and `init_container_statuses` report readiness, restart
+counts, and current/previous container states from that same inventory. Waiting
+and termination reasons are allowlisted; messages, image/container IDs and unknown
+reason strings are not exported. Missing status is unknown, not healthy or zero
+restarts. These diagnostics do not qualify runtime readiness or permit a retry.
+
 `controller_inventory` adds Deployment/CronJob identities, declared ServiceAccounts,
 selected execution target/pool/group identifiers and database Secret references.
 Referenced `envFrom` ConfigMaps are projected through the same field allowlist;
