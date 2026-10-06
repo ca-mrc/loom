@@ -267,6 +267,25 @@ async def test_explicit_index_attempt_must_be_exact_integer(recovery, index_atte
     assert await snapshot(r) == before
 
 
+@pytest.mark.parametrize("storage_attempt", [True, 1.0])
+async def test_legacy_index_requires_integer_canonical_storage_attempt(recovery, storage_attempt):
+    r = recovery
+    async with r.sessions() as session:
+        artifact = await session.get(Artifact, UUID(r.payload["artifact_id"]))
+        trial = await session.get(Trial, UUID(r.payload["trial_id"]))
+        artifact.storage = {**artifact.storage, "attempt": storage_attempt}
+        flag_modified(artifact, "storage")
+        trial.trajectory_index = {key: value for key, value in trial.trajectory_index.items() if key != "attempt"}
+        r.payload["expected_storage_sha256"] = digest(artifact.storage)
+        r.payload["expected_index_sha256"] = digest(trial.trajectory_index)
+        await session.commit()
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "published_owner_conflict"
+    assert await snapshot(r) == before
+
+
 @pytest.mark.parametrize("change", ["schema", "trial", "team", "task", "trajectory", "atif", "bundle"])
 async def test_legacy_index_attempt_omission_preserves_identity_guards(recovery, change):
     r = recovery
