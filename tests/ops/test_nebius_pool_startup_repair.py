@@ -190,6 +190,7 @@ class RepairAPI:
         self.startup, self.resources, self.activation = startup, resources, activation
         self.calls = []
         self.failure = None
+        self.pending = None
         self.drained = True
 
     def qualify_closed(self):
@@ -212,6 +213,7 @@ class RepairAPI:
         assert record['phases'][phase] == {'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         self.calls.append(phase)
         if self.failure == (phase, 'before'):
+            self.pending = (copy.deepcopy(before), copy.deepcopy(desired))
             raise OSError('private-repair-failure')
         actual = copy.deepcopy(desired)
         actual['metadata'].update(uid=before['metadata']['uid'], resourceVersion=str(int(before['metadata']['resourceVersion']) + 1))
@@ -294,6 +296,14 @@ def test_repair_never_repeats_uncertain_manager_writes(prepared_repair, phase, w
         assert repair(prepared_repair) == result and api.calls == calls
         options = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
         assert len(options[_key(context.request.manager)]) == 2
+        # The initial request can commit later. Its exact submitted object,
+        # rather than a new write, must be accepted on the next observation.
+        before, desired = api.pending
+        desired['metadata'].update(uid=before['metadata']['uid'],
+            resourceVersion=str(int(before['metadata']['resourceVersion']) + 1))
+        api.startup.documents[_key(before)] = desired
+        assert repair(prepared_repair)['status'] == 'pool_startup_repaired_closed'
+        assert api.calls.count(phase) == 1
     else:
         assert result['status'] == 'pool_startup_repaired_closed'
         assert repair(prepared_repair) == result and api.calls == calls
@@ -308,3 +318,54 @@ def test_repair_waits_for_actual_manager_drain_before_changing_template(prepared
     api.drained = True
     assert repair(prepared_repair)['status'] == 'pool_startup_repaired_closed'
     assert api.calls == ['stop', 'template', 'start']
+
+
+def test_partial_repair_cannot_open_admission_even_if_runtime_callback_reports_ready(prepared_repair):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+
+    context, _, api, state, anchor = prepared_repair
+    api.failure = ('template', 'before')
+    assert repair(prepared_repair)['status'] == 'pending_source_repair_outcome'
+    api.activation.ready = True
+    with pytest.raises(ValueError):
+        advance_pool_activation(request=context.request, api=api.activation, state_dir=state, anchor_dir=anchor)
+    assert api.activation.calls == [] and api.activation.mode == 'closed'
+
+
+def test_runtime_reader_qualifies_repaired_started_template(prepared_repair):
+    from types import SimpleNamespace
+
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+    from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
+
+    context, _, api, state, anchor = prepared_repair
+    assert repair(prepared_repair)['status'] == 'pool_startup_repaired_closed'
+    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+    adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
+        targets=targets, _scope=lambda: None, read_workload=api.read_workload)
+    observed = HTTPSPoolStartupAPI._started_workloads(adapter)
+    assert observed[_key(context.request.manager)] == api.read_workload(_key(context.request.manager))
+
+
+def test_completed_repair_binds_ancestry_and_remains_a_valid_refresh_predecessor(prepared_repair):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
+    from scripts.ops.nebius_pool_predecessor import PoolPredecessorV1, load_completed_pool
+
+    context, _, api, state, anchor = prepared_repair
+    assert repair(prepared_repair)['status'] == 'pool_startup_repaired_closed'
+    api.activation.ready = True
+    assert advance_pool_activation(request=context.request, api=api.activation,
+        state_dir=state, anchor_dir=anchor)['status'] == 'pool_activation_complete'
+    result = complete_pool_cutover(request=context.request, api=api.activation, state_dir=state, anchor_dir=anchor)
+    completed = load_pool_completion(request=context.request, state_dir=state, anchor_dir=anchor,
+        completion_sha256=result['completion_sha256'])
+    child = state / 'source-repair-configuration/stage.json'
+    assert {state / 'startup-repair.json', child} <= set(completed.history)
+    predecessor = PoolPredecessorV1(operation=context.operation, completion_sha256=result['completion_sha256'])
+    loaded = load_completed_pool(predecessor, original=context.original)
+    assert loaded.deployment.installation.applications.runtime.source_upload.spool_directory == Path('/run/loom-application-source/spool')
+    assert loaded.active['metadata']['uid'] == context.request.manager['metadata']['uid']
+    child.write_bytes(child.read_bytes() + b'\n')
+    with pytest.raises(ValueError):
+        load_completed_pool(predecessor, original=context.original)
