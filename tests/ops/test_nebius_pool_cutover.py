@@ -763,6 +763,224 @@ def writer_descendant(parent, kind, *, name=None):
         "spec": copy.deepcopy(template["spec"]) if kind == "Pod" else {"template": copy.deepcopy(template)}}
 
 
+@pytest.fixture
+def platform_consumer_inputs(cutover_inputs, platform_inputs):
+    from pathlib import Path
+
+    from loom.nebius_platform_render import build_platform
+
+    request, tokens = cutover_inputs
+    guard = request.fencing.retirement.migration.guards[0]
+    guard.controller["spec"]["template"]["spec"]["serviceAccountName"] = "loom-platform"
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+    consumers = []
+    for rows in files.values():
+        for row in rows:
+            if (row["kind"], row["metadata"]["name"]) not in {
+                    ("Deployment", "loom-web"), ("Deployment", "loom-llm-gateway"),
+                    ("CronJob", "loom-platform-backup")}:
+                continue
+            row["metadata"].update(namespace=guard.namespace, uid=str(uuid4()), resourceVersion="1")
+            consumers.append(row)
+    return replace(request, platform_consumers=tuple(consumers)), tokens
+
+
+def platform_consumer_inventory(request):
+    rows = writer_workload_inventory(request)
+    for original in request.platform_consumers:
+        rows["cronjobs" if original["kind"] == "CronJob" else "deployments"].append(copy.deepcopy(original))
+        child = writer_descendant(original, "Job" if original["kind"] == "CronJob" else "ReplicaSet")
+        rows["jobs" if child["kind"] == "Job" else "replicasets"].append(child)
+        rows["pods"].append(writer_descendant(child, "Pod"))
+    return rows
+
+
+def terminal_platform_job(request):
+    """A completed native one-shot Job, as retained by normal platform rollouts."""
+    guard = request.fencing.retirement.migration.guards[0]
+    uid = str(uuid4())
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": {
+        "name": "loom-platform-migrate-history", "namespace": guard.namespace, "uid": uid, "resourceVersion": "1"},
+        "spec": {"parallelism": 1, "completions": 1, "completionMode": "NonIndexed",
+            "selector": {"matchLabels": {"batch.kubernetes.io/controller-uid": uid}},
+            "template": {"metadata": {"labels": {"batch.kubernetes.io/controller-uid": uid}}, "spec": {
+                "serviceAccountName": "loom-platform", "restartPolicy": "Never", "automountServiceAccountToken": False,
+                "containers": [{"name": "migration", "image": "registry.example/service@sha256:" + "a" * 64}]}}},
+        "status": {"active": 0, "succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}]}}
+    pod = writer_descendant(job, "Pod")
+    pod["metadata"]["labels"] = copy.deepcopy(job["spec"]["selector"]["matchLabels"])
+    pod["status"] = {"phase": "Succeeded", "containerStatuses": [
+        {"name": "migration", "state": {"terminated": {"exitCode": 0}}}]}
+    return job, pod
+
+
+@pytest.mark.parametrize("terminal", ["Complete", "Failed"])
+def test_terminal_platform_job_history_qualifies_without_mutation(
+        platform_consumer_inputs, cutover_binding_inventory, terminal):
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    job, pod = terminal_platform_job(request)
+    if terminal == "Failed":
+        job["status"] = {"failed": 1, "conditions": [{"type": "Failed", "status": "True"}]}
+        pod["status"]["phase"] = "Failed"
+        pod["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = 1
+    rows["jobs"].append(job)
+    rows["pods"].append(pod)
+    before = copy.deepcopy(rows)
+    calls = binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+    assert calls and all(call.method == "GET" for call in calls)
+    assert rows == before
+
+
+@pytest.mark.parametrize("damage", ["unfinished_job", "active_job", "terminating_job", "pod_running", "pod_status_missing",
+    "init_running", "ephemeral_running", "foreign_account", "owner_uid", "owner_namespace", "owner_kind",
+    "unowned_matching_pod", "job_owner", "manual_selector", "wrong_selector", "custom_controller", "indexed",
+    "parallelism", "restart_always", "restart_on_failure", "execution_identity", "duplicate_status",
+    "duplicate_container", "extra_status", "missing_container", "ambiguous_terminal", "early_terminal",
+    "selector_expression", "boolean_counter", "completions", "foreign_matching_pod"])
+def test_terminal_history_never_exempts_restartable_or_unproven_processes(
+        platform_consumer_inputs, cutover_binding_inventory, damage):
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    job, pod = terminal_platform_job(request)
+    if damage == "unfinished_job":
+        job["status"]["conditions"] = []
+    elif damage == "active_job":
+        job["status"]["active"] = 1
+    elif damage == "terminating_job":
+        job["status"]["terminating"] = 1
+    elif damage == "pod_running":
+        pod["status"]["phase"] = "Running"
+    elif damage == "pod_status_missing":
+        pod["status"]["containerStatuses"] = []
+    elif damage in {"init_running", "ephemeral_running"}:
+        field = "init" if damage == "init_running" else "ephemeral"
+        pod["spec"][field + "Containers"] = [{"name": "still-running"}]
+        pod["status"][field + "ContainerStatuses"] = [{"name": "still-running", "state": {"running": {}}}]
+    elif damage == "foreign_account":
+        pod["spec"]["serviceAccountName"] = "unrelated"
+    elif damage == "owner_uid":
+        pod["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    elif damage == "owner_namespace":
+        pod["metadata"]["namespace"] = "unrelated"
+    elif damage == "owner_kind":
+        pod["metadata"]["ownerReferences"][0]["kind"] = "CronJob"
+    elif damage == "unowned_matching_pod":
+        pod["metadata"].pop("ownerReferences")
+    elif damage == "job_owner":
+        job["metadata"]["ownerReferences"] = [copy.deepcopy(pod["metadata"]["ownerReferences"][0])]
+    elif damage == "manual_selector":
+        job["spec"]["manualSelector"] = True
+    elif damage == "wrong_selector":
+        job["spec"]["selector"]["matchLabels"] = {"app": "migration"}
+    elif damage == "custom_controller":
+        job["spec"]["managedBy"] = "custom.example/controller"
+    elif damage == "indexed":
+        job["spec"]["completionMode"] = "Indexed"
+    elif damage == "parallelism":
+        job["spec"]["parallelism"] = 2
+    elif damage == "restart_always":
+        job["spec"]["template"]["spec"]["restartPolicy"] = "Always"
+    elif damage == "restart_on_failure":
+        job["spec"]["template"]["spec"]["restartPolicy"] = "OnFailure"
+    elif damage == "duplicate_status":
+        pod["status"]["containerStatuses"] *= 2
+    elif damage == "duplicate_container":
+        pod["spec"]["containers"] *= 2
+    elif damage == "extra_status":
+        pod["status"]["containerStatuses"].append({"name": "extra", "state": {"terminated": {"exitCode": 0}}})
+    elif damage == "missing_container":
+        pod["spec"]["containers"] = []
+        pod["status"]["containerStatuses"] = []
+    elif damage == "ambiguous_terminal":
+        job["status"]["conditions"].append({"type": "Failed", "status": "True"})
+    elif damage == "early_terminal":
+        job["status"]["conditions"][0]["type"] = "SuccessCriteriaMet"
+    elif damage == "selector_expression":
+        job["spec"]["selector"]["matchExpressions"] = [{"key": "extra", "operator": "Exists"}]
+    elif damage == "boolean_counter":
+        job["status"]["active"] = False
+    elif damage == "completions":
+        job["spec"]["completions"] = 2
+    elif damage == "foreign_matching_pod":
+        extra = copy.deepcopy(pod)
+        extra["metadata"].update(name="unrelated", uid=str(uuid4()))
+        extra["metadata"].pop("ownerReferences")
+        extra["spec"]["serviceAccountName"] = "unrelated"
+        rows["pods"].append(extra)
+    else:
+        actuator = request.fencing.retirement.actuators[0]
+        for row in (job, pod):
+            row["metadata"]["namespace"] = actuator["metadata"]["namespace"]
+        for spec in (job["spec"]["template"]["spec"], pod["spec"]):
+            spec["serviceAccountName"] = actuator["spec"]["template"]["spec"]["serviceAccountName"]
+    rows["jobs"].append(job)
+    rows["pods"].append(pod)
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+def test_exact_platform_consumers_are_read_only_roots_not_retirement_targets(
+        platform_consumer_inputs, cutover_binding_inventory):
+    from scripts.ops.nebius_pool_cutover import _contract, cutover_documents
+
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    before = copy.deepcopy(rows)
+    calls = binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+    assert calls and all(call.method == "GET" for call in calls)
+    assert rows == before
+    catalog = cutover_documents(request)
+    consumers = {_key(row) for row in request.platform_consumers}
+    assert not consumers & (set(catalog["runtime"]) | set(catalog["producers"]))
+    contract = _contract(request, catalog)
+    assert set(contract["platform_consumers"]) == consumers
+    assert all(contract["platform_consumers"][_key(row)]["uid"] == row["metadata"]["uid"]
+        for row in request.platform_consumers)
+
+
+@pytest.mark.parametrize("damage", ["clone", "missing", "uid", "template", "descendant_owner"])
+def test_platform_consumers_do_not_exempt_unknown_or_drifted_workloads(
+        platform_consumer_inputs, cutover_binding_inventory, damage):
+    request, tokens = platform_consumer_inputs
+    rows = platform_consumer_inventory(request)
+    if damage == "clone":
+        clone = copy.deepcopy(request.fencing.retirement.migration.guards[0].controller)
+        clone["metadata"].update(name="old-control-plane-copy", uid=str(uuid4()), labels={"app": "unknown"})
+        rows["deployments"].append(clone)
+    else:
+        root = next(row for row in rows["deployments"] if row["metadata"]["name"] == "loom-web")
+        if damage == "missing":
+            rows["deployments"].remove(root)
+        elif damage == "uid":
+            root["metadata"]["uid"] = str(uuid4())
+        elif damage == "template":
+            root["spec"]["template"]["spec"]["containers"][0]["command"] = ["run-old-control-plane"]
+        else:
+            rows["pods"][-1]["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+
+
+@pytest.mark.parametrize("resource,verbs", [("jobs", ["create"]), ("secrets", ["get"])])
+def test_platform_consumers_do_not_exempt_extra_account_authority(
+        platform_consumer_inputs, cutover_binding_inventory, resource, verbs):
+    request, tokens = platform_consumer_inputs
+    namespace = request.platform_consumers[0]["metadata"]["namespace"]
+    cutover_binding_inventory["clusterroles"].append({
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+        "metadata": {"name": "extra-platform-authority", "uid": str(uuid4()), "resourceVersion": "1"},
+        "rules": [{"apiGroups": ["batch" if resource == "jobs" else ""], "resources": [resource], "verbs": verbs}]})
+    cutover_binding_inventory["rolebindings"].append({
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
+        "metadata": {"name": "extra-platform-authority", "namespace": namespace, "uid": str(uuid4()), "resourceVersion": "1"},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "extra-platform-authority"},
+        "subjects": [{"kind": "ServiceAccount", "name": "loom-platform", "namespace": namespace}]})
+    with pytest.raises(ValueError, match="pool_retained_writer_binding_inventory_unqualified"):
+        binding_preflight(request, tokens, cutover_binding_inventory, workloads=platform_consumer_inventory(request))
+
+
 def binding_preflight(request, tokens, inventories, *, page_mode=None, qualified_hook=None, journal=None,
                       workloads=None, workload_page_mode=None, database_read=None, history_read=None):
     from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
@@ -1133,15 +1351,17 @@ def test_gateway_writer_permissions_require_actual_retained_cutover_stage_proof(
             binding_preflight(request, tokens, rows, journal=journal)
 
 
+@pytest.mark.parametrize("automount", [True, False])
 @pytest.mark.parametrize("resource,kind", [("deployments", "Deployment"), ("replicasets", "ReplicaSet"),
     ("statefulsets", "StatefulSet"), ("daemonsets", "DaemonSet"), ("replicationcontrollers", "ReplicationController"),
     ("cronjobs", "CronJob"), ("jobs", "Job"), ("pods", "Pod")])
 def test_retiring_writer_identity_cannot_be_shared_with_unregistered_workload(
-        cutover_inputs, cutover_binding_inventory, resource, kind):
+        cutover_inputs, cutover_binding_inventory, resource, kind, automount):
     request, tokens = cutover_inputs
     rows = writer_workload_inventory(request)
     original = request.fencing.retirement.actuators[0]
     template = copy.deepcopy(original["spec"]["template"])
+    template["spec"]["automountServiceAccountToken"] = automount
     spec = {"template": template, "replicas": 0}
     if kind == "CronJob":
         spec = {"suspend": True, "jobTemplate": {"spec": {"template": template}}}

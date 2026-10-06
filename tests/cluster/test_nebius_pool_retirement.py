@@ -26,6 +26,104 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
     reason="requires explicitly disposable Kubernetes")
 
 
+@pytest.mark.timeout(300)
+async def test_native_terminal_job_history_qualifies_and_spec_edits_cannot_restart_it(fencing_inputs):
+    from kubernetes.client.exceptions import ApiException
+    from scripts.ops.nebius_pool_retirement import retirement_documents
+    from scripts.ops.nebius_pool_role_fencing import (
+        POOL_WRITER_WORKLOAD_COLLECTIONS,
+        qualify_retained_writer_workloads,
+    )
+
+    # Only historical Job/Pod snapshots come from Kubernetes here. The unchanged
+    # retained roots are fixtures; complete installed-pool acceptance is separate.
+    guard = fencing_inputs.retirement.migration.guards[0]
+    namespace = guard.namespace
+    account = guard.controller["spec"]["template"]["spec"]["serviceAccountName"]
+    originals = retirement_documents(fencing_inputs.retirement)
+    container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
+    try:
+        _, core, batch = await asyncio.to_thread(_load_client, container)
+        await asyncio.to_thread(core.create_namespace, {"metadata": {"name": namespace}})
+        await asyncio.to_thread(core.create_namespaced_service_account, namespace, {"metadata": {"name": account}})
+
+        async def create_job(name, command):
+            await asyncio.to_thread(batch.create_namespaced_job, namespace, {
+                "apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name},
+                "spec": {"backoffLimit": 0, "template": {"spec": {
+                    "restartPolicy": "Never", "serviceAccountName": account,
+                    "automountServiceAccountToken": False,
+                    "containers": [{"name": "one-shot", "image": "busybox:1.36", "command": command}]}}}})
+
+        async def snapshots():
+            jobs = await asyncio.to_thread(batch.list_namespaced_job, namespace)
+            pods = await asyncio.to_thread(core.list_namespaced_pod, namespace)
+            result = []
+            for collection, api, kind in ((jobs, "batch/v1", "Job"), (pods, "v1", "Pod")):
+                rows = core.api_client.sanitize_for_serialization(collection)["items"]
+                # Kubernetes list items omit TypeMeta; the production inventory
+                # reader qualifies it from each enclosing typed collection.
+                for row in rows:
+                    row.setdefault("apiVersion", api)
+                    row.setdefault("kind", kind)
+                result.append(rows)
+            return tuple(result)
+
+        async def wait_terminal(names):
+            deadline = time.monotonic() + 120
+            while True:
+                jobs, pods = await snapshots()
+                terminal = {row["metadata"]["name"] for row in jobs if any(
+                    condition["type"] in {"Complete", "Failed"} and condition["status"] == "True"
+                    for condition in row.get("status", {}).get("conditions", []))}
+                if names <= terminal:
+                    return jobs, pods
+                assert time.monotonic() < deadline, repr((jobs, pods))
+                await asyncio.sleep(0.5)
+
+        def qualify(jobs, pods):
+            inventory = {resource: [copy.deepcopy(row) for row in originals.values() if row["kind"] == kind]
+                for _api, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+            inventory["jobs"] += jobs
+            inventory["pods"] += pods
+            qualify_retained_writer_workloads(fencing_inputs, inventory, originals=originals, expected=originals)
+
+        histories = {"succeeded-history", "failed-history"}
+        await create_job("succeeded-history", ["/bin/sh", "-c", "exit 0"])
+        await create_job("failed-history", ["/bin/sh", "-c", "exit 1"])
+        jobs, pods = await wait_terminal(histories)
+        assert len(pods) == 2 and {pod["status"]["phase"] for pod in pods} == {"Succeeded", "Failed"}
+        qualify(jobs, pods)
+        history_uids = {row["metadata"]["uid"] for row in jobs}
+        for name in sorted(histories):
+            for spec in ({"suspend": True}, {"suspend": False}, {"parallelism": 2}, {"backoffLimit": 3}):
+                await asyncio.to_thread(batch.patch_namespaced_job, name, namespace, {"spec": spec})
+            for spec in ({"completions": 2}, {"template": {"spec": {"containers": [
+                    {"name": "one-shot", "image": "busybox:1.36", "command": ["/bin/sleep", "60"]}]}}}):
+                with pytest.raises(ApiException) as error:
+                    await asyncio.to_thread(batch.patch_namespaced_job, name, namespace, {"spec": spec})
+                assert error.value.status == 422
+            await asyncio.to_thread(batch.patch_namespaced_job, name, namespace, {"spec": {"parallelism": 1}})
+        for pod in pods:
+            await asyncio.to_thread(core.delete_namespaced_pod, pod["metadata"]["name"], namespace)
+
+        # A new Job must complete while these finished parents stay inert. This
+        # proves controller liveness, not just a sleep with no reconciliation.
+        await create_job("liveness-control", ["/bin/sh", "-c", "sleep 3; exit 0"])
+        jobs, pods = await wait_terminal(histories | {"liveness-control"})
+        deadline = time.monotonic() + 5
+        while True:
+            jobs, pods = await snapshots()
+            assert not [pod for pod in pods if any(owner["uid"] in history_uids
+                for owner in pod["metadata"].get("ownerReferences", []))]
+            qualify(jobs, pods)
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(0.5)
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
 @pytest.mark.timeout(240)
 async def test_actual_controller_retirement_preserves_templates_waits_for_pods_and_replays_readonly(retirement_inputs, fencing_inputs, guest_runtime_inputs, tmp_path):
     from kubernetes import client

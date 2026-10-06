@@ -81,6 +81,7 @@ class PoolCutoverRequest:
     collector_credential: PoolCollectorCredential
     platform_authority: PoolPlatformAuthority | None = None
     application_delivery: ApplicationBuildDeliveryRequest | None = None
+    platform_consumers: tuple[dict[str, Any], ...] = ()
 
 
 class PoolCutoverAPI(Protocol):
@@ -141,6 +142,7 @@ def _cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
     PoolCollectorCredential.model_validate(request.collector_credential.model_dump())
     spec, binding = migration.registration.spec, migration.registration.binding
     originals = retirement_documents(request.fencing.retirement)
+    platform_consumer_documents(request)
     role_fence_documents(request.fencing)
     participants = {row.participant_id: row for row in spec.participants}
     if (set(request.profiles) != set(participants) or len(request.services) != len(participants)
@@ -200,8 +202,46 @@ def _cutover_documents(request: PoolCutoverRequest) -> dict[str, Any]:
         "authority": gateway["authority"], "workload": gateway["workload"]}
 
 
+def platform_consumer_documents(request: PoolCutoverRequest) -> dict[str, dict[str, Any]]:
+    """Read-only roots qualified by the entry's retained foundation renderer.
+
+    They never become retirement, drain, runtime or resource mutation targets.
+    No execution/build ServiceAccount may gain a consumer exemption.
+    """
+    try:
+        migration = request.fencing.retirement.migration
+        namespaces = {row.namespace for row in migration.guards}
+        writer_namespaces = {ns.name for row in migration.registration.spec.participants
+            for ns in (row.execution_namespace, row.build_namespace)}
+        originals = {**retirement_documents(request.fencing.retirement),
+            **{_key(row): row for row in (request.manager, *request.services)}}
+        identities = {_uid(row) for row in originals.values()}
+        result: dict[str, dict[str, Any]] = {}
+        for row in request.platform_consumers:
+            key, uid = _key(row), _uid(row)
+            namespace = row["metadata"]["namespace"]
+            if ((row["apiVersion"], row["kind"], row["metadata"]["name"]) not in {
+                    ("apps/v1", "Deployment", "loom-web"), ("apps/v1", "Deployment", "loom-llm-gateway"),
+                    ("batch/v1", "CronJob", "loom-platform-backup")}
+                    or namespace not in namespaces or namespace in writer_namespaces
+                    or key in originals or key in result or uid in identities):
+                raise ValueError
+            pod = (row["spec"]["jobTemplate"]["spec"]["template"]["spec"] if row["kind"] == "CronJob"
+                else row["spec"]["template"]["spec"])
+            if pod.get("serviceAccountName") != "loom-platform" or pod.get("automountServiceAccountToken") is not False:
+                raise ValueError
+            _snapshot(row)
+            identities.add(uid)
+            result[key] = copy.deepcopy(row)
+        return result
+    except Exception:
+        raise ValueError("pool platform consumers unqualified") from None
+
+
 def _contract(request: PoolCutoverRequest, documents: dict[str, Any]) -> dict[str, Any]:
     return {"migration": migration_contract(request.fencing.retirement.migration),
+        **({"platform_consumers": {key: {"uid": _uid(row), "document": _stable(row)}
+            for key, row in platform_consumer_documents(request).items()}} if request.platform_consumers else {}),
         **({'application_source': request.application_delivery.source_credential.model_dump(mode='json')}
             if request.application_delivery is not None else {}),
         **({"platform_authority": request.platform_authority.model_dump(mode="json")} if request.platform_authority is not None else {}),

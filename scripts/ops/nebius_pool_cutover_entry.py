@@ -126,6 +126,7 @@ class PoolCutoverPrivateInputs(BaseModel):
     dormant_consumers: tuple[DormantPoolConsumer, ...] = ()
     roles: tuple[dict[str, Any], ...]
     services: tuple[dict[str, Any], ...]
+    platform_consumers: tuple[dict[str, Any], ...] = ()
     collector_config: dict[str, Any]
     collector_credential: PoolCollectorCredential
     application_source_credential: ApplicationSourceCredentialPin | None = None
@@ -216,10 +217,27 @@ def load_pool_cutover_inputs(operation: dict[str, Any]) -> PoolCutoverContext:
         if inputs.application_source_credential is not None:
             application_delivery = ApplicationBuildDeliveryRequest(predecessor.deployment, inputs.profile,
                 original.upgrade.setup.repo_root, inputs.application_source_credential)
+        if inputs.platform_consumers:
+            from scripts.ops.nebius_management_stage import _qualified_defaulted
+
+            from loom.nebius_platform_render import build_platform
+
+            foundation = predecessor.deployment.installation
+            retained_config = foundation.foundation.platform_config
+            if retained_config["namespace"] not in {row.namespace for row in inputs.guards}:
+                raise ValueError
+            rendered = build_platform(retained_config, inputs.candidate, inputs.profile, foundation.keyring,
+                repo_root=original.upgrade.setup.repo_root)
+            expected = {_key(row): row for rows in rendered.values() for row in rows
+                if (row["kind"], row["metadata"]["name"]) in {("Deployment", "loom-web"),
+                    ("Deployment", "loom-llm-gateway"), ("CronJob", "loom-platform-backup")}}
+            for row in inputs.platform_consumers:
+                _qualified_defaulted(expected[_key(row)], row)
         request = PoolCutoverRequest(PoolRoleFenceRequest(PoolRetirementRequest(migration,
             inputs.actuators, inputs.collectors, inputs.dormant_consumers), inputs.roles), predecessor.active, inputs.services,
             inputs.collector_config, inputs.profiles, "https://" + predecessor.deployment.public_host,
-            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority, application_delivery)
+            "https://kubernetes.default.svc", inputs.collector_credential, inputs.platform_authority, application_delivery,
+            inputs.platform_consumers)
         cutover_documents(request)
         names = {row.machine_id for row in spec.machines}
         paths = set(inputs.machine_token_files.values())

@@ -1264,6 +1264,19 @@ Pin all production, staging and shared-development participants, dormant consume
 actual namespace/workload/credential identities, provider pool and quota scope,
 effective writer permissions, and the protected candidate/runtime publication.
 Preserve the original management upgrade and immediate completed predecessor.
+When the standalone foundation's web, gateway and backup share the control-plane
+ServiceAccount, retain those exact Deployment/CronJob observations in the private
+`platform_consumers` roster. They must match the predecessor's foundation namespace
+and the selected candidate's rendered templates. Their UIDs/templates are checked
+without stopping or changing them; do not add unknown schedulers or execution
+writers to this roster. A candidate mismatch requires a normal protected platform
+rollout and fresh observations, not rewriting live image or revision fields.
+Completed standalone migration/configuration/predeploy Jobs need no roster entry
+or cleanup. Preflight qualifies only native singleton terminal platform Jobs with
+automatic UID selectors and complete terminated-Pod evidence from the same API
+snapshot. Active Jobs, incomplete container status, ambiguous ancestry, custom
+controllers and execution/build identities still block; do not bypass this by
+dropping terminal Pods from the inventory or adopting unknown roots.
 Include both configured execution-only guest targets, including the emulated-auth
 target, in the same participant's retained actuator roster and execution profiles.
 They share the ordinary collector and capacity authority; do not omit a running
