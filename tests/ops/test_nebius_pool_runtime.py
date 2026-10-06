@@ -34,12 +34,12 @@ def desired_profile(request, service):
 
 
 @pytest.fixture
-def runtime_inputs(platform_inputs, management_inputs):
+def runtime_inputs(platform_inputs, management_inputs, request):
     from loom.nebius_platform_render import build_platform
     from loom.service_execution_materialization import build_nebius_runtime_profile
     from loom_service.pool_management.installation import PoolInstallation
 
-    request = migration_request()
+    request = migration_request(getattr(request, "param", ("production", "staging", "development")))
     spec = request.registration.spec.model_dump(mode="json")
     config, candidate, profile = copy.deepcopy(platform_inputs)
     profile = build_nebius_runtime_profile(candidate_sha=candidate["candidate_sha"],

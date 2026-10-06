@@ -118,6 +118,11 @@ builder token and shared-build read permissions through the protected operation.
 The management renderer reserves 2 GiB of temporary disk per concurrent source
 upload (4 GiB by default), plus its ordinary ephemeral overhead. This is a
 Pod-lifetime upload spool, not an extra database/PVC or execution-pool allocation.
+The private spool is mounted at `/run/loom-application-source/spool`; startup
+clears inherited setgid only on an otherwise owner-only directory. It continues
+to reject symlinks, foreign ownership and broader permissions. Apply renderer
+changes through a qualified protected transition, never by editing a retained
+cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
 Subsequent lifecycle changes use the same management context:
@@ -182,6 +187,12 @@ init containers and overhead, services/ingress, PVC sizes and storage classes.
 It excludes Secret values, arbitrary Pod environment/commands, annotations, kubeconfig and
 configuration payloads. Failed or incomplete inventory fails the command rather
 than being treated as an empty cluster.
+
+Pod `container_statuses` and `init_container_statuses` report readiness, restart
+counts, and current/previous container states from that same inventory. Waiting
+and termination reasons are allowlisted; messages, image/container IDs and unknown
+reason strings are not exported. Missing status is unknown, not healthy or zero
+restarts. These diagnostics do not qualify runtime readiness or permit a retry.
 
 `controller_inventory` adds Deployment/CronJob identities, declared ServiceAccounts,
 selected execution target/pool/group identifiers and database Secret references.
