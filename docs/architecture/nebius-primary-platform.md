@@ -1073,6 +1073,9 @@ installation fingerprints.
 The management renderer binds configured source uploads to a revision-named,
 source-only credential Secret and a private disk-backed `emptyDir`. Its non-root
 initializer verifies the spool directory's ownership and mode on every Pod start.
+It clears an inherited setgid bit from an otherwise owner-only directory using
+a no-follow directory descriptor, leaving exactly `0700`; symlinks, foreign
+ownership and broader permissions remain errors rather than being repaired.
 The spool is capped at 2 GiB per admitted concurrent upload (4 GiB at the default
 concurrency of two), included in the manager's ephemeral-storage request and limit,
 and disappears with the Pod; it creates no PVC or backup requirement. Archive
