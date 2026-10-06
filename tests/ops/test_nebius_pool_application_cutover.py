@@ -100,8 +100,44 @@ def builder_cutover_inputs(private_cutover, build_inputs):
     credentials = {'access-key': 'cutover-source-access', 'secret-key': 'cutover-source-secret'}
     payload['application_source_credential'] = {'uid': str(uuid4()), 'resource_version': '31',
         'sha256': hashlib.sha256(json.dumps(credentials, sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+    payload['source_delivery_version'] = 'v2'
     save_private(operation, payload)
     return operation, payload, root, credentials
+
+
+@pytest.mark.parametrize('version', [None, 'v1', 'v2'])
+def test_private_source_version_preserves_historical_or_current_projection(builder_cutover_inputs, version):
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_cutover import cutover_documents
+    from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
+
+    operation, payload, _, _ = builder_cutover_inputs
+    payload.pop('source_delivery_version')
+    if version is not None:
+        payload['source_delivery_version'] = version
+    save_private(operation, payload)
+    context = load_pool_cutover_inputs(operation)
+    rendered = cutover_documents(context.request)
+    manager = rendered['runtime'][_key(context.request.manager)]
+    initializer, = (row for row in manager['spec']['template']['spec']['initContainers']
+        if row['name'] == 'prepare-application-source')
+    assert initializer['command'][-1] == (
+        '/run/loom-application-source/spool' if version == 'v2' else '/var/run/loom-application-source/spool')
+    encoded = context.inputs.model_dump(mode='json')
+    if version == 'v2':
+        assert encoded['source_delivery_version'] == 'v2'
+    else:
+        assert 'source_delivery_version' not in encoded
+
+
+def test_private_source_version_rejects_unknown_contract(builder_cutover_inputs):
+    from scripts.ops.nebius_pool_cutover_entry import EntryError, load_pool_cutover_inputs
+
+    operation, payload, _, _ = builder_cutover_inputs
+    payload['source_delivery_version'] = 'v3'
+    save_private(operation, payload)
+    with pytest.raises(EntryError):
+        load_pool_cutover_inputs(operation)
 
 
 def test_private_builder_cutover_stages_material_and_readers_before_closed_manager(builder_cutover_inputs):
