@@ -796,6 +796,74 @@ def platform_consumer_inventory(request):
     return rows
 
 
+@pytest.mark.parametrize("damage", [None, "missing", "uid", "template", "clone", "unbound", "owner_uid",
+    "owner_kind", "owner_name", "owner_namespace", "owner_account", "noncontroller"])
+def test_retained_database_is_a_readonly_census_root_with_exact_pod_ancestry(
+        platform_consumer_inputs, platform_inputs, cutover_binding_inventory, damage):
+    from pathlib import Path
+
+    from scripts.ops.nebius_pool_cutover import _contract, cutover_documents
+    from scripts.ops.nebius_pool_migration import PoolGuardDatabase
+
+    from loom.nebius_platform_render import build_platform
+
+    request, tokens = platform_consumer_inputs
+    migration = request.fencing.retirement.migration
+    guard = migration.guards[0]
+    config, candidate, profile = platform_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=Path(__file__).resolve().parents[2])
+    database, = (row for rows in files.values() for row in rows
+        if row["kind"] == "StatefulSet" and row["metadata"]["name"] == "loom-postgres")
+    service, = (row for rows in files.values() for row in rows
+        if row["kind"] == "Service" and row["metadata"]["name"] == "loom-postgres")
+    for row in (database, service):
+        row["metadata"].update(namespace=guard.namespace, uid=str(uuid4()), resourceVersion="1")
+    if damage != "unbound":
+        guard = replace(guard, database=PoolGuardDatabase(database, service, uuid4(), "1"))
+        request = replace(request, fencing=replace(request.fencing, retirement=replace(request.fencing.retirement,
+            migration=replace(migration, guards=(guard, *migration.guards[1:])))))
+    rows = platform_consumer_inventory(request)
+    observed = copy.deepcopy(database)
+    pod = writer_descendant(observed, "Pod", name="loom-postgres-0")
+    rows["statefulsets"].append(observed)
+    rows["pods"].append(pod)
+    if damage == "missing":
+        rows["statefulsets"].clear()
+    elif damage == "uid":
+        observed["metadata"]["uid"] = str(uuid4())
+    elif damage == "template":
+        observed["spec"]["template"]["spec"]["containers"][0]["command"] = ["run-old-control-plane"]
+    elif damage == "clone":
+        clone = copy.deepcopy(observed)
+        clone["metadata"].update(name="unknown-database", uid=str(uuid4()))
+        rows["statefulsets"].append(clone)
+    elif damage in {"owner_uid", "owner_kind", "owner_name"}:
+        pod["metadata"]["ownerReferences"][0][damage.removeprefix("owner_")] = {
+            "owner_uid": str(uuid4()), "owner_kind": "Deployment", "owner_name": "unknown-database"}[damage]
+    elif damage == "owner_namespace":
+        pod["metadata"]["namespace"] = migration.guards[1].namespace
+        pod["spec"]["serviceAccountName"] = migration.guards[1].controller["spec"]["template"]["spec"].get(
+            "serviceAccountName", "default")
+    elif damage == "owner_account":
+        # The Pod still declares the retiring platform account, but its retained
+        # parent now has a distinct database-only identity.
+        for row in (database, observed):
+            row["spec"]["template"]["spec"]["serviceAccountName"] = "database-only"
+    elif damage == "noncontroller":
+        pod["metadata"]["ownerReferences"][0]["controller"] = False
+    before = copy.deepcopy(rows)
+    if damage is not None:
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+    else:
+        calls = binding_preflight(request, tokens, cutover_binding_inventory, workloads=rows)
+        assert calls and all(call.method == "GET" for call in calls)
+        catalog = cutover_documents(request)
+        assert _key(database) not in set(catalog["runtime"]) | set(catalog["producers"]) | set(catalog["stopped"])
+        assert _contract(request, catalog)["migration"]["guards"][0]["database"]["StatefulSet"]["uid"] == database["metadata"]["uid"]
+    assert rows == before
+
+
 def terminal_platform_job(request):
     """A completed native one-shot Job, as retained by normal platform rollouts."""
     guard = request.fencing.retirement.migration.guards[0]
