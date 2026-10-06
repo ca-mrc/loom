@@ -648,3 +648,53 @@ def test_unbound_dispatch_cannot_advance_an_anchored_repair(prepared_repair, mon
     with pytest.raises(target.PoolOperationError):
         target.run_pool_operation(parent=parent, tokens=context.tokens, action='install')
     assert api.activation.calls == []
+
+
+@pytest.fixture
+def private_repair(prepared_repair):
+    import hashlib
+
+    from scripts.ops import nebius_certificates as private_state
+    from tests.ops.test_nebius_pool_repair_authority import repair_operation
+
+    context, binding, _, state, _ = prepared_repair
+    root = state.parent.parent.parent
+    operation = repair_operation(root.parent)
+    operation.update(operation_id=str(binding.operation_id), source_sha=binding.source_sha, candidate=binding.source_sha,
+        original_operation_id=context.operation['operation_id'], namespace=context.operation['namespace'],
+        installation_id=context.operation['installation_id'])
+    directory = root / 'pool-repair' / str(binding.operation_id)
+    operation.update(state_dir=str(directory / 'state'), anchor_dir=str(directory / 'anchor'), inputs_path=str(directory / 'inputs.json'))
+    private_state._private_directory(directory.parent)
+    private_state._private_directory(directory)
+    binding = binding.model_copy(update={'original_operation_sha256': hashlib.sha256(
+        json.dumps(context.operation, sort_keys=True, separators=(',', ':')).encode()).hexdigest()})
+    payload = {'schema_version': 'loom.nebius-pool-startup-repair-private-inputs.v1',
+        'original_operation': context.operation, 'binding': binding.model_dump(mode='json')}
+    save_private(operation, payload)
+    return operation, payload, context
+
+
+def test_repair_entry_loads_original_without_rewriting_private_contract(private_repair):
+    from scripts.ops.nebius_pool_repair_entry import load_pool_repair_inputs
+
+    operation, _, original = private_repair
+    before = Path(original.operation['inputs_path']).read_bytes()
+    context = load_pool_repair_inputs(operation)
+    assert context.original == original and context.operation == operation
+    assert Path(original.operation['inputs_path']).read_bytes() == before
+    assert context.original.inputs.source_delivery_version == 'v1'
+
+
+@pytest.mark.parametrize('damage', ['source', 'original_hash', 'inputs_hash', 'closure', 'startup', 'activation', 'operation_id'])
+def test_repair_entry_rejects_changed_original_or_entry_binding(private_repair, damage):
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_repair_entry import load_pool_repair_inputs
+
+    operation, payload, _ = private_repair
+    field = {'source': 'source_sha', 'original_hash': 'original_operation_sha256', 'inputs_hash': 'inputs_sha256',
+        'closure': 'closure_sha256', 'startup': 'startup_sha256', 'activation': 'activation_sha256', 'operation_id': 'operation_id'}[damage]
+    payload['binding'][field] = str(uuid4()) if damage == 'operation_id' else ('a' * 40 if damage == 'source' else 'a' * 64)
+    save_private(operation, payload)
+    with pytest.raises(EntryError):
+        load_pool_repair_inputs(operation)
