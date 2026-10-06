@@ -26,6 +26,58 @@ pytestmark = pytest.mark.skipif(os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1"
     reason="requires explicitly disposable Kubernetes")
 
 
+@pytest.mark.timeout(180)
+async def test_native_statefulset_pod_qualifies_only_through_retained_database_root(fencing_inputs):
+    from kubernetes import client
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_retirement import retirement_documents
+    from scripts.ops.nebius_pool_role_fencing import (
+        POOL_WRITER_WORKLOAD_COLLECTIONS,
+        qualify_retained_writer_workloads,
+    )
+
+    guard = fencing_inputs.retirement.migration.guards[0]
+    namespace = guard.namespace
+    account = guard.controller["spec"]["template"]["spec"]["serviceAccountName"]
+    container = await asyncio.to_thread(_start_k3s, ephemeral_storage_floor="1Gi")
+    try:
+        _, core, _ = await asyncio.to_thread(_load_client, container)
+        apps = client.AppsV1Api(core.api_client)
+        await asyncio.to_thread(core.create_namespace, {"metadata": {"name": namespace}})
+        await asyncio.to_thread(core.create_namespaced_service_account, namespace, {"metadata": {"name": account}})
+        created = await asyncio.to_thread(apps.create_namespaced_stateful_set, namespace, {
+            "apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "loom-postgres"},
+            "spec": {"serviceName": "loom-postgres", "replicas": 1,
+                "selector": {"matchLabels": {"app": "database-test"}}, "template": {
+                    "metadata": {"labels": {"app": "database-test"}}, "spec": {
+                        "serviceAccountName": account, "automountServiceAccountToken": False,
+                        "containers": [{"name": "database-process", "image": "busybox:1.36",
+                            "command": ["/bin/sleep", "180"]}]}}}})
+        database = core.api_client.sanitize_for_serialization(created)
+        deadline = time.monotonic() + 60
+        while True:
+            response = await asyncio.to_thread(core.list_namespaced_pod, namespace)
+            pods = core.api_client.sanitize_for_serialization(response)["items"]
+            if pods:
+                break
+            assert time.monotonic() < deadline, "StatefulSet controller did not create its Pod"
+            await asyncio.sleep(0.5)
+        pod, = pods
+        pod.update(apiVersion="v1", kind="Pod")
+        assert pod["metadata"]["name"] == "loom-postgres-0"
+        originals = retirement_documents(fencing_inputs.retirement)
+        inventory = {resource: [copy.deepcopy(row) for row in originals.values() if row["kind"] == kind]
+            for _, resource, kind in POOL_WRITER_WORKLOAD_COLLECTIONS}
+        inventory["statefulsets"].append(database)
+        inventory["pods"].append(pod)
+        with pytest.raises(ValueError, match="pool_retained_writer_workload_inventory_unqualified"):
+            qualify_retained_writer_workloads(fencing_inputs, inventory, originals=originals, expected=originals)
+        originals[_key(database)] = database
+        qualify_retained_writer_workloads(fencing_inputs, inventory, originals=originals, expected=originals)
+    finally:
+        await asyncio.to_thread(container.stop)
+
+
 @pytest.mark.timeout(300)
 async def test_native_terminal_job_history_qualifies_and_spec_edits_cannot_restart_it(fencing_inputs):
     from kubernetes.client.exceptions import ApiException

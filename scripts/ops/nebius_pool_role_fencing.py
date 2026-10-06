@@ -437,7 +437,8 @@ def qualify_retained_writer_workloads(request: PoolRoleFenceRequest,
                         or owner != {"apiVersion": parent["apiVersion"], "kind": parent["kind"],
                             "name": parent["metadata"]["name"], "uid": parent_uid, "controller": True}
                         or (row["kind"], parent["kind"]) not in {
-                            ("Pod", "ReplicaSet"), ("Pod", "Job"), ("ReplicaSet", "Deployment"), ("Job", "CronJob")}
+                            ("Pod", "ReplicaSet"), ("Pod", "Job"), ("Pod", "StatefulSet"),
+                            ("ReplicaSet", "Deployment"), ("Job", "CronJob")}
                         or identities[parent_uid] != identity):
                     raise ValueError
                 uid = parent_uid

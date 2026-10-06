@@ -1271,6 +1271,9 @@ and the selected candidate's rendered templates. Their UIDs/templates are checke
 without stopping or changing them; do not add unknown schedulers or execution
 writers to this roster. A candidate mismatch requires a normal protected platform
 rollout and fresh observations, not rewriting live image or revision fields.
+Participant PostgreSQL StatefulSets need no extra roster entry: preflight uses
+their existing migration database bindings as read-only roots, checking exact
+UIDs/templates and same-namespace/account Pod ancestry without stopping the database.
 Completed standalone migration/configuration/predeploy Jobs need no roster entry
 or cleanup. Preflight qualifies only native singleton terminal platform Jobs with
 automatic UID selectors and complete terminated-Pod evidence from the same API
