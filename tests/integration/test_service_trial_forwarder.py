@@ -714,7 +714,7 @@ async def test_hosted_trial_rejects_agent_without_native_execution(
     postgres_url: str,
 ) -> None:
     """#2054: hosted single trials run natively on Nebius, which cannot run
-    Codex yet; say so instead of forwarding a doomed trial."""
+    OpenHands yet; say so instead of forwarding a doomed trial."""
     monkeypatch.delenv("LOOM_LOCAL_EXECUTION", raising=False)
     app, raw, team_id, captured = fwd_setup
     async with httpx.AsyncClient(
@@ -726,7 +726,7 @@ async def test_hosted_trial_rejects_agent_without_native_execution(
             json={
                 "task_id": "local/task-1",
                 "config": {
-                    "agent_name": "codex",
+                    "agent_name": "openhands-sdk",
                     "agent_model": {"provider": "openai", "name": "gpt-4o-mini"},
                 },
                 "provider_connection_id": _seed_connection(postgres_url, team_id, "gpt-4o-mini"),
@@ -734,5 +734,5 @@ async def test_hosted_trial_rejects_agent_without_native_execution(
         )
 
     assert r.status_code == 400, r.text
-    assert "agent 'codex' is not yet runnable on hosted (Nebius) execution" in r.json()["detail"]
+    assert "agent 'openhands' is not yet runnable on hosted (Nebius) execution" in r.json()["detail"]
     assert captured["reqs"] == []

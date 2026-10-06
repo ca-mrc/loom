@@ -187,7 +187,7 @@ async def _execution_identity(gateway: str) -> tuple[UUID, UUID]:
 
 
 # Workspace harness phases this controller implements (see `run_agent`).
-CONTROLLER_PHASES = frozenset({"terminus-2", "oracle"})
+CONTROLLER_PHASES = frozenset({"terminus-2", "oracle", "codex"})
 
 
 def _workspace_spec(trial: TrialConfig) -> HostedHarnessSpec:
@@ -307,6 +307,91 @@ async def _archive_install(
     return "stored"
 
 
+_SANDBOX_RELEASE_ARCHIVE = PurePosixPath("/tmp/loom-harness-release.tar.gz")
+_ARCHIVE_DOWNLOAD = PurePosixPath(".loom/harness-cache/release.download")
+
+
+async def _run_install_command(
+    driver: ServiceSandboxDriver, task: TaskConfig, setup: HarnessSetup,
+    environment: dict[str, str], deadline: AttemptDeadline | None,
+) -> None:
+    handle = await driver.exec_streaming(
+        list(setup.install), env_vars=environment, cwd=task.environment.workdir,
+        timeout_sec=_remaining(deadline, setup.timeout_seconds),
+    )
+    try:
+        async def forward(stream: AsyncIterator[bytes], sink: BinaryIO) -> None:
+            async for chunk in stream:
+                sink.write(chunk)
+                sink.flush()
+
+        await asyncio.gather(
+            forward(handle.stdout, sys.stdout.buffer), forward(handle.stderr, sys.stderr.buffer),
+        )
+        code = await handle.wait()
+    except BaseException:
+        await handle.kill()
+        raise
+    if code != 0:
+        raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
+
+
+async def _install_pinned_archive(
+    driver: ServiceSandboxDriver, workspace: Path, setup: HarnessSetup,
+    environment: dict[str, str], deadline: AttemptDeadline | None,
+) -> None:
+    """Fetch and verify the release in trusted code, then extract it in the sandbox."""
+    import base64
+    import hashlib
+
+    archive = setup.archive
+    assert archive is not None and setup.install_root is not None
+    local = workspace / _ARCHIVE_DOWNLOAD
+    local.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha512()
+    received = 0
+    try:
+        async with httpx.AsyncClient(
+            proxy=environment["https_proxy"], trust_env=False, follow_redirects=False,
+            timeout=httpx.Timeout(_remaining(deadline, setup.timeout_seconds), connect=30),
+        ) as client, client.stream("GET", archive.url) as response:
+            if response.status_code != 200:
+                raise ServiceExecutionTaskError(f"harness archive download failed with HTTP {response.status_code}")
+            with local.open("wb") as sink:
+                async for chunk in response.aiter_bytes(1024 * 1024):
+                    received += len(chunk)
+                    if received > MAX_SETUP_CACHE_BYTES:
+                        raise ServiceExecutionTaskError("harness archive exceeds the size limit")
+                    digest.update(chunk)
+                    sink.write(chunk)
+    except httpx.HTTPError as exc:
+        local.unlink(missing_ok=True)
+        raise ServiceExecutionTaskError("harness archive download failed") from exc
+    except BaseException:
+        local.unlink(missing_ok=True)
+        raise
+    if "sha512-" + base64.b64encode(digest.digest()).decode() != archive.integrity:
+        local.unlink(missing_ok=True)
+        raise ServiceExecutionTaskError("harness archive integrity mismatch")
+    print(f"harness archive verified ({received} bytes)", flush=True)
+    root = shlex.quote(setup.install_root)
+    remote = shlex.quote(str(_SANDBOX_RELEASE_ARCHIVE))
+    try:
+        await driver.upload(local, _SANDBOX_RELEASE_ARCHIVE)
+    finally:
+        local.unlink(missing_ok=True)
+    extracted = await driver.exec(
+        f"command -v tar >/dev/null && command -v gzip >/dev/null || {{ echo 'task image lacks tar/gzip' >&2; exit 127; }}; "
+        f"rm -rf -- {root} && mkdir -p -- {root} && "
+        f"tar -xzf {remote} -C {root} --strip-components={archive.strip_components}; "
+        f"status=$?; rm -f -- {remote}; exit $status",
+        timeout_sec=_remaining(deadline, setup.timeout_seconds),
+    )
+    sys.stderr.buffer.write(extracted.stderr)
+    if extracted.return_code != 0:
+        raise ServiceExecutionTaskError(f"harness archive extraction failed with exit status {extracted.return_code}")
+
+
 async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> None:
     """Run the selected harness's pinned install inside the task sandbox.
 
@@ -337,25 +422,10 @@ async def run_setup(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
             outcome["restore"] = await _restore_cached_install(driver, workspace, setup, deadline)
             if outcome["restore"] == "hit":
                 return
-        handle = await driver.exec_streaming(
-            list(setup.install), env_vars=environment, cwd=task.environment.workdir,
-            timeout_sec=_remaining(deadline, setup.timeout_seconds),
-        )
-        try:
-            async def forward(stream: AsyncIterator[bytes], sink: BinaryIO) -> None:
-                async for chunk in stream:
-                    sink.write(chunk)
-                    sink.flush()
-
-            await asyncio.gather(
-                forward(handle.stdout, sys.stdout.buffer), forward(handle.stderr, sys.stderr.buffer),
-            )
-            code = await handle.wait()
-        except BaseException:
-            await handle.kill()
-            raise
-        if code != 0:
-            raise ServiceExecutionTaskError(f"harness setup failed with exit status {code}")
+        if setup.archive is not None:
+            await _install_pinned_archive(driver, workspace, setup, environment, deadline)
+        else:
+            await _run_install_command(driver, task, setup, environment, deadline)
         if setup.cacheable:
             if not await _check_install(driver, setup, _remaining(deadline, setup.timeout_seconds)):
                 raise ServiceExecutionTaskError("harness install check failed")
@@ -458,6 +528,19 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                         trial_id=trial_id, team_id=team_id, instruction=instruction, gateway_url=gateway,
                         deadline=deadline,
                     )
+                elif spec.controller_phase == "codex":
+                    from loom.service_execution_codex import run_codex
+                    from loom.service_execution_terminus2 import LeaseGatewayClient
+
+                    ledger = LeaseGatewayClient(gateway_url=gateway, trial_id=trial_id, team_id=team_id)
+                    await run_codex(
+                        driver=driver, workspace=output, task_config=task, trial_config=trial,
+                        trial_id=trial_id, instruction=instruction, deadline=deadline,
+                        model_environment=installed_agent_model_environment(
+                            spec, base_url_env="OPENAI_BASE_URL", api_key_env="OPENAI_API_KEY",
+                        ),
+                        ledger=ledger.get_trial_llm_calls,
+                    )
                 else:
                     raise ServiceExecutionTaskError("no controller implements this harness phase")
                 handoff_allowed = True
@@ -481,7 +564,7 @@ async def run_agent(workspace: Path, task: TaskConfig, trial: TrialConfig) -> No
                             trace = output / "trajectory.jsonl"
                             if spec.trace_format == "oracle":
                                 _write_json_atomic(output / "usage.json", oracle_usage())
-                            elif trace.exists() and trial_id is not None:
+                            elif spec.trace_format == "terminus" and trace.exists() and trial_id is not None:
                                 events = parse_terminus_events(
                                     trace.read_bytes(), trial=trial, trial_id=trial_id,
                                 )

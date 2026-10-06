@@ -35,6 +35,8 @@ LABEL org.opencontainers.image.revision=${LOOM_BUILD_SHA} \
 # Install the whole Loom library at a trusted Python location. Isolated Python
 # ignores PYTHONPATH; no editable install, worker package or per-file copy list.
 COPY src/loom /usr/local/lib/python3.12/site-packages/loom
+# Installed-harness adapters (Codex, #2311): pure Python, pydantic only.
+COPY packages/loom-launcher/loom_launcher /usr/local/lib/python3.12/site-packages/loom_launcher
 USER 65532:65532
-RUN --network=none python -I -B -c "import litellm; assert litellm.model_cost; import loom.service_execution_sandbox_task; from loom.agent.terminus2.runtime import _import_terminus2; _import_terminus2(); from harbor.agents.terminus_2.tmux_session import TmuxSession"
+RUN --network=none python -I -B -c "import litellm; assert litellm.model_cost; import loom.service_execution_sandbox_task; import loom_launcher.adapters.codex; from loom.agent.terminus2.runtime import _import_terminus2; _import_terminus2(); from harbor.agents.terminus_2.tmux_session import TmuxSession"
 CMD ["python", "-I", "-B", "-m", "loom.service_execution_sandbox_task", "--help"]

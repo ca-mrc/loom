@@ -264,6 +264,43 @@ limit.
 A harness whose install is too slow even with this cache can declare a prebuilt
 runtime image instead (follow-up).
 
+### Codex
+
+Codex CLI is the first installed harness (`CODEX` in `hosted_harness.py`,
+[#2311](https://github.com/qianyi-sun/loom/issues/2311)). It is selectable on
+native (non-guest) execution; guest execution rejects it until
+`exec_streaming` is qualified there.
+
+- **Install.** A `PinnedArchive`: the npm release tarball for Linux x64,
+  pinned by version and `sha512` integrity. The trusted controller downloads
+  it through the setup-only proxy and verifies it before any byte reaches the
+  sandbox. It uploads the compressed archive and extracts it into
+  `/tmp/loom-harness/codex` (`--strip-components=3`). The binaries are
+  statically linked, so the task image needs only `tar`, `gzip` and `bash`
+  (Codex runs commands through `/bin/bash`). The install is cacheable per team
+  and task image.
+- **Run.** The `codex` controller phase runs the existing `CodexAdapter`
+  invocation inside the sandbox through `exec_streaming`, with
+  `installed_agent_model_environment` (Responses API through the broker).
+  - `CODEX_HOME` and `TMPDIR` live under `/tmp/loom-harness/`, outside both
+    the graded workdir and the cached install. Codex refuses a home under its
+    temp directory.
+  - Codex's provider-side `web_search` tool is disabled
+    (`-c web_search="disabled"`). It would otherwise search the web outside
+    the task's network policy.
+- **Capture** (`trace_format="codex"`).
+  - The raw `exec --json` stream is native evidence
+    (`artifacts/codex/events.jsonl`, required, bounded at 64 MiB).
+  - Completed items become typed events: `command_execution` becomes a
+    `shell` `ToolUseEvent`, `file_change` becomes an `apply_patch`
+    `ToolUseEvent`, and messages, reasoning and errors become
+    `AgentThoughtEvent`s.
+  - Model calls come from the Gateway ledger, not Codex's own usage report.
+    The runner appends them even when Codex fails. A call under another model
+    identity fails the Trial.
+  - Materialization reconciles the trace against the DB ledger and recomputes
+    usage (`loom.service-execution-codex-usage.v1`).
+
 ### Model access
 
 An installed agent reaches the model through the Pod-local runtime broker.

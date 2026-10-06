@@ -8,6 +8,7 @@ import pytest
 import loom.hosted_harness as hosted
 from loom.execution_contract import VerifierTopology, workload_requirements_from_task
 from loom.hosted_harness import (
+    CODEX,
     DIRECT_COMPLETION,
     HOSTED_HARNESSES,
     NATIVE_EXECUTION_AGENT_NAMES,
@@ -50,11 +51,12 @@ def test_registry_resolves_names_and_aliases() -> None:
     assert hosted_harness("litellm") is hosted_harness("direct-completion")
     assert hosted_harness("terminus-2") is TERMINUS_2
     assert hosted_harness("oracle") is ORACLE
-    assert hosted_harness("codex") is None
+    assert hosted_harness("no-such-agent") is None
+    assert hosted_harness("codex") is CODEX
     assert hosted_harness(None) is None
-    assert NATIVE_EXECUTION_AGENT_NAMES == {"direct-completion", "litellm", "terminus-2", "oracle"}
+    assert NATIVE_EXECUTION_AGENT_NAMES == {"direct-completion", "litellm", "terminus-2", "oracle", "codex"}
     assert is_workspace_harness("oracle") and not is_workspace_harness("litellm")
-    assert not is_workspace_harness("codex")
+    assert not is_workspace_harness("no-such-agent")
 
 
 def test_harness_only_features_are_declared_not_inferred() -> None:
@@ -210,7 +212,7 @@ def test_controller_image_comes_from_the_spec_binding() -> None:
 
     assert controller_image_for_trial(profile, trial) == profile.agent_image_ref
     assert controller_image_for_trial(profile, _trial("litellm")) is None
-    assert controller_image_for_trial(profile, _trial("codex")) is None
+    assert controller_image_for_trial(profile, _trial("no-such-agent")) is None
 
 
 def test_missing_controller_binding_fails_closed_before_compilation() -> None:
@@ -228,11 +230,11 @@ def test_missing_controller_binding_fails_closed_before_compilation() -> None:
 def test_unknown_harness_never_falls_through_to_direct_completion() -> None:
     task, _, profile = _inputs()
 
-    reasons = automatic_service_execution_rejections(task, _trial("codex"), source_provenance=_provenance())
+    reasons = automatic_service_execution_rejections(task, _trial("no-such-agent"), source_provenance=_provenance())
     assert "direct_completion_required" in reasons
     with pytest.raises(ValueError, match="incompatible"):
         compile_service_execution_plan(
-            task=task, trial=_trial("codex"), profile=profile, source_provenance=_provenance(),
+            task=task, trial=_trial("no-such-agent"), profile=profile, source_provenance=_provenance(),
             task_revision_sha256=_REVISION,
         )
 
