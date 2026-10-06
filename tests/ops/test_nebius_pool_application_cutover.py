@@ -106,7 +106,7 @@ def builder_cutover_inputs(private_cutover, build_inputs):
 
 
 @pytest.mark.parametrize('version', [None, 'v1', 'v2'])
-def test_private_source_version_preserves_historical_or_current_projection(builder_cutover_inputs, version):
+def test_private_source_version_preserves_historical_or_current_projection(builder_cutover_inputs, version, monkeypatch):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_cutover import cutover_documents
     from scripts.ops.nebius_pool_cutover_entry import load_pool_cutover_inputs
@@ -128,6 +128,11 @@ def test_private_source_version_preserves_historical_or_current_projection(build
         assert encoded['source_delivery_version'] == 'v2'
     else:
         assert 'source_delivery_version' not in encoded
+        from scripts.ops import nebius_pool_cutover_entry as entry
+
+        monkeypatch.setattr(entry, 'connected_pool_api', lambda _context: pytest.fail('legacy install must not connect'))
+        with pytest.raises(entry.EntryError, match='source delivery'):
+            entry.execute_pool_cutover(context, 'install')
 
 
 def test_private_source_version_rejects_unknown_contract(builder_cutover_inputs):
