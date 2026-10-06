@@ -698,3 +698,50 @@ def test_repair_entry_rejects_changed_original_or_entry_binding(private_repair, 
     save_private(operation, payload)
     with pytest.raises(EntryError):
         load_pool_repair_inputs(operation)
+
+
+@pytest.mark.parametrize('action', ['install', 'blocked'])
+def test_management_entry_runs_repair_and_reports_both_identities(private_repair, prepared_repair, monkeypatch, capsys, action):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_management_entry as entry
+    from scripts.ops import nebius_pool_operation as operation_runner
+    from scripts.ops import nebius_pool_repair_entry as repair_entry
+
+    operation, _, original = private_repair
+    _, _, api, state, anchor = prepared_repair
+    path = Path(operation['inputs_path']).with_name('operation.json')
+    path.write_text(json.dumps(operation))
+    path.chmod(0o600)
+    connection_events = []
+
+    @contextmanager
+    def connected(selected):
+        assert selected == original
+        connection_events.append('open')
+        try:
+            if action == 'blocked':
+                raise operation_runner.PoolOperationError('startup_repair') from RuntimeError('private-payload')
+            yield SimpleNamespace(request=original.request, state_dir=state, anchor_dir=anchor, refresh=None,
+                checks=SimpleNamespace(), guards=SimpleNamespace(telemetry_report=lambda: []))
+        finally:
+            connection_events.append('close')
+
+    monkeypatch.setattr(repair_entry, 'connected_pool_api', connected)
+    monkeypatch.setattr(operation_runner, 'HTTPSPoolStartupRepairAPI', lambda **kwargs: api)
+    monkeypatch.setattr(operation_runner, 'HTTPSPoolActivationAPI', lambda **kwargs: api.activation)
+    api.activation.ready = True
+    assert entry.main(str(path), 'install') == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['operation_id'] == operation['operation_id']
+    assert report['original_operation_id'] == original.operation['operation_id']
+    assert report['status'] == ('blocked' if action == 'blocked' else 'pool_cutover_completed')
+    if action == 'blocked':
+        assert report['stage'] == 'pool_startup_repair'
+        assert api.calls == []
+    else:
+        assert report['outcome'] == 'global' and report['acceptance_verified'] is False
+        assert api.calls == ['stop', 'template', 'start']
+    assert connection_events == ['open', 'close']
+    assert 'private-payload' not in json.dumps(report)
