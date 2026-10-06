@@ -5,7 +5,10 @@ import copy
 from typing import Any
 
 from scripts.ops.nebius_pool_cutover_live import HTTPSPoolCutoverAPI
-from scripts.ops.nebius_pool_manager_image_history import ManagerImageRepairBinding, manager_image_entry
+from scripts.ops.nebius_pool_manager_image_history import (
+    ManagerImageRepairBinding,
+    manager_image_entry,
+)
 from scripts.ops.nebius_pool_manager_image_stage import qualify_image_entry_closed
 from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
 from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI

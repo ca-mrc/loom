@@ -72,12 +72,18 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         closed: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]], startup: dict[str, Any] | None
         ) -> tuple[dict[str, tuple[str | None, tuple[dict[str, Any], ...]]], dict[str, str | None]]:
     """Original starts plus the one anchored repair; no new recovery protocol."""
+    from scripts.ops.nebius_pool_manager_image_history import (
+        load_manager_image_chain,
+        prepared_image_record,
+    )
     from scripts.ops.nebius_pool_startup_repair import (
         _manager_options,
         _repair_record,
         original_recovery_repair,
         startup_repair_exists,
     )
+
+    from loom.nebius_platform_render import digest
 
     sources = {key: (row['before_resource_version'], (closed[key], targets[key]))
         for key, row in ({} if startup is None else startup['workloads']).items() if row['phase'] == 'intent'}
@@ -93,6 +99,14 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         config = state / 'source-repair-configuration/stage.json'
         history = {'repair_sha256': _hash(state / 'startup-repair.json'),
             'repair_configuration_sha256': _hash(config) if config.exists() or config.is_symlink() else None}
+    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    if chain:
+        tail = chain[-1]
+        record = tail.record or prepared_image_record(tail.identity)
+        version = next((row['before_resource_version'] for row in record['phases'].values() if row['phase'] == 'intent'), None)
+        sources[_key(request.manager)] = (version, _manager_options(tail.documents, record))
+        history['manager_image_sha256'] = digest({str(path): _hash(path) if path.exists() else None
+            for entry in chain for path in (entry.path, entry.marker)})
     return sources, history
 
 

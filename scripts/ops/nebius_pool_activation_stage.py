@@ -98,10 +98,14 @@ def advance_pool_activation(*, request: PoolCutoverRequest, api: PoolActivationA
     try:
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         with private_state._locked_state(anchor):
+            from scripts.ops.nebius_pool_manager_image_history import (
+                qualify_completed_manager_images,
+            )
             from scripts.ops.nebius_pool_startup_repair import qualify_completed_startup_repair
 
             if not cancel:
                 qualify_completed_startup_repair(request, state=state, anchor=anchor)
+                qualify_completed_manager_images(request, state=state, anchor=anchor)
             closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
             _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
             identity, record = _activation_record(request, state=state, anchor=anchor)

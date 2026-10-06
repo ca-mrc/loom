@@ -391,3 +391,134 @@ def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_ca
         anchor_dir=anchor)["status"] == "pool_successors_stopped"
     with pytest.raises(ValueError):
         switch(image_repair_case, image_api)
+
+
+@pytest.mark.parametrize("loss", [None, "before", "after"])
+def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image_repair_case, loss):
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+    from scripts.ops.nebius_pool_manager_image_live import HTTPSPoolManagerImageAPI
+
+    context, remote, state, anchor, binding = image_repair_case
+    key = _key(context.request.manager)
+    workload = "/apis/apps/v1/namespaces/" + context.request.manager["metadata"]["namespace"] + "/deployments/loom-service"
+    writes = []
+
+    def respond(message):
+        path = message.url.path
+        if message.method == "GET":
+            if path == workload:
+                actual = remote.startup.documents[key]
+                actual["metadata"]["generation"] = 1
+                actual["status"] = {"observedGeneration": 1, "replicas": actual["spec"]["replicas"]}
+                return httpx.Response(200, json=actual)
+            assert path.endswith("/replicasets") or path.endswith("/pods")
+            return httpx.Response(200, json={"apiVersion": "apps/v1" if path.endswith("/replicasets") else "v1",
+                "kind": "ReplicaSetList" if path.endswith("/replicasets") else "PodList",
+                "metadata": {"resourceVersion": "100"}, "items": []})
+        assert message.method == "PATCH" and path == workload
+        before = remote.read_workload(key)
+        patches = json.loads(message.content)
+        assert patches[:4] == [
+            {"op": "test", "path": "/metadata/uid", "value": before["metadata"]["uid"]},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
+            {"op": "test", "path": "/metadata", "value": before["metadata"]},
+            {"op": "test", "path": "/spec", "value": before["spec"]}]
+        assert len(patches) == 5 and patches[-1]["op"] == "replace"
+        change, desired = patches[-1], copy.deepcopy(before)
+        if change["path"] == "/spec/template":
+            phase = "template"
+            assert before["spec"]["replicas"] == 0
+            expected = copy.deepcopy(before["spec"]["template"])
+            for container in (*expected["spec"]["containers"], *expected["spec"]["initContainers"]):
+                container["image"] = binding.candidate["images"]["service"]["image_ref"]
+            assert change["value"] == expected
+            desired["spec"]["template"] = expected
+        else:
+            assert change["path"] == "/spec/replicas"
+            phase = "stop" if change["value"] == 0 else "start"
+            desired["spec"]["replicas"] = change["value"]
+        if message.url.params:
+            assert dict(message.url.params) == {"dryRun": "All"}
+        else:
+            assert entry(image_repair_case).record["phases"][phase]["phase"] == "intent"
+            writes.append(phase)
+            if phase == "template" and loss == "before":
+                raise httpx.ReadTimeout("synthetic lost request")
+            desired["metadata"]["resourceVersion"] = str(int(before["metadata"]["resourceVersion"]) + 1)
+            remote.startup.documents[key] = desired
+            if phase == "template" and loss == "after":
+                raise httpx.ReadTimeout("synthetic lost response")
+        return httpx.Response(200, json=desired)
+
+    class TransportOnlyImage(HTTPSPoolManagerImageAPI):
+        def qualify_closed(self):
+            self._qualify_binding()
+            remote.qualify_closed()
+
+    with httpx.Client(base_url="https://kubernetes.invalid", transport=httpx.MockTransport(respond)) as client:
+        parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor,
+            client=client, _scope=lambda: None, error_type=ValueError)
+        parent._request = lambda method, path, **kwargs: ManagementKubernetesTransport._request(parent, method, path, **kwargs)
+        api = TransportOnlyImage(parent=parent, binding=binding)
+        result = switch(image_repair_case, api)
+        assert result["status"] == ("pending_manager_image_outcome" if loss == "before" else "pool_manager_image_repaired_closed")
+        assert switch(image_repair_case, api) == result
+        assert writes == (["stop", "template"] if loss == "before" else ["stop", "template", "start"])
+
+
+def test_https_cancellation_fences_image_intent_not_completed_source_repair(image_repair_case):
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, remote, state, anchor, _ = image_repair_case
+    image_api = ImageAPI(image_repair_case)
+    image_api.failure = ("template", "before")
+    assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
+    api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
+    api.state = state
+    assert advance_pool_activation(request=context.request, api=api, state_dir=state,
+        anchor_dir=anchor, cancel=True)["status"] == "pool_activation_cancelled"
+    key = _key(context.request.manager)
+    writes = []
+
+    def respond(message):
+        before = remote.read_workload(key)
+        patches = json.loads(message.content)
+        assert message.method == "PATCH" and message.url.path.endswith("/deployments/loom-service")
+        assert patches[:4] == [
+            {"op": "test", "path": "/metadata/uid", "value": before["metadata"]["uid"]},
+            {"op": "test", "path": "/metadata/resourceVersion", "value": before["metadata"]["resourceVersion"]},
+            {"op": "test", "path": "/metadata", "value": before["metadata"]},
+            {"op": "test", "path": "/spec", "value": before["spec"]}]
+        assert len(patches) == 5 and patches[-1]["path"] == "/metadata/annotations"
+        desired = copy.deepcopy(before)
+        desired["metadata"]["annotations"] = patches[-1]["value"]
+        if not message.url.params:
+            writes.append(patches)
+            desired["metadata"]["resourceVersion"] = str(int(before["metadata"]["resourceVersion"]) + 1)
+            remote.startup.documents[key] = desired
+        return httpx.Response(200, json=desired)
+
+    with httpx.Client(base_url="https://kubernetes.invalid", transport=httpx.MockTransport(respond)) as client:
+        closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+        adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed, targets=targets,
+            parent=SimpleNamespace(client=client), _scope=lambda: None, _path=lambda key: "/deployments/loom-service",
+            verify_retained=api.verify_retained, pool_state=api.pool_state, guard_state=api.guard_state)
+        api.preview_startup_fence = lambda key, before, desired: (copy.deepcopy(desired)
+            if HTTPSPoolActivationAPI._startup_fence_patch(adapter, key, before, desired, preview=True) else None)
+        api.fence_startup = lambda key, before, desired: HTTPSPoolActivationAPI._startup_fence_patch(
+            adapter, key, before, desired, preview=False)
+        assert fence_pool_startup(request=context.request, api=api, state_dir=state,
+            anchor_dir=anchor)["status"] == "startup_writes_fenced"
+        assert len(writes) == 1

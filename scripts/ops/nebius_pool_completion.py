@@ -55,12 +55,16 @@ def _repair_paths(operation: str, state: Path, anchor: Path) -> tuple[Path, ...]
 
 
 def _phase_hashes(operation: str, state: Path, anchor: Path) -> dict[str, str | None]:
+    from scripts.ops.nebius_pool_manager_image_history import manager_image_paths
+
     result = {str(path): _hash(path) if _exists(path) else None for phase in _PHASES
         for path in (state / (phase + '.json'), anchor / (operation + '-' + phase + '.json'))}
     repair = _repair_paths(operation, state, anchor)
     # Keep pre-repair completion receipts byte-for-byte stable.
     if any(_exists(path) for path in repair):
         result.update({str(path): _hash(path) if _exists(path) else None for path in repair})
+    result.update({str(path): _hash(path) if _exists(path) else None
+        for path in manager_image_paths(operation, state=state, anchor=anchor)})
     return result
 
 
@@ -74,9 +78,11 @@ def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[d
     if activation is None:
         raise ValueError
     if activation['opening'] == 'opened' and activation['cancellation'] == 'prepared':
+        from scripts.ops.nebius_pool_manager_image_history import qualify_completed_manager_images
         from scripts.ops.nebius_pool_startup_repair import qualify_completed_startup_repair
 
         qualify_completed_startup_repair(request, state=state, anchor=anchor)
+        qualify_completed_manager_images(request, state=state, anchor=anchor)
         if (startup is None or any(row['phase'] != 'started' for row in startup['workloads'].values())
                 or any(row != {'release': 'released', 'fence': 'prepared'} for row in activation['guards'].values())
                 or any(_exists(path) for phase in _RECOVERY

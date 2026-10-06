@@ -130,6 +130,7 @@ class HTTPSPoolStartupAPI:
             raise ValueError('pool_legacy_roles_unqualified') from None
 
     def _started_workloads(self) -> dict[str, dict[str, Any]]:
+        from scripts.ops.nebius_pool_manager_image_history import qualify_completed_manager_images
         from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
         from scripts.ops.nebius_pool_startup_repair import qualify_completed_startup_repair
 
@@ -139,6 +140,7 @@ class HTTPSPoolStartupAPI:
         if record is None or any(item['phase'] != 'started' for item in record['workloads'].values()):
             raise ValueError
         qualify_completed_startup_repair(self.request, state=self.state, anchor=self.anchor)
+        qualify_completed_manager_images(self.request, state=self.state, anchor=self.anchor)
         return observe_recovery_workloads(self.request, self, state=self.state, anchor=self.anchor)
 
     def qualify_database_runtimes(self) -> None:

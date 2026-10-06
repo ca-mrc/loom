@@ -17,6 +17,7 @@ from pydantic import Field
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_refresh import ManagementRefreshRenderRequest
+from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_activation_stage import _activation_record
 from scripts.ops.nebius_pool_application_delivery import derive_application_build_deployment
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
@@ -26,6 +27,7 @@ from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_docu
 from scripts.ops.nebius_pool_startup_repair import (
     PoolStartupRepairBinding,
     _exists,
+    _manager_options,
     _repair_record,
     startup_repair_exists,
 )
@@ -220,3 +222,49 @@ def manager_image_entry(request: PoolCutoverRequest, binding: ManagerImageRepair
         return _entry(request, binding, state=state, anchor=anchor, prior=chain)
     except Exception:
         raise ValueError('pool_manager_image_entry_unqualified') from None
+
+
+def manager_image_options(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+        choices: dict[str, tuple[dict[str, Any], ...]]) -> dict[str, tuple[dict[str, Any], ...]]:
+    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    if not chain:
+        return choices
+    key = _key(request.manager)
+    if len(choices[key]) != 1 or _stable(choices[key][0]) != _stable(chain[0].documents[0]):
+        raise ValueError('pool_manager_image_projection_differs')
+    tail = chain[-1]
+    return {**choices, key: _manager_options(tail.documents, tail.record or prepared_image_record(tail.identity))}
+
+
+def qualify_completed_manager_images(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> None:
+    if any(not _completed(row) for row in load_manager_image_chain(request, state=state, anchor=anchor)):
+        raise ValueError('pool_manager_image_incomplete')
+
+
+def manager_image_paths(operation: str, *, state: Path, anchor: Path) -> tuple[Path, ...]:
+    """Include missing records for enrolled tails; no-chain receipts stay unchanged."""
+    pairs = (_paths(UUID(operation), ordinal, state, anchor) for ordinal in range(1, MAX_CORRECTIONS + 1))
+    return tuple(path for pair in pairs if any(_exists(value) for value in pair) for path in pair)
+
+
+def manager_image_fence_patches(request: PoolCutoverRequest, before: dict[str, Any], *,
+        state: Path, anchor: Path) -> list[dict[str, Any]]:
+    from scripts.ops.nebius_pool_startup_fence import marked_startup_document
+
+    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    if not chain or chain[-1].record is None:
+        raise ValueError('pool_manager_image_fence_unqualified')
+    tail = chain[-1]
+    assert tail.record is not None
+    index, = (index for index, name in enumerate(STEPS) if tail.record['phases'][name]['phase'] == 'intent')
+    version = tail.record['phases'][STEPS[index]]['before_resource_version']
+    if (not _matches(before, tail.documents[index], _uid(request.manager))
+            or before['metadata']['resourceVersion'] != version):
+        raise ValueError('pool_manager_image_fence_unqualified')
+    operation = request.fencing.retirement.migration.registration.spec.operation_id
+    desired = marked_startup_document(before, operation)
+    return [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(request.manager)},
+        {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+        {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
+        {'op': 'test', 'path': '/spec', 'value': before['spec']},
+        {'op': 'add', 'path': '/metadata/annotations', 'value': desired['metadata']['annotations']}]

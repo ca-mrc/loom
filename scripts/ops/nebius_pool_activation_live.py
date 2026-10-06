@@ -564,12 +564,18 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             operation = self.request.fencing.retirement.migration.registration.spec.operation_id
             if _stable(desired) != _stable(marked_startup_document(sources[key][1][0], operation)):
                 raise ValueError
+            from scripts.ops.nebius_pool_manager_image_history import (
+                load_manager_image_chain,
+                manager_image_fence_patches,
+            )
             from scripts.ops.nebius_pool_startup_repair import (
                 repair_fence_patches,
                 startup_repair_exists,
             )
 
-            if key == _key(self.request.manager) and startup_repair_exists(self.request, state=self.state, anchor=self.anchor):
+            if key == _key(self.request.manager) and load_manager_image_chain(self.request, state=self.state, anchor=self.anchor):
+                patches = manager_image_fence_patches(self.request, before, state=self.state, anchor=self.anchor)
+            elif key == _key(self.request.manager) and startup_repair_exists(self.request, state=self.state, anchor=self.anchor):
                 patches = repair_fence_patches(self.request, before, state=self.state, anchor=self.anchor)
             else:
                 patches = startup_fence_patches(self.closed[key], before, operation)
