@@ -91,8 +91,9 @@ async def test_large_output_is_lossless_and_ordered(driver) -> None:
 
 
 async def test_jsonl_stdout_feeds_the_existing_launcher_capture(driver) -> None:
-    from loom.agent.subprocess import _bridge_driver, _bridge_exec_handle
     from loom_launcher.capture import stream_stdout_jsonl
+
+    from loom.agent.subprocess import _bridge_driver, _bridge_exec_handle
 
     events = [{"kind": "agent_thought", "n": n} for n in range(50)]
     script = "".join(f"print({json.dumps(json.dumps(event))}, flush=True)\n" for event in events)
