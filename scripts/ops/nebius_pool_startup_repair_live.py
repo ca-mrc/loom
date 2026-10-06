@@ -114,10 +114,11 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
         namespace = self.request.manager['metadata']['namespace']
         children = self.parent._request('GET', '/apis/apps/v1/namespaces/' + namespace + '/replicasets?limit=1000')
         pods = self.parent._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
-        if children is None or pods is None or self.read_workload(key) != current:
+        after = self.read_workload(key)
+        if children is None or pods is None or not _matches(after, current, _uid(current)):
             raise ValueError('pool_repair_drain_changed')
         drained = qualify_closed_workload_drain(original=self.closed[key], desired=desired,
-            current=current, children=children, pods=pods)
+            current=after, children=children, pods=pods)
         self.qualify_closed()
         return drained
 
