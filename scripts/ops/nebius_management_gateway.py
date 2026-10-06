@@ -66,6 +66,8 @@ POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1',
 MANAGER_SCHEMA_PROOF = 'manager-schema.json'
 POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'manager-image', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
     'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
+POOL_SHUTDOWN_PENDING_REASONS = frozenset({'pending_pool_cleanup', 'pending_shutdown_update',
+    'pending_shutdown_outcome', 'pending_successor_drain'})
 REFRESH_RETAINED_PREFLIGHT_STAGES = frozenset({
     "recovery", "cluster_identity", "resource_inventory", "persistent_storage", "prerequisites",
     "foundation", "shared_material", "platform_capacity", "publication", "cloud_identity", "public_route",
@@ -469,6 +471,11 @@ def safe_report(raw: bytes, operation: dict[str, Any]) -> dict[str, Any]:
                 if value.get('phase') not in POOL_PHASES:
                     raise ValueError()
                 result['phase'] = value['phase']
+                if 'pending_reason' in value:
+                    if (value['phase'] != 'shutdown'
+                            or value['pending_reason'] not in POOL_SHUTDOWN_PENDING_REASONS):
+                        raise ValueError()
+                    result['pending_reason'] = value['pending_reason']
             elif status == success:
                 if (value.get('outcome') not in {'global', 'legacy'} or value.get('acceptance_verified') is not False
                         or not isinstance(value.get('completion_sha256'), str)
