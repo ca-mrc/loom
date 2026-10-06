@@ -37,7 +37,11 @@ def runtime_image_repair_operation(tmp_path):
     return repair_operation(tmp_path, 'v3')
 
 
-@pytest.mark.parametrize('version', ['v2', 'v3'])
+def image_tooling_operation(tmp_path):
+    return repair_operation(tmp_path, 'v4')
+
+
+@pytest.mark.parametrize('version', ['v2', 'v3', 'v4'])
 def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path, version):
     import hashlib
 
@@ -128,6 +132,8 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     (image_repair_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_manager_image_live')
 ]+[
     (runtime_image_repair_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_runtime_image')
+]+[
+    (image_tooling_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_runtime_image')
 ])
 def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, metadata_factory, missing):
     """A qualified bundle must include the entry's deferred pool dependencies."""
@@ -355,11 +361,13 @@ def test_management_workflow_uses_protected_environment_and_separate_fixed_autho
     assert not any("SERVICE_ACCOUNT" in name for name in run["env"])
 
 
-@pytest.mark.parametrize('authority,action', [
-    (authority, action) for authority in ('initial', 'diagnostic', 'recovery', 'refresh', 'pool', 'pool-repair')
+@pytest.mark.parametrize('authority,action,version', [
+    (authority, action, 'v1') for authority in ('initial', 'diagnostic', 'recovery', 'refresh', 'pool', 'pool-repair')
     for action in ('preflight', 'install')
-] + [('pool', 'rollback'), ('pool-repair', 'rollback')])
-def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action):
+] + [('pool', 'rollback', 'v1'), ('pool-repair', 'rollback', 'v1')] + [
+    ('pool-repair', action, version) for version in ('v2', 'v3', 'v4')
+    for action in ('preflight', 'install', 'rollback')])
+def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path, authority, action, version):
     import os
 
     root = Path(__file__).resolve().parents[2]
@@ -391,7 +399,7 @@ def test_workflow_selects_exact_metadata_and_key_without_cross_fallback(tmp_path
     recovery = recovery_operation(tmp_path) | {"source_sha": "e" * 40}
     refresh = refresh_operation(tmp_path)
     pool = pool_operation(tmp_path)
-    repair = repair_operation(tmp_path)
+    repair = repair_operation(tmp_path, version)
     selected = {"initial": original, "diagnostic": probe, "recovery": recovery, 'refresh': refresh, 'pool': pool, 'pool-repair': repair}[authority]
     bindir = tmp_path / "bin"
     bindir.mkdir()

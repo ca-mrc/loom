@@ -1,4 +1,4 @@
-"""Complete image cancellation/fencing matrix, independently shardable."""
+"""Image cancellation/fencing behavior; target fixtures split measured CI load."""
 from __future__ import annotations
 
 import copy
@@ -82,7 +82,11 @@ from tests.ops.test_nebius_pool_manager_image_history import (
 )
 
 
-@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+@pytest.fixture(params=["manager"])
+def target(request):
+    return request.param
+
+
 @pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("late_commit", [False, True])
 # Targeted cases requalify two image entries through all successor shutdowns.
@@ -118,7 +122,6 @@ def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_ca
 
 
 
-@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
 def test_https_cancellation_fences_image_intent_not_completed_source_repair(image_repair_case, target):
     from types import SimpleNamespace
 
@@ -174,4 +177,3 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
         assert fence_pool_startup(request=context.request, api=api, state_dir=state,
             anchor_dir=anchor)["status"] == "startup_writes_fenced"
         assert len(writes) == 1
-

@@ -1570,6 +1570,27 @@ Cancellation fences the outstanding target's image write; shutdown and completio
 retain the full mixed-target image history. This remains image repair, not
 permission to open admission without qualification or a multi-owner acceptance claim.
 
+### Continue an anchored image repair with corrected tooling
+
+If an enrolled image repair needs a tooling fix, do not replace its private inputs,
+image binding, phase record or anchor. Use the same protected repair actions with a
+new `loom.nebius-pool-startup-repair-operation.v4` envelope, operation UUID and
+dedicated grant. Its source and candidate select the exact new integrated tooling
+commit. The new private `loom.nebius-pool-image-tooling-private-inputs.v1` document
+contains only `schema_version` and `repair_operation`: the retained v2 or v3 public
+repair metadata, including its original private-input path and SHA-256.
+
+The loader rereads and verifies that original private file, requires the existing
+latest image-repair anchor, and retains its exact binding, image publication,
+execution profile and journal. A tooling continuation cannot enroll a new image
+repair, reference another tooling continuation, or change the installation,
+namespace or original pool operation. The new bundle must independently prove
+schema revision `0174`; the original image publication must still qualify. It
+uses the original dispatch lock and the same fixed image-update/activation paths.
+Unknown writes remain readback-only. Current identity, metadata, spec and version
+checks remain mandatory, including when a fresh observation replaces a stale
+pre-preview snapshot. Subsequent image corrections still require a completed tail.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

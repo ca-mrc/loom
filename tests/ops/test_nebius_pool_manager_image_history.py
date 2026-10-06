@@ -396,6 +396,50 @@ def selected_image_case(fixture, target):
     return (*fixture[:-1], runtime_binding(fixture, target, entry(fixture)))
 
 
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+def test_image_switch_uses_latest_qualified_version_after_preview(image_repair_case, target):
+    from scripts.ops.nebius_ingress_stage import _key
+
+    fixture = selected_image_case(image_repair_case, target)
+
+    class StatusUpdatingAPI(ImageAPI):
+        def preview_repair(self, phase, before, desired):
+            result = super().preview_repair(phase, before, desired)
+            # A controller updates status after dry-run succeeds. The subsequent
+            # qualified observation sees this version; do not discard it.
+            current = self.startup.documents[_key(before)]
+            current["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 100)
+            return result
+
+    api = StatusUpdatingAPI(fixture)
+    assert switch(fixture, api)["status"] == "pool_manager_image_repaired_closed"
+    assert api.calls == ["isolate", "stop", "template", "start"]
+    assert all(row["phase"] == "applied" for row in entry(fixture).record["phases"].values())
+
+
+@pytest.mark.parametrize("drift", ["uid", "spec"])
+def test_image_switch_fresh_observation_rejects_identity_or_spec_drift(image_repair_case, drift):
+    from scripts.ops.nebius_ingress_stage import _key
+
+    fixture = selected_image_case(image_repair_case, "collector")
+
+    class ChangedWorkloadAPI(ImageAPI):
+        def preview_repair(self, phase, before, desired):
+            result = super().preview_repair(phase, before, desired)
+            current = self.startup.documents[_key(before)]
+            if drift == "uid":
+                current["metadata"]["uid"] = str(uuid4())
+            else:
+                current["spec"]["schedule"] = "0 * * * *"
+            return result
+
+    api = ChangedWorkloadAPI(fixture)
+    with pytest.raises(ValueError, match="manager_image"):
+        switch(fixture, api)
+    assert api.calls == []
+    assert all(row["phase"] == "prepared" for row in entry(fixture).record["phases"].values())
+
+
 def test_manager_image_switch_waits_for_actual_drain(image_repair_case):
     api = ImageAPI(image_repair_case)
     api.drained = False
@@ -542,6 +586,96 @@ def test_image_entry_binds_original_history_and_packaged_schema_before_connectio
     assert Path(original.operation["inputs_path"]).read_bytes() == before
 
 
+def tooling_continuation(private_image_repair, image_repair_case, target="manager"):
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    previous, payload, proof, _ = private_image_repair
+    previous, payload = copy.deepcopy(previous), copy.deepcopy(payload)
+    fixture = image_repair_case
+    if target != "manager":
+        persist(entry(fixture), complete=True)
+        binding = runtime_binding(fixture, target, entry(fixture))
+        fixture = (*fixture[:-1], binding)
+        old_id = previous["operation_id"]
+        previous.update(schema="loom.nebius-pool-startup-repair-operation.v3", operation_id=str(binding.operation_id))
+        for name in ("inputs_path", "state_dir", "anchor_dir"):
+            previous[name] = previous[name].replace(old_id, str(binding.operation_id))
+        private_state._private_directory(Path(previous["inputs_path"]).parent)
+        payload.update(schema_version="loom.nebius-pool-runtime-image-private-inputs.v2",
+            binding=binding.model_dump(mode="json"))
+        save_private(previous, payload)
+    persist(entry(fixture))
+    operation = copy.deepcopy(previous)
+    operation.update(schema="loom.nebius-pool-startup-repair-operation.v4", operation_id=str(uuid4()),
+        source_sha="c" * 40, candidate="c" * 40)
+    for name in ("inputs_path", "state_dir", "anchor_dir"):
+        operation[name] = operation[name].replace(previous["operation_id"], operation["operation_id"])
+    private_state._private_directory(Path(operation["inputs_path"]).parent)
+    wrapper = {"schema_version": "loom.nebius-pool-image-tooling-private-inputs.v1", "repair_operation": previous}
+    save_private(operation, wrapper)
+    private_state._atomic_json(proof, {"schema": "loom.nebius-manager-schema.v1", "source_sha": "c" * 40,
+        "revision": "0174"})
+    return operation, wrapper, fixture
+
+
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
+def test_new_tooling_continues_anchored_image_without_replacing_binding_or_history(
+        private_image_repair, image_repair_case, target):
+    from pathlib import Path
+
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+
+    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case, target)
+    retained = entry(fixture)
+    paths = (retained.path, retained.marker, Path(wrapper["repair_operation"]["inputs_path"]))
+    before = {path: path.read_bytes() for path in paths}
+    context = load_image_repair_inputs(operation)
+    assert context.operation == operation and context.original == fixture[0]
+    assert context.inputs.binding == fixture[-1]
+    assert context.inputs.binding.source_sha != operation["source_sha"]
+    assert {path: path.read_bytes() for path in paths} == before
+
+
+@pytest.mark.parametrize("damage", ["unanchored", "recursive", "private_drift", "same_id", "same_source",
+    "other_parent", "injected_binding", "old_schema_proof"])
+def test_tooling_continuation_rejects_unbound_or_replaced_repair(
+        private_image_repair, image_repair_case, damage):
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    operation, wrapper, fixture = tooling_continuation(private_image_repair, image_repair_case)
+    previous = wrapper["repair_operation"]
+    if damage == "unanchored":
+        retained = entry(fixture)
+        retained.path.unlink()
+        retained.marker.unlink()
+    elif damage == "recursive":
+        previous["schema"] = "loom.nebius-pool-startup-repair-operation.v4"
+    elif damage == "private_drift":
+        Path(previous["inputs_path"]).write_bytes(b"{}")
+    elif damage == "same_id":
+        operation["operation_id"] = previous["operation_id"]
+    elif damage == "same_source":
+        operation["source_sha"] = operation["candidate"] = previous["source_sha"]
+    elif damage == "other_parent":
+        operation["original_operation_id"] = str(uuid4())
+    elif damage == "injected_binding":
+        wrapper["binding"] = fixture[-1].model_dump(mode="json")
+    else:
+        private_state._atomic_json(private_image_repair[2], {"schema": "loom.nebius-manager-schema.v1",
+            "source_sha": previous["source_sha"], "revision": "0174"})
+    save_private(operation, wrapper)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
+
+
 @pytest.mark.parametrize("damage", [None, "old_operation", "old_private", "legacy_binding"])
 def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
         private_image_repair, image_repair_case, damage):
@@ -604,7 +738,9 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
 
 
 @pytest.mark.parametrize("damage", [None, "failed_run", "missing_gate", "tampered", "candidate_bytes", "private_drift"])
-def test_image_repair_resolves_real_protected_catalog_before_operator_connection(private_image_repair, monkeypatch, damage):
+@pytest.mark.parametrize("continued", [False, True])
+def test_image_repair_resolves_real_protected_catalog_before_operator_connection(
+        private_image_repair, image_repair_case, monkeypatch, damage, continued):
     from contextlib import contextmanager
     from pathlib import Path
     from types import SimpleNamespace
@@ -614,10 +750,10 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
     from tests.ops.test_nebius_pool_cutover_entry import publication_http, save_private
 
     operation, payload, _, original = private_image_repair
+    retained_operation = operation
     selected = {key: payload["binding"][key] for key in ("publication", "candidate", "profile")}
     stub = {"inputs_path": str(Path(operation["inputs_path"]).with_name("publication-fixture.json"))}
     responses, wire = publication_http.__wrapped__((stub, selected, original.original), monkeypatch)
-    save_private(operation, payload)
     if damage == "failed_run":
         responses["actions/runs/100/attempts/1"]["conclusion"] = "failure"
     elif damage == "missing_gate":
@@ -626,10 +762,15 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
         wire["payload"] += b"tampered"
     elif damage == "candidate_bytes":
         payload["binding"]["candidate"]["source_archive_sha256"] = "sha256:" + "a" * 64
-        save_private(operation, payload)
     elif damage == "private_drift":
-        wire["during_read"] = lambda: Path(operation["inputs_path"]).write_bytes(b"{}")
-    context = target.load_image_repair_inputs(operation)
+        wire["during_read"] = lambda: Path(retained_operation["inputs_path"]).write_bytes(b"{}")
+    # Prepare the publication bytes before enrolling immutable history. The
+    # HTTP fixture rebinds the ZIP checksum (including its timestamp).
+    save_private(retained_operation, payload)
+    if continued:
+        binding = type(image_repair_case[-1]).model_validate(payload["binding"])
+        fixture = (*image_repair_case[:-1], binding)
+        operation, _, _ = tooling_continuation(private_image_repair, fixture)
     connections = []
 
     @contextmanager
@@ -641,6 +782,7 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
     monkeypatch.setattr(target, "connected_pool_api", connected)
     monkeypatch.setattr(target, "run_pool_operation", lambda **kwargs: {
         "status": "preflight_qualified", "operation_id": original.operation["operation_id"]})
+    context = target.load_image_repair_inputs(operation)
     if damage is None:
         result = target.execute_image_repair(context, "preflight")
         assert result["operation_id"] == operation["operation_id"]
@@ -650,6 +792,9 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
         with pytest.raises((PoolOperationError, target.EntryError)):
             target.execute_image_repair(context, "preflight")
         assert connections == []
+    assert wire["requests"]
+    if damage in {None, "tampered", "candidate_bytes", "private_drift"}:
+        assert any(request.url.host == "loom.blob.core.windows.net" for request in wire["requests"])
 
 
 def test_legacy_activation_cannot_open_while_an_image_stop_may_arrive_late(image_repair_case, monkeypatch):
