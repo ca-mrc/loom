@@ -894,3 +894,65 @@ def test_repair_private_drift_at_retained_barrier_rejects_without_later_effects(
     with pytest.raises(EntryError):
         checks.preflight(context.original.request)
     assert calls == ([] if when == 'before' else ['read-only-prerequisites'])
+
+
+def _original_recovery(name, monkeypatch):
+    """Execute reviewed, hash-pinned readers/writers from original 80c12 tooling."""
+    import hashlib
+    import sys
+    from types import ModuleType
+
+    checksums = {'startup_fence': '9f6983ad070aa9ee4fc2e8690dbc07daf31a0b9ca0785aff71af96deb6ef0563',
+        'startup': '7b49fea9462d076a52cfac27ef4ce7692c18dbfd32d9645546bf741c94620ef3',
+        'completion': '36f9598683208571692be89f75899b4e153c98299ce97c1bfbe79cb6ae908b27'}
+    path = Path(__file__).parents[1] / 'fixtures/nebius' / ('original-pool-' + name + '.py.txt')
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == checksums[name]
+    module = ModuleType('_loom_original_80c12_' + name)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(raw, str(path), 'exec'), module.__dict__)
+    return module
+
+
+@pytest.mark.parametrize('entry', ['prepared', 'intent', 'late_stop'])
+def test_original_tooling_fence_can_be_resumed_without_rewriting_its_bytes(prepared_repair, monkeypatch, entry):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, _, remote, state, anchor = prepared_repair
+    if entry == 'prepared':
+        monkeypatch.setattr(remote, 'preview_repair', lambda *args: None)
+    else:
+        remote.failure = ('stop', 'before')
+    repair(prepared_repair)
+    original = _original_recovery('startup_fence', monkeypatch)
+    api = ShutdownAPI((context.request, None, None, remote.startup, None, state.parent))
+    arguments = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    assert advance_pool_activation(**arguments, cancel=True)['status'] == 'pool_activation_cancelled'
+    # The historical fence dynamically imports its original startup reader.
+    # Restore both module bindings immediately after the old writer returns.
+    import sys
+
+    with monkeypatch.context() as legacy:
+        legacy.setitem(sys.modules, 'scripts.ops.nebius_pool_startup', _original_recovery('startup', legacy))
+        legacy.setitem(sys.modules, 'scripts.ops.nebius_pool_startup_fence', original)
+        assert original.fence_pool_startup(**arguments)['status'] == 'startup_writes_fenced'
+    before = {path: path.read_bytes() for path in (state / 'startup-fence.json',
+        anchor / (context.operation['operation_id'] + '-startup-fence.json'))}
+    if entry == 'late_stop':
+        pending, desired = remote.pending
+        desired = copy.deepcopy(desired)
+        desired['metadata'].update(uid=pending['metadata']['uid'],
+            resourceVersion=str(int(pending['metadata']['resourceVersion']) + 1))
+        remote.startup.documents[_key(context.request.manager)] = desired
+    assert fence_pool_startup(**arguments)['status'] == 'startup_writes_fenced'
+    assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
+    actual = api.read_workload(_key(context.request.manager))
+    assert actual['spec']['replicas'] == 0
+    if remote.pending is not None:
+        assert actual['metadata']['resourceVersion'] != remote.pending[0]['metadata']['resourceVersion']
+    if entry == 'late_stop':
+        assert _key(context.request.manager) not in api.stop_calls
+    assert all(path.read_bytes() == raw for path, raw in before.items())
