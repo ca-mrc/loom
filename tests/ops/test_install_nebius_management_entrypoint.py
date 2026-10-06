@@ -28,7 +28,7 @@ def module():
     return importlib.import_module("scripts.ops.install_nebius_management_entrypoint")
 
 
-@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic", "recovery", 'refresh', 'pool', 'repair'])
+@pytest.fixture(params=["initial", "upgrade", "retirement", "diagnostic", "recovery", 'refresh', 'pool', 'repair', 'image-repair'])
 def inputs(tmp_path, request):
     (tmp_path / ".loom").mkdir(mode=0o700)
     (tmp_path / ".ssh").mkdir(mode=0o700)
@@ -37,7 +37,8 @@ def inputs(tmp_path, request):
     keys.chmod(0o600)
     metadata = {"initial": operation, "upgrade": upgrade_operation, "retirement": retirement_operation,
         "diagnostic": diagnostic_operation, "recovery": recovery_operation, 'refresh': refresh_operation,
-        'pool': pool_operation, 'repair': repair_operation}[request.param](tmp_path / ".loom")
+        'pool': pool_operation, 'repair': repair_operation,
+        'image-repair': lambda path: repair_operation(path, 'v2')}[request.param](tmp_path / ".loom")
     content = archive({"operation.json": json.dumps(metadata).encode(),
         "scripts/ops/nebius_management_gateway.py": b'def authorized_main(digest):\n    return 0\n',
         "scripts/ops/nebius_certificate_gateway.py": b"# supervisor\n"})
@@ -121,7 +122,8 @@ def test_grant_is_exact_fixed_command_preserves_existing_keys_and_checks_sources
     import zipfile
     with zipfile.ZipFile(io.BytesIO(content)) as packed:
         pool = json.loads(packed.read('operation.json'))['schema'] in {
-            'loom.nebius-pool-cutover-operation.v1', 'loom.nebius-pool-startup-repair-operation.v1'}
+            'loom.nebius-pool-cutover-operation.v1', 'loom.nebius-pool-startup-repair-operation.v1',
+            'loom.nebius-pool-startup-repair-operation.v2'}
     for command, expected in [("loom-nebius-management-preflight-v1", 0), ("loom-nebius-management-install-v1", 0),
         ('loom-nebius-pool-rollback-v1', 0 if pool else 126),
         ("loom-nebius-management-install-v1 extra", 126), ("loom-nebius-ingress-v1", 126), ("kubectl apply", 126)]:

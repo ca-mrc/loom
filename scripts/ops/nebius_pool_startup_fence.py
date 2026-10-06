@@ -72,12 +72,20 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         closed: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]], startup: dict[str, Any] | None
         ) -> tuple[dict[str, tuple[str | None, tuple[dict[str, Any], ...]]], dict[str, str | None]]:
     """Original starts plus the one anchored repair; no new recovery protocol."""
+    from scripts.ops.nebius_pool_manager_image_history import (
+        image_phase_options,
+        load_manager_image_chain,
+        original_recovery_image,
+        prepared_image_record,
+    )
     from scripts.ops.nebius_pool_startup_repair import (
         _manager_options,
         _repair_record,
         original_recovery_repair,
         startup_repair_exists,
     )
+
+    from loom.nebius_platform_render import digest
 
     sources = {key: (row['before_resource_version'], (closed[key], targets[key]))
         for key, row in ({} if startup is None else startup['workloads']).items() if row['phase'] == 'intent'}
@@ -93,6 +101,14 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         config = state / 'source-repair-configuration/stage.json'
         history = {'repair_sha256': _hash(state / 'startup-repair.json'),
             'repair_configuration_sha256': _hash(config) if config.exists() or config.is_symlink() else None}
+    chain = load_manager_image_chain(request, state=state, anchor=anchor)
+    if chain and original_recovery_image(request, state=state, anchor=anchor) is None:
+        tail = chain[-1]
+        record = tail.record or prepared_image_record(tail.identity)
+        version = next((row['before_resource_version'] for row in record['phases'].values() if row['phase'] == 'intent'), None)
+        sources[_key(request.manager)] = (version, image_phase_options(tail.documents, record))
+        history['manager_image_sha256'] = digest({str(path): _hash(path) if path.exists() else None
+            for entry in chain for path in (entry.path, entry.marker)})
     return sources, history
 
 
@@ -158,11 +174,21 @@ def fenced_startup_options(request: PoolCutoverRequest, *, state: Path, anchor: 
             result[key] = (row['expected'],)
         elif row['phase'] == 'intent':
             result[key] = (*choices[key], marked_startup_document(sources[key][1][0], operation))
+    from scripts.ops.nebius_pool_manager_image_history import original_recovery_image
+
+    image = original_recovery_image(request, state=state, anchor=anchor)
+    if image is not None and image.record is not None and image.record['phases']['isolate']['phase'] == 'intent':
+        key = _key(request.manager)
+        if tuple(_stable(row) for row in result[key]) not in (
+                (_stable(image.documents[0]),), tuple(_stable(row) for row in image.documents[:2])):
+            raise ValueError
+        result[key] = (image.documents[0], image.documents[1])
     return result
 
 
 def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadReader, *,
                                state: Path, anchor: Path) -> dict[str, dict[str, Any]]:
+    from scripts.ops.nebius_pool_manager_image_history import original_recovery_image
     from scripts.ops.nebius_pool_startup import startup_workload_options
     from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 
@@ -176,9 +202,10 @@ def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadRea
     sources = ({} if record is None else _fence_sources(request, state=state, anchor=anchor,
         closed=closed, targets=targets, startup=startup)[0])
     repair = original_recovery_repair(request, state=state, anchor=anchor)
+    image = original_recovery_image(request, state=state, anchor=anchor)
     shutdown = state / 'shutdown.json'
     # startup_workload_options has already qualified the complete shutdown chain.
-    stopped = (repair is not None and shutdown.exists()
+    stopped = ((repair is not None or image is not None) and shutdown.exists()
         and json.loads(private_state._private_read(shutdown, limit=4 * 1024**2))['workloads'][_key(request.manager)]['phase'] == 'stopped')
     observed = {}
     for key, original in closed.items():
@@ -190,6 +217,9 @@ def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadRea
                 raise ValueError
         if (stopped and key == _key(request.manager) and repair is not None
                 and actual['metadata']['resourceVersion'] == repair['phases']['stop']['before_resource_version']):
+            raise ValueError
+        if (stopped and key == _key(request.manager) and image is not None and image.record is not None
+                and actual['metadata']['resourceVersion'] == image.record['phases']['isolate']['before_resource_version']):
             raise ValueError
         observed[key] = actual
     return observed
@@ -205,6 +235,9 @@ def fence_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupFenceAPI,
             _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
             identity, record = _fence_record(request, state=state, anchor=anchor, closed=closed, targets=targets, startup=startup)
             sources, _ = _fence_sources(request, state=state, anchor=anchor, closed=closed, targets=targets, startup=startup)
+            from scripts.ops.nebius_pool_manager_image_history import original_recovery_image
+
+            image = original_recovery_image(request, state=state, anchor=anchor)
             if record is None:
                 record = {**identity, 'workloads': {key: {'phase': 'prepared', 'expected': None}
                     for key in sources}}
@@ -254,7 +287,11 @@ def fence_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupFenceAPI,
                         actual = observe()[key]
                     if actual['metadata']['resourceVersion'] == version:
                         return result('pending_startup_fence')
-                item.update(phase='fenced', expected=_stable(actual))
+                # A retained old fence has no image hash. Keep its original
+                # projection; the narrowly qualified metadata-only isolate is
+                # carried separately until shutdown invalidates/removes it.
+                expected = image.documents[0] if image is not None and key == _key(request.manager) else actual
+                item.update(phase='fenced', expected=_stable(expected))
                 save()
             observe()
             return result('startup_writes_fenced')

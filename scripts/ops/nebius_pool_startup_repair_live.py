@@ -82,6 +82,9 @@ class _FixedRepairConfiguration:
 
 
 class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
+    steps = _STEPS
+    drain_slice = slice(1, 3)
+
     def __init__(self, *, parent: HTTPSPoolCutoverAPI, binding: PoolStartupRepairBinding):
         super().__init__(parent=parent)
         self.binding = PoolStartupRepairBinding.model_validate(binding.model_dump())
@@ -108,7 +111,7 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
     def manager_drained(self, key: str, desired: dict[str, Any]) -> bool:
         self.qualify_closed()
         if (key != _key(self.request.manager)
-                or not any(_stable(desired) == _stable(row) for row in self.documents[1:3])):
+                or not any(_stable(desired) == _stable(row) for row in self.documents[self.drain_slice])):
             raise ValueError('pool_repair_drain_scope_unqualified')
         current = self.read_workload(key)
         namespace = self.request.manager['metadata']['namespace']
@@ -122,10 +125,27 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
         self.qualify_closed()
         return drained
 
+    def _replacement_template(self, before: dict[str, Any]) -> dict[str, Any]:
+        running = copy.deepcopy(before)
+        running['spec']['replicas'] = 1
+        fixed, _ = source_repair_documents(self.request, running)
+        return fixed['spec']['template']
+
+    def _repair_changes(self, phase: str, before: dict[str, Any], desired: dict[str, Any]
+            ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        proposed = _snapshot(before)
+        if phase == 'template':
+            proposed['spec']['template'] = self._replacement_template(before)
+            field, value = '/spec/template', proposed['spec']['template']
+        else:
+            proposed['spec']['replicas'] = desired['spec']['replicas']
+            field, value = '/spec/replicas', desired['spec']['replicas']
+        return proposed, [{'op': 'replace', 'path': field, 'value': value}]
+
     def _patch_repair(self, phase: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
         try:
             record = self._qualify_binding()
-            index, version = _STEPS.index(phase), before['metadata']['resourceVersion']
+            index, version = self.steps.index(phase), before['metadata']['resourceVersion']
             key = _key(self.request.manager)
             if (record is None or not _matches(before, self.documents[index], _uid(self.request.manager))
                     or _stable(desired) != _stable(self.documents[index + 1])
@@ -136,24 +156,14 @@ class HTTPSPoolStartupRepairAPI(HTTPSPoolStartupAPI):
             self.qualify_closed()
             if phase in {'template', 'start'} and self.manager_drained(key, self.documents[index]) is not True:
                 raise ValueError
-            proposed = _snapshot(before)
-            if phase == 'template':
-                # Preserve server representation of every unrelated field.
-                running = copy.deepcopy(before)
-                running['spec']['replicas'] = 1
-                fixed, _ = source_repair_documents(self.request, running)
-                proposed['spec']['template'] = fixed['spec']['template']
-                field, value = '/spec/template', proposed['spec']['template']
-            else:
-                proposed['spec']['replicas'] = desired['spec']['replicas']
-                field, value = '/spec/replicas', desired['spec']['replicas']
+            # Preserve server representation of every unrelated field.
+            proposed, changes = self._repair_changes(phase, before, desired)
             if _stable(proposed) != _stable(desired) or self._qualify_binding() != record:
                 raise ValueError
             patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(self.request.manager)},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
                 {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
-                {'op': 'test', 'path': '/spec', 'value': before['spec']},
-                {'op': 'replace', 'path': field, 'value': value}]
+                {'op': 'test', 'path': '/spec', 'value': before['spec']}, *changes]
             with self.parent.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
                     json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
                 return _patch_result(response, desired=proposed, uid=_uid(self.request.manager))

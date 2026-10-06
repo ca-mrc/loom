@@ -55,12 +55,16 @@ def _repair_paths(operation: str, state: Path, anchor: Path) -> tuple[Path, ...]
 
 
 def _phase_hashes(operation: str, state: Path, anchor: Path) -> dict[str, str | None]:
+    from scripts.ops.nebius_pool_manager_image_history import manager_image_paths
+
     result = {str(path): _hash(path) if _exists(path) else None for phase in _PHASES
         for path in (state / (phase + '.json'), anchor / (operation + '-' + phase + '.json'))}
     repair = _repair_paths(operation, state, anchor)
     # Keep pre-repair completion receipts byte-for-byte stable.
     if any(_exists(path) for path in repair):
         result.update({str(path): _hash(path) if _exists(path) else None for path in repair})
+    result.update({str(path): _hash(path) if _exists(path) else None
+        for path in manager_image_paths(operation, state=state, anchor=anchor)})
     return result
 
 
@@ -74,9 +78,11 @@ def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[d
     if activation is None:
         raise ValueError
     if activation['opening'] == 'opened' and activation['cancellation'] == 'prepared':
+        from scripts.ops.nebius_pool_manager_image_history import qualify_completed_manager_images
         from scripts.ops.nebius_pool_startup_repair import qualify_completed_startup_repair
 
         qualify_completed_startup_repair(request, state=state, anchor=anchor)
+        qualify_completed_manager_images(request, state=state, anchor=anchor)
         if (startup is None or any(row['phase'] != 'started' for row in startup['workloads'].values())
                 or any(row != {'release': 'released', 'fence': 'prepared'} for row in activation['guards'].values())
                 or any(_exists(path) for phase in _RECOVERY
@@ -109,6 +115,19 @@ def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[d
     # always bind the complete repair history directly.
     marker = anchor / (operation + '-completion.json')
     if outcome == 'legacy' and _exists(marker):
+        from scripts.ops.nebius_pool_manager_image_history import (
+            manager_image_paths,
+            original_recovery_image,
+        )
+
+        image_paths = {str(path) for path in manager_image_paths(operation, state=state, anchor=anchor)}
+        image_historical = {**receipt, 'phase_sha256': {
+            name: value for name, value in before.items() if name not in image_paths}}
+        if (image_historical != receipt
+                and json.loads(private_state._private_read(marker)) == _identity(image_historical)):
+            if original_recovery_image(request, state=state, anchor=anchor) is None:
+                raise ValueError
+            return image_historical, before
         repair_paths = {str(path) for path in _repair_paths(operation, state, anchor)}
         historical = {**receipt, 'phase_sha256': {name: value for name, value in before.items() if name not in repair_paths}}
         if historical != receipt and json.loads(private_state._private_read(marker)) == _identity(historical):

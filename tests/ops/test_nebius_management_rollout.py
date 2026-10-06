@@ -29,6 +29,36 @@ def module():
     return importlib.import_module("scripts.ops.nebius_management_rollout")
 
 
+def image_repair_operation(tmp_path):
+    return repair_operation(tmp_path, 'v2')
+
+
+def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path):
+    import hashlib
+
+    from scripts.ops.nebius_management_gateway import GatewayError, unpack_bundle
+
+    uv, requirements, wheels = tmp_path / 'uv', tmp_path / 'requirements', tmp_path / 'wheels'
+    uv.write_bytes(b'fixture uv')
+    requirements.write_bytes(b'fixture requirements')
+    wheels.mkdir()
+    for name in ('loom-0.0.0-py3-none-any.whl', 'loom_bundle_checksum-0.1.0-py3-none-any.whl'):
+        (wheels / name).write_bytes(b'fixture wheel')
+    operation = image_repair_operation(tmp_path)
+    content = module().build_bundle(operation, uv=uv, requirements=requirements, wheels=wheels)
+    files, selected = unpack_bundle(content)
+    assert selected == operation
+    assert json.loads(files['manager-schema.json']) == {
+        'schema': 'loom.nebius-manager-schema.v1', 'source_sha': operation['source_sha'], 'revision': '0174'}
+    proof = json.loads(files['manager-schema.json'])
+    proof['source_sha'] = 'f' * 40
+    files['manager-schema.json'] = json.dumps(proof, sort_keys=True).encode()
+    files['manifest.json'] = json.dumps({name: hashlib.sha256(value).hexdigest()
+        for name, value in files.items() if name != 'manifest.json'}, sort_keys=True).encode()
+    with pytest.raises(GatewayError):
+        unpack_bundle(archive(files))
+
+
 def test_bundle_is_reproducible_complete_and_excludes_private_inputs(tmp_path):
     uv, requirements, wheels = tmp_path / "uv", tmp_path / "requirements.txt", tmp_path / "wheels"
     uv.write_bytes(b"approved uv")
@@ -89,6 +119,8 @@ def test_bundled_upgrade_entry_imports_without_workspace_scripts_or_private_inpu
     (refresh_operation, missing) for missing in (None, 'nebius_management_refresh_connected', 'nebius_pool_cutover_entry')
 ] + [
     (repair_operation, missing) for missing in (None, 'nebius_pool_repair_entry', 'nebius_pool_startup_repair_live')
+] + [
+    (image_repair_operation, missing) for missing in (None, 'nebius_pool_image_entry', 'nebius_pool_manager_image_live')
 ])
 def test_actual_tooling_qualification_loads_refresh_dependencies_without_private_inputs(tmp_path, metadata_factory, missing):
     """A qualified bundle must include the entry's deferred pool dependencies."""
