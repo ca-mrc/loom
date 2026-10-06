@@ -55,7 +55,8 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, 
         core.create_namespaced_secret(namespace, {'metadata': {'name': 'source-credentials'},
             'stringData': {'credentials.json': '{}'}})
         # Execute the actual emitted initializer in the actual service image;
-        # the main process only proves the private spool is usable after init.
+        # the main process proves the private spool and builder SDK transport
+        # work without the developer environment's optional dependencies.
         pod = {'restartPolicy': 'Never', 'automountServiceAccountToken': False,
             'securityContext': {'seccompProfile': {'type': 'RuntimeDefault'}},
             'containers': [{'name': 'spool-user', 'image': image,
@@ -64,15 +65,28 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, 
                 # Avoid an HTML-sensitive ampersand in this synthetic command:
                 # Kubernetes JSON-Patch compares its encoded string differently.
                 # The production initializer itself has no such character.
-                'command': ['python', '-c', 'import os,stat,sys; from operator import and_; from pathlib import Path; '
+                'command': ['python', '-c', 'import asyncio,os,stat,sys; from operator import and_; from pathlib import Path; '
                     'from loom_service.application_management.source_upload import ApplicationSourceUploader; '
+                    'from loom_service.environment_management.kubernetes_credentials import '
+                    'ProjectedKubernetesConnection,create_projected_api_client; '
+                    'from loom_execution_actuator.task_image_controller import NativeBuildKubernetesApi; '
                     'p=Path(sys.argv[1]); '
                     'assert and_(p.parent.stat().st_mode,stat.S_ISGID); '
                     'assert os.getuid()==p.stat().st_uid==1000; '
                     'assert stat.S_IMODE(p.stat().st_mode)==0o700; '
                     'assert ApplicationSourceUploader(None,None,spool_directory=p).directory==p; '
                     '(p/"upload").write_bytes(b"private source"); '
-                    'assert (p/"upload").read_bytes()==b"private source"', SOURCE_SPOOL_PATH]}]}
+                    'assert (p/"upload").read_bytes()==b"private source"; '
+                    'token=p/"token"; token.write_text("first-token"); token.chmod(0o600); '
+                    'api,credentials=create_projected_api_client(ProjectedKubernetesConnection('
+                    'kind="projected_service_account",endpoint="https://kubernetes.default.svc",'
+                    'ca_file=Path("/etc/ssl/certs/ca-certificates.crt"),token_file=token)); '
+                    'builder=NativeBuildKubernetesApi(api_client=api); '
+                    'assert api.configuration.verify_ssl is True; '
+                    'assert api.configuration.get_api_key_with_prefix("authorization")=="Bearer first-token"; '
+                    'token.write_text("rotated-token"); '
+                    'assert api.configuration.get_api_key_with_prefix("authorization")=="Bearer rotated-token"; '
+                    'asyncio.run(builder.close()); asyncio.run(credentials.close())', SOURCE_SPOOL_PATH]}]}
         mount_application_source(pod, settings=ApplicationSourceUploadSettings(
             credentials_file=Path(SOURCE_CREDENTIALS_PATH) / 'credentials.json',
             spool_directory=Path(SOURCE_SPOOL_PATH)), secret_name='source-credentials', service_image=image)
