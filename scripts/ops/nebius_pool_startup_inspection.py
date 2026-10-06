@@ -135,8 +135,10 @@ def _bound(kube: Kubectl, pod: dict[str, Any], role: str, installation: str) -> 
                 or container.get("args")):
             raise ValueError
     elif role == "gateway":
+        identity = [row for row in container.get("env", [])
+            if row.get("name", "").upper() == "LOOM_POOL_GATEWAY_INSTALLATION_ID"]
         if (root["metadata"].get("labels", {}).get(_LABEL) != installation
-                or {"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID", "value": installation} not in container.get("env", [])
+                or identity != [{"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID", "value": installation}]
                 or container.get("command") != ["python", "-m", "loom_service.pool_management"]
                 or container.get("args")):
             raise ValueError

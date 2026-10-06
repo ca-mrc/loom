@@ -364,7 +364,7 @@ def test_fixed_collector_and_gateway_error_types_are_retained_without_messages(c
         "stages": ["pool_gateway_identity_unavailable"], "locations": []}
 
 
-@pytest.mark.parametrize("override", ["literal", "secret", "same"])
+@pytest.mark.parametrize("override", ["literal", "secret", "same", "case_alias"])
 def test_duplicate_gateway_installation_cannot_select_a_different_runtime(cluster, gateway, override):
     root, replica, pod = gateway
     value = {"name": "LOOM_POOL_GATEWAY_INSTALLATION_ID"}
@@ -372,6 +372,9 @@ def test_duplicate_gateway_installation_cannot_select_a_different_runtime(cluste
         value["valueFrom"] = {"secretKeyRef": {"name": "foreign", "key": "installation"}}
     else:
         value["value"] = str(uuid4()) if override == "literal" else root["metadata"]["labels"][LABEL]
+    if override == "case_alias":
+        value["name"] = "loom_pool_gateway_installation_id"
+        value["value"] = str(uuid4())
     for spec in (root["spec"]["template"]["spec"], replica["spec"]["template"]["spec"], pod["spec"]):
         spec["containers"][0]["env"].append(copy.deepcopy(value))
     assert not any(row["role"] == "gateway" for row in inspect(cluster)["workloads"])
