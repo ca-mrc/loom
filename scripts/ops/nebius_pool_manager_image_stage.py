@@ -91,7 +91,7 @@ def repair_manager_image(*, request: PoolCutoverRequest, binding: ManagerImageRe
                         return result('pending_manager_image_update')
                     if _stable(preview) != _stable(desired):
                         raise ValueError
-                    observe()
+                    actual = observe()
                     version = actual['metadata']['resourceVersion']
                     if not isinstance(version, str) or not 0 < len(version) <= 128:
                         raise ValueError
