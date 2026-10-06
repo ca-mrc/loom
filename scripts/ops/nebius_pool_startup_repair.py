@@ -232,6 +232,40 @@ def qualify_completed_startup_repair(request: PoolCutoverRequest, *, state: Path
             raise ValueError('pool_startup_repair_incomplete')
 
 
+def original_recovery_repair(request: PoolCutoverRequest, *, state: Path, anchor: Path) -> dict[str, Any] | None:
+    """Qualify the old empty fence only before a repair could replace a template.
+
+    Old authenticated rollback processes can outlive repair entry. Their bytes
+    remain authoritative; a pending stop is settled by shutdown, not rewritten
+    into a new fence. No template/start CAS may be outstanding in this case.
+    """
+    if not startup_repair_exists(request, state=state, anchor=anchor):
+        return None
+    operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
+    marker = anchor / (operation + '-startup-fence.json')
+    if not _exists(marker):
+        return None
+    raw = private_state._private_read(marker)
+    if 'repair_sha256' in json.loads(raw):
+        return None
+    _, _, _, repair = _repair_record(request, state=state, anchor=anchor)
+    if (repair is None or repair['phases']['stop']['phase'] not in {'prepared', 'intent'}
+            or any(repair['phases'][phase]['phase'] != 'prepared' for phase in ('template', 'start'))):
+        raise ValueError
+    _, cancellation = _activation_record(request, state=state, anchor=anchor)
+    if (cancellation is None or cancellation['cancellation'] != 'fenced'
+            or any(row['fence'] != 'fenced' for row in cancellation['guards'].values())):
+        raise ValueError
+    identity = {'schema': 'loom.nebius-pool-startup-fence.v1', 'operation_id': operation,
+        'state_dir': str(state), 'closure_sha256': _hash(state / 'cutover.json'),
+        'startup_sha256': _hash(state / 'startup.json'), 'cancellation_sha256': _hash(state / 'activation.json')}
+    if (raw != json.dumps(identity, sort_keys=True).encode()
+            or private_state._private_read(state / 'startup-fence.json')
+                != json.dumps({**identity, 'workloads': {}}, sort_keys=True).encode()):
+        raise ValueError
+    return repair
+
+
 def qualify_repair_configuration(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         read: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
     """Read-only exact config identity, including harmless unresolved CREATEs."""

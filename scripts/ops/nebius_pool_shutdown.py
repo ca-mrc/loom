@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from scripts.ops import nebius_certificates as private_state
-from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_migration import _hash
@@ -22,6 +22,7 @@ from scripts.ops.nebius_pool_startup import (
     closed_startup_documents,
 )
 from scripts.ops.nebius_pool_startup_fence import _fence_record, observe_recovery_workloads
+from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 
 from loom.nebius_platform_render import digest
 
@@ -101,8 +102,15 @@ def shutdown_workload_options(request: PoolCutoverRequest, *, state: Path, ancho
     _, original, desired, _, record = _shutdown_record(request, state=state, anchor=anchor)
     if record is None:
         raise ValueError
+    repair = original_recovery_repair(request, state=state, anchor=anchor)
     result = dict(choices)
     for key, item in record['workloads'].items():
+        if (repair is not None and repair['phases']['stop']['phase'] == 'intent'
+                and key == _key(request.manager)):
+            if tuple(_stable(row) for row in choices[key]) != (original[key], desired[key]):
+                raise ValueError
+            result[key] = (desired[key],) if item['phase'] == 'stopped' else (original[key], desired[key])
+            continue
         if len(choices[key]) != 1 or _stable(choices[key][0]) != original[key]:
             raise ValueError
         result[key] = ((original[key],) if item['phase'] == 'prepared' else (desired[key],)
@@ -116,6 +124,7 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         with private_state._locked_state(anchor):
             closed, original, desired, identity, record = _shutdown_record(request, state=state, anchor=anchor)
+            repair = original_recovery_repair(request, state=state, anchor=anchor)
 
             def result(status: str) -> dict[str, Any]:
                 return {'status': status, 'operation_id': identity['operation_id'], 'legacy_restore_allowed': False}
@@ -147,6 +156,17 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
                 actual = observe()[key]
                 if not drained():
                     return result('pending_pool_cleanup')
+                if (item['phase'] == 'prepared' and repair is not None and key == _key(request.manager)
+                        and repair['phases']['stop']['phase'] == 'intent'
+                        and _matches(actual, target, _uid(closed[key]))):
+                    version = repair['phases']['stop']['before_resource_version']
+                    if actual['metadata']['resourceVersion'] == version:
+                        raise ValueError
+                    # The delayed repair stop already reached this exact target.
+                    # Retain its CAS version; do not issue a duplicate stop.
+                    item.update(phase='stopped', before_resource_version=version)
+                    private_state._atomic_json(state / 'shutdown.json', record)
+                    continue
                 if item['phase'] == 'prepared' and original[key] != target:
                     proposed = _snapshot(actual)
                     field = 'suspend' if proposed['kind'] == 'CronJob' else 'replicas'

@@ -75,6 +75,7 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
     from scripts.ops.nebius_pool_startup_repair import (
         _manager_options,
         _repair_record,
+        original_recovery_repair,
         startup_repair_exists,
     )
 
@@ -82,6 +83,8 @@ def _fence_sources(request: PoolCutoverRequest, *, state: Path, anchor: Path,
         for key, row in ({} if startup is None else startup['workloads']).items() if row['phase'] == 'intent'}
     history: dict[str, str | None] = {}
     if startup_repair_exists(request, state=state, anchor=anchor):
+        if original_recovery_repair(request, state=state, anchor=anchor) is not None:
+            return sources, history
         documents, _, _, repair = _repair_record(request, state=state, anchor=anchor)
         if repair is None or _key(request.manager) in sources:
             raise ValueError
@@ -161,6 +164,7 @@ def fenced_startup_options(request: PoolCutoverRequest, *, state: Path, anchor: 
 def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadReader, *,
                                state: Path, anchor: Path) -> dict[str, dict[str, Any]]:
     from scripts.ops.nebius_pool_startup import startup_workload_options
+    from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 
     closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
     options = startup_workload_options(request, state_dir=state, anchor_dir=anchor)
@@ -171,6 +175,11 @@ def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadRea
         if startup_fence_exists(request, state=state, anchor=anchor) else None)
     sources = ({} if record is None else _fence_sources(request, state=state, anchor=anchor,
         closed=closed, targets=targets, startup=startup)[0])
+    repair = original_recovery_repair(request, state=state, anchor=anchor)
+    shutdown = state / 'shutdown.json'
+    # startup_workload_options has already qualified the complete shutdown chain.
+    stopped = (repair is not None and shutdown.exists()
+        and json.loads(private_state._private_read(shutdown, limit=4 * 1024**2))['workloads'][_key(request.manager)]['phase'] == 'stopped')
     observed = {}
     for key, original in closed.items():
         actual = api.read_workload(key)
@@ -179,6 +188,9 @@ def observe_recovery_workloads(request: PoolCutoverRequest, api: PoolWorkloadRea
         if record is not None and key in record['workloads'] and record['workloads'][key]['phase'] == 'fenced':
             if sources[key][0] is not None and actual['metadata']['resourceVersion'] == sources[key][0]:
                 raise ValueError
+        if (stopped and key == _key(request.manager) and repair is not None
+                and actual['metadata']['resourceVersion'] == repair['phases']['stop']['before_resource_version']):
+            raise ValueError
         observed[key] = actual
     return observed
 

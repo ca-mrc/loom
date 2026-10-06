@@ -49,18 +49,22 @@ def _exists(path: Path) -> bool:
     return path.exists() or path.is_symlink()
 
 
+def _repair_paths(operation: str, state: Path, anchor: Path) -> tuple[Path, ...]:
+    return (state / 'startup-repair.json', anchor / (operation + '-startup-repair.json'),
+        state / 'source-repair-configuration/stage.json')
+
+
 def _phase_hashes(operation: str, state: Path, anchor: Path) -> dict[str, str | None]:
     result = {str(path): _hash(path) if _exists(path) else None for phase in _PHASES
         for path in (state / (phase + '.json'), anchor / (operation + '-' + phase + '.json'))}
-    repair = (state / 'startup-repair.json', anchor / (operation + '-startup-repair.json'),
-        state / 'source-repair-configuration/stage.json')
+    repair = _repair_paths(operation, state, anchor)
     # Keep pre-repair completion receipts byte-for-byte stable.
     if any(_exists(path) for path in repair):
         result.update({str(path): _hash(path) if _exists(path) else None for path in repair})
     return result
 
 
-def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> dict[str, Any]:
+def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[dict[str, Any], dict[str, str | None]]:
     """Derive the outcome and unique final templates from existing phase proofs."""
     operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
     before = _phase_hashes(operation, state, anchor)
@@ -97,9 +101,23 @@ def _terminal(request: PoolCutoverRequest, state: Path, anchor: Path) -> dict[st
         workloads[key] = value
     if _phase_hashes(operation, state, anchor) != before:
         raise ValueError
-    return {'schema': 'loom.nebius-pool-completion.v1', 'operation_id': operation,
+    receipt = {'schema': 'loom.nebius-pool-completion.v1', 'operation_id': operation,
         'state_dir': str(state), 'contract_sha256': digest(_contract(request, cutover_documents(request))),
         'outcome': outcome, 'phase_sha256': before, 'workloads': workloads}
+    # A retained old rollback can finish before updated tooling resumes. Only
+    # its already-anchored legacy bytes select the old encoding; new receipts
+    # always bind the complete repair history directly.
+    marker = anchor / (operation + '-completion.json')
+    if outcome == 'legacy' and _exists(marker):
+        repair_paths = {str(path) for path in _repair_paths(operation, state, anchor)}
+        historical = {**receipt, 'phase_sha256': {name: value for name, value in before.items() if name not in repair_paths}}
+        if historical != receipt and json.loads(private_state._private_read(marker)) == _identity(historical):
+            from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
+
+            if original_recovery_repair(request, state=state, anchor=anchor) is None:
+                raise ValueError
+            return historical, before
+    return receipt, before
 
 
 def _identity(receipt: dict[str, Any]) -> dict[str, str]:
@@ -130,11 +148,17 @@ def _saved(receipt: dict[str, Any], state: Path, anchor: Path) -> bool:
     return True
 
 
-def _qualified(receipt: dict[str, Any], state: Path, anchor: Path) -> PoolCutoverCompletion:
+def _qualified(receipt: dict[str, Any], state: Path, anchor: Path, *,
+               phases: dict[str, str | None]) -> PoolCutoverCompletion:
     path, marker = _paths(receipt, state, anchor)
     if not _saved(receipt, state, anchor):
         raise ValueError
-    history = {Path(name): value for name, value in receipt['phase_sha256'].items() if value is not None}
+    if (_phase_hashes(receipt['operation_id'], state, anchor) != phases
+            or any(phases[name] != value for name, value in receipt['phase_sha256'].items())):
+        raise ValueError
+    # _terminal has qualified the narrow original-rollback exception. Preserve
+    # that receipt while carrying its repair ancestry to future consumers.
+    history = {Path(name): value for name, value in phases.items() if value is not None}
     history.update({path: _hash(path), marker: _hash(marker)})
     if receipt['outcome'] not in ('global', 'legacy'):
         raise ValueError
@@ -147,8 +171,8 @@ def load_pool_completion(*, request: PoolCutoverRequest, state_dir: Path, anchor
     try:
         if _hash(state_dir / 'completion.json') != completion_sha256:
             raise ValueError
-        receipt = _terminal(request, state_dir, anchor_dir)
-        return _qualified(receipt, state_dir, anchor_dir)
+        receipt, phases = _terminal(request, state_dir, anchor_dir)
+        return _qualified(receipt, state_dir, anchor_dir, phases=phases)
     except Exception:
         raise ValueError('pool_completion_unqualified_preserve_evidence') from None
 
@@ -159,7 +183,7 @@ def complete_pool_cutover(*, request: PoolCutoverRequest, api: PoolLegacyReopeni
     try:
         state, anchor = state_dir.absolute(), anchor_dir.absolute()
         with private_state._locked_state(anchor):
-            receipt = _terminal(request, state, anchor)
+            receipt, phases = _terminal(request, state, anchor)
             saved = _saved(receipt, state, anchor)
 
             def observe() -> None:
@@ -173,7 +197,7 @@ def complete_pool_cutover(*, request: PoolCutoverRequest, api: PoolLegacyReopeni
                 if (api.pool_state() != ('global' if receipt['outcome'] == 'global' else 'fenced')
                         or any(api.guard_state(str(row.participant_id)) != 'open'
                             for row in request.fencing.retirement.migration.guards)
-                        or _phase_hashes(receipt['operation_id'], state, anchor) != receipt['phase_sha256']):
+                        or _phase_hashes(receipt['operation_id'], state, anchor) != phases):
                     raise ValueError
 
             observe()
@@ -185,7 +209,7 @@ def complete_pool_cutover(*, request: PoolCutoverRequest, api: PoolLegacyReopeni
                 observe()
                 private_state._atomic_json(path, receipt)
             observe()
-            completed = _qualified(receipt, state, anchor)
+            completed = _qualified(receipt, state, anchor, phases=phases)
             return {'status': 'pool_cutover_completed', 'operation_id': receipt['operation_id'],
                 'outcome': completed.outcome, 'completion_sha256': completed.sha256, 'acceptance_verified': False}
     except Exception:

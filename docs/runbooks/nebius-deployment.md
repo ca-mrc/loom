@@ -1443,6 +1443,15 @@ report, but still reports `acceptance_verified: false`. Collector failures and
 concurrent-owner acceptance require their own evidence; a repaired manager is
 not proof that either has passed.
 
+If retained original tooling already wrote rollback evidence after repair entry,
+keep those bytes. Updated recovery recognizes its original empty startup fence
+only while repair stop is prepared or unresolved and template/start have not
+begun. Shutdown must prove the exact manager stopped at a changed object version
+before restoration; a late stop is observed, not dispatched twice. An original
+legacy completion receipt stays unchanged, with the separately qualified repair
+ancestry included in historical loading. Later repair phases or altered old
+evidence reject this compatibility path; do not reset either journal.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
