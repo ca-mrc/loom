@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -146,3 +147,164 @@ def test_repair_refuses_foreign_or_nonhistorical_manager(historical_cutover, dam
             mount['mountPath'] = '/foreign'
     with pytest.raises(ValueError):
         source_repair_documents(request, original)
+
+
+@pytest.fixture
+def prepared_repair(historical_cutover):
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_cutover import stage_pool_cutover
+    from scripts.ops.nebius_pool_migration import _hash
+    from scripts.ops.nebius_pool_startup import stage_pool_startup
+    from scripts.ops.nebius_pool_startup_repair import PoolStartupRepairBinding
+    from tests.ops.test_nebius_pool_activation_stage import ActivationAPI
+    from tests.ops.test_nebius_pool_cutover import CutoverAPI
+    from tests.ops.test_nebius_pool_startup import StartupAPI
+
+    context, _, credentials = historical_cutover
+    request = context.request
+    state, anchor = Path(context.operation['state_dir']), Path(context.operation['anchor_dir'])
+    closed = CutoverAPI(request)
+    for document in closed.documents.values():
+        document['metadata'].setdefault('resourceVersion', '1')
+    assert stage_pool_cutover(request=request, tokens=context.tokens, api=closed,
+        source_credentials=credentials, state_dir=state, anchor_dir=anchor)['status'] == 'pool_runtime_staged_closed'
+    startup = StartupAPI(request, closed, state)
+    assert stage_pool_startup(request=request, api=startup,
+        state_dir=state, anchor_dir=anchor)['status'] == 'pool_startup_staged_closed'
+    activation = ActivationAPI((request, None, None, startup, None, state.parent))
+    activation.state, activation.ready = state, False
+    with pytest.raises(ValueError):
+        advance_pool_activation(request=request, api=activation, state_dir=state, anchor_dir=anchor)
+    binding = PoolStartupRepairBinding(operation_id=uuid4(), source_sha='9' * 40,
+        original_operation_sha256='8' * 64, inputs_sha256=context.operation['inputs_sha256'],
+        closure_sha256=_hash(state / 'cutover.json'), startup_sha256=_hash(state / 'startup.json'),
+        activation_sha256=_hash(state / 'activation.json'))
+    api = RepairAPI(startup, closed.resources, activation)
+    return context, binding, api, state, anchor
+
+
+class RepairAPI:
+    """Remote read/CAS/create boundaries only; real closure and phase journals."""
+
+    def __init__(self, startup, resources, activation):
+        self.startup, self.resources, self.activation = startup, resources, activation
+        self.calls = []
+        self.failure = None
+        self.drained = True
+
+    def qualify_closed(self):
+        self.startup.qualify_closed()
+
+    def read_workload(self, key):
+        return self.startup.read_workload(key)
+
+    def manager_drained(self, key, desired):
+        assert self.startup.documents[key]['spec']['replicas'] == desired['spec']['replicas'] == 0
+        return self.drained
+
+    def preview_repair(self, phase, before, desired):
+        assert before == self.startup.documents[_key(before)]
+        return copy.deepcopy(desired)
+
+    def patch_repair(self, phase, before, desired):
+        assert before == self.startup.documents[_key(before)]
+        record = json.loads((self.startup.state / 'startup-repair.json').read_bytes())
+        assert record['phases'][phase] == {'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
+        self.calls.append(phase)
+        if self.failure == (phase, 'before'):
+            raise OSError('private-repair-failure')
+        actual = copy.deepcopy(desired)
+        actual['metadata'].update(uid=before['metadata']['uid'], resourceVersion=str(int(before['metadata']['resourceVersion']) + 1))
+        self.startup.documents[_key(before)] = actual
+        if self.failure == (phase, 'after'):
+            raise OSError('private-repair-failure')
+        return True
+
+
+def repair(fixture):
+    from scripts.ops.nebius_pool_startup_repair import repair_pool_startup
+
+    context, binding, api, state, anchor = fixture
+    return repair_pool_startup(request=context.request, binding=binding, api=api, state_dir=state, anchor_dir=anchor)
+
+
+def test_preopening_repair_preserves_original_journals_and_replays_readonly(prepared_repair):
+    from scripts.ops.nebius_pool_startup import startup_workload_options
+
+    context, _, api, state, anchor = prepared_repair
+    originals = {name: (state / name).read_bytes() for name in ('cutover.json', 'startup.json', 'activation.json')}
+    result = repair(prepared_repair)
+    assert result['status'] == 'pool_startup_repaired_closed' and result['admission_open'] is False
+    assert api.calls == ['stop', 'template', 'start']
+    options = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
+    manager, = options[_key(context.request.manager)]
+    assert manager['spec']['replicas'] == 1
+    initializer, = (row for row in manager['spec']['template']['spec']['initContainers']
+        if row['name'] == 'prepare-application-source')
+    assert initializer['command'][-1] == '/run/loom-application-source/spool'
+    assert repair(prepared_repair) == result and api.calls == ['stop', 'template', 'start']
+    assert originals == {name: (state / name).read_bytes() for name in originals}
+    assert api.activation.calls == [] and api.activation.mode == 'closed'
+
+
+@pytest.mark.parametrize('damage', ['opening', 'cancellation', 'guard', 'startup', 'closure',
+    'binding', 'mode', 'guards', 'uid', 'recovery', 'completion'])
+def test_preopening_repair_refuses_ineligible_entry_without_writes(prepared_repair, damage):
+    context, binding, api, state, anchor = prepared_repair
+    if damage in {'opening', 'cancellation', 'guard'}:
+        path = state / 'activation.json'
+        record = json.loads(path.read_bytes())
+        if damage == 'guard':
+            record['guards'][next(iter(record['guards']))]['release'] = 'intent'
+        else:
+            record[damage] = 'intent'
+        path.write_text(json.dumps(record))
+    elif damage in {'closure', 'startup'}:
+        path = state / ('cutover.json' if damage == 'closure' else 'startup.json')
+        path.write_bytes(path.read_bytes() + b'\n')
+    elif damage == 'binding':
+        binding = binding.model_copy(update={'startup_sha256': 'f' * 64})
+    elif damage == 'mode':
+        api.startup.mode = 'global'
+    elif damage == 'guards':
+        api.startup.guards_held = False
+    elif damage == 'uid':
+        api.startup.documents[_key(context.request.manager)]['metadata']['uid'] = str(uuid4())
+    else:
+        (state / ('shutdown.json' if damage == 'recovery' else 'completion.json')).write_text('{}')
+    before = copy.deepcopy(api.resources.resources)
+    with pytest.raises(ValueError, match='repair'):
+        repair((context, binding, api, state, anchor))
+    assert api.calls == [] and api.resources.resources == before
+    assert not (state / 'startup-repair.json').exists()
+
+
+@pytest.mark.parametrize('phase', ['stop', 'template', 'start'])
+@pytest.mark.parametrize('when', ['before', 'after'])
+def test_repair_never_repeats_uncertain_manager_writes(prepared_repair, phase, when):
+    from scripts.ops.nebius_pool_startup import startup_workload_options
+
+    context, _, api, state, anchor = prepared_repair
+    api.failure = (phase, when)
+    result = repair(prepared_repair)
+    api.failure = None
+    calls = list(api.calls)
+    if when == 'before':
+        assert result['status'] == 'pending_source_repair_outcome'
+        assert repair(prepared_repair) == result and api.calls == calls
+        options = startup_workload_options(context.request, state_dir=state, anchor_dir=anchor)
+        assert len(options[_key(context.request.manager)]) == 2
+    else:
+        assert result['status'] == 'pool_startup_repaired_closed'
+        assert repair(prepared_repair) == result and api.calls == calls
+    assert calls.count(phase) == 1
+
+
+def test_repair_waits_for_actual_manager_drain_before_changing_template(prepared_repair):
+    _, _, api, _, _ = prepared_repair
+    api.drained = False
+    assert repair(prepared_repair)['status'] == 'pending_source_repair_drain'
+    assert api.calls == ['stop']
+    api.drained = True
+    assert repair(prepared_repair)['status'] == 'pool_startup_repaired_closed'
+    assert api.calls == ['stop', 'template', 'start']
