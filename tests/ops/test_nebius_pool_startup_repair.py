@@ -507,3 +507,111 @@ def test_repaired_config_live_readback_is_bound_to_journaled_create(prepared_rep
     else:
         with pytest.raises(ValueError):
             qualify_repair_configuration(context.request, state=state, anchor=anchor, read=api.resources.get_resource)
+
+
+@pytest.mark.parametrize('failure', [None, 'config-before', 'template-before', 'start-after'])
+def test_connected_repair_creates_only_fixed_config_and_uses_exact_manager_cas(prepared_repair, failure):
+    from types import SimpleNamespace
+
+    import httpx
+    from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+    from scripts.ops.nebius_pool_startup_repair import repair_pool_startup
+    from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI
+
+    context, binding, remote, state, anchor = prepared_repair
+    key = _key(context.request.manager)
+    namespace = context.request.manager['metadata']['namespace']
+    prefix = '/api/v1/namespaces/' + namespace
+    workload = '/apis/apps/v1/namespaces/' + namespace + '/deployments/loom-service'
+    objects, writes = {}, []
+
+    def respond(message):
+        path, method = message.url.path, message.method
+        if method == 'GET':
+            if path == workload:
+                actual = remote.startup.documents[key]
+                actual['metadata']['generation'] = 1
+                actual['status'] = {'observedGeneration': 1, 'replicas': actual['spec']['replicas']}
+                return httpx.Response(200, json=actual)
+            if path.endswith('/replicasets') or path.endswith('/pods'):
+                return httpx.Response(200, json={'apiVersion': 'apps/v1' if path.endswith('/replicasets') else 'v1',
+                    'kind': 'ReplicaSetList' if path.endswith('/replicasets') else 'PodList',
+                    'metadata': {'resourceVersion': '100'}, 'items': []})
+            assert path.startswith(prefix + '/configmaps/loom-management-applications-')
+            return httpx.Response(200, json=objects[path]) if path in objects else httpx.Response(404)
+        if method == 'POST':
+            assert path == prefix + '/configmaps'
+            desired = json.loads(message.content)
+            assert desired['kind'] == 'ConfigMap' and desired['immutable'] is True
+            assert desired['metadata']['name'].startswith('loom-management-applications-')
+            desired['metadata'].update(uid=str(uuid4()), resourceVersion='1')
+            if message.url.params:
+                assert dict(message.url.params) == {'dryRun': 'All'}
+            else:
+                child = json.loads((state / 'source-repair-configuration/stage.json').read_bytes())
+                assert child['resources'][_key(desired)]['status'] == 'create_intent'
+                writes.append('config')
+                if failure == 'config-before':
+                    raise httpx.ReadTimeout('private-unknown-create')
+                objects[path + '/' + desired['metadata']['name']] = desired
+            return httpx.Response(201, json=desired)
+        assert method == 'PATCH' and path == workload
+        actual = remote.read_workload(key)
+        patches = json.loads(message.content)
+        assert patches[:4] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': actual['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': actual['metadata']['resourceVersion']},
+            {'op': 'test', 'path': '/metadata', 'value': actual['metadata']},
+            {'op': 'test', 'path': '/spec', 'value': actual['spec']}]
+        assert len(patches) == 5 and patches[-1]['op'] == 'replace'
+        change = patches[-1]
+        desired = copy.deepcopy(actual)
+        if change['path'] == '/spec/template':
+            phase = 'template'
+            assert actual['spec']['replicas'] == 0
+            desired['spec']['template'] = change['value']
+        else:
+            assert change['path'] == '/spec/replicas' and type(change['value']) is int
+            phase = 'stop' if change['value'] == 0 else 'start'
+            desired['spec']['replicas'] = change['value']
+        if message.url.params:
+            assert dict(message.url.params) == {'dryRun': 'All'}
+        else:
+            journal = json.loads((state / 'startup-repair.json').read_bytes())
+            assert journal['phases'][phase]['phase'] == 'intent'
+            writes.append(phase)
+            if failure == phase + '-before':
+                raise httpx.ReadTimeout('private-unknown-patch')
+            desired['metadata']['resourceVersion'] = str(int(actual['metadata']['resourceVersion']) + 1)
+            remote.startup.documents[key] = desired
+            if failure == phase + '-after':
+                raise httpx.ReadTimeout('private-lost-reply')
+        return httpx.Response(200, json=desired)
+
+    class TransportOnlyRepair(HTTPSPoolStartupRepairAPI):
+        def qualify_closed(self):
+            # The owning connected-parent tests cover SQL/provider/credential
+            # qualification. Keep this test on actual HTTP/CAS/drain behavior.
+            self._qualify_binding()
+            remote.qualify_closed()
+
+    with httpx.Client(base_url='https://kubernetes.invalid', transport=httpx.MockTransport(respond)) as client:
+        parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor,
+            binding=context.request.fencing.retirement.migration.registration.binding,
+            client=client, _scope=lambda: None, error_type=ValueError)
+        parent._request = lambda method, path, **kwargs: ManagementKubernetesTransport._request(parent, method, path, **kwargs)
+        api = TransportOnlyRepair(parent=parent, binding=binding)
+        arguments = dict(request=context.request, binding=binding, api=api, state_dir=state, anchor_dir=anchor)
+        if failure == 'config-before':
+            for _ in range(2):
+                with pytest.raises(ValueError):
+                    repair_pool_startup(**arguments)
+            assert writes == ['config']
+        else:
+            result = repair_pool_startup(**arguments)
+            assert result['status'] == ('pending_source_repair_outcome' if failure == 'template-before'
+                else 'pool_startup_repaired_closed')
+            before = list(writes)
+            assert repair_pool_startup(**arguments) == result and writes == before
+            assert writes == (['config', 'stop', 'template'] if failure == 'template-before'
+                else ['config', 'stop', 'template', 'start'])
