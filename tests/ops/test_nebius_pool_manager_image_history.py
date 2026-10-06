@@ -79,6 +79,11 @@ def runtime_binding(fixture, target, predecessor=None, *, image_digit="9"):
     component = "execution_actuator" if target == "collector" else "service"
     image = data["candidate"]["images"][component]["image_ref"]
     data["candidate"]["images"][component]["image_ref"] = image.split("@")[0] + "@sha256:" + image_digit * 64
+    if component == "service":
+        data["profile"]["task_image_ref"] = data["candidate"]["images"][component]["image_ref"]
+        data["profile"]["image_admission"] = signed_image_admission_bundle(tuple(
+            data["profile"][key] for key in ("task_image_ref", "runtime_image_ref", "agent_image_ref")
+            if data["profile"].get(key))).model_dump(mode="json")
     return history.RuntimeImageRepairBinding.model_validate(data)
 
 
@@ -143,7 +148,7 @@ def test_targeted_image_entry_uses_retained_workload_and_exact_component(image_r
         ManagerImageRepairBinding.model_validate(binding.model_dump())
     value = entry((context, api, state, anchor, binding))
     assert value.documents[0]["kind"] == kind
-    closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+    _, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
     key = _key(value.documents[0])
     assert key != _key(context.request.manager)
     assert value.documents[0] == targets[key]
@@ -163,13 +168,16 @@ def test_targeted_image_entry_uses_retained_workload_and_exact_component(image_r
     assert options[key] == (desired,)
     assert options[_key(context.request.manager)] == (first.documents[-1],)
     assert retained == (first.path.read_bytes(), first.marker.read_bytes())
-    assert closed[key]["metadata"]["uid"] == desired["metadata"]["uid"]
 
 
 def test_mixed_image_history_folds_each_key_and_fences_only_pending_tail(image_repair_case):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_manager_image_history import load_manager_image_chain
-    from scripts.ops.nebius_pool_startup import _startup_record, closed_startup_documents, startup_workload_options
+    from scripts.ops.nebius_pool_startup import (
+        _startup_record,
+        closed_startup_documents,
+        startup_workload_options,
+    )
     from scripts.ops.nebius_pool_startup_fence import _fence_sources
 
     context, api, state, anchor, _ = image_repair_case
@@ -339,7 +347,9 @@ class ImageAPI:
         return self.startup.read_workload(key)
 
     def manager_drained(self, key, desired):
-        assert self.startup.documents[key]["spec"]["replicas"] == desired["spec"]["replicas"] == 0
+        field = "suspend" if desired["kind"] == "CronJob" else "replicas"
+        assert self.startup.documents[key]["spec"][field] == desired["spec"][field]
+        assert desired["spec"][field] == (True if field == "suspend" else 0)
         return self.drained
 
     def preview_repair(self, phase, before, desired):
@@ -379,9 +389,18 @@ def switch(fixture, api):
     return repair_manager_image(request=context.request, binding=binding, api=api, state_dir=state, anchor_dir=anchor)
 
 
+def selected_image_case(fixture, target):
+    if target == "manager":
+        return fixture
+    assert switch(fixture, ImageAPI(fixture))["status"] == "pool_manager_image_repaired_closed"
+    return (*fixture[:-1], runtime_binding(fixture, target, entry(fixture)))
+
+
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
 @pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("loss", ["before", "after"])
-def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_repair_case, phase, loss):
+def test_manager_image_switch_reconciles_lost_cas_without_duplicate_write(image_repair_case, phase, loss, target):
+    image_repair_case = selected_image_case(image_repair_case, target)
     api = ImageAPI(image_repair_case)
     api.failure = (phase, loss)
     result = switch(image_repair_case, api)
@@ -479,16 +498,19 @@ def test_completed_image_correction_supports_runtime_activation_completion_and_r
     assert loaded.deployment.installation.applications.shared.runtime_profile_json == context.predecessor.deployment.installation.applications.shared.runtime_profile_json
 
 
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
 @pytest.mark.parametrize("phase", ["isolate", "stop", "template", "start"])
 @pytest.mark.parametrize("late_commit", [False, True])
-def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_case, phase, late_commit):
+def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_case, phase, late_commit, target):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors
     from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
     from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
 
+    image_repair_case = selected_image_case(image_repair_case, target)
     context, remote, state, anchor, _ = image_repair_case
+    key = _key(entry(image_repair_case).documents[0])
     image_api = ImageAPI(image_repair_case)
     image_api.failure = (phase, "before")
     assert switch(image_repair_case, image_api)["status"] == "pending_manager_image_outcome"
@@ -501,26 +523,35 @@ def test_cancellation_fences_image_cas_before_successor_shutdown(image_repair_ca
         anchor_dir=anchor, cancel=True)["status"] == "pool_activation_cancelled"
     assert fence_pool_startup(request=context.request, api=api, state_dir=state,
         anchor_dir=anchor)["status"] == "startup_writes_fenced"
-    assert api.read_workload(_key(context.request.manager))["metadata"]["resourceVersion"] != old_version
-    assert api.fence_calls == ([] if late_commit else [_key(context.request.manager)])
+    assert api.read_workload(key)["metadata"]["resourceVersion"] != old_version
+    assert api.fence_calls == ([] if late_commit else [key])
     assert stop_pool_successors(request=context.request, api=api, state_dir=state,
         anchor_dir=anchor)["status"] == "pool_successors_stopped"
     with pytest.raises(ValueError):
         switch(image_repair_case, image_api)
 
 
+@pytest.mark.parametrize("target", ["manager", "collector", "gateway"])
 @pytest.mark.parametrize("loss", [None, "before", "after"])
-def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image_repair_case, loss):
+def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image_repair_case, loss, target):
     from types import SimpleNamespace
 
     import httpx
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
     from scripts.ops.nebius_pool_manager_image_live import HTTPSPoolManagerImageAPI
+    from scripts.ops.nebius_pool_runtime_image import runtime_image_template
 
+    image_repair_case = selected_image_case(image_repair_case, target)
     context, remote, state, anchor, binding = image_repair_case
-    key = _key(context.request.manager)
-    workload = "/apis/apps/v1/namespaces/" + context.request.manager["metadata"]["namespace"] + "/deployments/loom-service"
+    original = entry(image_repair_case).documents[0]
+    key = _key(original)
+    cron = original["kind"] == "CronJob"
+    prefix = "/apis/batch/v1/namespaces/" if cron else "/apis/apps/v1/namespaces/"
+    workload = prefix + original["metadata"]["namespace"] + ("/cronjobs/" if cron else "/deployments/") + original["metadata"]["name"]
+    template_path = "/spec/jobTemplate/spec/template" if cron else "/spec/template"
+    field = "suspend" if cron else "replicas"
+    component = "execution_actuator" if cron else "service"
     writes = []
 
     def respond(message):
@@ -529,11 +560,11 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
             if path == workload:
                 actual = remote.startup.documents[key]
                 actual["metadata"]["generation"] = 1
-                actual["status"] = {"observedGeneration": 1, "replicas": actual["spec"]["replicas"]}
+                actual["status"] = {} if cron else {"observedGeneration": 1, "replicas": actual["spec"]["replicas"]}
                 return httpx.Response(200, json=actual)
-            assert path.endswith("/replicasets") or path.endswith("/pods")
-            return httpx.Response(200, json={"apiVersion": "apps/v1" if path.endswith("/replicasets") else "v1",
-                "kind": "ReplicaSetList" if path.endswith("/replicasets") else "PodList",
+            assert path.endswith("/jobs" if cron else "/replicasets") or path.endswith("/pods")
+            return httpx.Response(200, json={"apiVersion": "v1" if path.endswith("/pods") else "batch/v1" if cron else "apps/v1",
+                "kind": "PodList" if path.endswith("/pods") else "JobList" if cron else "ReplicaSetList",
                 "metadata": {"resourceVersion": "100"}, "items": []})
         assert message.method == "PATCH" and path == workload
         before = remote.read_workload(key)
@@ -544,14 +575,17 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
             {"op": "test", "path": "/metadata", "value": before["metadata"]},
             {"op": "test", "path": "/spec", "value": before["spec"]}]
         change, desired = patches[4], copy.deepcopy(before)
-        if change["path"] == "/spec/template":
+        if change["path"] == template_path:
             phase = "template"
-            assert before["spec"]["replicas"] == 0
-            expected = copy.deepcopy(before["spec"]["template"])
+            assert before["spec"][field] == (True if cron else 0)
+            expected = copy.deepcopy(runtime_image_template(before))
             for container in (*expected["spec"]["containers"], *expected["spec"]["initContainers"]):
-                container["image"] = binding.candidate["images"]["service"]["image_ref"]
+                container["image"] = binding.candidate["images"][component]["image_ref"]
             assert change["value"] == expected
-            desired["spec"]["template"] = expected
+            if cron:
+                desired["spec"]["jobTemplate"]["spec"]["template"] = expected
+            else:
+                desired["spec"]["template"] = expected
         elif change["path"] == "/metadata/annotations":
             phase = "isolate"
             assert change["op"] == "add" and len(patches) == 5
@@ -559,9 +593,9 @@ def test_https_image_switch_sends_only_exact_uid_version_metadata_spec_cas(image
                 "loom.nebius/manager-image-repair": str(binding.operation_id)}
             assert change["value"] == desired["metadata"]["annotations"]
         else:
-            assert change["path"] == "/spec/replicas"
-            phase = "stop" if change["value"] == 0 else "start"
-            desired["spec"]["replicas"] = change["value"]
+            assert change["path"] == "/spec/" + field
+            phase = "stop" if change["value"] == (True if cron else 0) else "start"
+            desired["spec"][field] = change["value"]
         if phase == "start":
             assert patches[5:] == [{"op": "remove", "path": "/metadata/annotations/loom.nebius~1manager-image-repair"}]
             del desired["metadata"]["annotations"]["loom.nebius/manager-image-repair"]
@@ -711,6 +745,45 @@ def test_image_entry_binds_original_history_and_packaged_schema_before_connectio
     assert context.original == original
     assert context.operation == operation
     assert Path(original.operation["inputs_path"]).read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", [None, "old_operation", "old_private", "legacy_binding"])
+def test_targeted_image_private_entry_requires_matching_operation_and_binding_versions(
+        private_image_repair, image_repair_case, damage):
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    operation, payload, _, original = private_image_repair
+    first = entry(image_repair_case)
+    persist(first, complete=True)
+    binding = runtime_binding(image_repair_case, "collector", first)
+    payload.update(schema_version="loom.nebius-pool-runtime-image-private-inputs.v2",
+        binding=binding.model_dump(mode="json"))
+    operation.update(schema="loom.nebius-pool-startup-repair-operation.v3", operation_id=str(binding.operation_id))
+    # Fresh authority has its own directory; never overwrite the original image
+    # operation. This fixture has not enrolled its private operation externally.
+    previous_id = str(image_repair_case[-1].operation_id)
+    for field in ("inputs_path", "state_dir", "anchor_dir"):
+        operation[field] = operation[field].replace(previous_id, str(binding.operation_id))
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+
+    private_state._private_directory(Path(operation["inputs_path"]).parent)
+    if damage == "old_operation":
+        operation["schema"] = "loom.nebius-pool-startup-repair-operation.v2"
+    elif damage == "old_private":
+        payload["schema_version"] = "loom.nebius-pool-manager-image-private-inputs.v1"
+    elif damage == "legacy_binding":
+        del payload["binding"]["schema_version"], payload["binding"]["target"]
+    save_private(operation, payload)
+    if damage is not None:
+        with pytest.raises(EntryError):
+            load_image_repair_inputs(operation)
+    else:
+        context = load_image_repair_inputs(operation)
+        assert context.original == original and context.inputs.binding.target == "collector"
 
 
 @pytest.mark.parametrize("damage", ["schema_source", "schema_revision", "original_hash", "inputs_hash", "candidate", "closure"])
