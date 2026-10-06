@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 import pytest
 from tests.ops.test_nebius_pool_runtime import guest_runtime_inputs as guest_runtime_inputs
 from tests.ops.test_nebius_pool_runtime import runtime_inputs as runtime_inputs
+from tests.unit.test_nebius_application_image_renderer import build_inputs as build_inputs
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -557,12 +558,16 @@ def test_successor_database_probe_cannot_widen_retained_identity_or_credentials(
 
 
 @pytest.mark.parametrize('damage', [None, 'settings', 'scope', 'late_pod', 'not_ready', 'private_inputs'])
-def test_successor_pool_settings_use_retained_pod_and_registered_material(workload_database, guest_runtime_inputs, tmp_path, monkeypatch, damage):
+@pytest.mark.parametrize('builder_position', [None, 'first', 'last'])
+@pytest.mark.parametrize('runtime_inputs', [('development', 'production', 'staging')], indirect=True)
+def test_successor_pool_settings_use_retained_pod_and_registered_material(
+        workload_database, guest_runtime_inputs, build_inputs, tmp_path, monkeypatch, damage, builder_position):
     import hashlib
     import json
 
     from scripts.ops.nebius_pool_migration import PoolMigrationError
     from scripts.ops.nebius_pool_runtime import wire_participant
+    from tests.integration.test_nebius_pool_installation import add_application_builder
     from tests.ops.test_nebius_pool_runtime import desired_profile, env
 
     from loom_service.pool_management.installation import PoolInstallation
@@ -576,6 +581,14 @@ def test_successor_pool_settings_use_retained_pod_and_registered_material(worklo
     for machine in spec['machines']:
         if machine['participant_id'] == str(state.target.participant_id):
             machine['token_sha256'] = hashlib.sha256(token.read_bytes()).hexdigest()
+    if builder_position is not None:
+        spec, builder_id, _ = add_application_builder(spec, build_inputs[0].recipe)
+        builder, = (row for row in spec['machines'] if row['machine_id'] == str(builder_id))
+        assert builder['participant_id'] == str(state.target.participant_id)
+        assert builder['token_sha256'] != hashlib.sha256(token.read_bytes()).hexdigest()
+        if builder_position == 'first':
+            spec['machines'].remove(builder)
+            spec['machines'].insert(0, builder)
     migration = replace(previous.request, registration=replace(previous.request.registration, spec=PoolInstallation.model_validate(spec)))
     api = type(previous)(request=migration, kubeconfig=previous.kubeconfig, executable=Path('/usr/bin/kubectl'))
     monkeypatch.setattr(api, '_run', previous._run)
