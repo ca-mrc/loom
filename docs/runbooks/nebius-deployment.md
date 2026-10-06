@@ -1526,6 +1526,50 @@ is readback-only. Existing legacy completion receipts remain unchanged while
 historical readers include the separately qualified image ancestry. This narrow
 compatibility path cannot cover a later correction or destructive image phase.
 
+### Correct selected pool runtime images before first opening
+
+After a completed manager image correction, the same protected repair actions
+accept a new `loom.nebius-pool-startup-repair-operation.v3` envelope. Its private
+`loom.nebius-pool-runtime-image-private-inputs.v2` document retains
+`original_operation` and the previous image-binding fields, adding binding
+`schema_version: loom.nebius-pool-runtime-image-binding.v2` and exactly one
+`target`: `gateway` or `collector`. The target's name and UID cannot be supplied
+by the caller. The gateway comes from its retained creation receipt; the collector
+is the registered development participant's pooled collector. Gateway images use
+the publication's `service` component; collector main and initializer images use
+`execution_actuator`, not `control_plane`.
+
+This appends to the same eight-entry `manager-image-NN` ancestry. The first entry
+must remain a completed legacy manager correction; old binding bytes are unchanged.
+Each entry preserves the latest image for every other corrected workload. Old
+image-aware tooling rejects the additional target/version fields before writing;
+an already-frozen cancellation or recovery prevents new enrollment. The narrow
+first-manager legacy rollback exception above does not apply to targeted entries.
+
+Gateway repair retains the existing Deployment stop/drain/template/start sequence.
+Collector repair changes only CronJob suspension and Pod-template images, using
+exact UID/resourceVersion/metadata/spec checks. Suspension stops future scheduling
+but is not an atomic acknowledgement from the CronJob controller: an already
+dispatched old Job may arrive late. Each drain check reads complete Job and Pod
+collections, requires terminal owned Jobs and terminated containers, and refuses
+to advance when an active child is observed. It does not delete Jobs, claim atomic
+quiescence, change collector credentials, or give the collector execution authority.
+
+Normal activation still requires fresh capacity evidence under the existing pool
+transaction. For installed verification, observe a newly scheduled, successful
+collector Job and its Pods using the corrected image; a patched CronJob alone is
+not proof of execution. Preserve all original execution profiles and configuration.
+Protected `inspect` exposes `pool_startup_diagnostics.collector_completion` when
+it observes a successful Pod and Job bound to the current pooled CronJob template.
+Compare its controller UID with the retained collector and its `image_sha256`
+with the selected publication's execution-actuator digest. The observation includes
+Job/Pod identities, checks successful main and initializer containers, and rejects
+readback drift; `null` is not success. Only the digest is exported, not image URLs,
+configuration or logs. This readout is evidence to inspect, not activation authority.
+Cancellation fences the outstanding target's image write; shutdown and completion
+retain the full mixed-target image history. This remains image repair, not
+permission to open admission without qualification or a multi-owner acceptance claim.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

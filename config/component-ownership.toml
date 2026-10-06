@@ -136,6 +136,11 @@ pins = [
   # Keep all four full rollback cases together on the measured12m root5,
   # separate from repair phase/old-tooling checks; retain all timeout limits.
   { path = "tests/ops/test_nebius_pool_startup_repair_rollback.py", shard_index = 4 },
+  # Run37480179794: the expanded image matrix exhausted root 3's 40m limit.
+  # Preserve complete cancellation and transport matrices on measured 14m/15m
+  # roots 8/7, keeping history/private/legacy cases on their original shard.
+  { path = "tests/ops/test_nebius_pool_image_cancellation.py", shard_index = 7 },
+  { path = "tests/ops/test_nebius_pool_image_transport.py", shard_index = 6 },
 ]
 
 [[test_sharding]]

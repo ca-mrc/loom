@@ -17,7 +17,7 @@ def repair_operation(tmp_path, version='v1'):
         'state_dir': str(root / 'state'), 'anchor_dir': str(root / 'anchor'), 'inputs_path': str(root / 'inputs.json')}
 
 
-@pytest.fixture(params=['v1', 'v2'])
+@pytest.fixture(params=['v1', 'v2', 'v3'])
 def repair_version(request):
     return request.param
 
