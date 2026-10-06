@@ -61,10 +61,13 @@ def test_manager_source_initializer_starts_on_actual_fsgroup_emptydir(tmp_path, 
             'containers': [{'name': 'spool-user', 'image': image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
                     'capabilities': {'drop': ['ALL']}},
-                'command': ['python', '-c', 'import os,stat,sys; from pathlib import Path; '
+                # Avoid an HTML-sensitive ampersand in this synthetic command:
+                # Kubernetes JSON-Patch compares its encoded string differently.
+                # The production initializer itself has no such character.
+                'command': ['python', '-c', 'import os,stat,sys; from operator import and_; from pathlib import Path; '
                     'from loom_service.application_management.source_upload import ApplicationSourceUploader; '
                     'p=Path(sys.argv[1]); '
-                    'assert p.parent.stat().st_mode & stat.S_ISGID; '
+                    'assert and_(p.parent.stat().st_mode,stat.S_ISGID); '
                     'assert os.getuid()==p.stat().st_uid==1000; '
                     'assert stat.S_IMODE(p.stat().st_mode)==0o700; '
                     'assert ApplicationSourceUploader(None,None,spool_directory=p).directory==p; '

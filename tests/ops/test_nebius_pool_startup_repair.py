@@ -782,7 +782,8 @@ def test_repair_rollback_restores_templates_roles_and_completes_legacy(prepared_
 
     class RecoveryAPI(ReopeningAPI):
         def successor_drained(self, key, desired):
-            assert desired['spec']['suspend' if desired['kind'] == 'CronJob' else 'replicas'] in (True, 0)
+            assert (desired['spec']['suspend'] is True if desired['kind'] == 'CronJob'
+                else desired['spec']['replicas'] == 0)
             return self.processes_drained
 
     runtime = RecoveryAPI(fixture, restart)
@@ -800,7 +801,7 @@ def test_repair_rollback_restores_templates_roles_and_completes_legacy(prepared_
     assert all(path.read_bytes() == raw for path, raw in history.items())
 
 
-@pytest.mark.parametrize('change', ['status', 'spec', 'uid'])
+@pytest.mark.parametrize('change', ['status', 'busy', 'spec', 'uid'])
 def test_manager_drain_distinguishes_controller_status_updates_from_workload_drift(prepared_repair, change):
     from types import SimpleNamespace
 
@@ -822,6 +823,8 @@ def test_manager_drain_distinguishes_controller_status_updates_from_workload_dri
                     current['spec']['replicas'] = 1
                 elif change == 'uid':
                     current['metadata']['uid'] = str(uuid4())
+                elif change == 'busy':
+                    current['status']['replicas'] = 1
                 else:
                     current['status']['conditions'] = []
             reads.append(current)
@@ -836,8 +839,8 @@ def test_manager_drain_distinguishes_controller_status_updates_from_workload_dri
     parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, _scope=lambda: None,
         binding=context.request.fencing.retirement.migration.registration.binding, _request=request)
     reader = DrainReader(parent=parent, binding=binding)
-    if change == 'status':
-        assert reader.manager_drained(_key(context.request.manager), reader.documents[1]) is True
+    if change in {'status', 'busy'}:
+        assert reader.manager_drained(_key(context.request.manager), reader.documents[1]) is (change == 'status')
     else:
         with pytest.raises(ValueError):
             reader.manager_drained(_key(context.request.manager), reader.documents[1])
