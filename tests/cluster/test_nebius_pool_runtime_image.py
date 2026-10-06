@@ -130,6 +130,20 @@ def test_native_collector_image_switch_detects_late_child_and_runs_corrected_sch
                 while True:
                     before = api.read_workload(_key(original))
                     assert api.preview_repair(phase, before, documents[index + 1]) is not None
+                    if phase == 'isolate':
+                        # Real controller status churn invalidates a pre-preview
+                        # version even though the complete desired spec is stable.
+                        batch.patch_namespaced_cron_job_status('collector', namespace,
+                            {'status': {'lastSuccessfulTime': '2026-01-01T00:00:00Z'}})
+                        record['phases'][phase] = {'phase': 'intent',
+                            'before_resource_version': before['metadata']['resourceVersion']}
+                        assert api.patch_repair(phase, before, documents[index + 1]) is False
+                        record['phases'][phase] = {'phase': 'prepared', 'before_resource_version': None}
+                        latest = api.read_workload(_key(original))
+                        assert latest['metadata']['resourceVersion'] != before['metadata']['resourceVersion']
+                        assert _snapshot(latest) == _snapshot(before)
+                        before = latest
+                        assert api.preview_repair(phase, before, documents[index + 1]) is not None
                     record['phases'][phase] = {'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
                     if api.patch_repair(phase, before, documents[index + 1]):
                         record['phases'][phase]['phase'] = 'applied'

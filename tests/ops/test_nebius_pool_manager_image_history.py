@@ -738,7 +738,9 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
 
 
 @pytest.mark.parametrize("damage", [None, "failed_run", "missing_gate", "tampered", "candidate_bytes", "private_drift"])
-def test_image_repair_resolves_real_protected_catalog_before_operator_connection(private_image_repair, monkeypatch, damage):
+@pytest.mark.parametrize("continued", [False, True])
+def test_image_repair_resolves_real_protected_catalog_before_operator_connection(
+        private_image_repair, image_repair_case, monkeypatch, damage, continued):
     from contextlib import contextmanager
     from pathlib import Path
     from types import SimpleNamespace
@@ -748,10 +750,10 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
     from tests.ops.test_nebius_pool_cutover_entry import publication_http, save_private
 
     operation, payload, _, original = private_image_repair
+    retained_operation = operation
     selected = {key: payload["binding"][key] for key in ("publication", "candidate", "profile")}
     stub = {"inputs_path": str(Path(operation["inputs_path"]).with_name("publication-fixture.json"))}
     responses, wire = publication_http.__wrapped__((stub, selected, original.original), monkeypatch)
-    save_private(operation, payload)
     if damage == "failed_run":
         responses["actions/runs/100/attempts/1"]["conclusion"] = "failure"
     elif damage == "missing_gate":
@@ -760,10 +762,15 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
         wire["payload"] += b"tampered"
     elif damage == "candidate_bytes":
         payload["binding"]["candidate"]["source_archive_sha256"] = "sha256:" + "a" * 64
-        save_private(operation, payload)
     elif damage == "private_drift":
-        wire["during_read"] = lambda: Path(operation["inputs_path"]).write_bytes(b"{}")
-    context = target.load_image_repair_inputs(operation)
+        wire["during_read"] = lambda: Path(retained_operation["inputs_path"]).write_bytes(b"{}")
+    # Prepare the publication bytes before enrolling immutable history. The
+    # HTTP fixture rebinds the ZIP checksum (including its timestamp).
+    save_private(retained_operation, payload)
+    if continued:
+        binding = type(image_repair_case[-1]).model_validate(payload["binding"])
+        fixture = (*image_repair_case[:-1], binding)
+        operation, _, _ = tooling_continuation(private_image_repair, fixture)
     connections = []
 
     @contextmanager
@@ -775,6 +782,7 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
     monkeypatch.setattr(target, "connected_pool_api", connected)
     monkeypatch.setattr(target, "run_pool_operation", lambda **kwargs: {
         "status": "preflight_qualified", "operation_id": original.operation["operation_id"]})
+    context = target.load_image_repair_inputs(operation)
     if damage is None:
         result = target.execute_image_repair(context, "preflight")
         assert result["operation_id"] == operation["operation_id"]
@@ -784,6 +792,9 @@ def test_image_repair_resolves_real_protected_catalog_before_operator_connection
         with pytest.raises((PoolOperationError, target.EntryError)):
             target.execute_image_repair(context, "preflight")
         assert connections == []
+    assert wire["requests"]
+    if damage in {None, "tampered", "candidate_bytes", "private_drift"}:
+        assert any(request.url.host == "loom.blob.core.windows.net" for request in wire["requests"])
 
 
 def test_legacy_activation_cannot_open_while_an_image_stop_may_arrive_late(image_repair_case, monkeypatch):
