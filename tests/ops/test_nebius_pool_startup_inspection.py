@@ -204,7 +204,7 @@ def test_successful_collector_observation_binds_job_root_and_digest_without_payl
 
 @pytest.mark.parametrize('damage', ['pod_failed', 'main_failed', 'job_incomplete', 'job_active', 'job_failed',
     'stale_job', 'foreign_owner', 'mutable_image', 'init_failed', 'init_image', 'missing_init_status',
-    'init_command', 'init_env', 'init_mount'])
+    'init_command', 'init_env', 'init_mount', 'init_working_dir', 'main_working_dir'])
 def test_collector_completion_rejects_unqualified_success(cluster, damage):
     completed_collector(cluster)
     if damage == 'pod_failed':
@@ -225,6 +225,8 @@ def test_collector_completion_rejects_unqualified_success(cluster, damage):
         for spec in (cluster.collector_pod['spec'], cluster.job['spec']['template']['spec'],
                 cluster.cron['spec']['jobTemplate']['spec']['template']['spec']):
             spec['containers'][0]['image'] = 'registry.test/collector:latest'
+    elif damage == 'main_working_dir':
+        cluster.collector_pod['spec']['containers'][0]['workingDir'] = '/tmp'
     else:
         for spec in (cluster.collector_pod['spec'], cluster.job['spec']['template']['spec'],
                 cluster.cron['spec']['jobTemplate']['spec']['template']['spec']):
@@ -241,6 +243,8 @@ def test_collector_completion_rejects_unqualified_success(cluster, damage):
             cluster.collector_pod['spec']['initContainers'][0]['env'] = [{'name': 'PRIVATE', 'value': 'private-token'}]
         elif damage == 'init_mount':
             cluster.collector_pod['spec']['initContainers'][0]['volumeMounts'] = [{'name': 'private', 'mountPath': '/private'}]
+        elif damage == 'init_working_dir':
+            cluster.collector_pod['spec']['initContainers'][0]['workingDir'] = '/tmp'
         else:
             cluster.collector_pod['status']['initContainerStatuses'] = []
     assert inspect(cluster)['collector_completion'] is None
