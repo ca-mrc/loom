@@ -203,7 +203,8 @@ def test_successful_collector_observation_binds_job_root_and_digest_without_payl
 
 
 @pytest.mark.parametrize('damage', ['pod_failed', 'main_failed', 'job_incomplete', 'job_active', 'job_failed',
-    'stale_job', 'foreign_owner', 'mutable_image', 'init_failed', 'init_image', 'missing_init_status'])
+    'stale_job', 'foreign_owner', 'mutable_image', 'init_failed', 'init_image', 'missing_init_status',
+    'init_command', 'init_env', 'init_mount'])
 def test_collector_completion_rejects_unqualified_success(cluster, damage):
     completed_collector(cluster)
     if damage == 'pod_failed':
@@ -234,6 +235,12 @@ def test_collector_completion_rejects_unqualified_success(cluster, damage):
             cluster.collector_pod['status']['initContainerStatuses'][0]['state']['terminated']['exitCode'] = 1
         elif damage == 'init_image':
             cluster.collector_pod['spec']['initContainers'][0]['image'] = 'private-token'
+        elif damage == 'init_command':
+            cluster.collector_pod['spec']['initContainers'][0]['command'] = ['sh', '-c', 'exit 0']
+        elif damage == 'init_env':
+            cluster.collector_pod['spec']['initContainers'][0]['env'] = [{'name': 'PRIVATE', 'value': 'private-token'}]
+        elif damage == 'init_mount':
+            cluster.collector_pod['spec']['initContainers'][0]['volumeMounts'] = [{'name': 'private', 'mountPath': '/private'}]
         else:
             cluster.collector_pod['status']['initContainerStatuses'] = []
     assert inspect(cluster)['collector_completion'] is None
