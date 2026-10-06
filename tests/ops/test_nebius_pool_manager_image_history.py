@@ -522,3 +522,137 @@ def test_https_cancellation_fences_image_intent_not_completed_source_repair(imag
         assert fence_pool_startup(request=context.request, api=api, state_dir=state,
             anchor_dir=anchor)["status"] == "startup_writes_fenced"
         assert len(writes) == 1
+
+
+def test_bound_image_operation_completes_original_pool_and_unbound_install_refuses(image_repair_case, monkeypatch):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as target
+
+    context, remote, state, anchor, binding = image_repair_case
+    api = ImageAPI(image_repair_case)
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(target, "HTTPSPoolManagerImageAPI", lambda **kwargs: api, raising=False)
+    monkeypatch.setattr(target, "HTTPSPoolActivationAPI", lambda **kwargs: remote.activation)
+    remote.activation.ready = True
+    persist(entry(image_repair_case))
+    with pytest.raises(target.PoolOperationError):
+        target.run_pool_operation(parent=parent, tokens=context.tokens, action="install")
+    assert remote.activation.calls == []
+    result = target.run_pool_operation(parent=parent, tokens=context.tokens, action="install", image_binding=binding)
+    assert result["status"] == "pool_cutover_completed" and result["outcome"] == "global"
+    assert result["operation_id"] == context.operation["operation_id"]
+    assert api.calls == ["stop", "template", "start"]
+
+
+@pytest.fixture
+def private_image_repair(image_repair_case, monkeypatch):
+    from pathlib import Path
+
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops import nebius_pool_image_entry as target
+    from tests.ops.test_nebius_pool_repair_authority import repair_operation
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    context, _, state, _, binding = image_repair_case
+    root = state.parent.parent.parent
+    operation = repair_operation(root.parent, "v2")
+    directory = root / "pool-repair" / str(binding.operation_id)
+    operation.update(operation_id=str(binding.operation_id), source_sha=binding.source_sha, candidate=binding.source_sha,
+        original_operation_id=context.operation["operation_id"], namespace=context.operation["namespace"],
+        installation_id=context.operation["installation_id"], state_dir=str(directory / "state"),
+        anchor_dir=str(directory / "anchor"), inputs_path=str(directory / "inputs.json"))
+    private_state._private_directory(directory.parent)
+    private_state._private_directory(directory)
+    payload = {"schema_version": "loom.nebius-pool-manager-image-private-inputs.v1",
+        "original_operation": context.operation, "binding": binding.model_dump(mode="json")}
+    save_private(operation, payload)
+    proof = Path(operation["inputs_path"]).with_name("manager-schema.json")
+    private_state._atomic_json(proof, {"schema": "loom.nebius-manager-schema.v1", "source_sha": binding.source_sha,
+        "revision": "0174"})
+    monkeypatch.setattr(target, "SCHEMA_PROOF_PATH", proof)
+    return operation, payload, proof, context
+
+
+def test_image_entry_binds_original_history_and_packaged_schema_before_connection(private_image_repair):
+    from pathlib import Path
+
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+
+    operation, _, _, original = private_image_repair
+    before = Path(original.operation["inputs_path"]).read_bytes()
+    context = load_image_repair_inputs(operation)
+    assert context.original == original
+    assert context.operation == operation
+    assert Path(original.operation["inputs_path"]).read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["schema_source", "schema_revision", "original_hash", "inputs_hash", "candidate", "closure"])
+def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_repair, damage):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_management_entry import EntryError
+    from scripts.ops.nebius_pool_image_entry import load_image_repair_inputs
+    from tests.ops.test_nebius_pool_startup_repair import save_private
+
+    operation, payload, proof, _ = private_image_repair
+    if damage.startswith("schema_"):
+        content = json.loads(proof.read_bytes())
+        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0175"
+        private_state._atomic_json(proof, content)
+    elif damage == "candidate":
+        payload["binding"]["candidate"]["candidate_sha"] = "f" * 40
+    else:
+        field = {"original_hash": "original_operation_sha256", "inputs_hash": "inputs_sha256", "closure": "closure_sha256"}[damage]
+        payload["binding"][field] = "a" * 64
+    save_private(operation, payload)
+    with pytest.raises(EntryError):
+        load_image_repair_inputs(operation)
+
+
+@pytest.mark.parametrize("damage", [None, "failed_run", "missing_gate", "tampered", "candidate_bytes", "private_drift"])
+def test_image_repair_resolves_real_protected_catalog_before_operator_connection(private_image_repair, monkeypatch, damage):
+    from contextlib import contextmanager
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_image_entry as target
+    from scripts.ops.nebius_pool_operation import PoolOperationError
+    from tests.ops.test_nebius_pool_cutover_entry import publication_http, save_private
+
+    operation, payload, _, original = private_image_repair
+    selected = {key: payload["binding"][key] for key in ("publication", "candidate", "profile")}
+    stub = {"inputs_path": str(Path(operation["inputs_path"]).with_name("publication-fixture.json"))}
+    responses, wire = publication_http.__wrapped__((stub, selected, original.original), monkeypatch)
+    save_private(operation, payload)
+    if damage == "failed_run":
+        responses["actions/runs/100/attempts/1"]["conclusion"] = "failure"
+    elif damage == "missing_gate":
+        responses["commits/" + "b" * 40 + "/check-runs"]["check_runs"].pop()
+    elif damage == "tampered":
+        wire["payload"] += b"tampered"
+    elif damage == "candidate_bytes":
+        payload["binding"]["candidate"]["source_archive_sha256"] = "sha256:" + "a" * 64
+        save_private(operation, payload)
+    elif damage == "private_drift":
+        wire["during_read"] = lambda: Path(operation["inputs_path"]).write_bytes(b"{}")
+    context = target.load_image_repair_inputs(operation)
+    connections = []
+
+    @contextmanager
+    def connected(selected):
+        assert selected == original
+        connections.append("opened")
+        yield SimpleNamespace(checks=object(), guards=SimpleNamespace(telemetry_report=lambda: {}))
+
+    monkeypatch.setattr(target, "connected_pool_api", connected)
+    monkeypatch.setattr(target, "run_pool_operation", lambda **kwargs: {
+        "status": "preflight_qualified", "operation_id": original.operation["operation_id"]})
+    if damage is None:
+        result = target.execute_image_repair(context, "preflight")
+        assert result["operation_id"] == operation["operation_id"]
+        assert result["original_operation_id"] == original.operation["operation_id"]
+        assert connections == ["opened"]
+    else:
+        with pytest.raises((PoolOperationError, target.EntryError)):
+            target.execute_image_repair(context, "preflight")
+        assert connections == []
