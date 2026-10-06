@@ -1107,7 +1107,7 @@ async def test_nebius_batch_rejects_agents_without_native_execution(
                     "n_per_task": 1,
                 },
                 {
-                    "agent_name": "codex",
+                    "agent_name": "openhands-sdk",
                     "agent_model": {"provider": "openai", "name": "gpt-4o"},
                     "n_per_task": 1,
                 },
@@ -1117,4 +1117,4 @@ async def test_nebius_batch_rejects_agents_without_native_execution(
 
     assert r.status_code == 400, r.text
     detail = r.json()["detail"]
-    assert detail.startswith("combinations[1]: agent 'codex' is not yet runnable")
+    assert detail.startswith("combinations[1]: agent 'openhands' is not yet runnable")

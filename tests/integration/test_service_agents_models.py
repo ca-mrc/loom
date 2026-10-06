@@ -368,10 +368,10 @@ async def test_agents_report_hosted_native_availability(
     assert r.status_code == 200
     by_name = {a["name"]: a for a in r.json()["items"]}
 
-    for name in ("direct-completion", "terminus-2", "oracle"):
+    for name in ("direct-completion", "terminus-2", "oracle", "codex"):
         assert by_name[name]["service_mode_ready"] is True, name
         assert by_name[name]["readiness_status"] == "ready", name
-    for name in ("codex", "openhands-sdk"):
+    for name in ("openhands-sdk",):
         entry = by_name[name]
         assert entry["service_mode_ready"] is False, name
         assert entry["readiness_status"] == "unavailable", name
