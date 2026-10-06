@@ -2563,6 +2563,17 @@ Deployment → ReplicaSet → Pod or CronJob → Job → Pod. Dangling, replaced
 or contradictory ownership rejects preflight. Historical descendants can remain
 without deletion; this check establishes identity consumers, not execution health
 or shutdown. The existing drain and effective-permission barriers still apply.
+The standalone foundation's web, LLM gateway and platform-backup roots may be
+retained separately as `platform_consumers`: they share the control plane's
+tokenless account but are not retiring writers. The protected entry qualifies
+their fixed names, namespace and templates against the completed predecessor's
+foundation configuration and the selected protected candidate/profile/keyring.
+The cutover contract then pins their UIDs and complete stable observed snapshots;
+the same live inventory and typed ancestry checks cover them and their descendants.
+They are never mutation or drain targets. Unknown control-plane copies, changed
+consumer templates, execution/build identity reuse and additional Kubernetes
+grants still fail qualification. No blanket account or tokenless-Pod exemption
+is introduced. An empty roster retains the previous journal contract.
 Unrelated identities remain untouched. External credentials and custom-controller
 authority still require the parent's separate installed qualification.
 
