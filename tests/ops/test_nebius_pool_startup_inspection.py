@@ -184,6 +184,88 @@ def test_missing_metadata_performs_no_startup_requests(cluster, monkeypatch):
     assert not any(call[0] == "logs" for call in cluster.calls)
 
 
+def completed_collector(cluster):
+    cluster.collector_pod['status']['phase'] = 'Succeeded'
+    cluster.collector_pod['status']['containerStatuses'][0]['state'] = {'terminated': {'exitCode': 0}}
+    cluster.job['status'] = {'succeeded': 1, 'conditions': [{'type': 'Complete', 'status': 'True'}]}
+
+
+def test_successful_collector_observation_binds_job_root_and_digest_without_payloads(cluster):
+    completed_collector(cluster)
+    result = inspect(cluster)['collector_completion']
+    assert result == {'status': 'observed', 'namespace': EXECUTION,
+        'pod': cluster.collector_pod['metadata']['name'], 'pod_uid': cluster.collector_pod['metadata']['uid'],
+        'job': cluster.job['metadata']['name'], 'job_uid': cluster.job['metadata']['uid'],
+        'controller': cluster.cron['metadata']['name'], 'controller_uid': cluster.cron['metadata']['uid'],
+        'image_sha256': 'c' * 64}
+    assert 'registry.test' not in json.dumps(result)
+    assert all(call[0] in {'get', 'config', 'logs'} for call in cluster.calls)
+
+
+@pytest.mark.parametrize('damage', ['pod_failed', 'main_failed', 'job_incomplete', 'job_active', 'job_failed',
+    'stale_job', 'foreign_owner', 'mutable_image', 'init_failed', 'init_image', 'missing_init_status',
+    'init_command', 'init_env', 'init_mount', 'init_working_dir', 'main_working_dir'])
+def test_collector_completion_rejects_unqualified_success(cluster, damage):
+    completed_collector(cluster)
+    if damage == 'pod_failed':
+        cluster.collector_pod['status']['phase'] = 'Failed'
+    elif damage == 'main_failed':
+        cluster.collector_pod['status']['containerStatuses'][0]['state']['terminated']['exitCode'] = 1
+    elif damage == 'job_incomplete':
+        cluster.job['status']['conditions'] = []
+    elif damage == 'job_active':
+        cluster.job['status']['active'] = 1
+    elif damage == 'job_failed':
+        cluster.job['status']['conditions'].append({'type': 'Failed', 'status': 'True'})
+    elif damage == 'stale_job':
+        cluster.cron['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['image'] = 'other'
+    elif damage == 'foreign_owner':
+        cluster.collector_pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+    elif damage == 'mutable_image':
+        for spec in (cluster.collector_pod['spec'], cluster.job['spec']['template']['spec'],
+                cluster.cron['spec']['jobTemplate']['spec']['template']['spec']):
+            spec['containers'][0]['image'] = 'registry.test/collector:latest'
+    elif damage == 'main_working_dir':
+        cluster.collector_pod['spec']['containers'][0]['workingDir'] = '/tmp'
+    else:
+        for spec in (cluster.collector_pod['spec'], cluster.job['spec']['template']['spec'],
+                cluster.cron['spec']['jobTemplate']['spec']['template']['spec']):
+            spec['initContainers'] = [{'name': 'prepare', 'image': 'registry.test/collector@sha256:' + 'c' * 64}]
+        cluster.collector_pod['status']['initContainerStatuses'] = [{'name': 'prepare',
+            'state': {'terminated': {'exitCode': 0}}}]
+        if damage == 'init_failed':
+            cluster.collector_pod['status']['initContainerStatuses'][0]['state']['terminated']['exitCode'] = 1
+        elif damage == 'init_image':
+            cluster.collector_pod['spec']['initContainers'][0]['image'] = 'private-token'
+        elif damage == 'init_command':
+            cluster.collector_pod['spec']['initContainers'][0]['command'] = ['sh', '-c', 'exit 0']
+        elif damage == 'init_env':
+            cluster.collector_pod['spec']['initContainers'][0]['env'] = [{'name': 'PRIVATE', 'value': 'private-token'}]
+        elif damage == 'init_mount':
+            cluster.collector_pod['spec']['initContainers'][0]['volumeMounts'] = [{'name': 'private', 'mountPath': '/private'}]
+        elif damage == 'init_working_dir':
+            cluster.collector_pod['spec']['initContainers'][0]['workingDir'] = '/tmp'
+        else:
+            cluster.collector_pod['status']['initContainerStatuses'] = []
+    assert inspect(cluster)['collector_completion'] is None
+
+
+def test_collector_completion_rejects_replaced_pod_and_bounds_candidate_reads(cluster, monkeypatch):
+    completed_collector(cluster)
+    original = cluster.get
+
+    def replaced(kind, name, namespace):
+        result = original(kind, name, namespace)
+        if kind == 'pod' and name == cluster.collector_pod['metadata']['name']:
+            result['metadata']['uid'] = str(uuid4())
+        return result
+
+    monkeypatch.setattr(cluster, 'get', replaced)
+    cluster.lists['pods'] = [copy.deepcopy(cluster.collector_pod) for _ in range(100)]
+    assert inspect(cluster)['collector_completion'] is None
+    assert sum(call[:2] == ('get', 'pod') for call in cluster.calls) == 3
+
+
 def test_startup_requests_are_bounded_even_with_many_stale_candidates(cluster):
     stale = copy.deepcopy(cluster.manager_pod)
     stale["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())

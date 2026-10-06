@@ -47,7 +47,7 @@ SOURCES = (*( "scripts/ops/" + name + ".py" for name in (
     "nebius_pool_migration_guard", "nebius_pool_operation", "nebius_pool_origin_history", "nebius_pool_platform_authority",
     "nebius_pool_predecessor", "nebius_pool_projection", "nebius_pool_recovery_database", "nebius_pool_recovery_release", "nebius_pool_repair_entry",
     "nebius_pool_manager_image", "nebius_pool_manager_image_history", "nebius_pool_manager_image_stage",
-    "nebius_pool_manager_image_live", "nebius_pool_image_entry",
+    "nebius_pool_manager_image_live", "nebius_pool_image_entry", "nebius_pool_runtime_image",
     "nebius_pool_refresh", "nebius_pool_refresh_live", "nebius_pool_registration",
     "nebius_pool_retirement", "nebius_pool_retirement_live", "nebius_pool_role_fencing",
     "nebius_pool_role_fencing_live", "nebius_pool_role_restoration", "nebius_pool_runtime",
@@ -61,7 +61,8 @@ LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
 MAX_BUNDLE, MAX_WHEEL = 100 * 1024**2, 16 * 1024**2
 COMMANDS = {"loom-nebius-management-preflight-v1": "preflight", "loom-nebius-management-install-v1": "install",
     "loom-nebius-pool-rollback-v1": "rollback"}
-POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1', 'loom.nebius-pool-startup-repair-operation.v2'})
+IMAGE_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v2', 'loom.nebius-pool-startup-repair-operation.v3'})
+POOL_REPAIR_SCHEMAS = frozenset({'loom.nebius-pool-startup-repair-operation.v1', *IMAGE_REPAIR_SCHEMAS})
 MANAGER_SCHEMA_PROOF = 'manager-schema.json'
 POOL_PHASES = frozenset({'cutover', 'startup', 'startup-repair', 'manager-image', 'activation', 'startup-fence', 'shutdown', 'machine-retirement',
     'gateway-retirement', 'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening'})
@@ -195,7 +196,7 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
                 raise ValueError()
             operation = json.loads(archive.read('operation.json'))
             validate_operation(operation)
-            image_repair = operation['schema'] == 'loom.nebius-pool-startup-repair-operation.v2'
+            image_repair = operation['schema'] in IMAGE_REPAIR_SCHEMAS
             limits = {**LIMITS, **({MANAGER_SCHEMA_PROOF: 4096} if image_repair else {})}
             if (set(names) != set(limits) | wheels or len(wheels) != 2
                     or not all(sum(bool(re.fullmatch(r"wheels/" + package + r"-[0-9][0-9.]*-py3-none-any\.whl", name))

@@ -587,7 +587,8 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 startup_repair_exists,
             )
 
-            if key == _key(self.request.manager) and load_manager_image_chain(self.request, state=self.state, anchor=self.anchor):
+            images = load_manager_image_chain(self.request, state=self.state, anchor=self.anchor)
+            if images and key == _key(images[-1].documents[0]):
                 patches = manager_image_fence_patches(self.request, before, state=self.state, anchor=self.anchor)
             elif key == _key(self.request.manager) and startup_repair_exists(self.request, state=self.state, anchor=self.anchor):
                 patches = repair_fence_patches(self.request, before, state=self.state, anchor=self.anchor)
