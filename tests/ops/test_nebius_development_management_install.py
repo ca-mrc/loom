@@ -212,6 +212,21 @@ def test_recovery_freezes_private_entry_configuration_and_files(installation, tm
     assert len(api.store.creates) == before
 
 
+def test_initial_replay_preserves_older_anchor_format_without_reopening_writes(installation, tmp_path):
+    request, api = installation
+    request = replace(request, qualification_digest='sha256:' + 'a' * 64)
+    first = run((request, api), tmp_path)
+    paths = (tmp_path / 'state/installation.json', tmp_path / 'anchor' / (request.binding.installation_id + '.json'))
+    for path in paths:
+        value = json.loads(path.read_text())
+        value.pop('qualification_digest')
+        path.write_text(json.dumps(value))
+    before = len(api.store.creates)
+    assert run((request, api), tmp_path) == first
+    assert len(api.store.creates) == before
+    assert all('qualification_digest' not in json.loads(path.read_text()) for path in paths)
+
+
 @pytest.mark.parametrize('value', ['', 'a' * 64, 'sha256:' + 'A' * 64, 12])
 def test_private_entry_fingerprint_has_canonical_shape(installation, value):
     from scripts.ops.nebius_management_install import ManagementInstallError

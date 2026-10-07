@@ -340,8 +340,14 @@ has its own private input file at
 `.loom/nebius-development-management-renewal/<installation-id>/<operation-id>/inputs.json`.
 The `loom.nebius-development-management-renewal-inputs.v1` document contains:
 
-- `retained`: original manager operation path/hash, installation input digest and
-  original qualification digest, from the protected initial-install records;
+- `retained`: original manager operation path/hash and installation input digest,
+  from the protected initial-install records. New installations persist their
+  qualification digest in both the independent anchor and installation journal;
+  renewal reconstructs and checks the enclosing input fingerprint from these.
+  Older records without that field need an explicitly preserved
+  `qualification_digest`; absent that evidence they fail closed. Do not retire
+  original credential files for such an older installation before preserving its
+  qualified input digest through the approved operator route;
 - `certificate`: original issuer configuration path/UUID and exact new generation;
 - `operator_connection`: explicit Kubernetes HTTPS endpoint, CA and credential files;
 - `route`: freshly qualified shared-ingress UIDs and configuration digests, using

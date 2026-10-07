@@ -39,7 +39,8 @@ class RetainedManagementReference(BaseModel):
     operation_path: Path
     operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     installation_input_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
-    qualification_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    # Only older installer records need an explicitly preserved preimage.
+    qualification_digest: str | None = Field(default=None, pattern=r'^sha256:[0-9a-f]{64}$')
 
     @field_validator('operation_path')
     @classmethod
@@ -103,6 +104,12 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
         identity = {'schema': 'loom.nebius-development-management-install.v1',
             'input_digest': reference.installation_input_digest, 'state_dir': str(state), 'binding': asdict(inputs.binding)}
         started = read(anchor / (inputs.binding.installation_id + '.json'))
+        qualification = started.get('qualification_digest', reference.qualification_digest)
+        if (not isinstance(qualification, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', qualification)
+                or (reference.qualification_digest is not None and reference.qualification_digest != qualification)):
+            raise ValueError()
+        if 'qualification_digest' in started:
+            identity['qualification_digest'] = qualification
         if set(started) != {*identity, 'operation_id'} or any(started[key] != value for key, value in identity.items()):
             raise ValueError()
         _uuid(started['operation_id'])
@@ -196,7 +203,7 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
         original = {'binding': asdict(inputs.binding), 'deployment': inputs.deployment.model_dump(mode='json'),
             'candidate': inputs.candidate, 'profile': inputs.profile, 'material': material,
             'application_material': asdict(application_material), 'shared_namespace_uid': str(inputs.shared_namespace_uid),
-            'tls_material': asdict(tls_material), 'qualification_digest': reference.qualification_digest}
+            'tls_material': asdict(tls_material), 'qualification_digest': qualification}
         if digest(original) != reference.installation_input_digest or any(
                 private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files.items()):
             raise ValueError()

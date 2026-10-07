@@ -248,12 +248,17 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
             'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid,
             'tls_material': asdict(request.tls_material),
             'qualification_digest': request.qualification_digest})
-        identity = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
+        identity: dict[str, Any] = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
                     'state_dir': str(state), 'binding': asdict(request.binding)}
         with private_state._locked_state(anchor):
             marker, journal = anchor / (request.binding.installation_id + '.json'), state / 'installation.json'
             if marker.exists() or marker.is_symlink():
                 started = json.loads(private_state._private_read(marker))
+                # Preserve older input fingerprints without rewriting history.
+                # Fresh installs retain the qualification preimage so renewal
+                # does not need retired original operator credential files.
+                if isinstance(started, dict) and 'qualification_digest' in started:
+                    identity['qualification_digest'] = request.qualification_digest
                 if (not isinstance(started, dict) or set(started) != {*identity, 'operation_id'}
                         or any(started[key] != value for key, value in identity.items())
                         or not journal.is_file() or journal.is_symlink() or state.is_symlink()):
@@ -266,6 +271,7 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
                 stage = None
                 api.preflight(request, rendered)
                 stage = 'recovery'
+                identity['qualification_digest'] = request.qualification_digest
                 started = {**identity, 'operation_id': str(uuid4())}
                 record = {**started, 'phases': {}}
                 private_state._atomic_json(marker, started)

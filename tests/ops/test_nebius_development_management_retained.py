@@ -58,7 +58,7 @@ def retained(manager_entry):
         pytest.fail('fixture did not complete the real initial installer')
     parent = json.loads((state / 'installation.json').read_text())
     selector = {'operation_path': path, 'operation_sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest(),
-        'installation_input_digest': parent['input_digest'], 'qualification_digest': request.qualification_digest}
+        'installation_input_digest': parent['input_digest']}
     return selector, operation, payload, request, api
 
 
@@ -137,12 +137,15 @@ def test_persisted_qualification_cannot_be_rebound_even_with_matching_parent_cop
 
 
 def test_legacy_history_requires_explicit_preserved_digest_without_reopening_old_credentials(retained):
+    preserved = None
     for path in (Path(retained[1]['anchor_dir']) / (retained[1]['installation_id'] + '.json'),
                  Path(retained[1]['state_dir']) / 'installation.json'):
         value = json.loads(path.read_text())
-        value.pop('qualification_digest', None)
+        preserved = value.pop('qualification_digest')
         path.write_text(json.dumps(value))
-    assert load(retained).binding.installation_id == retained[1]['installation_id']
+    explicit = {**retained[0], 'qualification_digest': preserved}
+    assert module().load_retained_management(module().RetainedManagementReference.model_validate(
+        explicit)).binding.installation_id == retained[1]['installation_id']
     reference = {key: value for key, value in retained[0].items() if key != 'qualification_digest'}
     with pytest.raises(ValueError, match='retained development management'):
         module().load_retained_management(module().RetainedManagementReference.model_validate(reference))
