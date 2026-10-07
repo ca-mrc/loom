@@ -134,7 +134,8 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
             or config['environment'] != 'development' or app is None
             or app.shared.platform_namespace != 'loom-dev'
             or not isinstance(app.runtime.kubernetes, ProjectedKubernetesConnection)
-            or app.runtime.build is not None or deployment.pool_catalog_operation_id is not None
+            or app.runtime.build is not None or app.runtime.source_upload is not None
+            or deployment.pool_catalog_operation_id is not None
             or request.tls_material.public_host != deployment.public_host
             or deployment.public_tls_secret_name != management_tls_secret_name(binding.installation_id, request.tls_material)):
         raise ManagementInstallError('development management requires independent application-only binding')

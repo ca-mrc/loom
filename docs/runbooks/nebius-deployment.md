@@ -317,7 +317,10 @@ and a blind retry. `development_management_preflight_qualified` permits no readi
 claim; `pending` names the unfinished phase; `blocked` exposes only a closed stage.
 `development_management_installed` records the completed manager installation,
 not shared-dev public access, active source builds, task execution or multi-owner
-acceptance. Manager-only certificate renewal and its installed proof remain
+acceptance. Initial manager inputs must leave both source upload and image-build
+runtime unconfigured; their credentials and shared-pool admission belong to the
+later activation. Unsupported initial selections are rejected before bootstrap.
+Manager-only certificate renewal and its installed proof remain
 required before operational acceptance.
 
 #### Owner commands
