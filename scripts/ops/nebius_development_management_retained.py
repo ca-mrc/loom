@@ -28,7 +28,7 @@ from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_install import _journal_names
 from scripts.ops.nebius_management_material import ManagementBinding, _uuid
-from scripts.ops.nebius_management_stage import _MARKER, _validate_record
+from scripts.ops.nebius_management_stage import _MARKER, _comparison_snapshot, _validate_record
 
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import _json
@@ -145,7 +145,8 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
                 actual = copy.deepcopy(item['observed'])
                 actual['metadata']['uid'] = item['uid']
                 _uid(actual)
-                if _snapshot(actual) != item['observed']:
+                if (_snapshot(actual) != item['observed']
+                        or _comparison_snapshot(actual) != item['expected']):
                     raise ValueError()
                 observed[name] = actual
             _validate_record(journal, {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(binding),
@@ -175,6 +176,13 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
         tls_material = ManagementTLSMaterial(inputs.deployment.public_host, old['tls.crt'], old['tls.key'])
         ingress, = public.values()
         name = management_tls_secret_name(binding.installation_id, tls_material)
+        # Qualify the fixed initial route contract without rerendering old
+        # workload/configuration revisions with today's source.
+        host = inputs.deployment.public_host
+        spec = {'ingressClassName': inputs.deployment.installation.foundation.ingress_class_name,
+            'tls': [{'hosts': [host], 'secretName': name}],
+            'rules': [{'host': host, 'http': {'paths': [{'path': '/', 'pathType': 'Prefix',
+                'backend': {'service': {'name': 'loom-service', 'port': {'number': 8090}}}}]}}]}
         if (hashlib.sha256(tls_material.chain.encode()).hexdigest() != inputs.certificate.generation
                 or inputs.deployment.public_tls_secret_name != name or tls['metadata']['name'] != name
                 or tls['metadata']['namespace'] != binding.namespace or tls['type'] != 'kubernetes.io/tls'
@@ -183,7 +191,7 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
                 or ingress['metadata']['name'] != 'loom-management'
                 or ingress['metadata']['namespace'] != binding.namespace
                 or ingress['metadata']['labels'].get('loom.nebius/management-installation') != binding.installation_id
-                or ingress['spec']['tls'] != [{'hosts': [inputs.deployment.public_host], 'secretName': name}]):
+                or ingress['spec'] != spec):
             raise ValueError()
         original = {'binding': asdict(inputs.binding), 'deployment': inputs.deployment.model_dump(mode='json'),
             'candidate': inputs.candidate, 'profile': inputs.profile, 'material': material,
