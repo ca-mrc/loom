@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Loom gateway cache maintenance
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=30min
+Persistent=true
+Unit=loom-nebius-gateway-cleanup.service
+
+[Install]
+WantedBy=timers.target
