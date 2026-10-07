@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import pytest
 from tests.ops.test_nebius_application_setup import application_material as application_material
+from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_management_install import InstallationAPI
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.unit.test_nebius_management_render import (
@@ -49,14 +50,16 @@ class DevelopmentAPI(InstallationAPI):
 
 
 @pytest.fixture
-def installation(application_management_inputs, material, application_material):
+def installation(application_management_inputs, material, application_material, tls_material):
     from scripts.ops.nebius_development_management_install import DevelopmentManagementRequest
     from scripts.ops.nebius_management_bootstrap import BootstrapBinding
+    from scripts.ops.nebius_development_management_tls import management_tls_secret_name
 
     from loom_service.environment_management.deployment import ManagementDeployment
 
     raw, candidate, profile = copy.deepcopy(application_management_inputs)
     raw['namespace'] = 'loom-nebius-management-dev'
+    raw['public_tls_secret_name'] = management_tls_secret_name(raw['installation_id'], tls_material)
     foundation = raw['installation']['foundation']
     config = json.loads(foundation['platform_config_json'])
     config.update(namespace='loom-dev', environment='development', execution_namespace='loom-nebius-dev-execution')
@@ -68,7 +71,7 @@ def installation(application_management_inputs, material, application_material):
     binding = BootstrapBinding(raw['installation_id'], raw['namespace'], str(uuid4()))
     request = DevelopmentManagementRequest(binding=binding, deployment=ManagementDeployment.model_validate(raw),
         candidate=candidate, profile=profile, material=material, application_material=application_material,
-        shared_namespace_uid=str(uuid4()))
+        shared_namespace_uid=str(uuid4()), tls_material=tls_material)
     api = DevelopmentAPI(binding)
     api.shared_uid = request.shared_namespace_uid
     return request, api
@@ -123,6 +126,24 @@ def test_fresh_install_orders_real_database_admission_sql_backup_and_public_barr
     assert {doc['metadata'].get('namespace') for doc in api.store.resources.values()} <= {
         None, 'loom-dev', 'loom-nebius-management-dev'}
     assert len([doc for doc in api.store.resources.values() if doc['kind'] == 'StatefulSet']) == 1
+    tls_name = request.deployment.public_tls_secret_name
+    assert api.store.creates.index('Secret:' + tls_name) < api.store.creates.index('Ingress:loom-management')
+    assert api.store.resources['Ingress:loom-management']['spec']['tls'] == [{
+        'hosts': ['manage.example.com'], 'secretName': tls_name}]
+
+
+@pytest.mark.parametrize('change', ['host', 'secret'])
+def test_missing_or_mismatched_public_certificate_blocks_before_bootstrap(installation, tmp_path, change):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request, api = installation
+    if change == 'host':
+        request = replace(request, tls_material=replace(request.tls_material, public_host='foreign.example.com'))
+    else:
+        request = replace(request, deployment=request.deployment.model_copy(update={'public_tls_secret_name': None}))
+    with pytest.raises((ManagementInstallError, ValueError)):
+        run((request, api), tmp_path)
+    assert not api.store.creates
 
 
 @pytest.mark.parametrize('phase', ['preflight', 'provider-storage', 'application', 'backup', 'public'])
