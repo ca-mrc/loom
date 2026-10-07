@@ -667,3 +667,172 @@ async def test_exact_version_recovery_needs_no_bucket_configuration_permission(r
     response = await r.client.post(URL, headers=HEADERS, json=payload)
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "applied"
+
+
+def add_equivalent_versions(r, count=2, index=0):
+    versions = [r.versions[index]]
+    for _ in range(count - 1):
+        versions.append(r.s3.put_object(
+            Bucket=r.bucket, Key=r.objects[index].object_key, Body=r.bodies[index],
+        )["VersionId"])
+    r.payload["objects"][index].update(version_id=versions[-1], equivalent_version_ids=versions)
+    return versions
+
+
+@pytest.mark.parametrize("count", [2, 5, 8])
+async def test_equivalent_versions_adopt_latest_with_complete_audit_and_replay(recovery, count):
+    r = recovery
+    versions = add_equivalent_versions(r, count)
+    before = await snapshot(r)
+    payload = await applying(r)
+    assert await snapshot(r) == before
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    after = await snapshot(r)
+    assert after[0]["files"][0]["version_id"] == versions[-1]
+    assert after[1]["artifacts"][0]["version_id"] == versions[-1]
+    assert after[2] == [versions[-1], *r.versions[1:]]
+    assert after[4] == before[4]
+    assert len(after[3]) == 1
+    plan = after[3][0][1]["plan"]
+    adopted = next(o for o in plan["objects"] if o["registry_id"] == str(r.objects[0].id))
+    assert adopted["equivalent_version_ids"] == sorted(versions)
+    assert adopted["version_id"] == versions[-1]
+    # A set's order cannot create a new operation identity or invalidate its audit.
+    payload["objects"][0]["equivalent_version_ids"].reverse()
+    replay = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["status"] == "replayed"
+    assert await snapshot(r) == after
+    remaining = r.s3.list_object_versions(Bucket=r.bucket, Prefix=r.objects[0].object_key)
+    assert {v["VersionId"] for v in remaining["Versions"]} == set(versions)
+    assert not remaining.get("DeleteMarkers")
+
+
+async def test_identical_versions_still_require_explicit_inventory(recovery):
+    r = recovery
+    add_equivalent_versions(r)
+    r.payload["objects"][0].pop("equivalent_version_ids")
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert "ambiguous_stored_versions" in response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("fault", ["corrupt_older_copy", "nonlatest", "missing", "extra", "delete_marker"])
+async def test_equivalent_inventory_rejects_conflicts_before_any_repair(recovery, fault):
+    r = recovery
+    versions = add_equivalent_versions(r)
+    obj = r.objects[0]
+    if fault == "corrupt_older_copy":
+        bad = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"x" * len(r.bodies[0]))["VersionId"]
+        latest = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=r.bodies[0])["VersionId"]
+        r.payload["objects"][0].update(version_id=latest, equivalent_version_ids=[*versions, bad, latest])
+    elif fault == "nonlatest":
+        r.payload["objects"][0]["version_id"] = versions[0]
+    elif fault == "missing":
+        r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key, VersionId=versions[0])
+    elif fault == "extra":
+        r.payload["objects"][0]["equivalent_version_ids"].append("nonexistent-version")
+    else:
+        r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key)
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("when", ["after_preview", "during_reads"])
+async def test_equivalent_inventory_drift_cannot_apply(recovery, monkeypatch, when):
+    r = recovery
+    add_equivalent_versions(r)
+    payload = await applying(r)
+    before = await snapshot(r)
+
+    def add_copy():
+        r.s3.put_object(Bucket=r.bucket, Key=r.objects[0].object_key, Body=r.bodies[0])
+
+    if when == "after_preview":
+        add_copy()
+    else:
+        original = r.s3.get_object
+        remaining_reads = len(r.objects) + 1
+
+        def change_during_reads(**kwargs):
+            nonlocal remaining_reads
+            result = original(**kwargs)
+            remaining_reads -= 1
+            # Registry rows are UUID ordered. Pick an earlier key deterministically
+            # from the observed read order rather than assuming fixture order.
+            if remaining_reads == 0:
+                index = next(i for i, obj in enumerate(r.objects) if obj.object_key != kwargs["Key"])
+                r.s3.put_object(Bucket=r.bucket, Key=r.objects[index].object_key, Body=r.bodies[index])
+            return result
+
+        monkeypatch.setattr(r.s3, "get_object", change_during_reads)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
+
+
+async def test_all_equivalent_copies_count_toward_verification_budget(recovery, monkeypatch):
+    import loom_control_plane.object_version_recovery as module
+
+    r = recovery
+    add_equivalent_versions(r)
+    # Selected bytes fit exactly; the extra retained copy exceeds the budget.
+    monkeypatch.setattr(module, "MAX_BYTES", sum(len(body) for body in r.bodies))
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 409, response.text
+    assert "byte_limit_exceeded" in response.text
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("invalid", [[], ["latest"], ["latest"] * 2,
+    ["latest", "null"], ["latest", " null "], ["latest", ""], ["latest", 1],
+    ["latest", "x" * 1025], ["latest", "bad\nversion"], ["a", "b"],
+    ["latest", *[str(i) for i in range(8)]]])
+async def test_equivalent_version_request_requires_complete_bounded_concrete_set(recovery, invalid):
+    r = recovery
+    r.payload["objects"][0].update(version_id="latest", equivalent_version_ids=invalid)
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 422, response.text
+    assert await snapshot(r) == before
+
+
+async def test_legacy_single_version_request_keeps_audited_identity(recovery):
+    r = recovery
+    payload = await applying(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    after = await snapshot(r)
+    legacy_identity = copy.deepcopy(r.payload)
+    legacy_identity["objects"].sort(key=lambda obj: obj["registry_id"])
+    audit = after[3][0][1]
+    assert audit["request_sha256"] == digest(legacy_identity)
+    assert audit["plan"]["request"] == legacy_identity
+    assert all("equivalent_version_ids" not in obj for obj in audit["plan"]["objects"])
+    # Explicit null is the same legacy mode, preserving old persisted receipts.
+    for obj in payload["objects"]:
+        obj["equivalent_version_ids"] = None
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "replayed"
+
+
+async def test_equivalent_versions_support_complete_paginated_inventory(recovery, monkeypatch):
+    r = recovery
+    add_equivalent_versions(r, 5)
+    r.s3.put_object(Bucket=r.bucket, Key=r.objects[0].object_key + ".neighbor", Body=b"unrelated")
+    original = r.s3.list_object_versions
+
+    def paginated(**kwargs):
+        return original(**{**kwargs, "MaxKeys": 1})
+
+    monkeypatch.setattr(r.s3, "list_object_versions", paginated)
+    response = await r.client.post(URL, headers=HEADERS, json=await applying(r))
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "applied"
