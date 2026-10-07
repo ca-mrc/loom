@@ -18,7 +18,11 @@ from tests.ops.test_nebius_candidate import source_checkout as source_checkout
 from tests.ops.test_nebius_development_cloud import cloud as cloud
 from tests.ops.test_nebius_development_preflight import (
     preflight as preflight,
+)
+from tests.ops.test_nebius_development_preflight import (
     published_source as published_source,
+)
+from tests.ops.test_nebius_development_preflight import (
     retained_namespace,
 )
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
@@ -44,7 +48,14 @@ def live(preflight, cloud, tmp_path, monkeypatch):
     from scripts.ops.nebius_development_stage import DevelopmentStageInput
 
     mod = module()
+    cloud.config["buckets"]["trajectories"] = "loom-dev-trajectories"
+    cloud.scope["data_buckets"]["bucket-trajectories"] = "loom-dev-trajectories"
+    bucket_type, data_bucket = cloud.rows["bucket-data"]
+    trajectory_bucket = copy.deepcopy(data_bucket)
+    trajectory_bucket["metadata"].update(id="bucket-trajectories", name="loom-dev-trajectories")
+    cloud.rows["bucket-trajectories"] = bucket_type, trajectory_bucket
     preflight.config.update(cloud.config)
+    preflight.config["postgres_storage_gi"] = 10
     with zipfile.ZipFile(io.BytesIO(preflight.publication.payload)) as bundle:
         profile = json.loads(bundle.read("runtime-profile.json"))
     selection = DevelopmentStageInput(preflight.config, preflight.publication.candidate,
@@ -56,7 +67,7 @@ def live(preflight, cloud, tmp_path, monkeypatch):
     credentials.write_text('{"private":"operator-test"}')
     credentials.chmod(0o600)
     token_file = tmp_path / "publication-token"
-    token_file.write_text("publication-test-secret")
+    token_file.write_text("test-github-secret")
     token_file.chmod(0o600)
     settings = mod.DevelopmentLiveSettings(preflight=preflight.client.settings,
         cloud=DevelopmentCloudScope.model_validate(cloud.scope),
@@ -108,6 +119,7 @@ def live(preflight, cloud, tmp_path, monkeypatch):
 def test_connected_checks_verify_actual_publication_inventory_provider_and_both_keys(live):
     live.api.qualify(live.request, fresh=True)
     assert live.lists == [(False, {"Bucket": "loom-dev-data", "MaxKeys": 1}),
+                          (False, {"Bucket": "loom-dev-trajectories", "MaxKeys": 1}),
                           (True, {"Bucket": "loom-dev-source", "MaxKeys": 1})]
     assert ("get", "compute-network-ssd") in live.cloud.calls
     assert live.closes == [True]
@@ -139,7 +151,10 @@ def test_failed_live_prerequisite_never_becomes_install_authority(live, failure)
 
 
 def test_connected_resources_cannot_substitute_another_selection_or_namespace(live):
-    from scripts.ops.nebius_development_stage import DevelopmentResourceBinding, HTTPSDevelopmentStageAPI
+    from scripts.ops.nebius_development_stage import (
+        DevelopmentResourceBinding,
+        HTTPSDevelopmentStageAPI,
+    )
 
     binding = DevelopmentResourceBinding(live.request.bootstrap, str(uuid4()), str(uuid4()))
     with live.api.resources(binding, live.request.selection, "database") as api:
@@ -157,7 +172,6 @@ def test_connected_resources_cannot_substitute_another_selection_or_namespace(li
 def test_s3_client_uses_explicit_identity_and_rejects_origin_changes(live, monkeypatch):
     import boto3
 
-    factory = module().development_object_client
     # The fixture replaces the I/O factory for composed checks, not this factory test.
     monkeypatch.undo()
     factory = module().development_object_client
