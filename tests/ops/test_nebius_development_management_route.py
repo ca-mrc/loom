@@ -4,6 +4,8 @@ from __future__ import annotations
 import copy
 import json
 import ssl
+from dataclasses import replace
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -12,7 +14,9 @@ from tests.ops.test_nebius_application_setup import application_material as appl
 from tests.ops.test_nebius_development_management_install import installation as installation
 from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_management_supplied import material as material
-from tests.unit.test_nebius_management_render import application_management_inputs as application_management_inputs
+from tests.unit.test_nebius_management_render import (
+    application_management_inputs as application_management_inputs,
+)
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -24,6 +28,9 @@ def route(installation, monkeypatch):
     from loom.nebius_platform_render import digest
 
     request = installation[0]
+    raw = request.deployment.model_dump(mode='json')
+    raw['installation']['foundation']['ingress_controller_label'] = 'loom-shared-ingress'
+    request = replace(request, deployment=type(request.deployment).model_validate(raw))
     foundation = request.deployment.installation.foundation
     ns = foundation.ingress_namespace
     def obj(api, kind, name, namespace=None, **parts):
@@ -86,10 +93,18 @@ def test_initial_preflight_needs_no_manager_tls_or_staging_application_config(ro
 
 
 def test_final_route_requires_matching_new_manager_certificate(route):
-    api, request, _, _, _, tls_names, _ = route
+    api, request, _, _, _, tls_names, ingresses = route
+    ingresses.append(own_route(request))
     api.verify_public(request)
     assert tls_names[-1][:2] == (request.deployment.public_host, '8.8.8.8')
     assert len(tls_names[-1][2]) == 64
+
+
+def own_route(request):
+    from loom_service.environment_management.deployment import render_management
+
+    return render_management(request.deployment, candidate=request.candidate, profile=request.profile,
+        repo_root=Path(__file__).resolve().parents[2]).files['70-public.yaml'][0]
 
 
 @pytest.mark.parametrize('change', ['namespace_uid', 'service_uid', 'controller_uid', 'config', 'class', 'selector', 'not_ready', 'address'])
@@ -131,16 +146,77 @@ def test_competing_host_blocks_even_if_ingress_class_differs(route, wildcard):
 def test_own_route_must_use_exact_tls_and_backend_before_final_probe(route):
     from scripts.ops.nebius_management_install import ManagementInstallError
 
-    from loom_service.environment_management.deployment import render_management
-
     api, request, _, _, _, tls_names, ingresses = route
-    from pathlib import Path
-    rendered = render_management(request.deployment, candidate=request.candidate, profile=request.profile,
-        repo_root=Path(__file__).resolve().parents[2])
-    ingresses.extend(copy.deepcopy(rendered.files['70-public.yaml']))
+    ingresses.append(copy.deepcopy(own_route(request)))
     api.preflight(request)
     ingresses[0]['spec']['tls'][0]['secretName'] = 'foreign-secret'
     tls_names.clear()
     with pytest.raises(ManagementInstallError):
         api.verify_public(request)
     assert not tls_names
+
+
+def test_final_route_without_ingress_cannot_report_ready(route):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api, request, _, _, dns_names, tls_names, _ = route
+    with pytest.raises(ManagementInstallError):
+        api.verify_public(request)
+    assert not dns_names and not tls_names
+
+
+def test_shared_controller_change_during_public_probe_is_not_accepted(route, monkeypatch):
+    from scripts.ops import nebius_development_management_route as module
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api, request, resources, _, _, _, _ = route
+    def changed(*args, **kwargs):
+        resources['controller']['metadata']['uid'] = str(uuid4())
+    monkeypatch.setattr(module, 'qualify_tls_address', changed)
+    with pytest.raises(ManagementInstallError):
+        api.preflight(request)
+
+
+@pytest.mark.parametrize('change', ['passthrough', 'namespace_filter'])
+def test_pinned_but_incompatible_controller_configuration_does_not_qualify(route, change):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    from loom.nebius_platform_render import digest
+
+    api, request, resources, _, dns_names, _, _ = route
+    data = resources['config']['data']
+    if change == 'passthrough':
+        data['routes.yaml'] = json.dumps({'tcp': {'routers': {'standalone': {
+            'rule': 'HostSNI(`' + request.deployment.public_host + '`)'}}}})
+    else:
+        data['traefik.json'] = json.dumps({'providers': {'kubernetesIngress': {
+            'ingressClass': 'loom-shared', 'namespaces': ['staging-only']}}})
+    api.settings = api.settings.model_copy(update={'config_data_digest': digest(data)})
+    with pytest.raises(ManagementInstallError):
+        api.preflight(request)
+    assert not dns_names
+
+
+@pytest.mark.parametrize('change', [None, 'alias', 'extra_address', 'ipv6'])
+def test_dns_qualification_checks_normal_resolution_before_credentials(monkeypatch, change):
+    from types import SimpleNamespace
+
+    import dns.name
+    from scripts.ops import nebius_development_management_route as module
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    class Answer(list):
+        canonical_name = dns.name.from_text('foreign.test' if change == 'alias' else 'manage.example.com')
+    calls = []
+    def resolve(host, kind, **kwargs):
+        calls.append((host, kind))
+        assert kwargs == {'lifetime': 10, 'search': False, 'raise_on_no_answer': False}
+        addresses = ['8.8.8.8'] + (['1.1.1.1'] if change == 'extra_address' else [])
+        return Answer(addresses if kind == 'A' else (['::1'] if change == 'ipv6' else []))
+    monkeypatch.setattr(module.dns.resolver, 'Resolver', lambda: SimpleNamespace(resolve=resolve))
+    if change:
+        with pytest.raises(ManagementInstallError):
+            module.qualify_dns_address('manage.example.com', '8.8.8.8')
+    else:
+        module.qualify_dns_address('manage.example.com', '8.8.8.8')
+        assert calls == [('manage.example.com', 'A'), ('manage.example.com', 'AAAA')]
