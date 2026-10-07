@@ -1,4 +1,6 @@
-# Copy to ~/.config/loom/gateway-cleanup.toml on the deployment gateway.
+# Optional gateway operator overrides. No configuration file is needed by default.
+# Built-in defaults match the values below on every installation.
+# To customize, copy to ~/.config/loom/gateway-cleanup.toml on the gateway.
 # The service reads this file each run; changing these settings needs no restart.
 
 # Pause all cleanup and reporting without disabling the installed timer.

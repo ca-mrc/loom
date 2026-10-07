@@ -1002,8 +1002,13 @@ source/dependencies, sourceless bytecode, authority grants, inputs, journals,
 backups and recovery evidence remain retained. Certificate/ingress tooling,
 user results, databases and object storage are outside its scope.
 
-The operator configuration entry point is
-`~/.config/loom/gateway-cleanup.toml`. Copy the commented example from
+Every installation uses the same checked-in defaults: cleanup enabled, seven-day
+cache retention and the gateway account's `.loom/nebius-management` storage.
+**No configuration file is required.** This is gateway maintenance, so ordinary
+Loom application users do not need a personal cleanup configuration.
+
+For deployment-specific overrides, the gateway operator may create
+`~/.config/loom/gateway-cleanup.toml` using the commented example from
 [`config/nebius-gateway-cleanup.example.toml`](../../config/nebius-gateway-cleanup.example.toml):
 
 ```toml
@@ -1013,20 +1018,22 @@ min_age_days = 7
 root = "~/.loom/nebius-management"
 ```
 
-The service reads this file on every run, so these edits need no systemd reload
+The service reads this optional file on every run, so these edits need no systemd reload
 or service-command override. Set `enabled = false` to pause maintenance, or
 `mode = "report"` to retain daily inventories without deletion. `~/` refers to
 the gateway account's home. These settings cannot expand the deletion allowlist.
 Unknown keys, invalid values, symlinks, hardlinks, unreadable or untrusted files
-block execution; errors never fall back to enabled defaults. The installed
-service requires its configuration file, so accidentally removing it blocks
-cleanup too. Keep the file owned by the gateway account and mode `0600`.
+block execution; an invalid existing file never falls back to enabled defaults.
+Removing the optional file restores the built-in defaults, including cleanup;
+use `enabled = false` to disable maintenance instead. Keep overrides owned by the
+gateway account and mode `0600`.
 
 For a one-off preview, pass `--dry-run` (alias `--report-only`). Explicit CLI
 `--root`, `--min-age-days` and `--apply`/`--dry-run` override valid file settings;
 `enabled = false` still prevents maintenance. `--config PATH` selects a required
-alternative file. Without `--config`, the standalone CLI reads the default file
-if present and otherwise uses the defaults above, including cleanup. The schedule
+alternative file; a missing explicitly selected file blocks execution.
+Without `--config`, both the shipped service and standalone CLI read the optional file
+if present and otherwise use the defaults above, including cleanup. The schedule
 remains in the systemd timer; change it with
 `systemctl --user edit loom-nebius-gateway-cleanup.timer` and reload the user manager.
 
@@ -1063,18 +1070,12 @@ Run these commands on the gateway as the owning account, from that reviewed
 checkout; installing this service does not grant a new forced-SSH action:
 
 ```bash
-install -d -m 700 "$HOME/.local/libexec/loom" "$HOME/.config/systemd/user" "$HOME/.config/loom"
+install -d -m 700 "$HOME/.local/libexec/loom" "$HOME/.config/systemd/user"
 install -m 600 scripts/ops/nebius_gateway_cleanup.py \
   "$HOME/.local/libexec/loom/nebius_gateway_cleanup.py"
-# Create settings on first installation only; preserve existing operator choices.
-if [ ! -e "$HOME/.config/loom/gateway-cleanup.toml" ] && [ ! -L "$HOME/.config/loom/gateway-cleanup.toml" ]; then
-  install -m 600 config/nebius-gateway-cleanup.example.toml \
-    "$HOME/.config/loom/gateway-cleanup.toml"
-fi
 install -m 600 deploy/systemd/loom-nebius-gateway-cleanup.service \
   deploy/systemd/loom-nebius-gateway-cleanup.timer "$HOME/.config/systemd/user/"
-python3 -I -B "$HOME/.local/libexec/loom/nebius_gateway_cleanup.py" \
-  --config "$HOME/.config/loom/gateway-cleanup.toml" --dry-run
+python3 -I -B "$HOME/.local/libexec/loom/nebius_gateway_cleanup.py" --dry-run
 systemctl --user daemon-reload
 systemctl --user enable --now loom-nebius-gateway-cleanup.timer
 systemctl --user start loom-nebius-gateway-cleanup.service
@@ -1086,8 +1087,8 @@ The user manager must persist after logout. Check
 `loginctl show-user "$USER" -p Linger`; if needed, an operator enables it with
 `sudo loginctl enable-linger "$USER"`. These are deployment steps, not a consequence of merging source. The
 timer runs daily with up to 30 minutes of jitter and catches a missed run after
-startup. Once installed and enabled with the default configuration, it cleans
-eligible caches automatically. Merging this source or an ordinary application
+startup. Installation leaves any existing operator overrides untouched. Once
+installed and enabled, the timer cleans eligible caches automatically. Merging this source or an ordinary application
 deployment does not install/enable the gateway timer. Route the JSON pressure field or service
 failure into the installation's monitoring; journaling a warning is not an
 external alert or evidence that alert delivery is configured.
