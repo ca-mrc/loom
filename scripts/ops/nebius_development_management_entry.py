@@ -26,7 +26,10 @@ from scripts.ops.nebius_development_management_install import (
     render_installation,
 )
 from scripts.ops.nebius_development_management_live import HTTPSDevelopmentManagementAPI
-from scripts.ops.nebius_development_management_operation import validate_operation
+from scripts.ops.nebius_development_management_operation import (
+    DIAGNOSTIC_STAGES,
+    validate_operation,
+)
 from scripts.ops.nebius_development_management_prerequisites import (
     DevelopmentManagementPrerequisiteSettings,
     HTTPSDevelopmentManagementPrerequisites,
@@ -42,9 +45,6 @@ from loom_service.environment_management.candidates import _json
 from loom_service.environment_management.deployment import ManagementDeployment
 
 SOURCE_RECORD = Path(__file__).resolve().parents[2] / 'development-management-source.json'
-_DIAGNOSTICS = frozenset({'operation', 'inputs', 'connection', 'installation', 'render', 'cluster_identity',
-    'prerequisites', 'foundation', 'platform_capacity', 'publication', 'cloud_identity', 'backup_quota',
-    'backup_access', 'public_route', 'foundation_readback', 'database_storage', 'provider_disk'})
 
 
 class ManagementCertificateSelection(BaseModel):
@@ -194,5 +194,5 @@ def main(operation_path: str, action: str) -> int:
         return 0
     except Exception:
         detail = getattr(getattr(api, 'development_checks', None), 'diagnostic_stage', None) or getattr(api, 'diagnostic_stage', None)
-        print(json.dumps({'status': 'blocked', 'stage': detail if detail in _DIAGNOSTICS else stage}))
+        print(json.dumps({'status': 'blocked', 'stage': detail if detail in DIAGNOSTIC_STAGES else stage}))
         return 1

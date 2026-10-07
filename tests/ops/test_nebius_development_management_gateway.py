@@ -102,7 +102,7 @@ def test_invalid_bundle_is_rejected_before_extraction(tmp_path, damage):
         raw = raw.replace(b"test-uv", b"evil-uv")
     with pytest.raises(module().GatewayError):
         module().unpack_bundle(raw)
-    assert not (tmp_path / "nebius-development-management").exists()
+    assert not Path(operation(tmp_path)["inputs_path"]).parent.exists()
 
 
 @pytest.mark.parametrize("command", ["", "loom-nebius-management-install-v1", "loom-nebius-development-install-v1", "loom-nebius-pool-rollback-v1",
@@ -124,6 +124,10 @@ def test_unapproved_bytes_never_prepare_release(tmp_path, monkeypatch):
 @pytest.mark.parametrize("action,status,extra", [
     ("preflight", "development_management_preflight_qualified", {}),
     ("install", "pending", {"phase": "database"}),
+    ("install", "pending", {"phase": "application-admission"}),
+    ("install", "pending", {"phase": "application-database"}),
+    ("install", "pending", {"phase": "backup"}),
+    ("install", "pending", {"phase": "service"}),
     ("install", "development_management_installed", {}),
     ("install", "blocked", {"stage": "provider_disk"}),
 ])
@@ -197,4 +201,3 @@ def test_command_uses_only_isolated_dev_entry(tmp_path):
     assert command[-3:] == [str(tmp_path), str(tmp_path / "operation.json"), "install"]
     with pytest.raises(module().GatewayError):
         module().command(tmp_path, "rollback")
-

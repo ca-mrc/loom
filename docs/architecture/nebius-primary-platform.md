@@ -1572,7 +1572,30 @@ The certificate, key and generation-derived Secret reference join the retained
 installation input identity. Lost create replies use exact readback, not another
 write; missing/replaced Secrets cannot be adopted on replay. This initial-delivery
 stage does not rotate certificates or patch the shared controller. The connected
-protected entry and installed renewal remain necessary before claiming readiness.
+protected entry pins the issuer installation and immutable generation, not a
+floating certificate selection. Installed renewal remains necessary before
+claiming operational readiness.
+
+Fresh development management has a separate fixed operation and gateway, bound
+to `loom-nebius-management-dev`, its own private installation/anchor paths and a
+dedicated exact-bundle SSH grant. Protected manual preflight/installation actions
+in `nebius-rollout` select only this authority; neither can invoke the legacy
+manager or foundation commands. Source publication requires the exact clean
+integrated revision, hash-locked dependencies and deterministic first-party
+wheels. The remote release qualifies actual imports and verifies retained bundle
+bytes on replay. Private configuration, source and material files join the
+existing installer identity; they are not copied into publication artifacts.
+
+This application-only installer qualifies the completed private dev foundation
+from retained source/input evidence and current resource identities rather than
+rerendering its old source. It composes the existing database, application access,
+shared SQL setup, backup and public authentication stages without starting a
+legacy full-stack provisioner. Cloud identity, storage and system capacity checks
+precede writes; actual manager PVC/PV/controller/node/provider disk identity is
+verified before migrations. Personal capacity reserves only API/web resources,
+not per-owner data volumes. A manager completion receipt still does not establish
+source-build/task admission or multi-owner acceptance. See the
+[delivery runbook](../runbooks/nebius-deployment.md#independent-development-manager-delivery).
 
 Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
 backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,

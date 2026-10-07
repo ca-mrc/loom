@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+DIAGNOSTIC_STAGES = frozenset({'operation', 'inputs', 'connection', 'installation', 'render', 'cluster_identity',
+    'prerequisites', 'foundation', 'platform_capacity', 'publication', 'cloud_identity', 'backup_quota',
+    'backup_access', 'public_route', 'foundation_readback', 'database_storage', 'provider_disk'})
+
 
 def validate_operation(value: dict[str, Any]) -> None:
     """Refuse legacy management state and noncanonical dev-manager selections."""

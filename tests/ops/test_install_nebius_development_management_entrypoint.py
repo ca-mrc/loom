@@ -49,6 +49,7 @@ def test_preview_grants_nothing_and_apply_preserves_foreign_keys_on_replay(autho
     assert module().install(raw, expected_sha256=digest, public_key=key, apply=True) == result
     assert keys.read_bytes() == after
     assert not Path(operation(root)["state_dir"]).exists()
+    assert Path(operation(root)["anchor_dir"]).parent.is_dir()
     assert not (root / "nebius-management").exists()
 
 
@@ -86,4 +87,3 @@ def test_bad_authority_preserves_existing_material(authority, damage):
     with pytest.raises(module().InstallError):
         module().install(raw, expected_sha256=digest, public_key=key, apply=True)
     assert keys.read_bytes() == before and not (root / "nebius-development-management").exists()
-

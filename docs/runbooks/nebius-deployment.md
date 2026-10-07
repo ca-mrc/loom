@@ -264,6 +264,62 @@ means the private phase has not finished; `blocked` reports only a closed failur
 stage. Only `development_private_installed` records private completion, and it
 does **not** qualify management/HTTPS, shared-pool execution or concurrent owners.
 
+##### Independent development-manager delivery
+
+After the private `loom-dev` foundation is installed, use the separate
+`development-management-preflight` and `development-management-install` actions
+in `nebius-rollout`, dispatched from `dev`. They consume
+`NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON` and
+`NEBIUS_DEVELOPMENT_MANAGEMENT_SSH_KEY` in the protected `nebius-integration`
+environment. Neither action falls back to the foundation or legacy management
+key, operation or history. The common operation queue is retained; these actions
+do not change staging or activate shared execution/build admission.
+
+The fixed operation targets `loom-nebius-management-dev` and binds an installation
+UUID, exact integrated `source_sha == candidate`, private input hash, and paths
+under the operator's `.loom/nebius-development-management/<installation-id>`
+directory. Inputs are `inputs.json`, mutable journals are under `state`, and the
+separately retained anchor is
+`.loom/nebius-development-management-anchors/<installation-id>`. Keep these paths
+separate from both the foundation and the old manager.
+
+Deliver `loom.nebius-development-management-private-inputs.v1` through the approved
+operator route. It selects the completed foundation's retained operation and live
+identity, application-only management configuration, dedicated cloud/material
+files, explicit management hostname and exact-host certificate. The certificate
+selection pins its issuer configuration, installation UUID and immutable
+generation; it does not follow a floating selected-generation file. The entry
+checks retained issuer history and freezes the private file identities into the
+installation journal. No staging database, manager state or default TLS key is
+an input. Policy headroom must cover the manager's separate recovery bucket; its
+database needs at least 10 GiB. Personal applications add no data PVCs or business
+buckets.
+
+Prepare the bundle from the exact clean integrated checkout with the same locked
+dependency export and pinned uv toolchain described above, using
+`python -m scripts.ops.nebius_development_management_rollout --operation preflight
+--requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Through the approved operator route, run
+`scripts.ops.install_nebius_development_management_entrypoint` with `--bundle`,
+`--bundle-sha256` and a dedicated `--public-key`. Review its preview before
+`--apply`. It preserves other grants, rejects a key with different authority, and
+creates only private tooling/anchor parents plus the exact-bundle forced command;
+it does not install any cluster resource. Inputs, keys and reports remain outside
+the checkout. Never reuse staging's protected installer to grant this authority.
+
+The bundle qualifies its real imports before accepting an operation. Private
+preflight verifies the foundation, publication, cloud/storage capacity and shared
+ingress/DNS route. Installation composes the database, migration, constrained
+application access, shared SQL setup, recovery backup, service, immutable local
+TLS Secret and public authentication proof. Replay rechecks retained identities;
+partial tooling or ambiguous resource writes require reconciliation, not deletion
+and a blind retry. `development_management_preflight_qualified` permits no readiness
+claim; `pending` names the unfinished phase; `blocked` exposes only a closed stage.
+`development_management_installed` records the completed manager installation,
+not shared-dev public access, active source builds, task execution or multi-owner
+acceptance. Manager-only certificate renewal and its installed proof remain
+required before operational acceptance.
+
 #### Owner commands
 
 Use the verified management HTTPS origin and an ordinary owner **user session**

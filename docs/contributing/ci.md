@@ -41,6 +41,15 @@ Refresh uses dedicated protected metadata and a separate exact-bundle SSH key;
 to another management authority. These are installed-operation entry points, not
 PR validation or evidence that the development environment is already accepted.
 
+The independent dev manager uses a separate manual-only job in this same queue:
+`development-management-preflight` and `development-management-install`, with
+`NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON` and dedicated
+`NEBIUS_DEVELOPMENT_MANAGEMENT_SSH_KEY`. Its exact integrated-source checkout and
+digest-bound bundle target only `loom-nebius-management-dev`; legacy manager and
+foundation authorities are unchanged. The job has contents-read permissions,
+uses the protected `nebius-integration` environment without recording a staging
+deployment, removes its ephemeral key, and uploads only bounded outcome evidence.
+
 The same job and concurrency carry `management-pool-preflight`,
 `management-pool-install` and `management-pool-rollback`. They require dedicated
 `NEBIUS_MANAGEMENT_POOL_OPERATION_JSON` metadata and
