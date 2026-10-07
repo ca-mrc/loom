@@ -250,6 +250,25 @@ def test_staging_binding_is_rejected_before_bootstrap(installation, tmp_path):
     assert api.store is None
 
 
+def test_source_upload_without_delivery_is_rejected_before_bootstrap(installation, tmp_path):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request, api = installation
+    raw = request.deployment.model_dump(mode='json')
+    raw['installation']['applications']['runtime']['source_upload'] = {
+        'credentials_file': '/var/run/loom-application-source-credentials/credentials.json',
+        'spool_directory': '/run/loom-application-source/spool', 'max_inflight': 2,
+    }
+    deployment = type(request.deployment).model_validate(raw)
+    assert deployment.installation.applications.runtime.build is None
+    with pytest.raises(ManagementInstallError):
+        run((replace(request, deployment=deployment), api), tmp_path)
+    assert not api.bootstrap.creates
+    assert api.store is None
+    assert not (tmp_path / 'anchor').exists()
+    assert not (tmp_path / 'state').exists()
+
+
 def test_late_resource_drift_cannot_report_completed_installation(installation, tmp_path):
     from scripts.ops.nebius_management_install import ManagementInstallError
 

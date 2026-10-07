@@ -103,7 +103,7 @@ def test_private_entry_loads_exact_source_material_and_pinned_issuer_generation(
     assert set(request.material) == {'loom-management-publications', 'loom-platform-storage'}
 
 
-@pytest.mark.parametrize('change', ['hash', 'source', 'namespace', 'alias', 'certificate-host', 'certificate-generation', 'public', 'symlink'])
+@pytest.mark.parametrize('change', ['hash', 'source', 'namespace', 'alias', 'certificate-host', 'certificate-generation', 'public', 'symlink', 'source-upload'])
 def test_invalid_entry_inputs_cannot_open_connection_or_create_state(manager_entry, change, monkeypatch, capsys):
     from scripts.ops import nebius_development_management_entry as module
 
@@ -112,6 +112,11 @@ def test_invalid_entry_inputs_cannot_open_connection_or_create_state(manager_ent
         operation['inputs_sha256'] = '0' * 64
     elif change == 'source':
         payload['candidate']['source_archive_sha256'] = 'sha256:' + '0' * 64
+    elif change == 'source-upload':
+        payload['deployment']['installation']['applications']['runtime']['source_upload'] = {
+            'credentials_file': '/var/run/loom-application-source-credentials/credentials.json',
+            'spool_directory': '/run/loom-application-source/spool', 'max_inflight': 2,
+        }
     elif change == 'namespace':
         operation['namespace'] = 'loom-nebius-management'
     elif change == 'alias':
