@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -49,6 +50,16 @@ class DevelopmentInstallError(RuntimeError):
 class DevelopmentInstallRequest:
     bootstrap: DevelopmentBootstrapBinding
     selection: DevelopmentStageInput
+    qualification_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        # The private entry binds settings/files not rendered into workloads.
+        # Existing anchor input_digest includes this field, so process restart
+        # cannot silently select another StorageClass, observer or key set.
+        if self.qualification_digest is not None and (
+                not isinstance(self.qualification_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", self.qualification_digest) is None):
+            raise DevelopmentInstallError("development qualification digest invalid")
 
 
 class DevelopmentStorageAPI(DevelopmentStageAPI, Protocol):

@@ -237,7 +237,9 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
                             admitted = api.default_resource(doc)
                             qualify_development_default(doc, admitted)
                             if doc["kind"] in {"Deployment", "StatefulSet"}:
-                                from scripts.ops.nebius_management_evidence import _matches_backup_template
+                                from scripts.ops.nebius_management_evidence import (
+                                    _matches_backup_template,
+                                )
 
                                 expected = deepcopy(admitted["spec"]["template"]["spec"])
                                 for claim in admitted["spec"].get("volumeClaimTemplates", []):

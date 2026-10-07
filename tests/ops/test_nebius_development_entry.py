@@ -56,7 +56,8 @@ def entry(live, tmp_path, monkeypatch):
 def test_entry_loads_one_exact_source_without_delivering_operator_credentials(entry):
     operation, _, _, live = entry
     inputs, request, files = module().load_inputs(operation)
-    assert request == live.request
+    assert request.bootstrap == live.request.bootstrap and request.selection == live.request.selection
+    assert request.qualification_digest.startswith("sha256:")
     assert inputs.binding.namespace == "loom-dev"
     assert set(request.selection.storage) == {"access-key", "secret-key", "source-access-key", "source-secret-key"}
     assert live.credentials in files and Path(operation["inputs_path"]) in files

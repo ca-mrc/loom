@@ -33,6 +33,7 @@ from scripts.ops.nebius_development_stage import (
 )
 
 from loom.nebius_kubernetes import NebiusKubernetesConnection, NebiusKubernetesCredentials
+from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import _json
 
 SOURCE_RECORD = Path(__file__).resolve().parents[2] / "development-source.json"
@@ -82,7 +83,9 @@ def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentPrivateInputs, De
             raise ValueError()
         storage = {key: files[item].decode() for key, item in inputs.storage_files.items()}
         request = DevelopmentInstallRequest(inputs.binding,
-            DevelopmentStageInput(inputs.config, inputs.candidate, inputs.profile, inputs.keyring, storage))
+            DevelopmentStageInput(inputs.config, inputs.candidate, inputs.profile, inputs.keyring, storage),
+            qualification_digest=digest({"operation": operation,
+                "private_files": {str(path): hashlib.sha256(raw).hexdigest() for path, raw in files.items()}}))
         # Only pure validation; the real namespace and operation UIDs come from
         # independently anchored bootstrap evidence, not these provisional IDs.
         provisional = DevelopmentResourceBinding(inputs.binding, inputs.binding.installation_id, inputs.binding.installation_id)
