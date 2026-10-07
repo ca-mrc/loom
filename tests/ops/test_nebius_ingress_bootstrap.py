@@ -28,7 +28,7 @@ def configuration(tmp_path):
         "candidate": "b" * 40,
         "state_dir": str(tmp_path / "nebius-ingress" / "state"),
         "certificate_config": str(tmp_path / "nebius-certificates" / "installation.json"),
-        "kubeconfig": str(tmp_path / "kubeconfig"), "kubectl": "/usr/local/bin/kubectl",
+        "kubeconfig": str(tmp_path / "kubeconfig"), "kubectl": str(tmp_path / "kubectl"),
         "cluster_id": "mk8scluster-e00fixture", "api_server": "https://192.0.2.1:443",
         "ingress_class": "loom-shared",
         "image": "cr.eu-north1.nebius.cloud/registry/loom-shared-ingress@sha256:" + "c" * 64,
