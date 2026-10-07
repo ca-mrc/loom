@@ -110,6 +110,109 @@ async def check(state):
             github_token="test-github-secret", http=http)
 
 
+async def check_installation(state, installation_id):
+    pub = state.publication
+    async with httpx.AsyncClient(transport=github_transport(pub.responses, pub.payload), trust_env=False) as http:
+        return await state.client.inspect_installation(config=state.config, keyring=pub.keyring,
+            github_token="test-github-secret", http=http, installation_id=installation_id)
+
+
+def retained_namespace(state, installation_id):
+    from scripts.ops.nebius_development_bootstrap import DevelopmentBootstrapBinding, _namespace_document
+
+    binding = DevelopmentBootstrapBinding(str(installation_id), str(state.client.settings.kube_system_uid),
+        state.config["db_tls_secret_name"])
+    row = _namespace_document(binding, str(uuid4()))
+    row["metadata"].update(uid=str(uuid4()), resourceVersion="1")
+    state.documents["/api/v1/namespaces/loom-dev"] = row
+    return row
+
+
+async def test_anchored_installation_preflight_accepts_absence_before_bootstrap(preflight):
+    result = await check_installation(preflight, uuid4())
+    assert result.evidence["status"] == "installation_dev_preflight_only"
+    assert result.evidence["namespace_uid"] is None
+    assert result.evidence["pending_storage_mib"] == preflight.config["postgres_storage_gi"] * 1024
+    assert "installation" in result.evidence["unverified"]
+
+
+async def test_resume_counts_own_live_workloads_once_without_adopting_them(preflight):
+    identity = uuid4()
+    baseline = await check_installation(preflight, identity)
+    ns = retained_namespace(preflight, identity)
+    resource_names = {"Deployment": "deployments", "StatefulSet": "statefulsets", "Job": "jobs"}
+    for docs in baseline.rendered.files.values():
+        for doc in docs:
+            if doc["kind"] not in resource_names:
+                continue
+            row = copy.deepcopy(doc)
+            row["metadata"].update(uid=str(uuid4()), generation=1)
+            row["metadata"]["labels"]["loom.nebius/development-installation"] = str(identity)
+            preflight.rows.setdefault(resource_names[row["kind"]], []).append(row)
+    before = copy.deepcopy(preflight.rows)
+    result = await check_installation(preflight, identity)
+    assert result.evidence["namespace_uid"] == ns["metadata"]["uid"]
+    assert result.evidence["capacity"]["required"] == baseline.evidence["capacity"]["required"]
+    assert result.evidence["pending_storage_mib"] == baseline.evidence["pending_storage_mib"]
+    assert preflight.rows == before
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check(preflight)  # Existing public preflight remains fresh-only.
+
+
+@pytest.mark.parametrize("change", ["installation", "deleting", "policy", "replaced", "disappeared"])
+async def test_resume_rejects_foreign_or_changing_namespace_before_installation(preflight, change):
+    identity = uuid4()
+    row = retained_namespace(preflight, identity)
+    if change == "installation":
+        row["metadata"]["labels"]["loom.nebius/development-installation"] = str(uuid4())
+    elif change == "deleting":
+        row["metadata"]["deletionTimestamp"] = "2026-10-07T00:00:00Z"
+    elif change == "policy":
+        row["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "privileged"
+    else:
+        def mutate(request):
+            if request.url.path == "/api/v1/namespaces/loom-dev":
+                preflight.namespace_reads += 1
+                if preflight.namespace_reads == 2:
+                    if change == "replaced":
+                        row["metadata"]["uid"] = str(uuid4())
+                    else:
+                        preflight.documents[request.url.path] = None
+        preflight.on_read = mutate
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check_installation(preflight, identity)
+
+
+@pytest.mark.parametrize("allocated_gi,pending_gi", [(0, 10), (10, 0), (6, 4)])
+async def test_resume_storage_quota_counts_only_unallocated_claim_capacity(preflight, allocated_gi, pending_gi):
+    identity = uuid4()
+    retained_namespace(preflight, identity)
+    preflight.config["postgres_storage_gi"] = 10
+    claim = {"metadata": {"name": "data-loom-postgres-0", "namespace": "loom-dev", "uid": str(uuid4()),
+        "labels": {"loom.nebius/development-installation": str(identity)}},
+        "spec": {"storageClassName": preflight.config["storage_class"], "resources": {"requests": {"storage": "10Gi"}}},
+        "status": {"phase": "Bound" if allocated_gi else "Pending", "capacity": {"storage": str(allocated_gi) + "Gi"}}}
+    preflight.rows["persistentvolumeclaims"] = [claim]
+    result = await check_installation(preflight, identity)
+    assert result.evidence["pending_storage_mib"] == pending_gi * 1024
+
+
+async def test_resume_storage_quota_includes_foreign_pending_and_future_ordinal_claims(preflight):
+    identity = uuid4()
+    retained_namespace(preflight, identity)
+    preflight.config["postgres_storage_gi"] = 10
+    preflight.rows["persistentvolumeclaims"] = [{
+        "metadata": {"name": "pending", "namespace": "other", "uid": str(uuid4())},
+        "spec": {"resources": {"requests": {"storage": "3Gi"}}}, "status": {"phase": "Pending"}}]
+    other = workload("StatefulSet", name="other-db")
+    other["metadata"]["namespace"] = "other"
+    other["spec"].update(replicas=2, ordinals={"start": 3}, volumeClaimTemplates=[{
+        "metadata": {"name": "data"}, "spec": {"resources": {"requests": {"storage": "2Gi"}}}}])
+    preflight.rows["statefulsets"] = [other]
+    result = await check_installation(preflight, identity)
+    assert result.evidence["pending_storage_mib"] == (10 + 3 + 2 * 2) * 1024
+
+
 async def test_verified_source_and_fresh_resources_produce_readonly_not_installed_evidence(preflight):
     before = copy.deepcopy(preflight.rows)
     result = await check(preflight)
