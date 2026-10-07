@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -169,7 +169,9 @@ async def qualify_development_disk(*, sdk: Any, scope: DevelopmentCloudScope, di
             row = await _read(api["disks"].get, compute.GetDiskRequest(id=disk_id))
             _resource(row, disk_id, scope.compute_project_id)
             created = _timestamp(row["metadata"]["created_at"])
-            _require(_timestamp(claim_created_at) <= created <= _timestamp(volume_created_at))
+            # Kubernetes metav1.Time drops fractional seconds; Nebius retains
+            # them. The PV timestamp denotes the whole second, not its start.
+            _require(_timestamp(claim_created_at) <= created < _timestamp(volume_created_at) + timedelta(seconds=1))
             spec, status = row["spec"], row["status"]
             sizes = [int(spec[key]) * factor for key, factor in (
                 ("size_bytes", 1), ("size_kibibytes", 1024), ("size_mebibytes", 1024**2), ("size_gibibytes", 1024**3)) if key in spec]
