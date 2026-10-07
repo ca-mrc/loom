@@ -41,7 +41,7 @@ def test_canonical_identity_resolves_only_its_own_root_and_operator_home(tmp_pat
 ])
 @pytest.mark.parametrize("consumer", ["validate_operation", "operation_root", "operator_home"])
 def test_every_consumer_refuses_another_namespace(tmp_path, namespace, consumer):
-    with pytest.raises(ValueError, match="^development management operation unqualified$"):
+    with pytest.raises(ValueError, match=r"^development management operation unqualified$"):
         getattr(module(), consumer)(operation(tmp_path) | {"namespace": namespace})
 
 
@@ -63,7 +63,7 @@ def test_every_consumer_refuses_another_namespace(tmp_path, namespace, consumer)
     ("source_sha", "a" * 1025),
 ])
 def test_changed_or_unqualified_identity_is_rejected(tmp_path, field, replacement):
-    with pytest.raises(ValueError, match="^development management operation unqualified$"):
+    with pytest.raises(ValueError, match=r"^development management operation unqualified$"):
         module().validate_operation(operation(tmp_path) | {field: replacement})
 
 
@@ -119,7 +119,7 @@ def test_layout_cannot_retarget_or_alias_other_installation_state(tmp_path, dama
         value["inputs_path"] = str(root) + "/../inputs.json"
     elif damage == "space":
         value["inputs_path"] = str(root / "private input.json")
-    with pytest.raises(ValueError, match="^development management operation unqualified$"):
+    with pytest.raises(ValueError, match=r"^development management operation unqualified$"):
         module().validate_operation(value)
 
 
@@ -131,12 +131,12 @@ def test_symlinked_owner_or_input_paths_fail_without_followup_writes(tmp_path, t
     real = tmp_path / "retained-private-material"
     real.mkdir()
     selected.symlink_to(real, target_is_directory=True)
-    with pytest.raises(ValueError, match="^development management operation unqualified$"):
+    with pytest.raises(ValueError, match=r"^development management operation unqualified$"):
         module().validate_operation(value)
     assert list(real.iterdir()) == []
 
 
 @pytest.mark.parametrize("value", [None, [], {"private-input": "secret-material-marker"}])
 def test_diagnostic_never_contains_private_input(value):
-    with pytest.raises(ValueError, match="^development management operation unqualified$"):
+    with pytest.raises(ValueError, match=r"^development management operation unqualified$"):
         module().validate_operation(value)
