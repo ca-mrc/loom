@@ -131,6 +131,7 @@ def test_release_preparation_is_private_replayable_and_separate_from_renewal_jou
     release = module().prepare_release(raw)
     assert release.parent == root / 'releases'
     assert len(calls) == 4 and '--require-hashes' in calls[1] and '--offline' in calls[2]
+    assert calls[2][1:3] == ['pip', 'install']
     assert module().prepare_release(raw) == release and len(calls) == 4
     assert not (tmp_path / '.loom/nebius-development-management').exists()
     (release / 'development-management-renewal-source.json').write_bytes(b'changed')
