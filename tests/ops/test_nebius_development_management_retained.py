@@ -11,12 +11,16 @@ import pytest
 from tests.ops.test_nebius_development_management_entry import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_management_entry import application_material as application_material
+from tests.ops.test_nebius_development_management_entry import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_management_entry import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_management_entry import cloud as cloud
 from tests.ops.test_nebius_development_management_entry import installation as installation
 from tests.ops.test_nebius_development_management_entry import inventory as inventory
-from tests.ops.test_nebius_development_management_entry import management_inputs as management_inputs
+from tests.ops.test_nebius_development_management_entry import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_development_management_entry import manager_entry as manager_entry
 from tests.ops.test_nebius_development_management_entry import material as material
 from tests.ops.test_nebius_development_management_entry import platform_inputs as platform_inputs
