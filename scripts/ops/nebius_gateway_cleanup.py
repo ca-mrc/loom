@@ -24,7 +24,9 @@ from uuid import UUID
 
 SINGLE_SCOPES = ('upgrade', 'retirement', 'retirement-diagnostic', 'retirement-recovery')
 MULTI_SCOPES = ('refresh', 'pool-cutover', 'pool-repair')
-MAX_ENTRIES = 250_000
+# Retained multi-scope tooling can exceed 800k entries; keep a finite inventory
+# budget with growth headroom and the independent four-minute deadline below.
+MAX_ENTRIES = 2_000_000
 MAX_SCOPES = 256
 MAX_SECONDS = 240
 CACHE_NAME = re.compile(r'(.+)\.cpython-[0-9]+[a-z]*(?:\.opt-[0-9]+)?\.pyc\Z')

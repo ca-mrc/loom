@@ -1046,7 +1046,7 @@ an operation starting during maintenance may receive the existing busy-lock
 failure and require a normal retry. Do not run operations outside their protected
 entrypoints while maintenance is enabled. Report-only may create absent empty
 tooling lock files but removes no files. The pass is bounded to 256 scopes,
-250,000 scanned entries and four minutes, with a five-minute service timeout.
+2,000,000 scanned entries and four minutes, with a five-minute service timeout.
 If the inventory exceeds either bound, the entire pass blocks before deletion;
 repeating it against the same oversized tree makes no cleanup progress. This
 version has no incremental scan cursor. Escalate that report for a sized,

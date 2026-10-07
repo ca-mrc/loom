@@ -259,6 +259,26 @@ def test_scan_bound_refuses_partial_inventory(root, monkeypatch):
     assert cache.exists()
 
 
+def test_late_inventory_limit_preserves_already_qualified_candidates(root, monkeypatch):
+    _, first = release(root, digest='a')
+    _, second = release(root, digest='b')
+    module = cleaner()
+    candidates = module._candidates
+
+    def oversized_later_release(selected, cutoff, scan):
+        if selected.name == 'b' * 64:
+            # Model a dependency tree exceeding the remaining scan budget after
+            # the previous release has already supplied an eligible real cache.
+            scan.tick(module.MAX_ENTRIES)
+        return candidates(selected, cutoff, scan)
+
+    monkeypatch.setattr(module, '_candidates', oversized_later_release)
+    report = module.clean(root, apply=True)
+    assert report['status'] == 'blocked' and report['stage'] == 'inventory'
+    assert report['deleted_files'] == 0
+    assert first.exists() and second.exists()
+
+
 def test_cache_can_be_regenerated_by_an_ordinary_import(root):
     selected, original = release(root)
     original.unlink()
