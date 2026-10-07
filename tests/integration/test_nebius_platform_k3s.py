@@ -133,13 +133,21 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
         container.stop()
 
 
-def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path) -> None:
+def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path, platform_inputs) -> None:
     """Exercise the actual HTTPS adapter, generated keys and recovery journal."""
     from scripts.ops.nebius_development_bootstrap import (
         DevelopmentBootstrapBinding,
         HTTPSDevelopmentBootstrapAPI,
         bootstrap_development,
     )
+    from scripts.ops.nebius_development_stage import (
+        DevelopmentResourceBinding,
+        DevelopmentStageInput,
+        HTTPSDevelopmentStageAPI,
+        development_documents,
+        stage_development_resources,
+    )
+    from scripts.ops.nebius_management_stage import _qualified_defaulted
 
     container = _start_k3s()
     try:
@@ -168,6 +176,36 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
         }
         assert {row.metadata.name: row.metadata.uid for row in secrets} == first["secret_uids"]
         assert all(row.immutable for row in secrets)
+        assert not core.list_namespaced_pod("loom-dev").items
+        assert not core.list_namespaced_persistent_volume_claim("loom-dev").items
+        import json
+
+        local = json.loads(journal)
+        resource_binding = DevelopmentResourceBinding(binding, first["namespace_uid"], local["operation_id"])
+        config, candidate, profile = deepcopy(platform_inputs)
+        config.update(namespace="loom-dev", execution_namespace="loom-nebius-dev-execution",
+                      db_tls_secret_name=binding.tls_secret_name)
+        candidate["source_ref"] = "refs/heads/dev"
+        selection = DevelopmentStageInput(config, candidate, profile, {}, {
+            "access-key": "test-dev-access", "secret-key": "test-dev-secret",
+            "source-access-key": "test-source-access", "source-secret-key": "test-source-secret",
+        })
+        for phase in ("config", "supplied", "database", "migration", "services"):
+            with HTTPSDevelopmentStageAPI(binding=resource_binding, selection=selection, phase=phase,
+                    api_server=configuration.host, ssl_context=trust) as api:
+                if phase in {"config", "supplied"}:
+                    result = stage_development_resources(selection=selection, binding=resource_binding,
+                        phase=phase, api=api, state_dir=tmp_path / phase)
+                    assert stage_development_resources(selection=selection, binding=resource_binding,
+                        phase=phase, api=api, state_dir=tmp_path / phase) == result
+                else:
+                    # Server defaults and admission without running fixture images
+                    # or creating a disk. Scope still comes from the real renderer.
+                    _, documents = development_documents(selection, resource_binding, phase)
+                    for doc in documents.values():
+                        doc["metadata"].setdefault("annotations", {})["loom.nebius/development-stage-operation"] = str(uuid4())
+                        _qualified_defaulted(doc, api.default_resource(doc))
+        assert len(core.list_namespaced_secret("loom-dev").items) == 5
         assert not core.list_namespaced_pod("loom-dev").items
         assert not core.list_namespaced_persistent_volume_claim("loom-dev").items
     finally:

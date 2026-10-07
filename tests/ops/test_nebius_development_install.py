@@ -215,3 +215,23 @@ def test_competing_installer_anchor_cannot_overwrite_successful_journal(inputs, 
     assert (tmp_path / "state/installation.json").read_bytes() == winner
     assert module().install_private_development(request=request, api=api,
         state_dir=tmp_path / "state", anchor_dir=tmp_path / "competitor")["phase"] == "storage"
+
+
+def test_final_dependency_probe_cannot_hide_changed_earlier_phase(inputs, tmp_path):
+    request, api = setup(inputs)
+    install(request, api, tmp_path)
+    storage_ready(api, request.selection)
+    workloads_ready(api, "StatefulSet")
+    install(request, api, tmp_path)
+    workloads_ready(api, "Job")
+    install(request, api, tmp_path)
+    workloads_ready(api, "Deployment")
+
+    def concurrent_change(request, binding, material_state):
+        api.stage.resources["ConfigMap:loom-platform-config"]["data"]["environment.json"] = "{}"
+
+    api.verify_private_dependencies = concurrent_change
+    before = copy.deepcopy((api.bootstrap.creates, api.stage.creates))
+    with pytest.raises(module().DevelopmentInstallError):
+        install(request, api, tmp_path)
+    assert (api.bootstrap.creates, api.stage.creates) == before
