@@ -21,6 +21,7 @@ from scripts.ops.nebius_application_setup import (
     _revision,
     application_setup_ready,
 )
+from scripts.ops.nebius_development_live import _private
 from scripts.ops.nebius_development_management_install import (
     _APPLICATION_PHASES,
     DevelopmentManagementRequest,
@@ -30,6 +31,7 @@ from scripts.ops.nebius_development_management_install import (
 from scripts.ops.nebius_development_management_tls import HTTPSManagementTLSAPI
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
+from scripts.ops.nebius_management_bootstrap import HTTPSBootstrapAPI
 from scripts.ops.nebius_management_install import ManagementInstallError
 from scripts.ops.nebius_management_live import (
     HTTPSManagementInstallationAPI,
@@ -51,7 +53,8 @@ class HTTPSDevelopmentManagementAPI(HTTPSManagementInstallationAPI):
     _public_runtime: Literal['legacy', 'applications'] = 'applications'
 
     def __init__(self, *, request: DevelopmentManagementRequest, api_server: str, ssl_context: ssl.SSLContext,
-                 runtime_ca_pem: str | None, checks: DevelopmentManagementPrerequisites, token: str | None = None):
+                 runtime_ca_pem: str | None, checks: DevelopmentManagementPrerequisites, token: str | None = None,
+                 private_files: dict[Path, bytes] | None = None):
         # Do not invoke the legacy constructor: its renderer requires the legacy
         # provisioner. Only common fixed phase/evidence methods are inherited.
         self.request, self.development_request = request, request
@@ -62,6 +65,22 @@ class HTTPSDevelopmentManagementAPI(HTTPSManagementInstallationAPI):
         self.diagnostic_stage = None
         self.api_server, self.ssl_context, self.token = api_server, ssl_context, token
         self.runtime_trust = ssl.create_default_context(cadata=runtime_ca_pem)
+        self.private_files = dict(private_files or {})
+
+    def _private_inputs(self) -> None:
+        try:
+            if any(_private(path) != raw for path, raw in self.private_files.items()):
+                raise ValueError()
+        except Exception:
+            raise ManagementInstallError('development management private input changed') from None
+
+    def bootstrap_api(self) -> HTTPSBootstrapAPI:
+        self._private_inputs()
+        return super().bootstrap_api()
+
+    def _binding(self, binding: ManagementBinding) -> None:
+        self._private_inputs()
+        super()._binding(binding)
 
     def resources(self, binding: ManagementBinding, phase: str) -> HTTPSManagementStageAPI:
         self._binding(binding)

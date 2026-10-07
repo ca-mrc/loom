@@ -163,3 +163,44 @@ def test_entry_drives_real_installation_and_rejects_changed_identity_on_resume(m
     assert module.main(path, 'install') == 1
     assert json.loads(capsys.readouterr().out)['status'] == 'blocked'
     assert len(api.store.creates) == writes
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_connection_uses_concrete_dev_api_and_rechecks_files_after_exchange(manager_entry, monkeypatch, changed):
+    import ssl
+
+    import certifi
+    from scripts.ops import nebius_development_management_entry as module
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    operation, payload, _, _ = manager_entry
+    Path(payload['operator_connection']['ca_file']).write_bytes(Path(certifi.where()).read_bytes())
+    inputs, request, files = module.load_inputs(operation)
+    password = Path(payload['application_files']['manager_password'])
+    async def exchange(connection):
+        assert connection == inputs.operator_connection
+        if changed:
+            password.write_text('changed-at-exchange')
+        return ssl.create_default_context(), 'short-lived-operator-token'
+    # Token exchange is separately covered by the reused transport tests. Keep
+    # the concrete prerequisites and live API composition below it real.
+    monkeypatch.setattr(module, '_transport', exchange)
+    if changed:
+        with pytest.raises(ValueError, match='connection inputs changed'):
+            with module.connected_api(inputs, request, files):
+                pytest.fail('changed inputs yielded a live API')
+    else:
+        with module.connected_api(inputs, request, files) as api:
+            assert api.development_checks.settings == inputs.prerequisites
+            assert api.development_request == request and api.runtime_trust.get_ca_certs()
+            password.write_text('changed-after-exchange')
+            with pytest.raises(ManagementInstallError, match='private input changed'):
+                api.bootstrap_api()
+
+
+def test_unknown_entry_action_never_reads_material(monkeypatch, capsys):
+    from scripts.ops import nebius_development_management_entry as module
+
+    monkeypatch.setattr(module, '_private', lambda *args: pytest.fail('private input read'))
+    assert module.main('/unused', 'recover-staging') == 1
+    assert json.loads(capsys.readouterr().out) == {'status': 'blocked', 'stage': 'operation'}
