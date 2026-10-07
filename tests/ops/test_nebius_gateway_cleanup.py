@@ -6,6 +6,7 @@ import importlib
 import json
 import os
 import py_compile
+import shlex
 import subprocess
 import sys
 import time
@@ -327,13 +328,12 @@ def test_second_cleaner_cannot_enter_while_first_deletes(root, tmp_path, monkeyp
     assert not cache.exists()
 
 
-def test_daily_user_service_reads_the_operator_configuration():
+def test_daily_user_service_uses_defaults_without_requiring_a_configuration_file():
     directory = SCRIPT.parents[2] / 'deploy/systemd'
     service = configparser.ConfigParser(interpolation=None)
     assert service.read(directory / 'loom-nebius-gateway-cleanup.service')
     command = service['Service']['ExecStart']
-    assert command == ('/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py '
-        '--config %h/.config/loom/gateway-cleanup.toml')
+    assert command == '/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py'
     assert service['Service']['UMask'] == '0077'
     timer = configparser.ConfigParser(interpolation=None)
     assert timer.read(directory / 'loom-nebius-gateway-cleanup.timer')
@@ -480,3 +480,35 @@ def test_home_root_with_repeated_slashes_remains_below_home(tmp_path, monkeypatc
     monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
     config = private(tmp_path / 'cleanup.toml', ('root = ' + json.dumps(root_value)).encode())
     assert module.load_settings(config, required=True).root == tmp_path / '.loom/nebius-management'
+
+
+def test_shipped_service_command_cleans_without_personal_configuration(tmp_path, monkeypatch, capsys):
+    module = cleaner()
+    root = tmp_path / '.loom/nebius-management'
+    _, cache = release(root)
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    service = configparser.ConfigParser(interpolation=None)
+    service.read(SCRIPT.parents[2] / 'deploy/systemd/loom-nebius-gateway-cleanup.service')
+    command = shlex.split(service['Service']['ExecStart'].replace('%h', str(tmp_path)))
+    monkeypatch.setattr(sys, 'argv', command[3:])
+    assert module.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'cleaned' and report['deleted_files'] == 1
+    assert not cache.exists() and not module.default_config().exists()
+
+
+def test_default_service_honors_optional_overrides_without_command_changes(tmp_path, monkeypatch, capsys):
+    module = cleaner()
+    root = tmp_path / '.loom/nebius-management'
+    _, cache = release(root)
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    service = configparser.ConfigParser(interpolation=None)
+    service.read(SCRIPT.parents[2] / 'deploy/systemd/loom-nebius-gateway-cleanup.service')
+    command = shlex.split(service['Service']['ExecStart'].replace('%h', str(tmp_path)))
+    monkeypatch.setattr(sys, 'argv', command[3:])
+    settings = private(module.default_config(), b'mode = "report"\n')
+    assert module.main() == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'reported' and cache.exists()
+    settings.write_text('enabled = false\n')
+    assert module.main() == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'disabled' and cache.exists()
