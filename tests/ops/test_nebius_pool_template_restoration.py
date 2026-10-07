@@ -43,7 +43,9 @@ class TemplateAPI(GatewayAPI):
         assert before == self.startup.documents[key]
         return copy.deepcopy(desired)
 
-    def restore_legacy_template(self, key, before, desired):
+    def restore_legacy_template(self, key, before, desired, *, record_intent):
+        before = self.read_workload(key)
+        record_intent(before)
         assert json.loads((self.state / 'template-restoration.json').read_bytes())['workloads'][key] == {
             'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         assert self.machine_phase == 'revoked' and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}

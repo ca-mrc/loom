@@ -76,7 +76,13 @@ OPTIONAL_TELEMETRY_STAGES = frozenset({
     'tls_kubelet', 'kubelet_authorization', 'kubelet_network', 'kubelet_http', 'counters',
     *(f'tls_kubelet_verify_{code}' for code in range(256)),
 })
-DIAGNOSTIC_STAGES = frozenset({"operation", "connection", "render", "cluster_identity", "prerequisites",
+TOOLING_PREPARATION_STAGES = frozenset({
+    'tooling_lock', 'tooling_retained_incomplete', 'tooling_retained_integrity', 'tooling_release_limit',
+    'tooling_extract', 'tooling_venv', 'tooling_dependency_sync', 'tooling_wheel_install',
+    'tooling_import_qualification', 'tooling_completion',
+})
+DIAGNOSTIC_STAGES = frozenset({*TOOLING_PREPARATION_STAGES,
+    "operation", "connection", "render", "cluster_identity", "prerequisites",
     "foundation", "resource_inventory", "platform_capacity", "storage_class", "persistent_storage",
     "publication", "cloud_identity", "provider_quota", "backup_access", "public_route",
     "recovery", "runtime_authority", "public_authentication", "backup_execution", "backup_object",
@@ -116,6 +122,16 @@ _ENTRY = "import sys; sys.path.insert(0, sys.argv[1]); from scripts.ops.nebius_m
 
 class GatewayError(RuntimeError):
     """Payload-free failure; preserve credentials, installed resources and state."""
+
+
+class ToolingPreparationError(GatewayError):
+    """Only the failed preparation boundary may leave the private gateway."""
+
+    def __init__(self, stage: str):
+        if stage not in TOOLING_PREPARATION_STAGES:
+            raise GatewayError('invalid management tooling diagnostic')
+        self.stage = stage
+        super().__init__('management tooling incomplete; retain private state')
 
 
 def validate_operation(value: dict[str, Any]) -> None:
@@ -229,13 +245,14 @@ def unpack_bundle(content: bytes) -> tuple[dict[str, bytes], dict[str, Any]]:
 def command(release: Path, action: str) -> list[str]:
     if action not in {"qualify", "preflight", "install", "rollback"}:
         raise GatewayError("management action outside fixed authority")
-    return [str(release / "venv/bin/python"), "-I", "-c", _ENTRY,
+    return [str(release / "venv/bin/python"), "-I", "-B", "-c", _ENTRY,
             str(release), str(release / "operation.json"), action]
 
 
 def prepare_release(content: bytes) -> Path:
     files, operation = unpack_bundle(content)
     root = Path(operation["state_dir"]).parent
+    stage = 'tooling_lock'
     try:
         _directory(root)
         lock_path = root / "tooling.lock"
@@ -247,33 +264,42 @@ def prepare_release(content: bytes) -> Path:
             _directory(releases)
             release = releases / hashlib.sha256(content).hexdigest()
             if release.exists() or release.is_symlink():
+                stage = 'tooling_retained_incomplete'
                 _directory(release)
                 if _read(release / "complete", 64) != b"complete":
                     raise ValueError()
+                stage = 'tooling_retained_integrity'
                 for name, expected in files.items():
                     if _read(release / name, LIMITS.get(name, MAX_WHEEL)) != expected:
                         raise ValueError()
                 return release
+            stage = 'tooling_release_limit'
             if sum(1 for _ in releases.iterdir()) >= 8:
                 raise ValueError()
+            stage = 'tooling_extract'
             for path in (release, release / "scripts", release / "scripts/ops", release / "wheels",
                          release / "deploy", release / "deploy/k8s"):
                 _directory(path)
             for name, value in files.items():
                 _write(release / name, value, executable=name == "uv")
             uv, python = str(release / "uv"), str(release / "venv/bin/python")
+            stage = 'tooling_venv'
             run_private([uv, "venv", "--no-config", "--no-cache", "--no-python-downloads",
                          "--python", "/usr/bin/python3", str(release / "venv")], timeout=90)
+            stage = 'tooling_dependency_sync'
             run_private([uv, "pip", "sync", "--no-config", "--no-cache", "--python", python,
                          "--require-hashes", "--only-binary", ":all:", "--index-url", "https://pypi.org/simple",
                          str(release / "requirements.txt")], timeout=600)
+            stage = 'tooling_wheel_install'
             run_private([uv, "pip", "install", "--no-config", "--no-cache", "--python", python,
                          "--offline", "--no-deps", *sorted(str(release / name) for name in files if name.startswith("wheels/"))], timeout=90)
+            stage = 'tooling_import_qualification'
             run_private(command(release, "qualify"), timeout=60)
+            stage = 'tooling_completion'
             _write(release / "complete", b"complete")
             return release
     except Exception:
-        raise GatewayError("management tooling incomplete; retain private state") from None
+        raise ToolingPreparationError(stage) from None
 
 
 def validate_startup_report(value: dict[str, Any]) -> dict[str, Any]:
@@ -532,8 +558,17 @@ def authorized_main(expected_sha256: str) -> int:
     try:
         _, operation = unpack_bundle(content)
         validate_action(action, operation)
-        release = prepare_release(content)
-        report = safe_report(run_private(command(release, action), timeout=1800), operation)
+        try:
+            release = prepare_release(content)
+        except ToolingPreparationError as error:
+            # A validated, exact-bundle failure is a protocol response, not
+            # installation success. Never dispatch an incompletely prepared tool.
+            failure = {'status': 'blocked', 'stage': error.stage,
+                **{key: operation[key] for key in ('source_sha', 'candidate', 'installation_id',
+                    'namespace', 'operation_id', 'original_operation_id') if key in operation}}
+            report = safe_report(json.dumps(failure).encode(), operation)
+        else:
+            report = safe_report(run_private(command(release, action), timeout=1800), operation)
         if report["status"] != "blocked" and (action == "preflight") != (report["status"] == "preflight_qualified"):
             raise ValueError()
         if action == 'rollback' and report['status'] == 'pool_cutover_completed' and report['outcome'] != 'legacy':

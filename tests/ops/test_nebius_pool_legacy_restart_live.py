@@ -10,7 +10,7 @@ import pytest
 from scripts.ops.nebius_ingress_stage import _key
 from scripts.ops.nebius_management_switch import _stable
 from tests.ops.test_nebius_pool_gateway_retirement import GatewayAPI, gateway_retire
-from tests.ops.test_nebius_pool_legacy_restart import RestartAPI, restart
+from tests.ops.test_nebius_pool_legacy_restart import RestartAPI, restart, roles_restored
 from tests.ops.test_nebius_pool_role_restoration import RoleAPI, restore_roles
 from tests.ops.test_nebius_pool_role_restoration_live import activation_http as activation_http
 from tests.ops.test_nebius_pool_role_restoration_live import closed_startup as closed_startup
@@ -29,7 +29,99 @@ from tests.ops.test_nebius_pool_role_restoration_live import startup_http as sta
 from tests.ops.test_nebius_pool_role_restoration_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
 )
-from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, restore
+from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, gateway_retired, restore
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize('phase', ['template', 'restart'])
+@pytest.mark.parametrize('damage', [None, 'uid', 'metadata', 'spec'])
+def test_recovery_cas_uses_final_controller_version_after_qualification(closed_startup, monkeypatch, phase, damage):
+    from scripts.ops import nebius_pool_activation_live as live
+    from scripts.ops.nebius_pool_startup import closed_startup_documents
+
+    api = gateway_retired(closed_startup) if phase == 'template' else roles_restored(closed_startup)
+    journal_name = 'template-restoration.json' if phase == 'template' else 'legacy-restart.json'
+    qualify_name = 'qualify_template_restoration' if phase == 'template' else 'qualify_legacy_restart'
+    patch_method = getattr(live.HTTPSPoolActivationAPI, '_legacy_' + phase + '_patch')
+    writes = []
+
+    def respond(message):
+        kind = 'CronJob' if '/cronjobs/' in message.url.path else 'Deployment'
+        key = kind + ':' + message.url.path.split('/')[-3] + ':' + message.url.path.split('/')[-1]
+        current = api.startup.documents[key]
+        patches = json.loads(message.content)
+        version = next(row['value'] for row in patches if row['path'] == '/metadata/resourceVersion')
+        if version != current['metadata']['resourceVersion']:
+            return httpx.Response(422, json={'apiVersion': 'v1', 'kind': 'Status',
+                'status': 'Failure', 'code': 422, 'reason': 'Invalid'})
+        assert patches[:4] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+            {'op': 'test', 'path': '/metadata', 'value': current['metadata']},
+            {'op': 'test', 'path': '/spec', 'value': current['spec']}]
+        desired = copy.deepcopy(current)
+        if phase == 'template':
+            desired['spec'] = patches[-1]['value']
+        else:
+            desired['spec'][patches[-1]['path'].split('/')[-1]] = patches[-1]['value']
+        if not message.url.params:
+            journal = json.loads((api.state / journal_name).read_bytes())
+            assert journal['workloads'][key] == {'phase': 'intent', 'before_resource_version': version}
+            writes.append(key)
+            desired['metadata']['resourceVersion'] = str(int(version) + 1)
+            api.startup.documents[key] = desired
+        return httpx.Response(200, json=desired)
+
+    with httpx.Client(base_url='https://kubernetes.invalid', transport=httpx.MockTransport(respond)) as client:
+        closed, _ = closed_startup_documents(api.request, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
+        adapter = SimpleNamespace(request=api.request, state=api.state, anchor=api.root / 'cutover-anchor',
+            closed=closed,
+            parent=SimpleNamespace(client=client), _scope=lambda: None,
+            _path=lambda key: '/apis/' + ('batch/v1' if key.startswith('CronJob:') else 'apps/v1')
+                + '/namespaces/' + key.split(':')[1] + '/' + ('cronjobs' if key.startswith('CronJob:') else 'deployments')
+                + '/' + key.split(':')[2],
+            **{name: getattr(api, name) for name in ('read_workload', 'verify_retained', 'recovery_drained',
+                'pool_state', 'machine_authority', 'guard_state', 'qualify_legacy_roles',
+                'qualify_gateway_readonly', 'qualify_gateway_retired', 'successor_drained') if hasattr(api, name)})
+        qualify = getattr(live, qualify_name)
+        active, qualifications = [], []
+
+        def slow_qualification(*args, **kwargs):
+            result = qualify(*args, **kwargs)
+            qualifications.append(active[-1])
+            # Real controllers may update status during the ledger/inventory
+            # checks without changing any UID, stable metadata or spec.
+            for current in api.startup.documents.values():
+                current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+            if damage is not None and len(qualifications) == 2:
+                current = api.startup.documents[active[-1]]
+                if damage == 'uid':
+                    current['metadata']['uid'] = 'foreign-controller'
+                elif damage == 'metadata':
+                    current['metadata'].setdefault('annotations', {})['foreign'] = 'changed'
+                else:
+                    current['spec']['foreign'] = 'changed'
+            return result
+
+        def preview(key, before, desired):
+            active.append(key)
+            return copy.deepcopy(desired) if patch_method(adapter, key, before, desired, preview=True) else None
+
+        monkeypatch.setattr(live, qualify_name, slow_qualification)
+        monkeypatch.setattr(api, 'preview_legacy_' + phase, preview)
+        monkeypatch.setattr(api, 'restore_legacy_template' if phase == 'template' else 'restart_legacy_workload',
+            lambda key, before, desired, **kwargs: patch_method(adapter, key, before, desired, preview=False, **kwargs))
+        if damage is not None:
+            with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
+                restore(closed_startup, api) if phase == 'template' else restart(api)
+            assert len(qualifications) == 2 and not writes
+            journal = json.loads((api.state / journal_name).read_bytes())
+            assert journal['workloads'][active[-1]] == {'phase': 'prepared', 'before_resource_version': None}
+            return
+        result = restore(closed_startup, api) if phase == 'template' else restart(api)
+        assert result['status'] == ('pool_legacy_templates_restored_closed' if phase == 'template'
+            else 'pool_legacy_restart_staged_closed')
+        assert writes and len(writes) == len(set(writes))
 
 
 @pytest.mark.timeout(600)
@@ -109,17 +201,26 @@ def test_legacy_restart_transport_keeps_intent_after_lost_reply_and_qualifies_ru
             api.restart_legacy_workload(key, before, desired)
         assert api.preview_legacy_restart(key, before, desired) == desired
         assert previews == [key] and not writes
+        def record_intent(fresh):
+            assert fresh == before and json.loads(journal.read_bytes()) == prepared
+            journal.write_bytes(intent)
+
+        # An uncertain attempt may only be observed, never reissued or rebound.
         journal.write_bytes(intent)
+        with pytest.raises(ValueError):
+            api.restart_legacy_workload(key, before, desired, record_intent=record_intent)
+        assert not writes and journal.read_bytes() == intent
+        journal.write_text(json.dumps(prepared))
         widened = copy.deepcopy(desired)
         widened['spec']['replicas'] = 2
         with pytest.raises(ValueError):
-            api.restart_legacy_workload(key, before, widened)
+            api.restart_legacy_workload(key, before, widened, record_intent=record_intent)
         state.machine_phase = 'active'
         with pytest.raises(ValueError):
-            api.restart_legacy_workload(key, before, desired)
+            api.restart_legacy_workload(key, before, desired, record_intent=record_intent)
         state.machine_phase = 'revoked'
         with pytest.raises(ValueError) as error:
-            api.restart_legacy_workload(key, before, desired)
+            api.restart_legacy_workload(key, before, desired, record_intent=record_intent)
         assert 'private-' not in str(error.value) and writes == [key]
         api.verify_retained()
         assert _stable(api.read_workload(key)) == desired

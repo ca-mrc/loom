@@ -50,11 +50,13 @@ def qualify_machine_retirement_drain(request: PoolCutoverRequest, api: PoolShutd
     targets, _, _ = _machine_record(request, state=state, anchor=anchor)
 
     def journals() -> bool:
+        drained = api.recovery_drained()
+        # Detect authority drift during the ledger reads before this boundary
+        # can permit retirement; the drain reader itself only proves quiescence.
         api.verify_retained()
         if (api.pool_state() != 'fenced' or any(api.guard_state(str(row.participant_id)) != 'fenced'
                 for row in request.fencing.retirement.migration.guards)):
             raise ValueError
-        drained = api.recovery_drained()
         if type(drained) is not bool:
             raise ValueError
         return drained

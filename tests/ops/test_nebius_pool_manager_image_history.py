@@ -969,11 +969,15 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
 
         client = httpx.Client(base_url="https://kubernetes.invalid", transport=httpx.MockTransport(respond))
         request.addfinalizer(client.close)
-        closed, _ = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
-        adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
+        closed, targets = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
+        adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed, targets=targets,
             parent=SimpleNamespace(client=client), _scope=lambda: None,
             _path=lambda key: "/deployments/loom-service", recovery_drained=api.recovery_drained,
-            read_workload=remote.read_workload)
+            read_workload=remote.read_workload, verify_retained=api.verify_retained,
+            pool_state=api.pool_state, guard_state=api.guard_state)
+        # Keep the real journal/fence reader: the stop adapter now independently
+        # qualifies both the retained fence and authority before its actual CAS.
+        adapter._recovery_fence = HTTPSPoolActivationAPI._recovery_fence.__get__(adapter)
         monkeypatch.setattr(api, "stop_workload", lambda key, before, desired, **kwargs:
             HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=False, **kwargs))
         monkeypatch.setattr(api, "preview_stop", lambda key, before, desired: copy.deepcopy(desired)

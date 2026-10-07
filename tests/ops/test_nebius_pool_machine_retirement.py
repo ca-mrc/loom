@@ -54,6 +54,30 @@ def retire(fixture, api):
     return retire_pool_machines(request=request, api=api, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
 
 
+def test_machine_boundary_rejects_authority_drift_during_final_drain(closed_startup, monkeypatch):
+    from scripts.ops.nebius_pool_machine_retirement import qualify_machine_retirement_drain
+
+    api = stopped(closed_startup)
+    original = api.verify_retained
+    drains = 0
+
+    def drain():
+        nonlocal drains
+        drains += 1
+        return True
+
+    def verify():
+        if drains == 2:
+            raise ValueError('authority changed during final ledger read')
+        return original()
+
+    monkeypatch.setattr(api, 'recovery_drained', drain)
+    monkeypatch.setattr(api, 'verify_retained', verify)
+    with pytest.raises(ValueError):
+        qualify_machine_retirement_drain(api.request, api, state=api.state, anchor=api.root / 'cutover-anchor')
+    assert drains == 2 and not api.machine_calls
+
+
 @pytest.mark.parametrize('failure', [None, 'before', 'after'])
 def test_retirement_is_anchored_once_and_unknown_replies_only_observe(closed_startup, failure):
     api = stopped(closed_startup)

@@ -115,17 +115,26 @@ def test_fixed_template_patch_uses_intent_and_keeps_unobserved_generation_undrai
             api.restore_legacy_template(key, before, desired)
         assert api.preview_legacy_template(key, before, desired) == desired
         assert previews == [key] and not writes
+        def record_intent(fresh):
+            assert fresh == before and json.loads(journal.read_bytes()) == prepared
+            journal.write_bytes(intent)
+
+        # An uncertain attempt may only be observed, never reissued or rebound.
         journal.write_bytes(intent)
+        with pytest.raises(ValueError):
+            api.restore_legacy_template(key, before, desired, record_intent=record_intent)
+        assert not writes and journal.read_bytes() == intent
+        journal.write_text(json.dumps(prepared))
         broadened = copy.deepcopy(desired)
         broadened['spec']['replicas'] = 1
         with pytest.raises(ValueError):
-            api.restore_legacy_template(key, before, broadened)
+            api.restore_legacy_template(key, before, broadened, record_intent=record_intent)
         state.machine_phase = 'active'
         with pytest.raises(ValueError):
-            api.restore_legacy_template(key, before, desired)
+            api.restore_legacy_template(key, before, desired, record_intent=record_intent)
         state.machine_phase = 'revoked'
         with pytest.raises(ValueError) as error:
-            api.restore_legacy_template(key, before, desired)
+            api.restore_legacy_template(key, before, desired, record_intent=record_intent)
         assert 'private-' not in str(error.value) and writes == [key]
         actual = api.read_workload(key)
         assert _stable(actual) == desired and actual['spec']['replicas'] == 0
