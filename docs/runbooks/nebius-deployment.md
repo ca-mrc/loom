@@ -81,6 +81,27 @@ of spare capacity. A dev-only protected bootstrap and connection to the single
 shared admission authority must be qualified before installation or task tests.
 Do not repoint the existing protected staging rollout or ingress to achieve this.
 
+The separate `loom.nebius_development_foundation.render_development_foundation`
+function prepares a private, non-executing bootstrap offline. Its only namespace
+is `loom-dev`; PostgreSQL, migrations and internal API/control-plane/gateway/web
+services reuse the existing templates. It emits no public load balancer/Ingress,
+backup job, task workers or execution credentials. API background workers,
+control-plane scheduling and materialization are disabled, and no task runtime
+profile or execution catalog is installed. Published candidate image identities
+are retained; an image's task capabilities do not activate those capabilities.
+
+This partial bundle cannot be passed to `deploy_nebius_platform.py`. It still
+needs a protected fresh-dev installer that verifies the exact CI-approved
+candidate, namespace/database ownership, independently delivered credentials and
+system-node headroom. That candidate's service image must include the new
+`development-database` phase; older published images cannot run this bootstrap.
+The returned `platform_envelope` includes the requested DB
+PVC, migration and rolling-update headroom; rendering it does not reserve capacity.
+The `development-database` bootstrap phase creates only the three service roles
+and no worker tokens. It is not a cleanup or rollback tool for an existing stack.
+There is no public owner access or installed task acceptance until dev-only
+ingress/management and the single shared-pool connection are separately qualified.
+
 #### Owner commands
 
 Use the verified management HTTPS origin and an ordinary owner **user session**

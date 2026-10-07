@@ -21,11 +21,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("mode", ["standalone", "management", "application"])
+@pytest.mark.parametrize("mode", ["standalone", "management", "application", "development-foundation"])
 def test_complete_platform_resources_and_pods_pass_server_admission(
     request: pytest.FixtureRequest, tmp_path: Path, mode: str,
 ) -> None:
-    if mode == "application":
+    if mode == "development-foundation":
+        from loom.nebius_development_foundation import render_development_foundation
+
+        config, candidate, profile = deepcopy(request.getfixturevalue("platform_inputs"))
+        config.update(namespace="loom-dev", execution_namespace="loom-nebius-dev-execution")
+        candidate["source_ref"] = "refs/heads/dev"
+        files = render_development_foundation(config, candidate, profile, {},
+            repo_root=Path(__file__).resolve().parents[2]).files
+    elif mode == "application":
         from loom.nebius_application_render import render_application
         from tests.unit.test_nebius_application_render import inputs
 

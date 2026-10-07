@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 
 import pytest
 
@@ -50,6 +51,10 @@ def test_private_bootstrap_has_only_dev_system_objects(development_inputs, stora
                 pod = doc["spec"]["template"]["spec"]
                 assert pod["automountServiceAccountToken"] is False
                 assert len(pod["containers"]) == 1
+                volumes = {volume["name"] for volume in pod.get("volumes", [])}
+                volumes.update(claim["metadata"]["name"] for claim in doc["spec"].get("volumeClaimTemplates", []))
+                for container in pod.get("initContainers", []) + pod["containers"]:
+                    assert {mount["name"] for mount in container.get("volumeMounts", [])} <= volumes
     assert {doc["metadata"]["name"] for doc in result.files["40-services.yaml"]
             if doc["kind"] == "Deployment"} == {
         "loom-service", "loom-control-plane", "loom-llm-gateway", "loom-web",
@@ -79,6 +84,7 @@ def test_private_bootstrap_has_no_execution_config_or_worker_credentials(develop
         key for keys in required.values() for key in keys
     }
     migration, = result.files["30-migrate.yaml"]
+    assert not migration["spec"]["template"]["spec"].get("initContainers")
     container, = migration["spec"]["template"]["spec"]["containers"]
     assert container["command"] == ["python", "-m", "loom.nebius_platform_bootstrap", "development-database"]
     assert {row["name"] for row in container["env"]} == {
@@ -90,30 +96,38 @@ def test_private_bootstrap_has_no_execution_config_or_worker_credentials(develop
 def test_private_runtime_settings_do_not_start_work(development_inputs, monkeypatch):
     from loom_control_plane.app import create_app as cp_app
     from loom_control_plane.config import ControlPlaneSettings
+    from loom_llm_gateway.app import create_app as gateway_app
+    from loom_llm_gateway.config import GatewaySettings
     from loom_service.app import create_app as service_app
     from loom_service.config import LoomServiceSettings
 
     result = render(development_inputs)
     for name, model, factory in (("loom-service", LoomServiceSettings, service_app),
-                                 ("loom-control-plane", ControlPlaneSettings, cp_app)):
+                                 ("loom-control-plane", ControlPlaneSettings, cp_app),
+                                 ("loom-llm-gateway", GatewaySettings, gateway_app)):
         container, = named(result, "Deployment", name)["spec"]["template"]["spec"]["containers"]
         with monkeypatch.context() as scoped:
+            for variable in tuple(os.environ):
+                if variable.startswith(("LOOM_SVC_", "LOOM_CP_", "LOOM_GW_")):
+                    scoped.delenv(variable)
             for row in container["env"]:
                 value = row.get("value", "test-secret-" + "x" * 32)
                 if row["name"].endswith("_DB_URL"):
                     value = "postgresql+psycopg://test:test@loom-postgres.loom-dev.svc/loom"
                 scoped.setenv(row["name"], value)
-            settings = model()
+            settings = model(_env_file=None)
             assert factory(settings) is not None
             if name == "loom-service":
                 assert settings.service_mode == "api_only"
                 assert settings.service_execution_runtime_profile_json == "{}"
                 assert settings.batch_runner_cp_token is None
                 assert settings.pool_submission_source is None
-            else:
+            elif name == "loom-control-plane":
                 assert settings.service_execution_scheduler_enabled is False
                 assert settings.service_execution_materializer_enabled is False
                 assert settings.global_pool is None
+            else:
+                assert settings.local_providers == {}
 
 
 def test_private_network_peers_never_include_staging_or_execution(development_inputs):
@@ -129,7 +143,7 @@ def test_private_network_peers_never_include_staging_or_execution(development_in
 
 
 def test_capable_candidate_does_not_restore_execution_authority(development_inputs):
-    config, candidate, profile = development_inputs
+    config, _candidate, profile = development_inputs
     config["task_identity_policy"] = {"mode": "private-root-v1", "target_id": config["target_id"],
                                       "execution_namespace": config["execution_namespace"]}
     config["guest_execution_target"] = {"target_id": "nebius-dev-guest"}
@@ -164,3 +178,14 @@ def test_private_bootstrap_requires_dev_publication(development_inputs):
     config, candidate, profile = development_inputs
     with pytest.raises(NebiusPlatformError, match="dev publication"):
         render_development_foundation(config, candidate, profile, {}, repo_root=ROOT)
+
+
+@pytest.mark.parametrize("change", [{"namespace": "loom-nebius-platform"}, {"environment": "staging"},
+                                   {"schema_version": "loom.nebius-platform.v1"}, {"capacity_policy": {}}])
+def test_development_database_rejects_other_bindings_before_connecting(change):
+    from loom import nebius_platform_bootstrap as bootstrap
+
+    config = {"schema_version": "loom.nebius-development-bootstrap.v1",
+              "namespace": "loom-dev", "environment": "development", **change}
+    with pytest.raises(ValueError, match="private development bootstrap"):
+        bootstrap.bootstrap_development_database(config)

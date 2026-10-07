@@ -33,6 +33,23 @@ This namespace support neither creates a foundation nor qualifies shared-pool
 admission; standalone execution writers must not independently admit against a
 pool already owned by the shared manager.
 
+`render_development_foundation` separately prepares a **private bootstrap** for
+fresh `loom-dev` data and internal services. It reuses the platform templates but
+emits no execution/build namespaces, actuator, collector, public route, backup
+CronJob or execution configuration job. The API runs in `api_only` mode without
+a task runtime profile; control-plane scheduling and materialization are off.
+The database bootstrap creates only service, control-plane and gateway roles,
+without an actuator role or worker tokens. The namespace allows internal ingress
+only. This is not an execution-close operation for an existing installation.
+
+The result includes a resource envelope for system-node headroom review and is
+deliberately not an ordinary standalone rollout bundle. It grants no permission
+to reuse staging credentials, adopt an existing database, or modify ingress or
+physical capacity. A protected dev-only installer must qualify those boundaries
+before applying it. Public/management access and connection to the single shared
+pool remain separate activation requirements; a private bootstrap is not a
+working multi-person development environment.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile
