@@ -998,6 +998,12 @@ failure and require a normal retry. Do not run operations outside their protecte
 entrypoints while maintenance is enabled. Report-only may create absent empty
 tooling lock files but removes no files. The pass is bounded to 256 scopes,
 250,000 scanned entries and four minutes, with a five-minute service timeout.
+If the inventory exceeds either bound, the entire pass blocks before deletion;
+repeating it against the same oversized tree makes no cleanup progress. This
+version has no incremental scan cursor. Escalate that report for a sized,
+reviewed change to the scan budget or a separately qualified release-retention
+operation; do not bypass the locks or delete retained releases to satisfy a
+cache-maintenance limit.
 
 Filesystem links and unsafe ownership/permissions cannot broaden deletion.
 Unsafe cache subdirectories are skipped; unsafe scope/lock state blocks the pass.

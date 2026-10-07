@@ -292,6 +292,36 @@ def test_symlink_loop_is_a_payload_free_blocked_report(root):
     assert str(root) not in result.stdout and cache.exists()
 
 
+def test_typical_uv_interpreter_and_lib64_links_are_retained(root):
+    selected, cache = release(root)
+    venv = selected / 'venv'
+    (venv / 'bin').mkdir()
+    (venv / 'bin/python').symlink_to(sys.executable)
+    (venv / 'lib64').symlink_to('lib', target_is_directory=True)
+    report = cleaner().clean(root, apply=True)
+    assert report['deleted_files'] == 1 and not cache.exists()
+    assert (venv / 'bin/python').is_symlink() and (venv / 'lib64').is_symlink()
+    assert (venv / 'lib64/python3.12/site-packages/example/module.py').is_file()
+
+
+def test_second_cleaner_cannot_enter_while_first_deletes(root, monkeypatch):
+    _, cache = release(root)
+    module = cleaner()
+    unlink = module._unlink
+
+    def while_locked(*args):
+        result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root), '--apply'],
+            capture_output=True, text=True, check=True)
+        report = json.loads(result.stdout)
+        assert report['status'] == 'skipped_busy' and report['stage'] == 'locks'
+        assert report['deleted_files'] == 0 and cache.exists()
+        return unlink(*args)
+
+    monkeypatch.setattr(module, '_unlink', while_locked)
+    assert module.clean(root, apply=True)['deleted_files'] == 1
+    assert not cache.exists()
+
+
 def test_daily_user_service_defaults_to_report_only():
     directory = SCRIPT.parents[2] / 'deploy/systemd'
     service = configparser.ConfigParser(interpolation=None)
