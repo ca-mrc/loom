@@ -20,7 +20,6 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from sqlalchemy.engine import make_url
-
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 

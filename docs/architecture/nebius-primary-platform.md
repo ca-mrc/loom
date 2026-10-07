@@ -62,6 +62,18 @@ an interrupted-install recovery path. See the
 [foundation runbook](../runbooks/nebius-deployment.md#independent-shared-development-foundation)
 for the remaining write, credential and activation boundaries.
 
+The fixed local-material bootstrap can create only `loom-dev` and its four
+immutable database/TLS/authentication/admin Secrets. It generates independent
+material once and retains no actuator, collector, batch-runner or cloud keys.
+A private recovery journal and a separately retained start marker bind the
+installation, cluster, operation, material digest and resource UIDs. Ambiguous
+creates are resolved by readback, never automatically repeated; existing or
+changed resources and missing recovery evidence stop the operation. Fresh state
+is claimed exclusively, so callers with different marker directories cannot
+overwrite one another's journal. This primitive has no CLI or installed write
+authority and creates no workload, database volume or public route. Storage
+identity delivery and the source-bound protected installer remain prerequisites.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile

@@ -134,6 +134,36 @@ through this fresh-only check. Live isolation, HTTPS, shared-pool activation and
 ordinary-owner acceptance remain unverified by this check. There is no apply CLI
 or workflow dispatch for this partial implementation.
 
+`scripts.ops.nebius_development_bootstrap.bootstrap_development` implements only
+the fresh namespace and local-key phase for that future protected entrypoint.
+`DevelopmentBootstrapBinding` fixes `loom-dev`, a non-nil installation UUID, the
+qualified `kube-system` UID and the database TLS Secret name. The HTTPS adapter
+can create the namespace plus `loom-platform-db`, the selected TLS Secret,
+`loom-platform-auth` and `loom-admin-secret`; it cannot create workloads, volumes,
+RBAC, public routes or execution resources. The existing key generator is reused,
+but discarded execution keys are never retained or delivered by this phase.
+
+The protected caller must supply separate private `state_dir` and `anchor_dir`
+paths under trusted, existing parents. They cannot nest or contain symlinks.
+Preserve both after interruption: the anchor binds the exact state path,
+installation, cluster, operation and material digest; the journal retains the
+keys and namespace/Secret create intents and UIDs. Rerunning with those same
+inputs reads back uncertain writes and validates all retained credentials before
+continuing. It does not regenerate keys, repeat unknown creates, adopt existing
+resources or repair missing evidence. An unresolved absent object requires
+explicit recovery qualification; deleting the evidence is not a retry procedure.
+The receipt `development_local_bootstrap_complete` contains identities only and
+is not database/application readiness.
+
+`loom-platform-storage` is deliberately separate: rendered consumers require
+`access-key`, `secret-key`, `source-access-key` and `source-secret-key` from
+independently qualified development identities. Do not borrow staging keys to
+satisfy these references. The fixed resource/database installer, PVC/CSI identity
+and readiness checks, protected source-bound gateway and dev-only workflow are
+still required. Namespace UID checks detect replacement during delivery; they
+do not replace the protected caller's authority and exclusion of competing
+namespace deletion/recreation.
+
 #### Owner commands
 
 Use the verified management HTTPS origin and an ordinary owner **user session**
