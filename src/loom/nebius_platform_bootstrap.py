@@ -187,6 +187,17 @@ def bootstrap_management_database(config: dict[str, Any]) -> None:
     _bootstrap_database(config, roles={"loom_service": os.environ["LOOM_DB_SERVICE_PASSWORD"]}, tokens=())
 
 
+def bootstrap_development_database(config: dict[str, Any]) -> None:
+    """Fresh private dev services: no actuator role, collector or batch token."""
+    from loom.nebius_development_foundation import DEVELOPMENT_BOOTSTRAP_CONFIG
+
+    if config != DEVELOPMENT_BOOTSTRAP_CONFIG:
+        raise ValueError("database requires the private development bootstrap binding")
+    roles = {"loom_" + name: os.environ["LOOM_DB_" + name.upper() + "_PASSWORD"]
+             for name in ("service", "control_plane", "gateway")}
+    _bootstrap_database(config, roles=roles, tokens=())
+
+
 def _bootstrap_database(
     config: dict[str, Any], *, roles: dict[str, str], tokens: tuple[tuple[str, str, str, str], ...],
 ) -> None:
@@ -598,11 +609,12 @@ def upload_backup(config: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("database", "management-database", "configure", "backup"))
+    parser.add_argument("phase", choices=("database", "management-database", "development-database", "configure", "backup"))
     args = parser.parse_args()
     try:
         config = json.loads(Path(os.environ["LOOM_PLATFORM_CONFIG"]).read_text())
         {"database": bootstrap_database, "management-database": bootstrap_management_database,
+         "development-database": bootstrap_development_database,
          "configure": configure_platform, "backup": upload_backup}[
             args.phase
         ](config)

@@ -55,6 +55,217 @@ and its CLI command are retired.
 
 ### Personal application owner workflow
 
+#### Independent shared-development foundation
+
+Shared development uses the standalone `loom.nebius-platform.v1` input with
+`namespace: loom-dev` and `environment: development`. Keep execution outside the
+personal `loom-dev-<slug>` naming space, for example in
+`loom-nebius-dev-execution`. The ordinary personal-application registration and
+renderer accept this foundation; no `loom-dev-shared` namespace is needed.
+
+Use a separate database/PVC, runtime target ID, storage credentials and data
+stores, public hostname/allocation, management installation, and ingress binding.
+Do not copy staging's database material or mutate its retained management history.
+Immutable candidate images can be reused. Data-store separation does not prevent
+qualified sharing of published results; it avoids giving personal code staging's
+mutable data or credentials.
+
+Namespace support is an offline rendering capability, **not a safe shared-pool
+bootstrap procedure**. The current standalone renderer requires enabled local
+capacity and emits its own execution writers/collector. Simply changing the
+namespace and applying it against staging's worker pool would duplicate admission
+authority. Setting `capacity_policy.enabled=false` is rejected in standalone
+inputs; it is not an available shortcut. System workloads also retain the existing
+integration node selector; namespace separation is not physical isolation or proof
+of spare capacity. A dev-only protected bootstrap and connection to the single
+shared admission authority must be qualified before installation or task tests.
+Do not repoint the existing protected staging rollout or ingress to achieve this.
+
+The separate `loom.nebius_development_foundation.render_development_foundation`
+function prepares a private, non-executing bootstrap offline. Its only namespace
+is `loom-dev`; PostgreSQL, migrations and internal API/control-plane/gateway/web
+services reuse the existing templates. It emits no public load balancer/Ingress,
+backup job, task workers or execution credentials. API background workers,
+control-plane scheduling and materialization are disabled, and no task runtime
+profile or execution catalog is installed. Published candidate image identities
+are retained; an image's task capabilities do not activate those capabilities.
+
+This partial bundle cannot be passed to `deploy_nebius_platform.py`. It still
+needs a protected fresh-dev installer that verifies the exact CI-approved
+candidate, namespace/database ownership, independently delivered credentials and
+system-node headroom. That candidate's service image must include the new
+`development-database` phase; older published images cannot run this bootstrap.
+The returned `platform_envelope` includes the requested DB
+PVC, migration and rolling-update headroom; rendering it does not reserve capacity.
+The `development-database` bootstrap phase creates only the three service roles
+and no worker tokens. It is not a cleanup or rollback tool for an existing stack.
+There is no public owner access or installed task acceptance until dev-only
+ingress/management and the single shared-pool connection are separately qualified.
+
+`scripts.ops.nebius_development_preflight.HTTPSDevelopmentPreflight` provides the
+fresh-only, read-only part of that installer. Its protected settings bind the
+exact publication, registry, Kubernetes `kube-system` UID and StorageClass
+UID/parameters. `prepare_development_source` measures the exact clean publisher
+checkout's source archive. The future protected entrypoint must authenticate the
+bundle carrying that source record **and the installer code** before invoking
+live inspection; the record alone is not an attestation. Inspection resolves the
+actual GitHub publication and required checks, matches the bundle's source to the
+published digest, then renders that candidate's private foundation. It needs no
+Git checkout on the gateway. An older publication cannot qualify a newer
+installer's source record. This source restriction applies to the protected
+foundation, **not** personal feature builds.
+
+The check rejects an existing `loom-dev` namespace, orphan dev resources,
+retained dev claims/volumes and reusable unowned volumes in the selected storage
+class. It uses complete controller/Pod inventory, HPA maxima, maintenance,
+rolling surge and additional terminating Pods to check system-node fit beside
+other environments. Visible unsupported controller owners are rejected rather
+than treated as bounded orphan workloads. It never patches those environments or
+borrows unrelated nodes. Reads use explicit TLS
+trust and credentials, without ambient kubeconfig, redirects or retries.
+
+The returned `fresh_dev_preflight_only` report is neither a reservation nor a
+write/recovery permit. Protected installer bundle authority, provider disk quota,
+independent credential delivery, create-only installation journals and PVC/CSI
+identity qualification are still
+required at the protected write boundary. A repeated or interrupted installation
+must use its retained installation journal, not pass an existing namespace
+through this fresh-only check. `inspect_installation` separately accepts the
+anchored installation's namespace while recomputing current capacity and pending
+storage demand; it does not adopt resources or replace the installer journals.
+Live isolation, HTTPS, shared-pool activation and ordinary-owner acceptance remain
+unverified by these checks. The dev-only workflow described below is the delivery
+path; its existence is not evidence of installed authority or a live installation.
+
+`scripts.ops.nebius_development_bootstrap.bootstrap_development` implements only
+the fresh namespace and local-key phase for that future protected entrypoint.
+`DevelopmentBootstrapBinding` fixes `loom-dev`, a non-nil installation UUID, the
+qualified `kube-system` UID and the database TLS Secret name. The HTTPS adapter
+can create the namespace plus `loom-platform-db`, the selected TLS Secret,
+`loom-platform-auth` and `loom-admin-secret`; it cannot create workloads, volumes,
+RBAC, public routes or execution resources. The existing key generator is reused,
+but discarded execution keys are never retained or delivered by this phase.
+
+The protected caller must supply separate private `state_dir` and `anchor_dir`
+paths under trusted, existing parents. They cannot nest or contain symlinks.
+Preserve both after interruption: the anchor binds the exact state path,
+installation, cluster, operation and material digest; the journal retains the
+keys and namespace/Secret create intents and UIDs. Rerunning with those same
+inputs reads back uncertain writes and validates all retained credentials before
+continuing. It does not regenerate keys, repeat unknown creates, adopt existing
+resources or repair missing evidence. An unresolved absent object requires
+explicit recovery qualification; deleting the evidence is not a retry procedure.
+The receipt `development_local_bootstrap_complete` contains identities only and
+is not database/application readiness.
+
+`loom-platform-storage` is deliberately separate: rendered consumers require
+`access-key`, `secret-key`, `source-access-key` and `source-secret-key` from
+independently qualified development identities. Do not borrow staging keys to
+satisfy these references. The protected source-bound gateway and dev-only workflow
+are still required. Namespace UID checks detect replacement during delivery; they
+do not replace the protected caller's authority and exclusion of competing
+namespace deletion/recreation.
+
+The source-only `nebius_development_entry` and `nebius_development_live` modules now
+connect these checks to the fixed installer. Private inputs name independently
+delivered storage-key files, the observing operator's Kubernetes/provider files,
+the publication reader and a fixed kubectl executable. Operator/publication
+credentials never become workload material. A packaged `development-source.json`
+must match the selected protected publication; the dev gateway authenticates
+that record together with the code, not accept an owner-provided digest as proof.
+Input hashes and file contents are rechecked across credential exchange and
+installation phases. The operation's state and independent anchor live beneath
+dev-only `nebius-development/<installation-id>` and
+`nebius-development-anchors/<installation-id>` roots.
+
+The final dependency probe uses an explicit temporary token/CA kubeconfig and a
+fixed, bounded command inside the recorded running service Pod. It checks rejected
+anonymous/invalid-token access, authenticated API-only PostgreSQL/object readiness
+and the exact running build. It reads the Pod's mounted admin key internally;
+neither the key nor raw probe responses appear in arguments or public reports.
+This is not a command for operators to run against staging, and these source
+modules do not install gateway authority by themselves.
+
+`scripts.ops.nebius_development_install.install_private_development` now composes
+the private installation in this fixed order: local bootstrap, configuration and
+network, supplied storage Secret, database controller, volume qualification,
+migration and internal services. `nebius_development_stage` derives every resource
+from the private renderer and frozen source/configuration; it is not a raw-manifest
+apply interface. Server dry-run defaults are checked before persistent creates.
+Neither stage adapter nor installer patches, replaces or deletes resources.
+
+The installation anchor and phase-journal hashes reject changed source/material,
+missing evidence and competing state directories. Pending PVC binding, database,
+migration or service readiness returns a `pending` receipt with the phase; resume
+using the exact original inputs and retained state. A failed migration requires
+explicit recovery, not another Job. Claim absence is recorded before database
+creation. Before migration, storage qualification binds the labelled dev claim,
+its UID-derived dynamically provisioned PV, exact claim reference, storage class,
+size and Nebius CSI handle. The protected `qualify_volume` implementation must
+query the actual disk and reject a foreign/reused disk or unexpected project,
+region or capacity; Kubernetes annotations are not provider proof.
+
+The caller's `qualify(fresh=True)` performs full fresh qualification before any
+write. `qualify(fresh=False)` requalifies frozen source/credentials and current
+resource fit on continuation without demanding namespace absence. After controller
+and migration readiness, `verify_private_dependencies` must probe actual internal
+authenticated API/database/object access. The installer rechecks all completed
+phases after those probes before returning `development_private_installed`.
+These live qualification/probe methods and the authenticated fixed gateway/workflow
+still need installed qualification. Unit tests or disposable Kubernetes do not
+establish that receipt for Nebius, and no public/task/multi-owner acceptance follows
+from the private phase alone.
+
+##### Protected private-development delivery
+
+Use only `development-preflight` and `development-install` in `nebius-rollout`,
+dispatched from `dev`. They select `NEBIUS_DEVELOPMENT_OPERATION_JSON` and the
+dedicated protected `NEBIUS_DEVELOPMENT_SSH_KEY`, never a management/staging key.
+The existing protected `nebius-integration` environment and common operation queue
+are retained; the existing rollout, recovery and management jobs are unchanged.
+No automatic event invokes the development installer.
+
+The operation binds the exact integrated `source_sha == candidate`, `loom-dev`,
+installation UUID, input hash and canonical private paths. Under the gateway
+owner's existing `.loom` directory, use
+`nebius-development/<installation-id>/inputs.json` and `state`, with the separately
+retained `nebius-development-anchors/<installation-id>` directory. Deliver private
+inputs, dedicated data/source credentials and operator read/probe files through
+the existing approved operator route; they are never bundled or uploaded as CI
+artifacts. Freeze one reviewed source/input selection before installing authority.
+
+From that exact clean integrated checkout, export the locked dependencies with
+`uv export --locked --no-default-groups --extra cluster --group nebius-certificates
+--no-emit-workspace --format requirements-txt --no-header --quiet`. Use the pinned
+Linux x86-64 uv toolchain, and invoke
+`python -m scripts.ops.nebius_development_rollout --operation preflight
+--requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Preparation builds deterministic first-party wheels and reports the complete
+bundle SHA256; it makes no remote request. Keep output outside the checkout.
+
+Through the approved operator route, run the reviewed module
+`scripts.ops.install_nebius_development_entrypoint` with `--bundle BUNDLE`,
+`--bundle-sha256 REVIEWED_DIGEST` and `--public-key DEDICATED_ED25519_PUBLIC_KEY`.
+The default is preview; `--apply` adds only the dev forced-command grant. Existing
+keys are preserved, and a key already granted different authority is rejected.
+Run from the reviewed checkout because this module reuses its stdlib file/key
+helpers. Do not invoke it through staging's deployment command or substitute a
+digest supplied by an untrusted caller. Installing a grant creates no Kubernetes
+resources and is not an installation receipt.
+
+The gateway rejects unknown/duplicate/link/oversize archive members, changed
+source identity, commands and reports. It installs hash-locked dependencies into
+a private digest-addressed release, qualifies imports without live writes, and
+then invokes the fixed dev entrypoint. Replay verifies retained bundle members;
+the generated virtualenv and bytecode rely on the existing trusted-host boundary.
+A partial tooling release or changed bundle member requires reconciliation, not
+automatic deletion/retry. `pending`
+means the private phase has not finished; `blocked` reports only a closed failure
+stage. Only `development_private_installed` records private completion, and it
+does **not** qualify management/HTTPS, shared-pool execution or concurrent owners.
+
+#### Owner commands
+
 Use the verified management HTTPS origin and an ordinary owner **user session**
 in a named CLI context. Application login requires a user session, not a delegable
 API token. The management and application logins stay separate:

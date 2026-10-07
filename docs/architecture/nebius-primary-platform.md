@@ -23,6 +23,93 @@ retain their data and credential boundaries. The v1 managed renderer described
 below still provisions isolated child stacks; it has **not** been converted to
 this shared-data model. Existing frozen v1 bindings retain their old meaning.
 
+The standalone foundation renderer also accepts the canonical `loom-dev` system
+namespace, only with `environment=development`. Its execution namespace remains
+in the separate `loom-nebius-` naming space (for example,
+`loom-nebius-dev-execution`), so it cannot reserve a personal `loom-dev-<slug>`
+name such as `loom-dev-execution`. Personal applications reference this foundation
+through `SharedDevelopmentBindingV1` and continue to own only their web/API.
+This namespace support neither creates a foundation nor qualifies shared-pool
+admission; standalone execution writers must not independently admit against a
+pool already owned by the shared manager.
+
+`render_development_foundation` separately prepares a **private bootstrap** for
+fresh `loom-dev` data and internal services. It reuses the platform templates but
+emits no execution/build namespaces, actuator, collector, public route, backup
+CronJob or execution configuration job. The API runs in `api_only` mode without
+a task runtime profile; control-plane scheduling and materialization are off.
+The database bootstrap creates only service, control-plane and gateway roles,
+without an actuator role or worker tokens. The namespace allows internal ingress
+only. This is not an execution-close operation for an existing installation.
+
+The result includes a resource envelope for system-node headroom review and is
+deliberately not an ordinary standalone rollout bundle. It grants no permission
+to reuse staging credentials, adopt an existing database, or modify ingress or
+physical capacity. A protected dev-only installer must qualify those boundaries
+before applying it. Public/management access and connection to the single shared
+pool remain separate activation requirements; a private bootstrap is not a
+working multi-person development environment.
+
+The fresh-only development preflight now binds the protected publication/source,
+cluster and StorageClass identities, refuses pre-existing dev resources or
+reusable old data volumes, and measures system capacity alongside existing
+workloads. It includes HPA maxima, rollout/maintenance demand and terminating
+Pods without changing other environments. Source preparation happens in the
+publisher checkout; live inspection needs no Git checkout on the gateway. The
+separate protected dev gateway authenticates the source-bound installer bundle.
+This read-only report is not installation authority, a capacity reservation or
+an interrupted-install recovery path. See the
+[foundation runbook](../runbooks/nebius-deployment.md#independent-shared-development-foundation)
+for the remaining write, credential and activation boundaries.
+
+The fixed local-material bootstrap can create only `loom-dev` and its four
+immutable database/TLS/authentication/admin Secrets. It generates independent
+material once and retains no actuator, collector, batch-runner or cloud keys.
+A private recovery journal and a separately retained start marker bind the
+installation, cluster, operation, material digest and resource UIDs. Ambiguous
+creates are resolved by readback, never automatically repeated; existing or
+changed resources and missing recovery evidence stop the operation. Fresh state
+is claimed exclusively, so callers with different marker directories cannot
+overwrite one another's journal. This primitive has no CLI or installed write
+authority and creates no workload, database volume or public route. Storage
+identity delivery and the source-bound protected installer remain prerequisites.
+
+Private installation sequencing now composes that bootstrap with fixed
+renderer-derived configuration/network, supplied-storage, database, migration and
+internal-service phases. An independently anchored installation journal freezes
+inputs and completed phase journals. Recovery rechecks the existing installation;
+it does not reuse the fresh namespace-absence preflight. Each phase previews server
+defaults, records create intent before writing, resolves ambiguous outcomes only
+by readback and retains exact resource UIDs/configuration. The installer pins the
+dev PVC, dynamically provisioned PV and CSI disk before migrations, requires a
+separate authenticated provider-disk qualification, and checks current workload
+generations and migration completion. A final readback covers earlier phases too.
+
+The connected development adapter now supplies live publication/source,
+cloud/credential/quota/headroom checks, provider-disk ownership and authenticated
+dependency probes. Resumed qualification counts installed dev resources once;
+only the existing anchored installer grants write/recovery authority. The disk
+check follows the recorded database controller through its Pod, node and dynamic
+PVC/PV to the actual provider disk. Dependency proof runs a fixed read-only HTTP
+probe inside the existing API Pod, checks its own database/object credentials and
+exact build revision, and rechecks controller/Pod/container identity afterward.
+
+The private entry module freezes the packaged source record, installation inputs
+and credential files; it accepts no caller readiness flags or arbitrary manifests.
+The dev-only gateway authenticates the complete bundle against an operator-pinned
+digest before executing packaged code. It accepts only development preflight and
+private installation, with a separate key and retained dev state; existing
+management/staging commands are unchanged. Protected publication binds the clean,
+integrated source, source archive record, hash-locked dependencies and first-party
+wheels. Prepared releases are private and replay-checked; incomplete preparation
+is retained for reconciliation. The protected `nebius-rollout` development actions
+use only that dedicated authority. These source capabilities still require an
+installed operator grant and live qualification, including exclusion of competing
+privileged namespace or storage replacement. A private completion
+receipt does not establish public access, shared execution/build admission or
+personal-owner acceptance. Existing management/staging installer scope and runtime
+behavior are unchanged.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile
