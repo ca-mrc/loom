@@ -5,7 +5,6 @@ import copy
 import importlib
 import json
 from dataclasses import replace
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -129,6 +128,58 @@ def test_late_default_injection_is_rejected_before_first_persistent_write(inputs
     inputs[2].default_change = inject
     with pytest.raises(module().DevelopmentStageError):
         run(inputs, tmp_path / "database", "database")
+    assert not inputs[2].creates
+
+
+@pytest.mark.parametrize("injected", [
+    {"dataSource": {"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": "foreign-data"}},
+    {"dataSourceRef": {"kind": "PersistentVolumeClaim", "namespace": "loom-nebius-platform", "name": "data"}},
+    {"volumeName": "foreign-pv"}, {"selector": {"matchLabels": {"imported": "true"}}},
+])
+def test_database_preview_cannot_adopt_clone_or_prebind_existing_data(inputs, tmp_path, injected):
+    def inject(doc):
+        if doc["kind"] == "StatefulSet":
+            doc["spec"]["volumeClaimTemplates"][0]["spec"].update(injected)
+    inputs[2].default_change = inject
+    with pytest.raises(module().DevelopmentStageError):
+        run(inputs, tmp_path / "database", "database")
+    assert not inputs[2].creates
+
+
+@pytest.mark.parametrize("injected", [
+    {"podFailurePolicy": {"rules": [{"action": "Ignore", "onExitCodes": {"operator": "In", "values": [1]}}]}},
+    {"successPolicy": {"rules": [{"succeededCount": 0}]}}, {"parallelism": 2}, {"completions": 2},
+    {"completionMode": "Indexed"}, {"suspend": True}, {"managedBy": "foreign.example/controller"},
+])
+def test_migration_preview_cannot_change_execution_or_retry_policy(inputs, tmp_path, injected):
+    def inject(doc):
+        if doc["kind"] == "Job":
+            doc["spec"].update(injected)
+    inputs[2].default_change = inject
+    with pytest.raises(module().DevelopmentStageError):
+        run(inputs, tmp_path / "migration", "migration")
+    assert not inputs[2].creates
+
+
+@pytest.mark.parametrize("change", ["host_port", "dns", "scheduler", "host_alias", "image_policy"])
+def test_service_preview_rejects_nondefault_pod_network_and_runtime_settings(inputs, tmp_path, change):
+    def inject(doc):
+        if doc["kind"] != "Deployment":
+            return
+        pod = doc["spec"]["template"]["spec"]
+        if change == "host_port":
+            pod["containers"][0]["ports"][0].update(hostPort=8080, hostIP="0.0.0.0")
+        elif change == "dns":
+            pod.update(dnsPolicy="None", dnsConfig={"nameservers": ["203.0.113.9"]})
+        elif change == "scheduler":
+            pod["schedulerName"] = "foreign-scheduler"
+        elif change == "host_alias":
+            pod["hostAliases"] = [{"ip": "203.0.113.9", "hostnames": ["loom-postgres.loom-dev.svc"]}]
+        else:
+            pod["containers"][0]["imagePullPolicy"] = "Never"
+    inputs[2].default_change = inject
+    with pytest.raises(module().DevelopmentStageError):
+        run(inputs, tmp_path / "services", "services")
     assert not inputs[2].creates
 
 
