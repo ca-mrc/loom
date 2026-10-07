@@ -191,9 +191,10 @@ def validate_environment(config: dict[str, Any]) -> None:
         ):
             raise NebiusPlatformError("managed execution requires shared admission; currently disabled")
     else:
-        if config["namespace"] == config["execution_namespace"] or any(
-            not config[key].startswith("loom-nebius-") for key in ("namespace", "execution_namespace")
-        ):
+        shared_development = config["namespace"] == "loom-dev" and config.get("environment") == "development"
+        if (config["namespace"] == config["execution_namespace"]
+                or not (shared_development or config["namespace"].startswith("loom-nebius-"))
+                or not config["execution_namespace"].startswith("loom-nebius-")):
             raise NebiusPlatformError("independent Nebius system and execution namespaces are required")
         if config.get("environment") != "development":
             raise NebiusPlatformError(

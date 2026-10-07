@@ -55,6 +55,34 @@ and its CLI command are retired.
 
 ### Personal application owner workflow
 
+#### Independent shared-development foundation
+
+Shared development uses the standalone `loom.nebius-platform.v1` input with
+`namespace: loom-dev` and `environment: development`. Keep execution outside the
+personal `loom-dev-<slug>` naming space, for example in
+`loom-nebius-dev-execution`. The ordinary personal-application registration and
+renderer accept this foundation; no `loom-dev-shared` namespace is needed.
+
+Use a separate database/PVC, runtime target ID, storage credentials and data
+stores, public hostname/allocation, management installation, and ingress binding.
+Do not copy staging's database material or mutate its retained management history.
+Immutable candidate images can be reused. Data-store separation does not prevent
+qualified sharing of published results; it avoids giving personal code staging's
+mutable data or credentials.
+
+Namespace support is an offline rendering capability, **not a safe shared-pool
+bootstrap procedure**. The current standalone renderer requires enabled local
+capacity and emits its own execution writers/collector. Simply changing the
+namespace and applying it against staging's worker pool would duplicate admission
+authority. Setting `capacity_policy.enabled=false` is rejected in standalone
+inputs; it is not an available shortcut. System workloads also retain the existing
+integration node selector; namespace separation is not physical isolation or proof
+of spare capacity. A dev-only protected bootstrap and connection to the single
+shared admission authority must be qualified before installation or task tests.
+Do not repoint the existing protected staging rollout or ingress to achieve this.
+
+#### Owner commands
+
 Use the verified management HTTPS origin and an ordinary owner **user session**
 in a named CLI context. Application login requires a user session, not a delegable
 API token. The management and application logins stay separate:

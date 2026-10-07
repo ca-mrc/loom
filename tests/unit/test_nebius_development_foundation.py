@@ -8,7 +8,7 @@ import json
 import pytest
 
 from loom.nebius_application_render import render_application
-from loom.nebius_platform_render import NebiusPlatformError, build_platform
+from loom.nebius_platform_render import NebiusPlatformError, build_platform, write_platform
 from tests.unit.test_nebius_application_render import inputs, named
 from tests.unit.test_nebius_platform_render import ROOT
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
@@ -23,7 +23,6 @@ def development_inputs(platform_inputs):
         public_allocation_id="development-allocation",
     )
     config["buckets"] = {purpose: "loom-dev-" + purpose for purpose in config["buckets"]}
-    config["capacity_policy"]["enabled"] = False
     return config, candidate, profile
 
 
@@ -49,7 +48,7 @@ def test_shared_development_renders_own_data_and_runtime_endpoints(development_i
     target = json.loads(cm["data"]["catalog.json"])["topology"]["targets"][0]
     assert target["target_id"] == "nebius-eu-north1-shared-dev"
     assert target["namespace_name"] == "loom-nebius-dev-execution"
-    assert json.loads(cm["data"]["environment.json"])["capacity_policy"]["enabled"] is False
+    assert json.loads(cm["data"]["environment.json"])["capacity_policy"] == config["capacity_policy"]
 
 
 def test_new_dev_render_does_not_adopt_existing_platform_objects(platform_inputs, development_inputs):
@@ -65,6 +64,27 @@ def test_new_dev_render_does_not_adopt_existing_platform_objects(platform_inputs
 
     assert not identities(platform_inputs) & identities(development_inputs)
     assert platform_inputs == before
+
+
+def test_shared_development_render_preserves_boundaries_through_offline_loader(development_inputs, tmp_path):
+    from scripts.ops.deploy_nebius_platform import load_render
+
+    config, candidate, profile = development_inputs
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    write_platform(files, config, candidate, tmp_path)
+    manifest, loaded_config, loaded_files = load_render(tmp_path)
+    assert manifest["namespace"] == "loom-dev"
+    assert manifest["execution_namespace"] == "loom-nebius-dev-execution"
+    assert loaded_config["namespace"] == "loom-dev"
+    assert loaded_config["target_id"] == "nebius-eu-north1-shared-dev"
+    assert loaded_files == files
+
+
+def test_namespace_support_does_not_bypass_standalone_capacity_contract(development_inputs):
+    config, candidate, profile = development_inputs
+    config["capacity_policy"]["enabled"] = False
+    with pytest.raises(NebiusPlatformError, match="capacity policy must explicitly enable"):
+        build_platform(config, candidate, profile, {}, repo_root=ROOT)
 
 
 @pytest.mark.parametrize("slug", ["alice", "bob", "execution"])

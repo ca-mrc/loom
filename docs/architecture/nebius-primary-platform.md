@@ -23,6 +23,16 @@ retain their data and credential boundaries. The v1 managed renderer described
 below still provisions isolated child stacks; it has **not** been converted to
 this shared-data model. Existing frozen v1 bindings retain their old meaning.
 
+The standalone foundation renderer also accepts the canonical `loom-dev` system
+namespace, only with `environment=development`. Its execution namespace remains
+in the separate `loom-nebius-` naming space (for example,
+`loom-nebius-dev-execution`), so it cannot reserve a personal `loom-dev-<slug>`
+name such as `loom-dev-execution`. Personal applications reference this foundation
+through `SharedDevelopmentBindingV1` and continue to own only their web/API.
+This namespace support neither creates a foundation nor qualifies shared-pool
+admission; standalone execution writers must not independently admit against a
+pool already owned by the shared manager.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile
