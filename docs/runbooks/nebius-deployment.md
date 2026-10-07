@@ -256,8 +256,10 @@ resources and is not an installation receipt.
 The gateway rejects unknown/duplicate/link/oversize archive members, changed
 source identity, commands and reports. It installs hash-locked dependencies into
 a private digest-addressed release, qualifies imports without live writes, and
-then invokes the fixed dev entrypoint. A partial tooling release or changed
-retained bytes requires reconciliation, not automatic deletion/retry. `pending`
+then invokes the fixed dev entrypoint. Replay verifies retained bundle members;
+the generated virtualenv and bytecode rely on the existing trusted-host boundary.
+A partial tooling release or changed bundle member requires reconciliation, not
+automatic deletion/retry. `pending`
 means the private phase has not finished; `blocked` reports only a closed failure
 stage. Only `development_private_installed` records private completion, and it
 does **not** qualify management/HTTPS, shared-pool execution or concurrent owners.
