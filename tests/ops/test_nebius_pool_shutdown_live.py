@@ -50,8 +50,22 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
         mode = 'before'
         pending_pod = True
         patches = []
+        full_checks, collection_reads = 0, 0
+        first_intent_counts = []
+        verify_retained = api.verify_retained
+
+        def verify():
+            nonlocal full_checks
+            full_checks += 1
+            return verify_retained()
+
+        monkeypatch.setattr(api, 'verify_retained', verify)
+
         def respond(message):
+            nonlocal collection_reads
             path = message.url.path
+            if message.method == 'GET' and message.url.params.get('limit') == '100':
+                collection_reads += 1
             if message.method == 'PATCH':
                 kind = 'CronJob' if '/cronjobs/' in path else 'Deployment'
                 namespace, name = path.split('/')[-3], path.split('/')[-1]
@@ -72,6 +86,8 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
                     return httpx.Response(200, json=proposed)
                 record = json.loads((root / 'cutover/shutdown.json').read_bytes())['workloads'][key]
                 assert record == {'phase': 'intent', 'before_resource_version': current['metadata']['resourceVersion']}
+                if not patches:
+                    first_intent_counts.append((full_checks, collection_reads))
                 patches.append(key)
                 if mode == 'before':
                     raise httpx.ReadTimeout('private-marker')
@@ -99,6 +115,7 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
                 return stop_pool_successors(request=request, api=api, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
             first = run()
             assert first['status'] == 'pending_shutdown_outcome'
+            assert first_intent_counts == [(4, 96)]
             assert run() == first and len(patches) == 1
             # The same original stop arrives; no redispatch is authorized.
             current = state.objects[patches[0]]
@@ -114,7 +131,7 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.parametrize('damage', [None, 'uid', 'spec'])
+@pytest.mark.parametrize('damage', [None, 'uid', 'spec', 'authorization', 'drain_authorization', 'fence', 'busy', 'ancestry'])
 def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
         activation_http, closed_startup, monkeypatch, damage):
     from scripts.ops.nebius_pool_shutdown import stop_pool_successors
@@ -139,7 +156,7 @@ def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
             for key in api.targets:
                 current = state.objects[key]
                 current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
-            if damage and drains == 2:
+            if damage in {'uid', 'spec'} and drains == 2:
                 current = state.objects[next(reversed(api.targets))]
                 if damage == 'uid':
                     current['metadata']['uid'] = str(uuid4())
@@ -149,6 +166,28 @@ def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
             return result
 
         monkeypatch.setattr(api, 'recovery_drained', drain)
+        stop = api.stop_workload
+
+        def dispatch(*args, **kwargs):
+            # Drift after the stage's dry-run and rechecks must be rejected by
+            # the actual dispatch boundary before it records any write intent.
+            if damage == 'authorization':
+                state.role_damage = True
+            elif damage == 'drain_authorization':
+                def pool_drain():
+                    state.role_damage = True
+                    return True
+                api.parent.history.recovery_pool_drained = pool_drain
+            elif damage == 'fence':
+                state.guards[next(iter(state.guards))] = 'open'
+            elif damage == 'busy':
+                api.parent.history.recovery_pool_drained = lambda: False
+            elif damage == 'ancestry':
+                path = root / 'cutover/cutover.json'
+                path.write_bytes(path.read_bytes() + b' ')
+            return stop(*args, **kwargs)
+
+        monkeypatch.setattr(api, 'stop_workload', dispatch)
         original_transport = api.parent.client._transport
         writes = []
 
@@ -194,6 +233,8 @@ def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
                 with pytest.raises(ValueError):
                     stop_pool_successors(**arguments)
                 assert not writes
+                journal = json.loads((root / 'cutover/shutdown.json').read_bytes())
+                assert all(row['phase'] == 'prepared' for row in journal['workloads'].values())
             else:
                 assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
                 assert len(writes) == len(set(writes)) == len(api.targets)

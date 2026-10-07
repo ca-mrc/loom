@@ -1625,6 +1625,16 @@ updates during the earlier checks therefore do not force reuse of a stale versio
 A definite rejection may return the new attempt to prepared. An existing unknown
 intent retains its original version and is only observed, never refreshed or resent.
 
+Recovery stages qualify retained authority at their observation boundaries, and
+the actual shutdown dispatch independently repeats that qualification after
+its drain checks, then rechecks fences before the final workload read. Machine
+retirement and legacy restart likewise finish their live ledger checks with
+retained-authority and fence qualification. Nested drain checks read the current
+global and participant ledgers and recheck the fenced journals without repeating
+the whole-cluster authority inventory. No drain result or authority proof is
+cached across workload mutations or invocations. Dry-run success cannot authorize
+a stop; changed authority, fences, ancestry, UID or spec still blocks dispatch.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

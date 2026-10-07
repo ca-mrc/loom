@@ -111,12 +111,14 @@ def qualify_legacy_restart(request: PoolCutoverRequest, api: PoolLegacyRestartAP
     _restart_record(request, state=state, anchor=anchor)
 
     def closed() -> bool:
+        drained = api.recovery_drained()
+        # Read ledgers before the final authority/fence proof so drift during
+        # those reads cannot qualify a legacy workload restart.
         api.verify_retained()
         if (api.pool_state() != 'fenced' or api.machine_authority() != 'revoked'
                 or any(api.guard_state(str(row.participant_id)) != 'fenced'
                     for row in request.fencing.retirement.migration.guards)):
             raise ValueError
-        drained = api.recovery_drained()
         if type(drained) is not bool:
             raise ValueError
         return drained

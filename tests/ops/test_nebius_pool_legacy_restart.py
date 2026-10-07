@@ -67,6 +67,30 @@ def restart(api):
     return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
 
 
+def test_restart_boundary_rejects_authority_drift_during_final_drain(closed_startup, monkeypatch):
+    from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
+
+    api = roles_restored(closed_startup)
+    original = api.verify_retained
+    drains = 0
+
+    def drain():
+        nonlocal drains
+        drains += 1
+        return True
+
+    def verify():
+        if drains == 2:
+            raise ValueError('authority changed during final ledger read')
+        return original()
+
+    monkeypatch.setattr(api, 'recovery_drained', drain)
+    monkeypatch.setattr(api, 'verify_retained', verify)
+    with pytest.raises(ValueError):
+        qualify_legacy_restart(api.request, api, state=api.state, anchor=api.root / 'cutover-anchor')
+    assert drains == 2 and not api.restart_calls
+
+
 @pytest.mark.timeout(300)
 def test_legacy_restart_restores_exact_original_scalars_and_keeps_gateway_dormant_and_guards_closed(closed_startup):
     from scripts.ops.nebius_pool_retirement import retirement_documents

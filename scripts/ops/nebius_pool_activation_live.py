@@ -114,14 +114,17 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def recovery_drained(self) -> bool:
         """Fresh closed-intake drain across both journals, not shutdown authority."""
         try:
-            self.verify_retained()
+            # Stage and mutation boundaries own the complete retained-authority
+            # inventory. Drain reads stay fresh, but must not recursively repeat
+            # those whole-cluster scans for every ledger observation.
+            self._scope()
             before = self._recovery_fence()
             # Check every participant even when the global ledger is still busy.
             # No status is persisted, and no callback may mutate the journals.
             results = [self.parent.history.recovery_pool_drained()]
             results.extend(self.parent.guards.recovery_participant_drained(row)
                 for row in self.request.fencing.retirement.migration.guards)
-            self.verify_retained()
+            self._scope()
             if self._recovery_fence() != before or any(type(value) is not bool for value in results):
                 raise ValueError
             return all(results)
@@ -153,7 +156,14 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or item != {'phase': 'prepared', 'before_resource_version': None}
                     or (not preview and record_intent is None)):
                 raise ValueError
+            fence = self._recovery_fence()
             if self.recovery_drained() is not True:
+                raise ValueError
+            if not preview:
+                # Ledger reads can race changed authority. A dry-run or prior
+                # stage observation is never the actual stop's final proof.
+                self.verify_retained()
+            if self._recovery_fence() != fence:
                 raise ValueError
             if _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
