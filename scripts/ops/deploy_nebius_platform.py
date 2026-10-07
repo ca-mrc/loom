@@ -642,6 +642,14 @@ def validate_target_replacement(
     """Require an exact operator decision before replacing an immutable target."""
     data = current.get("data", {})
     previous = json.loads(data["environment.json"]) if "environment.json" in data else None
+    # The catalog stores environment in each immutable execution target. Reject
+    # relabeling before changing workloads, even without --retire-target, and
+    # recheck under the rollout guard. Target retirement is not a data migration.
+    if previous is not None and previous.get("environment") != config["environment"]:
+        raise DeploymentError(
+            "environment reclassification requires a separate migration of data and execution "
+            "target identities; ordinary platform rollout cannot change it"
+        )
     for guest_field in ("guest_execution_target", "emulated_auth_execution_target"):
         previous_guest = previous.get(guest_field) if previous else None
         proposed_guest = config.get(guest_field)
@@ -659,7 +667,7 @@ def validate_target_replacement(
         raise DeploymentError("target retirement must name the distinct installed primary target")
     if previous.get("regional_execution_targets") or config.get("regional_execution_targets"):
         raise DeploymentError("target retirement supports only a single-primary platform")
-    for key in ("cluster_id", "namespace", "execution_namespace", "environment"):
+    for key in ("cluster_id", "namespace", "execution_namespace"):
         if previous[key] != config[key]:
             raise DeploymentError("target replacement cannot change its platform boundary")
 

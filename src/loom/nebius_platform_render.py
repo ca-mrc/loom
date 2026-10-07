@@ -196,9 +196,9 @@ def validate_environment(config: dict[str, Any]) -> None:
                 or not (shared_development or config["namespace"].startswith("loom-nebius-"))
                 or not config["execution_namespace"].startswith("loom-nebius-")):
             raise NebiusPlatformError("independent Nebius system and execution namespaces are required")
-        if config.get("environment") != "development":
+        if config.get("environment") not in ("development", "staging"):
             raise NebiusPlatformError(
-                "this independent integration lane requires environment=development"
+                "standalone Nebius requires environment=development or staging"
             )
     host = config.get("public_host", "")
     if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9][a-z0-9.-]+\.[a-z]{2,63}", host):
@@ -1875,7 +1875,9 @@ def _build_platform(
         _env(
             {
                 "LOOM_FRONTEND_ENVIRONMENT": config["environment"],
-                "LOOM_FRONTEND_ENVIRONMENT_LABEL": "Nebius integration",
+                "LOOM_FRONTEND_ENVIRONMENT_LABEL": (
+                    "Staging" if config["environment"] == "staging" else "Nebius integration"
+                ),
                 "LOOM_FRONTEND_ROUTE_PATH": "",
                 "LOOM_FRONTEND_API_BASE": "",
                 "LOOM_FRONTEND_PUBLIC_ORIGIN": "https://" + config["public_host"],
