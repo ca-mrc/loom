@@ -27,11 +27,11 @@ from scripts.ops.nebius_application_setup import (
 )
 from scripts.ops.nebius_management_bootstrap import (
     BootstrapAPI,
-    BootstrapBinding,
     bootstrap_management,
 )
 from scripts.ops.nebius_management_install import (
     ManagementInstallError,
+    ManagementInstallRequest,
     _hash_journals,
     _journal_names,
 )
@@ -70,12 +70,7 @@ _PHASES = {
 
 
 @dataclass(frozen=True, repr=False)
-class DevelopmentManagementRequest:
-    binding: BootstrapBinding
-    deployment: ManagementDeployment
-    candidate: dict[str, Any]
-    profile: dict[str, Any]
-    material: dict[str, dict[str, str]]
+class DevelopmentManagementRequest(ManagementInstallRequest):
     application_material: ApplicationSetupMaterial
     shared_namespace_uid: str
 
