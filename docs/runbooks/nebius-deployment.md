@@ -134,8 +134,8 @@ through this fresh-only check. `inspect_installation` separately accepts the
 anchored installation's namespace while recomputing current capacity and pending
 storage demand; it does not adopt resources or replace the installer journals.
 Live isolation, HTTPS, shared-pool activation and ordinary-owner acceptance remain
-unverified by these checks. There is no installed apply CLI or workflow dispatch
-for this partial implementation.
+unverified by these checks. The dev-only workflow described below is the delivery
+path; its existence is not evidence of installed authority or a live installation.
 
 `scripts.ops.nebius_development_bootstrap.bootstrap_development` implements only
 the fresh namespace and local-key phase for that future protected entrypoint.
@@ -171,7 +171,7 @@ connect these checks to the fixed installer. Private inputs name independently
 delivered storage-key files, the observing operator's Kubernetes/provider files,
 the publication reader and a fixed kubectl executable. Operator/publication
 credentials never become workload material. A packaged `development-source.json`
-must match the selected protected publication; the future gateway must authenticate
+must match the selected protected publication; the dev gateway authenticates
 that record together with the code, not accept an owner-provided digest as proof.
 Input hashes and file contents are rechecked across credential exchange and
 installation phases. The operation's state and independent anchor live beneath
@@ -212,9 +212,55 @@ and migration readiness, `verify_private_dependencies` must probe actual interna
 authenticated API/database/object access. The installer rechecks all completed
 phases after those probes before returning `development_private_installed`.
 These live qualification/probe methods and the authenticated fixed gateway/workflow
-still need an installed implementation. Unit tests or disposable Kubernetes do not
+still need installed qualification. Unit tests or disposable Kubernetes do not
 establish that receipt for Nebius, and no public/task/multi-owner acceptance follows
 from the private phase alone.
+
+##### Protected private-development delivery
+
+Use only `development-preflight` and `development-install` in `nebius-rollout`,
+dispatched from `dev`. They select `NEBIUS_DEVELOPMENT_OPERATION_JSON` and the
+dedicated protected `NEBIUS_DEVELOPMENT_SSH_KEY`, never a management/staging key.
+The existing protected `nebius-integration` environment and common operation queue
+are retained; the existing rollout, recovery and management jobs are unchanged.
+No automatic event invokes the development installer.
+
+The operation binds the exact integrated `source_sha == candidate`, `loom-dev`,
+installation UUID, input hash and canonical private paths. Under the gateway
+owner's existing `.loom` directory, use
+`nebius-development/<installation-id>/inputs.json` and `state`, with the separately
+retained `nebius-development-anchors/<installation-id>` directory. Deliver private
+inputs, dedicated data/source credentials and operator read/probe files through
+the existing approved operator route; they are never bundled or uploaded as CI
+artifacts. Freeze one reviewed source/input selection before installing authority.
+
+From that exact clean integrated checkout, export the locked dependencies with
+`uv export --locked --no-default-groups --extra cluster --group nebius-certificates
+--no-emit-workspace --format requirements-txt --no-header --quiet`. Use the pinned
+Linux x86-64 uv toolchain, and invoke
+`python -m scripts.ops.nebius_development_rollout --operation preflight
+--requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Preparation builds deterministic first-party wheels and reports the complete
+bundle SHA256; it makes no remote request. Keep output outside the checkout.
+
+Through the approved operator route, run the reviewed module
+`scripts.ops.install_nebius_development_entrypoint` with `--bundle BUNDLE`,
+`--bundle-sha256 REVIEWED_DIGEST` and `--public-key DEDICATED_ED25519_PUBLIC_KEY`.
+The default is preview; `--apply` adds only the dev forced-command grant. Existing
+keys are preserved, and a key already granted different authority is rejected.
+Run from the reviewed checkout because this module reuses its stdlib file/key
+helpers. Do not invoke it through staging's deployment command or substitute a
+digest supplied by an untrusted caller. Installing a grant creates no Kubernetes
+resources and is not an installation receipt.
+
+The gateway rejects unknown/duplicate/link/oversize archive members, changed
+source identity, commands and reports. It installs hash-locked dependencies into
+a private digest-addressed release, qualifies imports without live writes, and
+then invokes the fixed dev entrypoint. A partial tooling release or changed
+retained bytes requires reconciliation, not automatic deletion/retry. `pending`
+means the private phase has not finished; `blocked` reports only a closed failure
+stage. Only `development_private_installed` records private completion, and it
+does **not** qualify management/HTTPS, shared-pool execution or concurrent owners.
 
 #### Owner commands
 

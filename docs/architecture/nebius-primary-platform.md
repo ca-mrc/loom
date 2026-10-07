@@ -56,7 +56,7 @@ reusable old data volumes, and measures system capacity alongside existing
 workloads. It includes HPA maxima, rollout/maintenance demand and terminating
 Pods without changing other environments. Source preparation happens in the
 publisher checkout; live inspection needs no Git checkout on the gateway. The
-future protected gateway must authenticate the source-bound installer bundle.
+separate protected dev gateway authenticates the source-bound installer bundle.
 This read-only report is not installation authority, a capacity reservation or
 an interrupted-install recovery path. See the
 [foundation runbook](../runbooks/nebius-deployment.md#independent-shared-development-foundation)
@@ -96,9 +96,16 @@ exact build revision, and rechecks controller/Pod/container identity afterward.
 
 The private entry module freezes the packaged source record, installation inputs
 and credential files; it accepts no caller readiness flags or arbitrary manifests.
-It is not yet published or installed through a dev-only protected gateway. That
-gateway must authenticate both installer code and its source record, and exclude
-competing privileged namespace or storage replacement. A private completion
+The dev-only gateway authenticates the complete bundle against an operator-pinned
+digest before executing packaged code. It accepts only development preflight and
+private installation, with a separate key and retained dev state; existing
+management/staging commands are unchanged. Protected publication binds the clean,
+integrated source, source archive record, hash-locked dependencies and first-party
+wheels. Prepared releases are private and replay-checked; incomplete preparation
+is retained for reconciliation. The protected `nebius-rollout` development actions
+use only that dedicated authority. These source capabilities still require an
+installed operator grant and live qualification, including exclusion of competing
+privileged namespace or storage replacement. A private completion
 receipt does not establish public access, shared execution/build admission or
 personal-owner acceptance. Existing management/staging installer scope and runtime
 behavior are unchanged.
