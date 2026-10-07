@@ -73,6 +73,15 @@ _PHASES = {
 class DevelopmentManagementRequest(ManagementInstallRequest):
     application_material: ApplicationSetupMaterial
     shared_namespace_uid: str
+    qualification_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        # The private entry must bind settings/files that do not appear in the
+        # renderer. None is reserved for isolated component use, not deployment.
+        if self.qualification_digest is not None and (
+                not isinstance(self.qualification_digest, str)
+                or re.fullmatch(r'sha256:[0-9a-f]{64}', self.qualification_digest) is None):
+            raise ManagementInstallError('development management qualification digest invalid')
 
 
 class DevelopmentManagementAPI(Protocol):
@@ -222,7 +231,8 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
         rendered = render_installation(request)
         fingerprint = digest({'binding': asdict(request.binding), 'deployment': request.deployment.model_dump(mode='json'),
             'candidate': request.candidate, 'profile': request.profile, 'material': request.material,
-            'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid})
+            'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid,
+            'qualification_digest': request.qualification_digest})
         identity = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
                     'state_dir': str(state), 'binding': asdict(request.binding)}
         with private_state._locked_state(anchor):
