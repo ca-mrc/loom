@@ -42,6 +42,11 @@ class DevelopmentAPI(InstallationAPI):
             if doc['kind'] == 'ValidatingAdmissionPolicy':
                 doc['status'] = {'observedGeneration': 1, 'typeChecking': {'expressionWarnings': []}}
 
+    def verify_public(self, binding, rendered, material_dir):
+        super().verify_public(binding, rendered, material_dir)
+        if self.block == 'late-drift':
+            self.store.resources['ConfigMap:loom-platform-config']['data']['environment.json'] = '{}'
+
 
 @pytest.fixture
 def installation(application_management_inputs, material, application_material):
@@ -199,5 +204,61 @@ def test_staging_binding_is_rejected_before_bootstrap(installation, tmp_path):
     deployment = type(request.deployment).model_validate(raw)
     with pytest.raises(ManagementInstallError):
         run((replace(request, deployment=deployment), api), tmp_path)
+    assert not api.bootstrap.creates
+    assert api.store is None
+
+
+def test_late_resource_drift_cannot_report_completed_installation(installation, tmp_path):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api = installation[1]
+    to_admission(installation, tmp_path)
+    api.admit()
+    run(installation, tmp_path)
+    api.complete('Job')
+    run(installation, tmp_path)
+    api.complete('Job')
+    run(installation, tmp_path)
+    api.complete('Deployment')
+    api.block = 'late-drift'
+    before = len(api.store.creates)
+    with pytest.raises(ManagementInstallError):
+        run(installation, tmp_path)
+    assert len(api.store.creates) == before + 1  # The already-qualified public Ingress only.
+
+
+@pytest.mark.parametrize('failure', ['before', 'after'])
+def test_unknown_application_create_does_not_repeat_request(installation, tmp_path, failure):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api = installation[1]
+    to_admission(installation, tmp_path)
+    api.admit()
+    api.store.failure = failure
+    before = len(api.store.creates)
+    for _ in range(2):
+        if failure == 'before':
+            with pytest.raises(ManagementInstallError):
+                run(installation, tmp_path)
+        else:
+            assert run(installation, tmp_path)['phase'] == 'application-database'
+    assert len(api.store.creates) == len(set(api.store.creates))
+    if failure == 'before':
+        assert len(api.store.creates) == before + 1
+
+
+@pytest.mark.parametrize('change', ['shared-password', 'publication', 'legacy-secret'])
+def test_invalid_material_is_rejected_before_bootstrap(installation, tmp_path, change):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request, api = installation
+    if change == 'shared-password':
+        request = replace(request, application_material=replace(request.application_material, manager_password=''))
+    elif change == 'publication':
+        request.material['loom-management-publications']['token'] = ''
+    else:
+        request.material['loom-management-cloud'] = {'credentials.json': '{"unexpected":"key"}'}
+    with pytest.raises(ManagementInstallError):
+        run((request, api), tmp_path)
     assert not api.bootstrap.creates
     assert api.store is None
