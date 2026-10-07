@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 import httpx
@@ -36,6 +36,7 @@ from scripts.ops.nebius_development_preflight import (
     DevelopmentPreflightSettings,
     HTTPSDevelopmentPreflight,
 )
+from scripts.ops.nebius_development_probe import probe_private_service
 from scripts.ops.nebius_development_stage import (
     DevelopmentResourceBinding,
     DevelopmentStageInput,
@@ -57,6 +58,7 @@ class DevelopmentLiveSettings(BaseModel):
     cloud: DevelopmentCloudScope
     operator_cloud_credentials: Path
     github_token_file: Path
+    kubectl: Path
 
 
 def _private(path: Path) -> bytes:
@@ -282,3 +284,61 @@ class HTTPSDevelopmentInstallationAPI:
             self.diagnostic_stage = None
         except Exception:
             raise DevelopmentInstallError("development physical database storage unavailable") from None
+
+    def _service(self, binding: DevelopmentResourceBinding) -> dict[str, Any]:
+        with self.resources(binding, self.request.selection, "services") as api:
+            deployment = self._recorded(binding, "services", "Deployment:loom-service", api)
+            labels = deployment["spec"]["selector"]["matchLabels"]
+            query = urlencode({"labelSelector": ",".join(key + "=" + value for key, value in sorted(labels.items())), "limit": 2})
+            listing = api._request("GET", "/api/v1/namespaces/loom-dev/pods?" + query)
+            if (listing is None or listing.get("apiVersion") != "v1" or listing.get("kind") != "PodList"
+                    or listing.get("metadata", {}).get("continue") or len(listing.get("items", [])) != 1):
+                raise ValueError()
+            row = {"apiVersion": "v1", "kind": "Pod", **listing["items"][0]}
+            name = row["metadata"]["name"]
+            if not isinstance(name, str) or re.fullmatch(r"loom-service-[a-z0-9-]{1,200}", name) is None:
+                raise ValueError()
+            pod = self._object(row, api="v1", kind="Pod", name=name)
+            owners = pod["metadata"].get("ownerReferences", [])
+            if len(owners) != 1:
+                raise ValueError()
+            replica_name = owners[0]["name"]
+            if not isinstance(replica_name, str) or re.fullmatch(r"loom-service-[a-z0-9-]{1,200}", replica_name) is None:
+                raise ValueError()
+            replicas = self._object(api._request("GET", "/apis/apps/v1/namespaces/loom-dev/replicasets/" + replica_name),
+                api="apps/v1", kind="ReplicaSet", name=replica_name)
+            self._owned(pod, replicas)
+            self._owned(replicas, deployment)
+            expected = deployment["spec"]["template"]["spec"]
+            if (not _matches_backup_template(replicas["spec"]["template"]["spec"], expected)
+                    or not _matches_backup_template(pod["spec"], expected)):
+                raise ValueError()
+            status = pod.get("status", {})
+            containers = status.get("containerStatuses", [])
+            if (status.get("phase") != "Running" or len(containers) != 1 or containers[0].get("name") != "loom-service"
+                    or containers[0].get("ready") is not True or not containers[0].get("containerID")
+                    or "running" not in containers[0].get("state", {})):
+                raise ValueError()
+            api.verify_identity(binding)
+            return {"pod_name": name, "pod_uid": _uid(pod), "replica_uid": _uid(replicas),
+                "deployment_uid": _uid(deployment), "container_id": containers[0]["containerID"],
+                "restarts": containers[0]["restartCount"]}
+
+    def verify_private_dependencies(self, request: DevelopmentInstallRequest, binding: DevelopmentResourceBinding,
+                                    material_state: Path) -> None:
+        try:
+            self.diagnostic_stage = "private_service"
+            self._request(request)
+            self._binding(binding)
+            if material_state != self.state_dir / "bootstrap":
+                raise ValueError()
+            before = self._service(binding)
+            probe_private_service(kubectl=self.settings.kubectl, api_server=self.api_server,
+                ssl_context=self.ssl_context, token=self.token, pod_name=before["pod_name"],
+                candidate=self.request.selection.candidate["candidate_sha"])
+            self._request(request)
+            if self._service(binding) != before:
+                raise ValueError()
+            self.diagnostic_stage = None
+        except Exception:
+            raise DevelopmentInstallError("development running API dependencies unavailable") from None

@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
+import certifi
 import pytest
 
 
@@ -105,7 +106,8 @@ def test_probe_transport_uses_private_temporary_kubeconfig_and_fixed_bounded_com
 
     monkeypatch.setattr(mod, "run_private", run)
     mod.probe_private_service(kubectl=executable, api_server="https://cluster.example",
-        ssl_context=ssl.create_default_context(), token="private-k8s-token", pod_name="loom-service-test", candidate="a" * 40)
+        ssl_context=ssl.create_default_context(cafile=certifi.where()), token="private-k8s-token",
+        pod_name="loom-service-test", candidate="a" * 40)
     assert len(calls) == 1 and not calls[0].exists()
 
 
@@ -118,5 +120,6 @@ def test_probe_transport_rejects_unqualified_report_without_echoing_it(tmp_path,
     monkeypatch.setattr(mod, "run_private", lambda *args, **kwargs: report)
     with pytest.raises(mod.DevelopmentInstallError) as error:
         mod.probe_private_service(kubectl=executable, api_server="https://cluster.example",
-            ssl_context=ssl.create_default_context(), token="private-k8s-token", pod_name="loom-service-test", candidate="a" * 40)
+            ssl_context=ssl.create_default_context(cafile=certifi.where()), token="private-k8s-token",
+            pod_name="loom-service-test", candidate="a" * 40)
     assert "sensitive" not in str(error.value)
