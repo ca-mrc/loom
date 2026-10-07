@@ -902,6 +902,20 @@ with hashed dependencies and two first-party wheels. Prepare it with
 extra and `nebius-certificates` group as the workflow. The bundle contains no
 runtime/installation credentials or private input file.
 
+Gateway preparation failures return a bound `blocked` report with a `tooling_*`
+stage, including `tooling_dependency_sync` for locked dependency installation and
+`tooling_retained_incomplete` when an earlier preparation lacks its completion
+marker. These stages identify the failed boundary; they do not expose child
+output or diagnose the underlying provider, network or filesystem error. A
+blocked report still fails the rollout and never dispatches the requested action.
+For dependency preparation failures, inspect gateway disk/inode availability and
+diagnose the dependency installation through the approved operator route before
+retrying. Preserve the failed release, bundle and operation records. The gateway
+refuses an identical incomplete release. After correcting the cause, an anchored
+image repair can use a new tooling continuation as described below.
+The fixed Python entry uses `-I -B` for qualification and operation execution, so
+retained tooling releases do not accumulate duplicate import bytecode caches.
+
 Using the existing approved operator route, preview
 `scripts/ops/install_nebius_management_entrypoint.py --bundle <bundle>
 --bundle-sha256 <exact-digest> --public-key <dedicated-key.pub>`; `--apply` installs
@@ -1603,13 +1617,24 @@ attempt forward-only closed-image qualification on an incomplete image tail.
 Forward repair still requires that qualification; recovery preflight neither
 completes an image correction nor authorizes reopening intake.
 
-Shutdown finishes its current recovery/drain checks before taking the final
-workload snapshot. The fixed adapter verifies unchanged UID and stable metadata
-and spec, records that snapshot's resourceVersion through the stage's write-ahead
-callback, then sends the full UID/version/metadata/spec CAS. Controller status
+Shutdown, template restoration and legacy restart finish their current
+recovery/drain checks before taking the final workload snapshot. The fixed adapter
+verifies unchanged UID and stable metadata and spec, records that snapshot's
+resourceVersion through the stage's write-ahead callback, then sends the full
+UID/version/metadata/spec CAS. Controller status
 updates during the earlier checks therefore do not force reuse of a stale version.
 A definite rejection may return the new attempt to prepared. An existing unknown
 intent retains its original version and is only observed, never refreshed or resent.
+
+Recovery stages qualify retained authority at their observation boundaries, and
+the actual shutdown dispatch independently repeats that qualification after
+its drain checks, then rechecks fences before the final workload read. Machine
+retirement and legacy restart likewise finish their live ledger checks with
+retained-authority and fence qualification. Nested drain checks read the current
+global and participant ledgers and recheck the fenced journals without repeating
+the whole-cluster authority inventory. No drain result or authority proof is
+cached across workload mutations or invocations. Dry-run success cannot authorize
+a stop; changed authority, fences, ancestry, UID or spec still blocks dispatch.
 
 ## Refresh the retained application manager
 

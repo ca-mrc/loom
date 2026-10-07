@@ -36,7 +36,9 @@ class RestartAPI(RoleAPI):
         assert before == self.startup.documents[key]
         return copy.deepcopy(desired)
 
-    def restart_legacy_workload(self, key, before, desired):
+    def restart_legacy_workload(self, key, before, desired, *, record_intent):
+        before = self.read_workload(key)
+        record_intent(before)
         assert json.loads((self.state / 'legacy-restart.json').read_bytes())['workloads'][key] == {
             'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         assert self.machine_phase == 'revoked' and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}
@@ -65,6 +67,30 @@ def restart(api):
     from scripts.ops.nebius_pool_legacy_restart import restart_pool_legacy
 
     return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
+
+
+def test_restart_boundary_rejects_authority_drift_during_final_drain(closed_startup, monkeypatch):
+    from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
+
+    api = roles_restored(closed_startup)
+    original = api.verify_retained
+    drains = 0
+
+    def drain():
+        nonlocal drains
+        drains += 1
+        return True
+
+    def verify():
+        if drains == 2:
+            raise ValueError('authority changed during final ledger read')
+        return original()
+
+    monkeypatch.setattr(api, 'recovery_drained', drain)
+    monkeypatch.setattr(api, 'verify_retained', verify)
+    with pytest.raises(ValueError):
+        qualify_legacy_restart(api.request, api, state=api.state, anchor=api.root / 'cutover-anchor')
+    assert drains == 2 and not api.restart_calls
 
 
 @pytest.mark.timeout(300)
