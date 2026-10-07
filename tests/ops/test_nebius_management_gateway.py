@@ -459,7 +459,7 @@ def test_tooling_is_private_pinned_and_replay_does_not_reinstall(tmp_path, monke
     assert (release / "deploy/k8s/nebius-capacity-collector.yaml").is_file()
     assert "--require-hashes" in calls[1] and "--only-binary" in calls[1]
     assert "--offline" in calls[2] and "--no-deps" in calls[2]
-    assert calls[3][-1] == "qualify" and calls[3][1:3] == ["-I", "-c"]
+    assert calls[3][-1] == "qualify" and calls[3][1:4] == ["-I", "-B", "-c"]
     assert gateway.prepare_release(content) == release and len(calls) == 4
     assert not (release / "inputs.json").exists()
     assert not (release.parent.parent / "state").exists()
@@ -478,6 +478,34 @@ def test_incomplete_tooling_never_retries_and_modified_tooling_never_replays(tmp
         with pytest.raises(gateway.GatewayError):
             gateway.prepare_release(content)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('failed_step,stage', [
+    (1, 'tooling_venv'), (2, 'tooling_dependency_sync'),
+    (3, 'tooling_wheel_install'), (4, 'tooling_import_qualification'),
+])
+def test_tooling_failure_identifies_boundary_without_completing_or_exposing_child_output(
+        tmp_path, monkeypatch, failed_step, stage):
+    from pathlib import Path
+
+    gateway = module()
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if len(calls) == failed_step:
+            raise RuntimeError('private child output with credentials and paths')
+        return b''
+
+    monkeypatch.setattr(gateway, 'run_private', run)
+    content = archive(bundle(tmp_path))
+    with pytest.raises(gateway.ToolingPreparationError) as failure:
+        gateway.prepare_release(content)
+    assert failure.value.stage == stage
+    assert 'private child' not in str(failure.value)
+    root = Path(operation(tmp_path)['state_dir']).parent
+    assert not (root / 'releases' / hashlib.sha256(content).hexdigest() / 'complete').exists()
+    assert not (root / 'state').exists() and len(calls) == failed_step
 
 
 @pytest.mark.parametrize("command", ["", "loom-nebius-management-install-v1 extra", "kubectl apply", "loom-nebius-ingress-v1"])

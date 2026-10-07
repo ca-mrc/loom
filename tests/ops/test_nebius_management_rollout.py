@@ -41,6 +41,62 @@ def image_tooling_operation(tmp_path):
     return repair_operation(tmp_path, 'v4')
 
 
+@pytest.mark.parametrize('action,metadata_factory', [
+    ('preflight', operation), ('install', operation), ('rollback', image_tooling_operation),
+])
+def test_preparation_failure_survives_gateway_transport_without_retry_or_private_output(
+        tmp_path, monkeypatch, action, metadata_factory):
+    import hashlib
+    import sys
+    from contextlib import redirect_stderr, redirect_stdout
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_management_gateway as gateway
+
+    metadata = metadata_factory(tmp_path)
+    files = bundle(tmp_path)
+    files['operation.json'] = json.dumps(metadata).encode()
+    if metadata_factory is image_tooling_operation:
+        files[gateway.MANAGER_SCHEMA_PROOF] = json.dumps({
+            'schema': 'loom.nebius-manager-schema.v1', 'source_sha': metadata['source_sha'],
+            'revision': '0174'}, sort_keys=True).encode()
+    content = archive(files)
+    Path(metadata['inputs_path']).parent.mkdir(mode=0o700, parents=True)
+    calls = []
+
+    def private(args, **kwargs):
+        calls.append(args)
+        if args[1:3] == ['pip', 'sync']:
+            raise RuntimeError('private dependency output with credential and path')
+        assert args[1] == 'venv', 'failed preparation must not dispatch the operation'
+        return b''
+
+    def ssh(args, **kwargs):
+        monkeypatch.setenv('SSH_ORIGINAL_COMMAND', args[-1])
+        monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(kwargs['input'])))
+        output, error = io.StringIO(), io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            code = gateway.authorized_main(hashlib.sha256(content).hexdigest())
+        return subprocess.CompletedProcess(args, code, output.getvalue().encode(), error.getvalue().encode())
+
+    monkeypatch.setattr(gateway, 'run_private', private)
+    monkeypatch.setattr(subprocess, 'run', ssh)
+    args = {'action': action, 'target': 'codex@host', 'key': Path('/private/key'),
+            'known_hosts': Path('/private/hosts')}
+    result = module().transfer(content, **args)
+    expected = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace')}
+    if action == 'rollback':
+        expected.update(operation_id=metadata['operation_id'], original_operation_id=metadata['original_operation_id'])
+    assert result == {**expected, 'status': 'blocked', 'stage': 'tooling_dependency_sync'}
+    assert len(calls) == 2
+    release = Path(metadata['state_dir']).parent / 'releases' / hashlib.sha256(content).hexdigest()
+    before = {path.relative_to(release): path.read_bytes() for path in release.rglob('*') if path.is_file()}
+    assert not (release / 'complete').exists() and not Path(metadata['state_dir']).exists()
+    assert module().transfer(content, **args) == {**expected, 'status': 'blocked', 'stage': 'tooling_retained_incomplete'}
+    assert len(calls) == 2
+    assert {path.relative_to(release): path.read_bytes() for path in release.rglob('*') if path.is_file()} == before
+
+
 @pytest.mark.parametrize('version', ['v2', 'v3', 'v4'])
 def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_source(tmp_path, version):
     import hashlib
@@ -160,8 +216,8 @@ def test_actual_tooling_qualification_loads_refresh_dependencies_without_private
     if missing is not None:
         (release / 'scripts/ops' / (missing + '.py')).unlink(missing_ok=True)
     args = command(release, 'qualify')
-    # Use the real fixed -I entry invocation. Only the interpreter is supplied by
-    # this test; installed-wheel qualification has its own cluster-lane test.
+    # Use the real fixed isolated, bytecode-free invocation. Only the interpreter
+    # is supplied by this test; installed-wheel qualification has its own cluster-lane test.
     args[0] = sys.executable
     result = subprocess.run(args, cwd=release, capture_output=True, text=True,
         timeout=30, env={**os.environ, 'PYTHONPATH': '/must-not-use-ambient-imports'})
@@ -171,6 +227,7 @@ def test_actual_tooling_qualification_loads_refresh_dependencies_without_private
     else:
         assert result.returncode != 0, 'incomplete protected tooling was qualified'
         assert 'tooling_qualified' not in result.stdout
+    assert not list(release.rglob('*.pyc')), 'immutable tooling must not accumulate bytecode caches'
     assert not Path(metadata['inputs_path']).exists()
 
 

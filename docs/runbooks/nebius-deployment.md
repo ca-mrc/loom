@@ -902,6 +902,20 @@ with hashed dependencies and two first-party wheels. Prepare it with
 extra and `nebius-certificates` group as the workflow. The bundle contains no
 runtime/installation credentials or private input file.
 
+Gateway preparation failures return a bound `blocked` report with a `tooling_*`
+stage, including `tooling_dependency_sync` for locked dependency installation and
+`tooling_retained_incomplete` when an earlier preparation lacks its completion
+marker. These stages identify the failed boundary; they do not expose child
+output or diagnose the underlying provider, network or filesystem error. A
+blocked report still fails the rollout and never dispatches the requested action.
+For dependency preparation failures, inspect gateway disk/inode availability and
+diagnose the dependency installation through the approved operator route before
+retrying. Preserve the failed release, bundle and operation records. The gateway
+refuses an identical incomplete release. After correcting the cause, an anchored
+image repair can use a new tooling continuation as described below.
+The fixed Python entry uses `-I -B` for qualification and operation execution, so
+retained tooling releases do not accumulate duplicate import bytecode caches.
+
 Using the existing approved operator route, preview
 `scripts/ops/install_nebius_management_entrypoint.py --bundle <bundle>
 --bundle-sha256 <exact-digest> --public-key <dedicated-key.pub>`; `--apply` installs
