@@ -69,6 +69,7 @@ def restart(api):
     return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
 
 
+@pytest.mark.timeout(300)
 def test_restart_boundary_rejects_authority_drift_during_final_drain(closed_startup, monkeypatch):
     from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
 
