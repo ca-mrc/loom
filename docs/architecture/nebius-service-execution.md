@@ -657,7 +657,14 @@ This repairs future publication. Existing null-version registrations have a
 separate [admin recovery operation](../runbooks/operator-runbook.md#historical-canonical-object-version-metadata).
 It is bounded to one terminal Trial's committed canonical Artifact, 32 exact
 objects and 256 MiB. Preview binds the complete published metadata and ownership
-state to a plan digest. Apply independently verifies the surviving versions'
+state to a plan digest. Single-version inventory is the default. An explicit
+complete set of 2–8 equivalent versions per key permits adoption of its sole
+latest version only after every copy matches the registered size and SHA-256.
+The complete set is part of the audited plan; all copies count toward the same
+256 MiB verification budget. Delete markers, incomplete or changing inventories
+and differing bytes remain conflicts. Unselected versions are left untouched,
+without new deletion authority or claims about the original upload receipt.
+Apply independently verifies the surviving versions'
 full bytes and exact-key inventories before acquiring bounded database locks.
 It then rechecks ownership, pinned retention, GC claims, competing registrations
 and the preview state, and atomically fills only absent/null versions in the registry,

@@ -46,6 +46,7 @@ MAX_BYTES = 256 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 VERIFICATION_SECONDS = 90
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+VersionId = Annotated[str, Field(min_length=1, max_length=1024)]
 
 
 class RecoveryConflictError(Exception):
@@ -56,7 +57,8 @@ class ObjectVersion(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     registry_id: UUID
-    version_id: str = Field(min_length=1, max_length=1024)
+    version_id: VersionId
+    equivalent_version_ids: list[VersionId] | None = Field(default=None, min_length=2, max_length=8)
 
     @field_validator("registry_id", mode="before")
     @classmethod
@@ -69,6 +71,23 @@ class ObjectVersion(BaseModel):
         if value != value.strip() or value.lower() == "null" or any(ord(c) < 32 for c in value):
             raise ValueError("a concrete version ID is required")
         return value
+
+    @field_validator("equivalent_version_ids")
+    @classmethod
+    def valid_equivalents(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None:
+            for version in value:
+                cls.valid_version(version)
+            if len(set(value)) != len(value):
+                raise ValueError("equivalent version IDs must be unique")
+            return sorted(value)
+        return None
+
+    @model_validator(mode="after")
+    def selected_version_in_inventory(self) -> ObjectVersion:
+        if self.equivalent_version_ids is not None and self.version_id not in self.equivalent_version_ids:
+            raise ValueError("the selected version must be in the complete equivalent inventory")
+        return self
 
 
 class RecoveryRequest(BaseModel):
@@ -97,7 +116,8 @@ class RecoveryRequest(BaseModel):
         return self
 
     def identity(self) -> dict[str, Any]:
-        result = self.model_dump(mode="json", exclude={"apply", "plan_sha256"})
+        # Preserve pre-extension request digests for existing audited operations.
+        result = self.model_dump(mode="json", exclude={"apply", "plan_sha256"}, exclude_none=True)
         result["objects"] = sorted(result["objects"], key=lambda item: item["registry_id"])
         return result
 
@@ -361,7 +381,10 @@ def _plan(
             and canonical_sha == f"sha256:{sha}", "trajectory_identity_conflict")
         add(trajectories_bucket, key, index, f"{name}_version_id",
             f"trial.trajectory_index.{name}_version_id", sha, index.get(f"{name}_size_bytes"))
-    proposed = {item.registry_id: item.version_id for item in request.objects}
+    proposed = {item.registry_id: item for item in request.objects}
+    # The storage budget charges every copy, including versions not adopted.
+    _require(sum(obj.size_bytes * len(proposed[obj.id].equivalent_version_ids or [proposed[obj.id].version_id])
+        for obj in state.objects) <= MAX_BYTES, "byte_limit_exceeded")
     changes = []
     for obj in state.objects:
         refs = references.get((obj.bucket, obj.object_key), [])
@@ -369,7 +392,8 @@ def _plan(
         for row, field, _, sha, size in refs:
             _require(row.get(field) is None and sha == obj.content_sha256 and size == obj.size_bytes,
                 "published_registry_conflict")
-        version = proposed[obj.id]
+        item = proposed[obj.id]
+        version = item.version_id
         before_fields = [{"location": location, "present": field in row, "value": row.get(field)}
                          for row, field, location, _, _ in refs]
         for row, field, _, _, _ in refs:
@@ -378,6 +402,8 @@ def _plan(
             "bucket": obj.bucket, "key": obj.object_key, "version_id": version,
             "sha256": obj.content_sha256, "size_bytes": obj.size_bytes,
             "locations": [ref[2] for ref in refs], "before_version_fields": before_fields})
+        if item.equivalent_version_ids is not None:
+            changes[-1]["equivalent_version_ids"] = item.equivalent_version_ids
     plan = {"schema_version": "loom.object-version-recovery.v1", "request": request.identity(),
         "before_state_sha256": state.digest(), "objects": changes,
         "after_storage_sha256": metadata_digest(storage), "after_index_sha256": metadata_digest(index),
@@ -393,15 +419,16 @@ def _verify_objects(client: Any, plan: dict[str, Any]) -> None:
         # Bounded complete pagination rejects pathological buckets safely.
         args = {"Bucket": obj["bucket"], "Prefix": obj["key"], "MaxKeys": 1000}
         found: list[dict[str, Any]] = []
+        expected = obj.get("equivalent_version_ids", [obj["version_id"]])
         seen_markers: set[tuple[str, str]] = set()
         for _ in range(16):
             _require(time.monotonic() < deadline, "verification_timeout")
             page = client.list_object_versions(**args)
-            _require(page.get("IsTruncated") in (True, False), "incomplete_version_inventory")
+            _require(type(page.get("IsTruncated")) is bool, "incomplete_version_inventory")
             _require(not any(row.get("Key") == obj["key"] for row in page.get("DeleteMarkers", [])),
                 "stored_delete_marker")
             found.extend(row for row in page.get("Versions", []) if row.get("Key") == obj["key"])
-            _require(len(found) <= 1, "ambiguous_stored_versions")
+            _require(len(found) <= len(expected), "ambiguous_stored_versions")
             if page["IsTruncated"] is False:
                 break
             marker = (page.get("NextKeyMarker"), page.get("NextVersionIdMarker"))
@@ -411,32 +438,41 @@ def _verify_objects(client: Any, plan: dict[str, Any]) -> None:
             args.update(KeyMarker=marker[0], VersionIdMarker=marker[1])
         else:
             raise RecoveryConflictError("version_inventory_limit_exceeded")
-        _require(len(found) == 1 and found[0].get("VersionId") == obj["version_id"]
-            and found[0].get("Size") == obj["size_bytes"] and found[0].get("IsLatest") is True,
+        _require(len(found) == len(expected)
+            and {row.get("VersionId") for row in found} == set(expected)
+            and all(type(row.get("Size")) is int and row["Size"] == obj["size_bytes"]
+                and type(row.get("IsLatest")) is bool
+                and row["IsLatest"] == (row.get("VersionId") == obj["version_id"]) for row in found),
             "stored_version_conflict")
 
     try:
         for obj in plan["objects"]:
             inventory(obj)
-            response = client.get_object(Bucket=obj["bucket"], Key=obj["key"], VersionId=obj["version_id"])
-            body = response["Body"]
-            try:
-                _require(response.get("VersionId") == obj["version_id"]
-                    and response.get("ContentLength") == obj["size_bytes"]
-                    and not response.get("DeleteMarker"), "stored_receipt_conflict")
-                size, digest = 0, hashlib.sha256()
-                while True:
-                    _require(time.monotonic() < deadline, "verification_timeout")
-                    chunk = body.read(min(1024 * 1024, obj["size_bytes"] - size + 1))
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    _require(size <= obj["size_bytes"], "stored_content_conflict")
-                    digest.update(chunk)
-                _require(size == obj["size_bytes"] and digest.hexdigest() == obj["sha256"],
-                    "stored_content_conflict")
-            finally:
-                body.close()
+            for version in obj.get("equivalent_version_ids", [obj["version_id"]]):
+                _require(time.monotonic() < deadline, "verification_timeout")
+                response = client.get_object(Bucket=obj["bucket"], Key=obj["key"], VersionId=version)
+                body = response["Body"]
+                try:
+                    _require(response.get("VersionId") == version
+                        and type(response.get("ContentLength")) is int
+                        and response["ContentLength"] == obj["size_bytes"]
+                        and not response.get("DeleteMarker"), "stored_receipt_conflict")
+                    size, digest = 0, hashlib.sha256()
+                    while True:
+                        _require(time.monotonic() < deadline, "verification_timeout")
+                        chunk = body.read(min(1024 * 1024, obj["size_bytes"] - size + 1))
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        _require(size <= obj["size_bytes"], "stored_content_conflict")
+                        digest.update(chunk)
+                    _require(size == obj["size_bytes"] and digest.hexdigest() == obj["sha256"],
+                        "stored_content_conflict")
+                finally:
+                    body.close()
+        # Recheck every key after all reads, including early keys that could have
+        # changed while a later object's payload was being streamed.
+        for obj in plan["objects"]:
             inventory(obj)
     except RecoveryConflictError:
         raise
