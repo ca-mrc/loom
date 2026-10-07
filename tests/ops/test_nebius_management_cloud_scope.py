@@ -113,6 +113,49 @@ async def test_exact_project_provisioner_and_object_only_backup_are_qualified(cl
 
 
 @pytest.mark.asyncio
+async def test_backup_qualification_needs_no_legacy_provisioner_key_or_grants(cloud):
+    from scripts.ops.nebius_management_cloud_scope import ManagementBackupScope, qualify_backup_material
+
+    scope = ManagementBackupScope.model_validate({key: value for key, value in cloud.scope.items()
+        if key in {'tenant_id', 'region'} or key.startswith('backup_')})
+    result = await qualify_backup_material(sdk=None, scope=scope,
+        material=cloud.material['loom-platform-storage'], bucket_name='loom-management-backup',
+        backup_bytes=10 * 1024**3, clients=cloud.clients, now=datetime(2026, 9, 24, tzinfo=UTC))
+    assert result == {'backup_bucket_id': 'bucket-management', 'backup_key_id': 'accesskey-backup'}
+    assert {identity for _, identity in cloud.calls} <= {
+        'project-backups', 'serviceaccount-backup', 'group-backup', 'aws-backup', 'bucket-management'}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change', ['extra_group', 'iam_grant', 'wrong_key', 'cross_bucket', 'full_bucket'])
+async def test_independent_backup_checks_reject_unqualified_scope_or_headroom(cloud, change):
+    from scripts.ops.nebius_management_cloud_scope import (
+        ManagementBackupScope,
+        ManagementCloudScopeError,
+        qualify_backup_material,
+    )
+
+    scope = ManagementBackupScope.model_validate({key: value for key, value in cloud.scope.items()
+        if key in {'tenant_id', 'region'} or key.startswith('backup_')})
+    if change == 'extra_group':
+        cloud.groups['serviceaccount-backup'].append('group-manager')
+    elif change == 'iam_grant':
+        cloud.permits['group-backup'] = copy.deepcopy(cloud.permits['group-manager'])
+    elif change == 'wrong_key':
+        cloud.rows['aws-backup'][1]['spec']['account']['service_account']['id'] = 'serviceaccount-manager'
+    elif change == 'cross_bucket':
+        cloud.rows['other-bucket'] = (storage.Bucket, copy.deepcopy(cloud.rows['bucket-management'][1]))
+        cloud.rows['other-bucket'][1]['metadata'].update(id='other-bucket', name='other-bucket')
+        cloud.bucket_ids.append('other-bucket')
+    else:
+        cloud.rows['bucket-management'][1]['spec']['max_size_bytes'] = str(1024)
+    with pytest.raises(ManagementCloudScopeError):
+        await qualify_backup_material(sdk=None, scope=scope,
+            material=cloud.material['loom-platform-storage'], bucket_name='loom-management-backup',
+            backup_bytes=10 * 1024**3, clients=cloud.clients, now=datetime(2026, 9, 24, tzinfo=UTC))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mutation", ["tenant_admin", "extra_group", "tenant_group", "wrong_public_key", "wrong_subject",
     "wrong_kid", "key_expired", "key_inactive", "account_inactive", "project_suspended", "wrong_region", "backup_admin",
     "backup_key_subject", "backup_key_expired", "backup_key_inactive", "bucket_public", "bucket_wrong_group", "bucket_broad_role",
