@@ -121,7 +121,10 @@ def live(preflight, cloud, tmp_path, monkeypatch):
 def installed(live, monkeypatch):
     from nebius.api.nebius.compute import v1 as compute
     from scripts.ops.nebius_development_install import _storage_observation
-    from scripts.ops.nebius_development_stage import DevelopmentResourceBinding, stage_development_resources
+    from scripts.ops.nebius_development_stage import (
+        DevelopmentResourceBinding,
+        stage_development_resources,
+    )
     from tests.ops.test_nebius_development_install import storage_ready
     from tests.ops.test_nebius_management_stage import PhaseAPI
 
@@ -129,6 +132,7 @@ def installed(live, monkeypatch):
     binding = DevelopmentResourceBinding(live.request.bootstrap, ns["metadata"]["uid"],
         ns["metadata"]["annotations"]["loom.nebius/development-bootstrap-operation"])
     backend = PhaseAPI(binding)
+    live.state_dir.mkdir(mode=0o700)
     for phase in ("database", "services"):
         stage_development_resources(selection=live.request.selection, binding=binding, phase=phase,
             api=backend, state_dir=live.state_dir / phase)

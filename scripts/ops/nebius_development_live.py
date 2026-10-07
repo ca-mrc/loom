@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import re
 import ssl
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -16,13 +18,19 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
+from kubernetes.utils.quantity import parse_quantity
 from pydantic import BaseModel, ConfigDict
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_bootstrap import HTTPSDevelopmentBootstrapAPI
-from scripts.ops.nebius_development_cloud import DevelopmentCloudScope, qualify_development_cloud
+from scripts.ops.nebius_development_cloud import (
+    DevelopmentCloudScope,
+    qualify_development_cloud,
+    qualify_development_disk,
+)
 from scripts.ops.nebius_development_install import (
     DevelopmentInstallError,
     DevelopmentInstallRequest,
+    _storage_observation,
 )
 from scripts.ops.nebius_development_preflight import (
     DevelopmentPreflightSettings,
@@ -32,7 +40,13 @@ from scripts.ops.nebius_development_stage import (
     DevelopmentResourceBinding,
     DevelopmentStageInput,
     HTTPSDevelopmentStageAPI,
+    _identity,
+    _observed,
+    _validate,
+    development_documents,
 )
+from scripts.ops.nebius_ingress_stage import _uid
+from scripts.ops.nebius_management_evidence import _matches_backup_template
 
 from loom.nebius_development_foundation import render_development_foundation
 
@@ -82,12 +96,15 @@ def development_object_client(config: dict[str, Any], material: dict[str, str], 
 
 class HTTPSDevelopmentInstallationAPI:
     def __init__(self, *, request: DevelopmentInstallRequest, settings: DevelopmentLiveSettings,
-                 api_server: str, ssl_context: ssl.SSLContext, token: str):
+                 api_server: str, ssl_context: ssl.SSLContext, token: str, state_dir: Path):
         self.diagnostic_stage: str | None = "configuration"
         try:
             self.request = copy.deepcopy(request)
             self.settings = settings.model_copy(deep=True)
             self.api_server, self.ssl_context, self.token = api_server, ssl_context, token
+            self.state_dir = state_dir
+            if not state_dir.is_absolute() or state_dir != state_dir.resolve():
+                raise ValueError()
             selected = self.request.selection
             self.rendered = render_development_foundation(selected.config, selected.candidate, selected.profile,
                 selected.keyring, repo_root=Path(__file__).resolve().parents[2])
@@ -171,3 +188,97 @@ class HTTPSDevelopmentInstallationAPI:
             self.diagnostic_stage = None
         except Exception:
             raise DevelopmentInstallError("development live prerequisites unavailable") from None
+
+    def _recorded(self, binding: DevelopmentResourceBinding, phase: str, key: str,
+                  api: HTTPSDevelopmentStageAPI) -> dict[str, Any]:
+        """Read an existing phase, never repair or regenerate its journal."""
+        selection = self.request.selection
+        revision, docs = development_documents(selection, binding, phase)
+        record = json.loads(private_state._private_read(self.state_dir / phase / "stage.json", limit=4 * 1024**2))
+        _validate(record, _identity(binding, phase, revision), docs)
+        item = record["resources"][key]
+        if item["status"] != "created":
+            raise DevelopmentInstallError("development recorded resource incomplete")
+        api.verify_identity(binding)
+        return _observed(api, item)[2]
+
+    @staticmethod
+    def _object(row: dict[str, Any] | None, *, api: str, kind: str, name: str,
+                namespace: str | None = "loom-dev") -> dict[str, Any]:
+        if (row is None or row.get("apiVersion") != api or row.get("kind") != kind
+                or row["metadata"].get("name") != name or row["metadata"].get("namespace") != namespace
+                or row["metadata"].get("deletionTimestamp")):
+            raise DevelopmentInstallError("development evidence identity differs")
+        _uid(row)
+        return row
+
+    @staticmethod
+    def _owned(row: dict[str, Any], owner: dict[str, Any]) -> None:
+        refs = row["metadata"].get("ownerReferences", [])
+        if (len(refs) != 1 or any(refs[0].get(key) != value for key, value in {
+                "apiVersion": owner["apiVersion"], "kind": owner["kind"], "uid": _uid(owner),
+                "name": owner["metadata"]["name"], "controller": True}.items())):
+            raise DevelopmentInstallError("development evidence owner differs")
+
+    def _database(self, binding: DevelopmentResourceBinding, observation: dict[str, Any]) -> dict[str, Any]:
+        with self.resources(binding, self.request.selection, "database") as api:
+            current = _storage_observation(self.request, binding, api)
+            if current is None or any(observation.get(key) != value for key, value in current.items()):
+                raise DevelopmentInstallError("development observed storage changed")
+            controller = self._recorded(binding, "database", "StatefulSet:loom-postgres", api)
+            claim, volume = api.get_database_claim(), api.get_database_volume()
+            assert claim is not None and volume is not None
+            if _uid(claim) != current["pvc_uid"] or _uid(volume) != current["pv_uid"]:
+                raise DevelopmentInstallError("development storage identity changed")
+            pod = self._object(api._request("GET", "/api/v1/namespaces/loom-dev/pods/loom-postgres-0"),
+                api="v1", kind="Pod", name="loom-postgres-0")
+            self._owned(pod, controller)
+            expected = copy.deepcopy(controller["spec"]["template"]["spec"])
+            expected.setdefault("volumes", []).append({"name": "data", "persistentVolumeClaim": {
+                "claimName": "data-loom-postgres-0"}})
+            actual = copy.deepcopy(pod["spec"])
+            for value in (expected, actual):
+                value["volumes"].sort(key=lambda row: row["name"])
+            if not _matches_backup_template(actual, expected):
+                raise DevelopmentInstallError("development database pod differs")
+            node_name = pod["spec"]["nodeName"]
+            if not isinstance(node_name, str) or re.fullmatch(r"computeinstance-[a-z0-9]+", node_name) is None:
+                raise ValueError()
+            node = self._object(api._request("GET", "/api/v1/nodes/" + node_name),
+                api="v1", kind="Node", name=node_name, namespace=None)
+            if node["spec"].get("providerID") != "nebius://" + node_name:
+                raise ValueError()
+            api.verify_identity(binding)
+            return {"observation": current, "controller_uid": _uid(controller), "pod_uid": _uid(pod),
+                "node_uid": _uid(node), "instance_id": node_name,
+                "claim_created_at": claim["metadata"]["creationTimestamp"],
+                "volume_created_at": volume["metadata"]["creationTimestamp"]}
+
+    async def _disk(self, evidence: dict[str, Any]) -> None:
+        from nebius.sdk import SDK
+
+        spec = evidence["observation"]["pv_spec"]
+        sdk = SDK(credentials_file_name=str(self.settings.operator_cloud_credentials),
+            user_agent_prefix="loom-development-installer/1.0")
+        try:
+            await qualify_development_disk(sdk=sdk, scope=self.settings.cloud, disk_id=spec["csi"]["volumeHandle"],
+                capacity_bytes=int(parse_quantity(spec["capacity"]["storage"])), instance_id=evidence["instance_id"],
+                claim_created_at=evidence["claim_created_at"], volume_created_at=evidence["volume_created_at"])
+        finally:
+            await sdk.close()
+
+    def qualify_volume(self, request: DevelopmentInstallRequest, binding: DevelopmentResourceBinding,
+                       observation: dict[str, Any]) -> None:
+        try:
+            self.diagnostic_stage = "database_storage"
+            self._request(request)
+            self._binding(binding)
+            before = self._database(binding, observation)
+            self.diagnostic_stage = "provider_disk"
+            asyncio.run(self._disk(before))
+            self._request(request)
+            if self._database(binding, observation) != before:
+                raise ValueError()
+            self.diagnostic_stage = None
+        except Exception:
+            raise DevelopmentInstallError("development physical database storage unavailable") from None
