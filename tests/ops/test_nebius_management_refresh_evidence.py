@@ -210,6 +210,31 @@ def test_continuously_changing_bookkeeping_exhausts_bounded_readbacks(probe_live
     assert all(message.method == 'GET' for message in state.calls)
 
 
+@pytest.mark.parametrize('damage', ['report_bool', 'restart_bool', 'job_count_bool', 'unknown_accounting'])
+def test_bookkeeping_convergence_cannot_accept_malformed_equal_python_values(probe_live, damage):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = probe_live()
+
+    def changed(state, read):
+        if read != 1:
+            return
+        state.pod['metadata']['resourceVersion'] = '2'
+        if damage == 'report_bool':
+            state.report['operations_checked'] = False
+        elif damage == 'restart_bool':
+            state.pod['status']['containerStatuses'][0]['restartCount'] = False
+        elif damage == 'job_count_bool':
+            state.job['status']['succeeded'] = True
+        else:
+            state.pod['status']['resources'] = {'foreign': 'private-marker'}
+
+    state.on_pod_read = changed
+    with api, pytest.raises(ManagementStageError):
+        api.probe_report(state.state_dir)
+    assert state.pod_reads == 1
+
+
 @pytest.mark.parametrize('damage', ['uid', 'deletion', 'labels', 'owner', 'image', 'command', 'secret',
     'privileged', 'resources', 'restart', 'exit', 'phase', 'conditions', 'unknown_status', 'annotations',
     'job_status', 'namespace', 'report', 'log'])
