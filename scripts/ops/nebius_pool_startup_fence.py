@@ -112,6 +112,15 @@ def _fence_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
                   closed: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]],
                   startup: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     cancellation = activation_record(request, state_dir=state, anchor_dir=anchor)
+    return _read_fence_record(request, state=state, anchor=anchor, closed=closed,
+        targets=targets, startup=startup, cancellation=cancellation)
+
+
+def _read_fence_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                       closed: dict[str, dict[str, Any]], targets: dict[str, dict[str, Any]],
+                       startup: dict[str, Any] | None, cancellation: dict[str, Any] | None
+                       ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read the current fence after its ancestors were read in this local call."""
     if (cancellation is None or cancellation['cancellation'] != 'fenced'
             or any(row['fence'] != 'fenced' for row in cancellation['guards'].values())):
         raise ValueError('startup_fence_requires_cancelled_activation')

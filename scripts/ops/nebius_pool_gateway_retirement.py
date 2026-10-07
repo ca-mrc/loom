@@ -42,6 +42,13 @@ def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path
 def _gateway_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                     ) -> tuple[Documents, Documents, dict[str, Any], dict[str, Any] | None]:
     _, _, machine = _machine_record(request, state=state, anchor=anchor)
+    return _read_gateway_record(request, state=state, anchor=anchor, machine=machine)
+
+
+def _read_gateway_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                         machine: dict[str, Any] | None
+                         ) -> tuple[Documents, Documents, dict[str, Any], dict[str, Any] | None]:
+    """Read current gateway evidence after the same call's machine journal read."""
     if machine is None or machine['phase'] != 'revoked':
         raise ValueError('gateway_retirement_requires_revoked_machines')
     rendered = {_key(row): row for row in cutover_documents(request)['authority']}

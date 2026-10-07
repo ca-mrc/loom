@@ -15,6 +15,7 @@ from typing import Any, Protocol
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
+from scripts.ops.nebius_pool_activation_stage import _activation_record
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_manager_image_history import IMAGE_MARKER, original_recovery_image
 from scripts.ops.nebius_pool_migration import _hash
@@ -23,7 +24,7 @@ from scripts.ops.nebius_pool_startup import (
     _startup_record,
     closed_startup_documents,
 )
-from scripts.ops.nebius_pool_startup_fence import _fence_record, observe_recovery_workloads
+from scripts.ops.nebius_pool_startup_fence import _read_fence_record, observe_recovery_workloads
 from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 
 from loom.nebius_platform_render import digest
@@ -55,7 +56,11 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                      ) -> tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]:
     closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
     _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
-    _, fence = _fence_record(request, state=state, anchor=anchor, closed=closed, targets=targets, startup=startup)
+    # These ancestors are freshly read together, without intervening remote I/O.
+    # The standalone fence reader still qualifies its own complete ancestry.
+    _, cancellation = _activation_record(request, state=state, anchor=anchor)
+    _, fence = _read_fence_record(request, state=state, anchor=anchor, closed=closed,
+        targets=targets, startup=startup, cancellation=cancellation)
     if fence is None or any(row['phase'] != 'fenced' for row in fence['workloads'].values()):
         raise ValueError('pool_shutdown_startup_fence_required')
     original: Documents = {}

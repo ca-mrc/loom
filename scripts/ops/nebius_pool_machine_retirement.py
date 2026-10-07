@@ -24,6 +24,13 @@ class PoolMachineRetirementAPI(PoolShutdownAPI, Protocol):
 def _machine_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                     ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
     _, _, targets, _, shutdown = _shutdown_record(request, state=state, anchor=anchor)
+    return _read_machine_record(request, state=state, anchor=anchor, targets=targets, shutdown=shutdown)
+
+
+def _read_machine_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                         targets: dict[str, dict[str, Any]], shutdown: dict[str, Any] | None
+                         ) -> tuple[dict[str, dict[str, Any]], dict[str, Any], dict[str, Any] | None]:
+    """Read the current machine journal after the same call's shutdown read."""
     if shutdown is None or any(row['phase'] != 'stopped' for row in shutdown['workloads'].values()):
         raise ValueError('pool_machine_retirement_shutdown_required')
     operation = str(request.fencing.retirement.migration.registration.spec.operation_id)

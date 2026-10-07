@@ -13,9 +13,10 @@ from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_gateway_retirement import (
     PoolGatewayRetirementAPI,
-    _gateway_record,
+    _read_gateway_record,
     qualify_gateway_retirement_drain,
 )
+from scripts.ops.nebius_pool_machine_retirement import _read_machine_record
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement import retirement_documents
 from scripts.ops.nebius_pool_shutdown import _shutdown_record
@@ -43,10 +44,13 @@ def template_restoration_exists(request: PoolCutoverRequest, *, state: Path, anc
 
 def _template_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                      ) -> tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]:
-    _, _, _, gateway = _gateway_record(request, state=state, anchor=anchor)
+    # Read this shared ancestry once within the local record load. Each reader
+    # still reads its own current journal, anchor and parent hash from disk.
+    closed, _, stopped, _, shutdown = _shutdown_record(request, state=state, anchor=anchor)
+    _, _, machine = _read_machine_record(request, state=state, anchor=anchor, targets=stopped, shutdown=shutdown)
+    _, _, _, gateway = _read_gateway_record(request, state=state, anchor=anchor, machine=machine)
     if gateway is None or any(row['phase'] != 'restricted' for row in gateway['roles'].values()):
         raise ValueError('pool_template_restoration_gateway_retirement_required')
-    closed, _, stopped, _, _ = _shutdown_record(request, state=state, anchor=anchor)
     before = {key: _stable(row) for key, row in closed.items()}
     before.update(copy.deepcopy(stopped))
     originals = {**retirement_documents(request.fencing.retirement),

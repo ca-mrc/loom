@@ -2117,6 +2117,13 @@ read-only gateway permission review with one fresh drain on each side. These
 checks are not cached across mutations or invocations, and unknown intents
 remain observation-only.
 
+Within one local recovery-record read, shared shutdown, machine and gateway
+ancestors are loaded in order once. Each current journal and independent anchor
+is still read from disk and checked against its parent hash and expected phase.
+This reuse ends when that record read returns; subsequent observations and
+dispatches reread the evidence. It does not cache mutable journals or live
+authority, and does not remove any ledger, process-drain, fence or CAS checks.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
