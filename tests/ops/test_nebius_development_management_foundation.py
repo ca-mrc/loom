@@ -72,8 +72,7 @@ def handoff(entry, installation):
             secret_store_master_keys=original['loom-platform-auth']['secret-store-master-key']))
     reference = {'operation_path': operation_path,
         'operation_sha256': hashlib.sha256(Path(operation_path).read_bytes()).hexdigest(),
-        'installation_input_digest': json.loads((state / 'installation.json').read_text())['input_digest'],
-        'qualification_digest': request.qualification_digest}
+        'installation_input_digest': json.loads((state / 'installation.json').read_text())['input_digest']}
     return reference, manager, api, state, anchor
 
 
@@ -125,6 +124,62 @@ def test_completed_foundation_handoff_never_rerenders_or_replays_installation(ha
     assert all('loom-nebius-platform' not in str(row.url) for row in calls)
     assert {str(path): path.read_bytes() for root in handoff[3:] for path in root.rglob('*.json')} == before
     assert 'password' not in json.dumps(result) and 'PRIVATE KEY' not in json.dumps(result)
+
+
+def test_manager_handoff_uses_only_durable_foundation_records_after_credentials_retire(handoff, monkeypatch):
+    operation_path = Path(handoff[0]['operation_path'])
+    operation_raw = operation_path.read_bytes()
+    operation = json.loads(operation_raw)
+    record = json.loads((Path(operation['state_dir']) / 'installation.json').read_text())
+    reference = {'operation_path': operation_path, 'operation_sha256': hashlib.sha256(operation_raw).hexdigest(),
+        'installation_input_digest': record['input_digest']}
+    inputs = json.loads(Path(operation['inputs_path']).read_text())
+    obsolete = {inputs['operator_connection']['credentials_file'], inputs['operator_connection']['ca_file'],
+        *inputs['storage_files'].values()}
+    for path in map(Path, obsolete):
+        path.unlink()
+    calls = []
+    result = verify((reference, *handoff[1:]), monkeypatch, calls)
+    assert result['namespace_uid'] == handoff[1].shared_namespace_uid
+    assert calls and all(row.method == 'GET' for row in calls)
+
+
+@pytest.mark.parametrize('damage', ['anchor', 'both', 'explicit'])
+def test_retained_foundation_rejects_changed_qualification_preimage(handoff, monkeypatch, damage):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    reference, _, _, state, anchor = handoff
+    paths = [next(anchor.glob('*.json'))]
+    if damage == 'both':
+        paths.append(state / 'installation.json')
+    if damage == 'explicit':
+        reference['qualification_digest'] = 'sha256:' + '0' * 64
+    else:
+        for path in paths:
+            record = json.loads(path.read_text())
+            record['qualification_digest'] = 'sha256:' + '0' * 64
+            path.write_text(json.dumps(record))
+    calls = []
+    with pytest.raises(ManagementInstallError):
+        verify(handoff, monkeypatch, calls)
+    assert not calls
+
+
+def test_old_foundation_history_requires_preserved_digest_without_rewriting_records(handoff, monkeypatch):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    reference, _, _, state, anchor = handoff
+    preserved = None
+    for path in (next(anchor.glob('*.json')), state / 'installation.json'):
+        record = json.loads(path.read_text())
+        preserved = record.pop('qualification_digest')
+        path.write_text(json.dumps(record))
+    before = {str(path): path.read_bytes() for root in handoff[3:] for path in root.rglob('*.json')}
+    with pytest.raises(ManagementInstallError):
+        verify(handoff, monkeypatch, [])
+    reference['qualification_digest'] = preserved
+    assert verify(handoff, monkeypatch, [])['namespace_uid'] == handoff[1].shared_namespace_uid
+    assert {str(path): path.read_bytes() for root in handoff[3:] for path in root.rglob('*.json')} == before
 
 
 @pytest.mark.parametrize('change', ['input-hash', 'anchor-digest', 'missing-anchor', 'phase-hash', 'pending-phase'])
