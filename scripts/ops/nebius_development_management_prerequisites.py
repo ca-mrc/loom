@@ -10,19 +10,22 @@ import asyncio
 import base64
 import copy
 import json
+import re
 import ssl
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
 import httpx
+from kubernetes.utils.quantity import parse_quantity
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_application_cloud_scope import (
     ApplicationCloudScope,
     qualify_application_cloud,
 )
-from scripts.ops.nebius_development_cloud import qualify_development_cloud
+from scripts.ops.nebius_development_cloud import qualify_development_cloud, qualify_development_disk
+from scripts.ops.nebius_development_live import HTTPSDevelopmentInstallationAPI
 from scripts.ops.nebius_development_management_foundation import (
     HTTPSRetainedDevelopmentFoundation,
     RetainedDevelopmentReference,
@@ -42,15 +45,19 @@ from scripts.ops.nebius_development_preflight import (
     HTTPSDevelopmentPreflight,
     _pending_storage,
 )
+from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_capacity import _count, qualify_platform_capacity
 from scripts.ops.nebius_management_cloud_scope import (
     ManagementBackupScope,
     _read,
     qualify_backup_material,
 )
+from scripts.ops.nebius_management_evidence import _matches_backup_template
 from scripts.ops.nebius_management_install import ManagementInstallError, ManagementInstallRequest
 from scripts.ops.nebius_management_live import backup_client
+from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI, _qualified_defaulted
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 from loom.execution_image_admission import ImageAdmissionKeyring
@@ -246,6 +253,101 @@ class HTTPSDevelopmentManagementPrerequisites(ManagementKubernetesTransport):
                 api.verify_public(request)
             else:
                 api.preflight(request)
+
+    def _database(self, request: DevelopmentManagementRequest, binding: ManagementBinding,
+                  rendered: RenderedManagement, receipt: dict[str, Any]) -> dict[str, Any]:
+        object_row = HTTPSDevelopmentInstallationAPI._object
+        with HTTPSManagementStageAPI(binding=binding, rendered=rendered, phase='20-database.yaml',
+                api_server=self.api_server, ssl_context=self.ssl_context, token=self.token) as api:
+            api.verify_identity(binding)
+            claim = object_row(api.get_database_claim(), api='v1', kind='PersistentVolumeClaim',
+                name='data-loom-postgres-0', namespace=binding.namespace)
+            volume = object_row(api.get_database_volume(), api='v1', kind='PersistentVolume',
+                name='pvc-' + _uid(claim), namespace=None)
+            if (receipt != {'status': 'management_storage_verified', 'pvc_uid': _uid(claim), 'pv_uid': _uid(volume)}
+                    or claim['metadata'].get('ownerReferences') or volume['metadata'].get('ownerReferences')
+                    or claim['metadata'].get('labels', {}).get('loom.nebius/management-installation') != binding.installation_id
+                    or claim.get('status', {}).get('phase') != 'Bound' or volume.get('status', {}).get('phase') != 'Bound'
+                    or volume['metadata'].get('annotations', {}).get('pv.kubernetes.io/provisioned-by') != 'compute.csi.nebius.com'):
+                raise ValueError()
+            spec, physical = claim['spec'], volume['spec']
+            requested, capacity = parse_quantity(spec['resources']['requests']['storage']), parse_quantity(physical['capacity']['storage'])
+            if (not requested.is_finite() or requested != request.deployment.postgres_storage_gi * 1024**3
+                    or not capacity.is_finite() or capacity < requested
+                    or spec.get('volumeName') != volume['metadata']['name']
+                    or any(spec.get(key) is not None for key in ('dataSource', 'dataSourceRef', 'selector', 'volumeAttributesClassName'))
+                    or any(row.get('storageClassName') != request.deployment.installation.foundation.platform_config['storage_class']
+                        or row.get('volumeMode', 'Filesystem') != 'Filesystem' or row.get('accessModes') != ['ReadWriteOnce']
+                        for row in (spec, physical))
+                    or any(physical['claimRef'].get(key) != value for key, value in {
+                        'namespace': binding.namespace, 'name': 'data-loom-postgres-0', 'uid': _uid(claim)}.items())
+                    or physical['csi'].get('driver') != 'compute.csi.nebius.com'):
+                raise ValueError()
+            desired = next(row for row in rendered.files['20-database.yaml'] if row['kind'] == 'StatefulSet')
+            controller = object_row(api.get_resource(desired), api='apps/v1', kind='StatefulSet',
+                name='loom-postgres', namespace=binding.namespace)
+            _qualified_defaulted(desired, controller)
+            if controller['metadata'].get('ownerReferences') or not HTTPSRetainedDevelopmentFoundation._ready(controller):
+                raise ValueError()
+            pod = object_row(api._request('GET', '/api/v1/namespaces/' + binding.namespace + '/pods/loom-postgres-0'),
+                api='v1', kind='Pod', name='loom-postgres-0', namespace=binding.namespace)
+            HTTPSDevelopmentInstallationAPI._owned(pod, controller)
+            expected = copy.deepcopy(controller['spec']['template']['spec'])
+            expected.setdefault('volumes', []).append({'name': 'data', 'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
+            actual = copy.deepcopy(pod['spec'])
+            for row in (expected, actual):
+                row['volumes'].sort(key=lambda item: item['name'])
+            if not _matches_backup_template(actual, expected):
+                raise ValueError()
+            node_name = pod['spec']['nodeName']
+            if not isinstance(node_name, str) or re.fullmatch(r'computeinstance-[a-z0-9]+', node_name) is None:
+                raise ValueError()
+            node = object_row(api._request('GET', '/api/v1/nodes/' + node_name), api='v1', kind='Node',
+                name=node_name, namespace=None)
+            if node['spec'].get('providerID') != 'nebius://' + node_name:
+                raise ValueError()
+            api.verify_identity(binding)
+            # Generic staged snapshots forbid owner references. This Pod is a
+            # qualified StatefulSet child, not an independently staged object.
+            # Retain that verified owner separately for the second readback.
+            pod_snapshot = copy.deepcopy(pod)
+            pod_owners = pod_snapshot['metadata'].pop('ownerReferences')
+            return {'disk_id': physical['csi']['volumeHandle'], 'capacity_bytes': int(capacity), 'instance_id': node_name,
+                'claim_created_at': claim['metadata']['creationTimestamp'], 'volume_created_at': volume['metadata']['creationTimestamp'],
+                'resources': {**{row['kind']: {'uid': _uid(row), 'snapshot': _snapshot(row)}
+                    for row in (claim, volume, controller, node)},
+                    'Pod': {'uid': _uid(pod), 'snapshot': _snapshot(pod_snapshot), 'ownerReferences': pod_owners}}}
+
+    def qualify_storage(self, request: DevelopmentManagementRequest, binding: ManagementBinding,
+                        rendered: RenderedManagement, receipt: dict[str, Any]) -> None:
+        async def qualify(evidence: dict[str, Any], retained: RetainedDevelopmentState) -> None:
+            from nebius.sdk import SDK
+
+            sdk = SDK(credentials_file_name=str(self.operator_cloud_credentials),
+                user_agent_prefix='loom-development-management-installer/1.0')
+            try:
+                await qualify_development_disk(sdk=sdk, scope=retained.inputs.settings.cloud,
+                    **{key: value for key, value in evidence.items() if key != 'resources'})
+            finally:
+                await sdk.close()
+
+        try:
+            self.diagnostic_stage = 'database_storage'
+            if ((binding.installation_id, binding.namespace, binding.kube_system_uid) != (
+                    request.binding.installation_id, request.binding.namespace, request.binding.kube_system_uid)
+                    or binding.namespace != 'loom-nebius-management-dev' or rendered != render_installation(request)):
+                raise ValueError()
+            retained = self.foundation(request)
+            before = self._database(request, binding, rendered, receipt)
+            identity = private_state._private_read(self.operator_cloud_credentials, limit=1024**2)
+            self.diagnostic_stage = 'provider_disk'
+            asyncio.run(qualify(before, retained))
+            if (private_state._private_read(self.operator_cloud_credentials, limit=1024**2) != identity
+                    or self._database(request, binding, rendered, receipt) != before):
+                raise ValueError()
+            self.diagnostic_stage = None
+        except Exception:
+            raise ManagementInstallError('development management physical database storage unqualified') from None
 
     def public_route(self, request: ManagementInstallRequest) -> None:
         if not isinstance(request, DevelopmentManagementRequest):

@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
+import io
 import json
 import ssl
+import zipfile
 from contextlib import contextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -16,7 +20,10 @@ from tests.ops.test_nebius_development_management_install import installation as
 from tests.ops.test_nebius_development_management_route import route as route
 from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
+from tests.ops.test_nebius_management_prerequisites import published_request
 from tests.ops.test_nebius_management_supplied import material as material
+from tests.unit.test_nebius_candidate_catalog import github_transport
+from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_management_render import (
     application_management_inputs as application_management_inputs,
 )
@@ -265,3 +272,48 @@ async def test_provider_preflight_rejects_cross_binding_and_late_quota_or_identi
         assert 'sdk' not in events
     else:
         assert events[-1] == 'close'
+
+
+@pytest.mark.parametrize('drift', [None, 'source', 'image', 'schema', 'failed-check', 'expired-artifact'])
+async def test_manager_and_personal_release_use_authenticated_publication_bytes(capacity_checks, publication, drift):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    from loom_service.application_management.installation import ApplicationInstallation
+    from loom_service.environment_management.registry import ManagementError
+
+    api, request, _, _ = capacity_checks
+    reference, responses, payload, keyring, candidate = copy.deepcopy(publication)
+    candidate['source_archive_sha256'] = 'sha256:' + 'f' * 64
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source, zipfile.ZipFile(buffer, 'w') as target:
+        for name in source.namelist():
+            target.writestr(name, json.dumps(candidate).encode() if name == 'candidate.json' else source.read(name))
+    payload = buffer.getvalue()
+    reference['artifact_sha256'] = 'sha256:' + hashlib.sha256(payload).hexdigest()
+    responses['actions/artifacts/123']['digest'] = reference['artifact_sha256']
+    request = published_request((request, None), (reference, responses, payload, keyring, candidate))
+    app = request.deployment.installation.applications.model_dump(mode='json')
+    release = {'release_id': str(reference['candidate_id']), 'source_digest': 'sha256:' + 'f' * 64,
+        'schema_revision': app['shared']['schema_revision'],
+        'service_image_ref': candidate['images']['service']['image_ref'], 'web_image_ref': candidate['images']['web']['image_ref']}
+    if drift == 'source':
+        release['source_digest'] = 'sha256:' + 'e' * 64
+    elif drift == 'image':
+        release['web_image_ref'] = release['web_image_ref'].replace('@sha256:', '-other@sha256:')
+    elif drift == 'schema':
+        release['schema_revision'] = 'incompatible'
+    elif drift == 'failed-check':
+        responses['commits/' + 'b' * 40 + '/check-runs']['check_runs'][0]['conclusion'] = 'failure'
+    elif drift == 'expired-artifact':
+        responses['actions/artifacts/123']['expired'] = True
+    app['releases'] = [release]
+    deployment = request.deployment.model_copy(update={'installation': request.deployment.installation.model_copy(
+        update={'applications': ApplicationInstallation.model_validate(app)})})
+    request = replace(request, deployment=deployment)
+    api.settings = SimpleNamespace(candidate_id=reference['candidate_id'])
+    async with httpx.AsyncClient(transport=github_transport(responses, payload), trust_env=False) as http:
+        if drift is None:
+            await api.publications(request, http)
+        else:
+            with pytest.raises((ManagementInstallError, ManagementError)):
+                await api.publications(request, http)
