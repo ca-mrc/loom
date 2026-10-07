@@ -48,7 +48,8 @@ def probe_live(resources_request, tmp_path):
         report = {'schema': 'loom.nebius-management-refresh-probe.v1', 'status': 'qualified',
             'mode': settings['mode'], 'revision': settings['expected_revision'], 'operations_checked': 0}
         state = SimpleNamespace(request=request, phase=phase, state_dir=state_dir, fake=fake, job=job, pod=pod,
-            report=report, log=None, calls=[], extra_pod=False, continuation=False, final_drift=False, namespace_drift=False)
+            report=report, log=None, calls=[], extra_pod=False, continuation=False, final_drift=False, namespace_drift=False,
+            pod_reads=0, on_pod_read=None)
         binding = request.binding
         identities = {binding.namespace: binding.namespace_uid, 'kube-system': binding.kube_system_uid,
             request.switch.render.after.installation.applications.shared.platform_namespace: request.shared_namespace_uid}
@@ -78,6 +79,9 @@ def probe_live(resources_request, tmp_path):
                 assert message.url.params['limitBytes'] == '16384'
                 return httpx.Response(200, content=state.log if state.log is not None else json.dumps(state.report).encode())
             assert path == base + '/' + state.pod['metadata']['name']
+            state.pod_reads += 1
+            if state.on_pod_read is not None:
+                state.on_pod_read(state, state.pod_reads)
             value = copy.deepcopy(state.pod)
             if state.final_drift:
                 value['metadata']['uid'] = str(uuid4())
@@ -167,3 +171,105 @@ def test_completed_shared_probe_cannot_claim_management_operation_inspection(pro
     state.report['operations_checked'] = 1
     with api, pytest.raises(ManagementStageError):
         api.probe_report(state.state_dir)
+
+
+@pytest.mark.parametrize('field', ['resource_version', 'managed_fields', 'terminal_resources', 'job_bookkeeping'])
+def test_completed_probe_requires_equal_full_readbacks_after_bookkeeping_settles(probe_live, field):
+    api, state = probe_live()
+
+    def converge(state, read):
+        if read != 1:
+            return
+        if field == 'resource_version':
+            state.pod['metadata']['resourceVersion'] = '2'
+        elif field == 'managed_fields':
+            state.pod['metadata']['managedFields'] = [{'manager': 'kubelet', 'fieldsV1': {'f:status': {}}}]
+        elif field == 'terminal_resources':
+            state.pod['status']['resources'] = {'requests': {'cpu': '0'}, 'limits': {}}
+        else:
+            state.job['metadata']['resourceVersion'] = '2'
+            state.job['metadata']['managedFields'] = [{'manager': 'kube-controller-manager'}]
+
+    state.on_pod_read = converge
+    with api:
+        result = api.probe_report(state.state_dir)
+    assert result == {'job_uid': state.job['metadata']['uid'], 'pod_uid': state.pod['metadata']['uid'],
+        'probe': state.report}
+    assert state.pod_reads == 2  # A single changed readback must never qualify.
+    assert all(message.method == 'GET' for message in state.calls)
+
+
+def test_continuously_changing_bookkeeping_exhausts_bounded_readbacks(probe_live):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = probe_live()
+    state.on_pod_read = lambda state, read: state.pod['metadata'].update(resourceVersion=str(read))
+    with api, pytest.raises(ManagementStageError):
+        api.probe_report(state.state_dir)
+    assert state.pod_reads == 3
+    assert all(message.method == 'GET' for message in state.calls)
+
+
+@pytest.mark.parametrize('damage', ['uid', 'deletion', 'labels', 'owner', 'image', 'command', 'secret',
+    'privileged', 'resources', 'restart', 'exit', 'phase', 'conditions', 'unknown_status', 'annotations',
+    'job_status', 'namespace', 'report', 'log'])
+@pytest.mark.parametrize('when', [1, 2])
+def test_convergence_never_hides_other_changes_or_retries_rejected_evidence(probe_live, damage, when):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    api, state = probe_live()
+
+    def changed(state, read):
+        state.pod['metadata']['resourceVersion'] = str(read)
+        if read != when:
+            return
+        pod = state.pod
+        if damage == 'uid':
+            pod['metadata']['uid'] = str(uuid4())
+        elif damage == 'deletion':
+            pod['metadata']['deletionTimestamp'] = '2026-10-07T00:00:00Z'
+        elif damage == 'labels':
+            pod['metadata']['labels']['foreign'] = 'private-marker'
+        elif damage == 'owner':
+            pod['metadata']['ownerReferences'][0]['uid'] = str(uuid4())
+        elif damage in {'image', 'command', 'secret', 'privileged', 'resources'}:
+            container = pod['spec']['containers'][0]
+            if damage == 'image':
+                container['image'] = 'foreign:latest'
+            elif damage == 'command':
+                container['command'] = ['foreign']
+            elif damage == 'secret':
+                container['env'][0]['valueFrom']['secretKeyRef']['key'] = 'admin-url'
+            elif damage == 'privileged':
+                container['securityContext']['privileged'] = True
+            else:
+                container['resources'] = {'requests': {'cpu': '99'}}
+        elif damage in {'restart', 'exit'}:
+            status = pod['status']['containerStatuses'][0]
+            if damage == 'restart':
+                status['restartCount'] = 1
+            else:
+                status['state']['terminated']['exitCode'] = 1
+        elif damage == 'phase':
+            pod['status']['phase'] = 'Failed'
+        elif damage == 'conditions':
+            pod['status']['conditions'] = [{'type': 'Ready', 'status': 'True'}]
+        elif damage == 'unknown_status':
+            pod['status']['foreign'] = 'private-marker'
+        elif damage == 'annotations':
+            pod['metadata']['annotations'] = {'foreign': 'private-marker'}
+        elif damage == 'job_status':
+            state.job['status']['failed'] = 1
+        elif damage == 'namespace':
+            state.namespace_drift = True
+        elif damage == 'report':
+            state.report['operations_checked'] = 1
+        else:
+            state.log = b'private-marker'
+
+    state.on_pod_read = changed
+    with api, pytest.raises(ManagementStageError) as error:
+        api.probe_report(state.state_dir)
+    assert state.pod_reads == when  # Reject immediately, including after one benign change.
+    assert 'private-marker' not in str(error.value)
+    assert all(message.method == 'GET' for message in state.calls)
