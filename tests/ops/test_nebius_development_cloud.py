@@ -158,6 +158,13 @@ async def test_bound_disk_is_empty_fresh_correct_project_region_size_and_attachm
     assert ("get", "project-compute") in cloud.calls
 
 
+async def test_provider_subsecond_creation_fits_kubernetes_second_precision(cloud):
+    # Kubernetes metav1.Time serializes creationTimestamp to seconds. A disk
+    # created at .5 and its PV at .8 legitimately report .5 and whole seconds.
+    cloud.rows["computedisk-test"][1]["metadata"]["created_at"] = "2026-10-07T12:00:03.500Z"
+    await disk(cloud)
+
+
 @pytest.mark.parametrize("change", ["project", "region", "old", "future", "snapshot", "image", "capacity", "type",
     "broken", "reconciling", "foreign-attachment", "read-only-attachment", "instance-owned"])
 async def test_provider_disk_cannot_be_reused_cloned_foreign_or_unready(cloud, change):
