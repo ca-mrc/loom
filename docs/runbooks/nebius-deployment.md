@@ -2033,6 +2033,17 @@ installation lock, stages only fixed operation resources, and proceeds through:
    verify the actual current Pod/controller plus authenticated public HTTPS and
    application-provisioner readiness.
 
+Completed compatibility probes require equal full Pod and recorded-resource
+snapshots around their closed runtime report. Kubernetes may still update
+`metadata.resourceVersion`, `metadata.managedFields`, or a terminal Pod's
+`status.resources` after completion. Qualification permits at most three final
+readbacks when only those fields change; it still requires two equal full
+snapshots, rechecks namespace/resource identity on every pass, and rereads the
+same bounded report before another pass. Other changes, malformed accounting,
+changed reports or continuous bookkeeping changes fail closed. This does not
+retry a failed proof, replay writes or extend the operation deadline. Preserve
+the original phase evidence when qualification fails.
+
 When retained preflight fails, the closed `stage` field preserves the failed check,
 such as `refresh_resource_inventory`, `refresh_persistent_storage`,
 `refresh_shared_material`, `refresh_publication` or `refresh_cloud_identity`.

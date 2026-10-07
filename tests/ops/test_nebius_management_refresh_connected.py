@@ -73,7 +73,7 @@ def connected_refresh(completed_upgrade, monkeypatch):
     state = SimpleNamespace(root=root, request=request, directory=directory, anchor=anchor, values=values,
         manager=manager, namespaces=namespaces, calls=[], storage_calls=[], storage_options=[], public_calls=[],
         pods={}, logs=Counter(), fail_backup=False, fail_public=False, activation_probe_drift=False,
-        operation=operation, fail_probe=None)
+        operation=operation, fail_probe=None, probe_reads=Counter(), on_probe_readback=None)
     kinds = {'configmaps': 'ConfigMap', 'secrets': 'Secret', 'serviceaccounts': 'ServiceAccount',
         'networkpolicies': 'NetworkPolicy', 'roles': 'Role', 'rolebindings': 'RoleBinding',
         'clusterroles': 'ClusterRole', 'clusterrolebindings': 'ClusterRoleBinding',
@@ -193,6 +193,9 @@ def connected_refresh(completed_upgrade, monkeypatch):
                     'mode': settings['mode'], 'revision': settings['expected_revision'], 'operations_checked':
                     int(state.activation_probe_drift and name.startswith('loom-refresh-manager-probe-') and state.logs[name] > 1)}
                 return httpx.Response(200, json=result)
+            if '-probe-' in name and state.on_probe_readback is not None:
+                state.probe_reads[name] += 1
+                state.on_probe_readback(pod, state.probe_reads[name])
             return httpx.Response(200, json=pod)
         value = values.get(key_for(path))
         return httpx.Response(200, json=value) if value is not None else httpx.Response(404)
@@ -364,6 +367,40 @@ def test_real_connected_parent_completes_and_replay_preserves_all_effects(connec
     assert writes(state) == recorded
     assert (state.directory / 'completion.json').read_bytes() == receipt
     assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize('change', ['settles', 'continuous', 'foreign_after_bookkeeping'])
+def test_connected_installer_preserves_barriers_while_probe_bookkeeping_settles(connected_refresh, change):
+    from scripts.ops.nebius_management_refresh_install import ManagementRefreshInstallError
+
+    _, state = connected_refresh
+
+    def readback(pod, read):
+        if read == 1 or change == 'continuous':
+            pod['metadata']['resourceVersion'] = str(read)
+            pod['status']['resources'] = {'requests': {'cpu': '0'}, 'limits': {}}
+        if read == 2 and change == 'foreign_after_bookkeeping':
+            pod['spec']['containers'][0]['image'] = 'foreign:latest'
+
+    state.on_probe_readback = readback
+    if change == 'settles':
+        assert run(connected_refresh)['status'] == 'management_refreshed'
+        recorded = writes(state)
+        completion = (state.directory / 'completion.json').read_bytes()
+        assert run(connected_refresh)['status'] == 'management_refreshed'
+        assert writes(state) == recorded
+        assert (state.directory / 'completion.json').read_bytes() == completion
+        assert len(state.probe_reads) == 3
+    else:
+        with pytest.raises(ManagementRefreshInstallError) as error:
+            run(connected_refresh)
+        assert error.value.stage == 'manager-probe'
+        assert state.manager['spec']['replicas'] == 0
+        assert not state.storage_calls and not state.public_calls
+        assert not (state.directory / 'completion.json').exists()
+        assert len([row for row in writes(state) if row[0] == 'PATCH']) == 1
+        assert not any('/jobs' in message.url.path and 'backup' in message.content.decode()
+            for message in state.calls if message.method == 'POST')
 
 
 @pytest.mark.parametrize('drift', ['shared_namespace', 'retained_material', 'retained_volume', 'predecessor', 'manager_template'])

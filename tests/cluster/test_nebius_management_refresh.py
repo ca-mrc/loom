@@ -308,37 +308,6 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
             assert not status.failed, f'rendered Job failed: {ns}/{name}'
             return status.succeeded == 1
 
-        def completed_probe_stable(proof, state):
-            previous = None
-
-            def check():
-                nonlocal previous
-                recorded = proof._recorded(state)
-                job = recorded['Job']
-                status = job.get('status', {})
-                conditions = {row['type']: row['status'] for row in status.get('conditions', [])}
-                if conditions.get('Failed') == 'True':
-                    raise AssertionError('refresh probe Job failed while settling')
-                if conditions.get('Complete') != 'True' or status.get('succeeded') != 1 or status.get('active', 0):
-                    return False
-                metadata = job['metadata']
-                base = '/api/v1/namespaces/' + metadata['namespace'] + '/pods'
-                listing = proof._request('GET', base + '?labelSelector=batch.kubernetes.io/controller-uid%3D'
-                    + metadata['uid'] + '&limit=2')
-                if listing is None or listing.get('metadata', {}).get('continue') or len(listing.get('items', [])) != 1:
-                    raise AssertionError('refresh probe did not retain one Pod while settling')
-                pod = {'apiVersion': 'v1', 'kind': 'Pod', **listing['items'][0]}
-                if pod.get('status', {}).get('phase') != 'Succeeded':
-                    return False
-                snapshot = (recorded, pod)
-                if previous is not None and pod['metadata']['uid'] != previous[1]['metadata']['uid']:
-                    raise AssertionError('refresh probe Pod identity changed while settling')
-                stable = snapshot == previous
-                previous = snapshot
-                return stable
-
-            return check
-
         def wait_for(check, message, timeout=180):
             deadline = time.monotonic() + timeout
             while not check():
@@ -401,8 +370,8 @@ def test_rendered_refresh_probes_and_migration_execute_against_real_tls_database
             if phase.endswith('probe'):
                 with HTTPSManagementRefreshEvidenceAPI(request=resources, phase=phase,
                         api_server=endpoint, ssl_context=trust) as proof:
-                    wait_for(completed_probe_stable(proof, state), 'refresh probe readbacks did not settle: ' + phase,
-                        timeout=max(0, phase_deadline - time.monotonic()))
+                    # Exercise production qualification immediately after Job
+                    # completion, without fixture-only convergence or proof retries.
                     try:
                         observed = proof.probe_report(state)
                     except Exception as error:

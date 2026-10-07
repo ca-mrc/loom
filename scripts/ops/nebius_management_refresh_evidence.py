@@ -1,6 +1,7 @@
 """Read-only qualification of the fixed refresh probes' actual Kubernetes Pods."""
 from __future__ import annotations
 
+import copy
 import json
 import re
 import ssl
@@ -21,6 +22,34 @@ from scripts.ops.nebius_management_stage import ManagementStageError, _validate_
 
 from loom.nebius_management_refresh_probe import SCHEMA, RefreshProbeSettings
 from loom_service.environment_management.candidates import _json
+
+
+def _exact_json(value: Any) -> str:
+    # Python equality equates False with 0 and True with 1; evidence must not.
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+
+
+def _convergence_identity(document: dict[str, Any]) -> str:
+    """Only terminal accounting/API bookkeeping may settle between strict reads."""
+    result = copy.deepcopy(document)
+    metadata = result['metadata']
+    if 'resourceVersion' in metadata and (not isinstance(metadata['resourceVersion'], str) or not metadata['resourceVersion']):
+        raise ValueError
+    if 'managedFields' in metadata and (not isinstance(metadata['managedFields'], list)
+            or any(not isinstance(row, dict) for row in metadata['managedFields'])):
+        raise ValueError
+    for field in ('resourceVersion', 'managedFields'):
+        metadata.pop(field, None)
+    if result['kind'] == 'Pod':
+        status = result.get('status', {})
+        if 'resources' in status:
+            resources = status.pop('resources')
+            if (not isinstance(resources, dict) or resources.keys() - {'limits', 'requests'}
+                    or any(not isinstance(values, dict)
+                        or any(not isinstance(key, str) or not isinstance(value, str)
+                            for key, value in values.items()) for values in resources.values())):
+                raise ValueError
+    return _exact_json(result)
 
 
 class HTTPSManagementRefreshEvidenceAPI(HTTPSManagementRefreshResourcesAPI):
@@ -47,7 +76,7 @@ class HTTPSManagementRefreshEvidenceAPI(HTTPSManagementRefreshResourcesAPI):
         return result
 
     def probe_report(self, state_dir: Path) -> dict[str, Any] | None:
-        """None only while the recorded Job runs; no writes, log scanning or retries."""
+        """Qualify exact evidence; bounded bookkeeping settling never replays writes."""
         try:
             resources = self._recorded(state_dir)
             job = resources['Job']
@@ -105,15 +134,19 @@ class HTTPSManagementRefreshEvidenceAPI(HTTPSManagementRefreshResourcesAPI):
                         raise ValueError
             path = base + '/' + meta['name']
             query = urlencode({'container': expected['containers'][0]['name'], 'limitBytes': 16384, 'timestamps': 'false'})
-            with self.client.stream('GET', path + '/log?' + query) as response:
-                if response.status_code != 200 or response.headers.get('content-encoding', 'identity') != 'identity':
-                    raise ValueError
-                content = bytearray()
-                for chunk in response.iter_bytes(chunk_size=8192):
-                    if len(content) + len(chunk) > 16384:
+
+            def read_report() -> Any:
+                with self.client.stream('GET', path + '/log?' + query) as response:
+                    if response.status_code != 200 or response.headers.get('content-encoding', 'identity') != 'identity':
                         raise ValueError
-                    content.extend(chunk)
-            report = _json(bytes(content))
+                    content = bytearray()
+                    for chunk in response.iter_bytes(chunk_size=8192):
+                        if len(content) + len(chunk) > 16384:
+                            raise ValueError
+                        content.extend(chunk)
+                return _json(bytes(content))
+
+            report = read_report()
             if (not isinstance(report, dict)
                     or set(report) != {'schema', 'status', 'mode', 'revision', 'operations_checked'}
                     or report['schema'] != SCHEMA or report['status'] != 'qualified'
@@ -121,9 +154,24 @@ class HTTPSManagementRefreshEvidenceAPI(HTTPSManagementRefreshResourcesAPI):
                     or type(report['operations_checked']) is not int or not 0 <= report['operations_checked'] <= 4096
                     or (settings.mode == 'shared' and report['operations_checked'] != 0)):
                 raise ValueError
-            if self._request('GET', path) != pod or self._recorded(state_dir) != resources:
-                raise ValueError
-            self.verify_identity(self.binding)
-            return {'job_uid': uid, 'pod_uid': pod_uid, 'probe': report}
+            original_pod = _convergence_identity(pod)
+            original_resources = {kind: _convergence_identity(value) for kind, value in resources.items()}
+            for attempt in range(3):
+                observed_pod = self._request('GET', path)
+                observed_resources = self._recorded(state_dir)
+                self.verify_identity(self.binding)
+                if _exact_json(observed_pod) == _exact_json(pod) and _exact_json(observed_resources) == _exact_json(resources):
+                    return {'job_uid': uid, 'pod_uid': pod_uid, 'probe': report}
+                if (observed_pod is None or _convergence_identity(observed_pod) != original_pod
+                        or {kind: _convergence_identity(value) for kind, value in observed_resources.items()}
+                        != original_resources):
+                    raise ValueError
+                # Do not retry a failed proof or normalize the accepted snapshots.
+                # Only these known non-authoritative fields may change, and the
+                # next full read must agree. The original report stays immutable.
+                if attempt == 2 or _exact_json(read_report()) != _exact_json(report):
+                    raise ValueError
+                pod, resources = observed_pod, observed_resources
+            raise ValueError
         except Exception:
             raise ManagementStageError('management refresh probe execution unqualified; preserve evidence') from None
