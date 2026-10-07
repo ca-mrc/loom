@@ -174,6 +174,47 @@ def _history(record: dict[str, Any], identity: dict[str, Any], state: Path) -> N
             raise ManagementInstallError('development management recovery journals changed')
 
 
+def _final_readback(request: DevelopmentManagementRequest, api: DevelopmentManagementAPI,
+                    binding: ManagementBinding, rendered: RenderedManagement, state: Path,
+                    record: dict[str, Any]) -> str | None:
+    """All journals are complete: fixed replay can only verify, never create."""
+    if (set(record['phases']) != set(_PHASES)
+            or any(item['status'] != 'complete' for item in record['phases'].values())):
+        raise ManagementInstallError('development management final recovery evidence incomplete')
+    _history(record, {key: value for key, value in record.items() if key != 'phases'}, state)
+    for phase, filename in _PHASES.items():
+        ready, phase_state = True, state / phase
+        if phase == 'bootstrap':
+            with api.bootstrap_api() as bootstrap_api:
+                receipt = bootstrap_management(binding=request.binding, api=bootstrap_api, state_dir=phase_state)
+        elif phase.startswith('application-'):
+            setup, selected = _setup(request, binding), phase.removeprefix('application-')
+            with api.application_resources(setup, selected) as stage_api:
+                receipt = stage_application_setup(request=setup, phase=selected, api=stage_api, state_dir=phase_state)
+                if selected in {'admission', 'database'}:
+                    ready = application_setup_ready(request=setup, phase=selected, api=stage_api, state_dir=phase_state)
+        else:
+            with api.resources(binding, 'database' if phase == 'storage' else phase) as stage_api:
+                if phase == 'storage':
+                    receipt = verify_management_storage(rendered=rendered, binding=binding, api=stage_api,
+                        state_dir=state / 'database', evidence_dir=phase_state)
+                elif phase == 'supplied':
+                    receipt = deliver_supplied_material(material=request.material, binding=binding,
+                        api=stage_api, state_dir=phase_state, application_only=True)
+                else:
+                    assert filename is not None
+                    receipt = stage_management_resources(rendered=rendered, phase=filename,
+                        binding=binding, api=stage_api, state_dir=phase_state)
+                    if phase in {'database', 'migration', 'backup', 'service'}:
+                        ready = management_phase_ready(rendered=rendered, phase=filename, binding=binding,
+                            api=stage_api, state_dir=phase_state)
+        if receipt != record['phases'][phase]['receipt']:
+            raise ManagementInstallError('development management final readback changed')
+        if not ready:
+            return phase
+    return None
+
+
 def install_development_management(*, request: DevelopmentManagementRequest, api: DevelopmentManagementAPI,
                                    state_dir: Path, anchor_dir: Path) -> dict[str, Any]:
     """Resume fixed phases; failed/unknown writes retain their original evidence."""
@@ -282,6 +323,11 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
                 assert binding is not None and backup is not None
                 stage = 'public_authentication'
                 api.verify_public(binding, rendered, state / 'bootstrap' / 'material')
+                stage = 'final_readback'
+                pending = _final_readback(request, api, binding, rendered, state, record)
+                if pending is not None:
+                    return {'status': 'pending', 'phase': pending, 'installation_id': binding.installation_id,
+                        'namespace_uid': binding.namespace_uid, 'revision': rendered.revision}
                 return {'status': 'development_management_installed', 'installation_id': binding.installation_id,
                     'namespace_uid': binding.namespace_uid, 'shared_namespace_uid': request.shared_namespace_uid,
                     'revision': rendered.revision, 'backup': backup}
