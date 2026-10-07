@@ -116,7 +116,68 @@ def test_private_entry_composes_real_installer_pending_and_resume_without_retry(
     assert len(api.bootstrap.creates) + len(api.stage.creates) == writes
 
 
+@pytest.mark.parametrize("change", ["storage-identity", "operator-key"])
+def test_resume_cannot_change_private_qualification_outside_rendered_request(entry, monkeypatch, capsys, change):
+    from uuid import uuid4
+
+    from tests.ops.test_nebius_development_install import InstallationAPI
+
+    operation, payload, path, live = entry
+    api = InstallationAPI(live.request)
+    monkeypatch.setattr(module(), "connected_api", lambda *args, **kwargs: api)
+    assert module().main(path, "install") == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pending"
+    writes = len(api.bootstrap.creates) + len(api.stage.creates)
+    journal = (Path(operation["state_dir"]) / "installation.json").read_bytes()
+    if change == "storage-identity":
+        payload["settings"]["preflight"]["storage_class_uid"] = str(uuid4())
+        payload["settings"]["preflight"]["storage_parameters"] = {"type": "NETWORK_HDD"}
+        payload["settings"]["cloud"]["disk_type"] = "NETWORK_HDD"
+        raw = json.dumps(payload)
+        Path(operation["inputs_path"]).write_text(raw)
+        operation["inputs_sha256"] = hashlib.sha256(raw.encode()).hexdigest()
+        Path(path).write_text(json.dumps(operation))
+    else:
+        live.credentials.write_text('{"private":"rotated-operator"}')
+    assert module().main(path, "install") == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert len(api.bootstrap.creates) + len(api.stage.creates) == writes
+    assert (Path(operation["state_dir"]) / "installation.json").read_bytes() == journal
+
+
 def test_unknown_command_does_not_read_private_files(monkeypatch, capsys):
     monkeypatch.setattr(module(), "load_inputs", lambda *args: pytest.fail("private inputs read"))
     assert module().main("/not-an-operation", "rollback-staging") == 1
     assert json.loads(capsys.readouterr().out) == {"status": "blocked", "stage": "operation"}
+
+
+@pytest.mark.parametrize("replace_during_exchange", [False, True])
+def test_credential_exchange_closes_sdk_and_rechecks_every_private_input(entry, monkeypatch, replace_during_exchange):
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    import certifi
+    from nebius.sdk import SDK
+
+    operation, payload, _, live = entry
+    Path(payload["operator_connection"]["ca_file"]).write_bytes(Path(certifi.where()).read_bytes())
+    inputs, request, files = module().load_inputs(operation)
+
+    async def token(self, *, timeout):
+        assert timeout == 30
+        if replace_during_exchange:
+            Path(payload["storage_files"]["secret-key"]).write_text("replaced")
+        return SimpleNamespace(token="operator-k8s-secret", expiration=datetime.now(UTC) + timedelta(minutes=30))
+
+    monkeypatch.setattr(SDK, "get_token", token)
+    if replace_during_exchange:
+        with pytest.raises(ValueError, match="connection inputs changed"):
+            module().connected_api(inputs, request, files, operation)
+    else:
+        api = module().connected_api(inputs, request, files, operation)
+        assert api.state_dir == Path(operation["state_dir"])
+        assert api.ssl_context.get_ca_certs()
+        Path(operation["inputs_path"]).write_text("changed after connection")
+        with pytest.raises(RuntimeError, match="private input changed"):
+            api.bootstrap_api()
+    assert live.closes == [True]

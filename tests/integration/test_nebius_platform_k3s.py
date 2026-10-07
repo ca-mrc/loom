@@ -234,7 +234,21 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
                     for doc in documents.values():
                         doc["metadata"].setdefault("annotations", {})["loom.nebius/development-stage-operation"] = str(uuid4())
                         try:
-                            qualify_development_default(doc, api.default_resource(doc))
+                            admitted = api.default_resource(doc)
+                            qualify_development_default(doc, admitted)
+                            if doc["kind"] in {"Deployment", "StatefulSet"}:
+                                from scripts.ops.nebius_management_evidence import _matches_backup_template
+
+                                expected = deepcopy(admitted["spec"]["template"]["spec"])
+                                for claim in admitted["spec"].get("volumeClaimTemplates", []):
+                                    expected.setdefault("volumes", []).append({"name": claim["metadata"]["name"],
+                                        "persistentVolumeClaim": {"claimName": "data-loom-postgres-0"}})
+                                body = {"apiVersion": "v1", "kind": "Pod", "metadata": {
+                                    "name": doc["metadata"]["name"] + "-evidence", "namespace": "loom-dev"},
+                                    "spec": expected}
+                                pod = core.api_client.sanitize_for_serialization(
+                                    core.create_namespaced_pod("loom-dev", body, dry_run="All"))
+                                assert _matches_backup_template(pod["spec"], expected), doc["metadata"]["name"]
                         except AssertionError as error:
                             default_failures.append(doc["kind"] + ":" + doc["metadata"]["name"] + " " + str(error))
         assert not default_failures, "\n".join(default_failures)
