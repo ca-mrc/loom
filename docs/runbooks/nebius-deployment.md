@@ -130,9 +130,12 @@ independent credential delivery, create-only installation journals and PVC/CSI
 identity qualification are still
 required at the protected write boundary. A repeated or interrupted installation
 must use its retained installation journal, not pass an existing namespace
-through this fresh-only check. Live isolation, HTTPS, shared-pool activation and
-ordinary-owner acceptance remain unverified by this check. There is no apply CLI
-or workflow dispatch for this partial implementation.
+through this fresh-only check. `inspect_installation` separately accepts the
+anchored installation's namespace while recomputing current capacity and pending
+storage demand; it does not adopt resources or replace the installer journals.
+Live isolation, HTTPS, shared-pool activation and ordinary-owner acceptance remain
+unverified by these checks. There is no installed apply CLI or workflow dispatch
+for this partial implementation.
 
 `scripts.ops.nebius_development_bootstrap.bootstrap_development` implements only
 the fresh namespace and local-key phase for that future protected entrypoint.
@@ -162,6 +165,26 @@ satisfy these references. The protected source-bound gateway and dev-only workfl
 are still required. Namespace UID checks detect replacement during delivery; they
 do not replace the protected caller's authority and exclusion of competing
 namespace deletion/recreation.
+
+The source-only `nebius_development_entry` and `nebius_development_live` modules now
+connect these checks to the fixed installer. Private inputs name independently
+delivered storage-key files, the observing operator's Kubernetes/provider files,
+the publication reader and a fixed kubectl executable. Operator/publication
+credentials never become workload material. A packaged `development-source.json`
+must match the selected protected publication; the future gateway must authenticate
+that record together with the code, not accept an owner-provided digest as proof.
+Input hashes and file contents are rechecked across credential exchange and
+installation phases. The operation's state and independent anchor live beneath
+dev-only `nebius-development/<installation-id>` and
+`nebius-development-anchors/<installation-id>` roots.
+
+The final dependency probe uses an explicit temporary token/CA kubeconfig and a
+fixed, bounded command inside the recorded running service Pod. It checks rejected
+anonymous/invalid-token access, authenticated API-only PostgreSQL/object readiness
+and the exact running build. It reads the Pod's mounted admin key internally;
+neither the key nor raw probe responses appear in arguments or public reports.
+This is not a command for operators to run against staging, and these source
+modules do not install gateway authority by themselves.
 
 `scripts.ops.nebius_development_install.install_private_development` now composes
 the private installation in this fixed order: local bootstrap, configuration and

@@ -85,13 +85,23 @@ dev PVC, dynamically provisioned PV and CSI disk before migrations, requires a
 separate authenticated provider-disk qualification, and checks current workload
 generations and migration completion. A final readback covers earlier phases too.
 
-The sequencing library is not yet an installed entrypoint. The protected caller
-must implement live publication/source, cloud/credential/quota/headroom checks,
-provider-disk ownership and internal authenticated dependency probes. It must
-exclude competing privileged namespace or storage replacement. Its private
-completion receipt does not establish public access, shared execution/build
-admission or personal-owner acceptance. Existing management/staging installer
-scope and runtime behavior are unchanged.
+The connected development adapter now supplies live publication/source,
+cloud/credential/quota/headroom checks, provider-disk ownership and authenticated
+dependency probes. Resumed qualification counts installed dev resources once;
+only the existing anchored installer grants write/recovery authority. The disk
+check follows the recorded database controller through its Pod, node and dynamic
+PVC/PV to the actual provider disk. Dependency proof runs a fixed read-only HTTP
+probe inside the existing API Pod, checks its own database/object credentials and
+exact build revision, and rechecks controller/Pod/container identity afterward.
+
+The private entry module freezes the packaged source record, installation inputs
+and credential files; it accepts no caller readiness flags or arbitrary manifests.
+It is not yet published or installed through a dev-only protected gateway. That
+gateway must authenticate both installer code and its source record, and exclude
+competing privileged namespace or storage replacement. A private completion
+receipt does not establish public access, shared execution/build admission or
+personal-owner acceptance. Existing management/staging installer scope and runtime
+behavior are unchanged.
 
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
