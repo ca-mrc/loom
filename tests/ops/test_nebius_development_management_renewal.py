@@ -10,16 +10,21 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from tests.ops.test_nebius_certificates import NOW, material as certificate_material
+from tests.ops.test_nebius_certificates import NOW
+from tests.ops.test_nebius_certificates import material as certificate_material
 from tests.ops.test_nebius_development_management_retained import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_management_retained import application_material as application_material
+from tests.ops.test_nebius_development_management_retained import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_management_retained import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_management_retained import cloud as cloud
 from tests.ops.test_nebius_development_management_retained import installation as installation
 from tests.ops.test_nebius_development_management_retained import inventory as inventory
-from tests.ops.test_nebius_development_management_retained import management_inputs as management_inputs
+from tests.ops.test_nebius_development_management_retained import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_development_management_retained import manager_entry as manager_entry
 from tests.ops.test_nebius_development_management_retained import material as material
 from tests.ops.test_nebius_development_management_retained import platform_inputs as platform_inputs
@@ -98,7 +103,10 @@ class RenewalAPI:
 
 @pytest.fixture
 def renewal(retained, monkeypatch):
-    from scripts.ops.nebius_development_management_retained import RetainedManagementReference, load_retained_management
+    from scripts.ops.nebius_development_management_retained import (
+        RetainedManagementReference,
+        load_retained_management,
+    )
 
     state = load_retained_management(RetainedManagementReference.model_validate(retained[0]))
     request = module().RenewalRequest(retained=state, material=new_material(monkeypatch),
