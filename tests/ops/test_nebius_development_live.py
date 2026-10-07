@@ -71,7 +71,7 @@ def live(preflight, cloud, tmp_path, monkeypatch):
     token_file.chmod(0o600)
     settings = mod.DevelopmentLiveSettings(preflight=preflight.client.settings,
         cloud=DevelopmentCloudScope.model_validate(cloud.scope),
-        operator_cloud_credentials=credentials, github_token_file=token_file)
+        operator_cloud_credentials=credentials, github_token_file=token_file, kubectl=tmp_path / "kubectl")
     api = mod.HTTPSDevelopmentInstallationAPI(request=request, settings=settings,
         api_server=preflight.client.api_server, ssl_context=ssl.create_default_context(), token="operator-k8s-secret",
         state_dir=tmp_path / "state")
@@ -208,6 +208,68 @@ def test_disk_proof_rejects_foreign_or_changing_live_ownership(installed, change
         state.on_read = replace_pod
     with pytest.raises(module().DevelopmentInstallError):
         state.live.api.qualify_volume(state.live.request, state.binding, state.observation)
+
+
+@pytest.fixture
+def running_service(installed, monkeypatch):
+    state = installed
+    deployment = state.backend.resources["Deployment:loom-service"]
+    replicas = {"apiVersion": "apps/v1", "kind": "ReplicaSet", "metadata": {
+        "namespace": "loom-dev", "name": "loom-service-replica", "uid": str(uuid4()),
+        "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "loom-service",
+            "uid": deployment["metadata"]["uid"], "controller": True}]},
+        "spec": {"template": copy.deepcopy(deployment["spec"]["template"])}}
+    pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "loom-service-test", "namespace": "loom-dev",
+        "uid": str(uuid4()), "ownerReferences": [{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+            "name": "loom-service-replica", "uid": replicas["metadata"]["uid"], "controller": True}]},
+        "spec": copy.deepcopy(deployment["spec"]["template"]["spec"]), "status": {"phase": "Running",
+            "containerStatuses": [{"name": "loom-service", "ready": True, "restartCount": 0,
+                "containerID": "containerd://test", "state": {"running": {"startedAt": "2026-10-07T12:00:00Z"}}}]}}
+    state.docs["/apis/apps/v1/namespaces/loom-dev/replicasets/loom-service-replica"] = replicas
+    state.docs["/api/v1/namespaces/loom-dev/pods"] = {"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [pod]}
+    state.service_pod, state.probes, state.fail_probe, state.after_probe = pod, [], False, None
+
+    def probe(**kwargs):
+        state.probes.append(kwargs)
+        if state.fail_probe:
+            raise RuntimeError("private-readiness-error")
+        if state.after_probe:
+            state.after_probe()
+
+    monkeypatch.setattr(module(), "probe_private_service", probe)
+    return state
+
+
+def test_dependency_proof_targets_the_recorded_running_api_not_an_unrelated_probe(running_service):
+    state = running_service
+    state.live.api.verify_private_dependencies(state.live.request, state.binding, state.live.state_dir / "bootstrap")
+    assert len(state.probes) == 1
+    assert state.probes[0]["pod_name"] == "loom-service-test"
+    assert state.probes[0]["candidate"] == state.live.request.selection.candidate["candidate_sha"]
+    assert state.live.api.diagnostic_stage is None
+
+
+@pytest.mark.parametrize("failure", ["controller", "owner", "image", "sidecar", "readiness", "restarted", "extra-pod"])
+def test_readiness_cannot_hide_wrong_or_replaced_runtime(running_service, failure):
+    state = running_service
+    pod = state.service_pod
+    if failure == "controller":
+        state.backend.resources["Deployment:loom-service"]["metadata"]["uid"] = str(uuid4())
+    elif failure == "owner":
+        pod["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    elif failure == "image":
+        pod["spec"]["containers"][0]["image"] = "foreign-image"
+    elif failure == "sidecar":
+        pod["spec"]["containers"].append({"name": "other", "image": "foreign-image"})
+    elif failure == "readiness":
+        state.fail_probe = True
+    elif failure == "restarted":
+        state.after_probe = lambda: pod["status"]["containerStatuses"][0].update(restartCount=1, containerID="containerd://other")
+    else:
+        state.docs["/api/v1/namespaces/loom-dev/pods"]["items"].append(copy.deepcopy(pod))
+    with pytest.raises(module().DevelopmentInstallError) as error:
+        state.live.api.verify_private_dependencies(state.live.request, state.binding, state.live.state_dir / "bootstrap")
+    assert "private-readiness-error" not in str(error.value)
 
 
 def test_connected_checks_verify_actual_publication_inventory_provider_and_both_keys(live):
