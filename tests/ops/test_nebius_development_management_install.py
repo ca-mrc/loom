@@ -178,6 +178,27 @@ def test_recovery_cannot_rebind_shared_namespace(installation, tmp_path):
     assert len(api.store.creates) == before
 
 
+def test_recovery_freezes_private_entry_configuration_and_files(installation, tmp_path):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request, api = installation
+    request = replace(request, qualification_digest='sha256:' + 'a' * 64)
+    run((request, api), tmp_path)
+    before = len(api.store.creates)
+    changed = replace(request, qualification_digest='sha256:' + 'b' * 64)
+    with pytest.raises(ManagementInstallError, match='recovery'):
+        run((changed, api), tmp_path)
+    assert len(api.store.creates) == before
+
+
+@pytest.mark.parametrize('value', ['', 'a' * 64, 'sha256:' + 'A' * 64, 12])
+def test_private_entry_fingerprint_has_canonical_shape(installation, value):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    with pytest.raises(ManagementInstallError):
+        replace(installation[0], qualification_digest=value)
+
+
 def test_retained_backup_and_shared_setup_are_in_system_capacity_envelope(installation):
     from scripts.ops.nebius_development_management_install import render_installation
 
