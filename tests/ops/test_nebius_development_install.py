@@ -24,6 +24,8 @@ class InstallationAPI:
         self.qualified = []
         self.dependencies = 0
         self.fail_qualification = False
+        self.fail_volume_qualification = False
+        self.qualified_volumes = []
 
     def qualify(self, request, *, fresh):
         self.qualified.append(fresh)
@@ -47,6 +49,13 @@ class InstallationAPI:
         assert (material_state / "bootstrap.json").is_file()
         assert binding == self.stage.binding
         self.dependencies += 1
+
+    def qualify_volume(self, request, binding, observation):
+        assert observation["pv_spec"]["csi"]["driver"] == "compute.csi.nebius.com"
+        assert observation["pv_spec"]["csi"]["volumeHandle"] == "dev-disk-123"
+        self.qualified_volumes.append(copy.deepcopy(observation))
+        if self.fail_volume_qualification:
+            raise RuntimeError("private-provider-disk-error")
 
 
 def setup(inputs):
@@ -114,6 +123,7 @@ def test_installer_resumes_storage_database_migration_and_service_barriers(input
     assert (api.bootstrap.creates, api.stage.creates) == creates
     assert api.qualified.count(True) == 1
     assert api.dependencies == 2
+    assert api.qualified_volumes
 
 
 @pytest.mark.parametrize("change", ["pvc_uid", "pv_uid", "disk", "driver", "claim", "size", "class", "clone", "missing"])
@@ -235,3 +245,17 @@ def test_final_dependency_probe_cannot_hide_changed_earlier_phase(inputs, tmp_pa
     with pytest.raises(module().DevelopmentInstallError):
         install(request, api, tmp_path)
     assert (api.bootstrap.creates, api.stage.creates) == before
+
+
+def test_csi_binding_does_not_substitute_for_actual_provider_disk_qualification(inputs, tmp_path):
+    request, api = setup(inputs)
+    install(request, api, tmp_path)
+    storage_ready(api, request.selection)
+    workloads_ready(api, "StatefulSet")
+    api.fail_volume_qualification = True
+    with pytest.raises(module().DevelopmentInstallError) as error:
+        install(request, api, tmp_path)
+    assert "private-provider-disk-error" not in str(error.value)
+    assert not any(key.startswith("Job:") for key in api.stage.resources)
+    api.fail_volume_qualification = False
+    assert install(request, api, tmp_path)["phase"] == "migration"
