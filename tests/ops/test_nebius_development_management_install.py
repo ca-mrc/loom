@@ -52,8 +52,8 @@ class DevelopmentAPI(InstallationAPI):
 @pytest.fixture
 def installation(application_management_inputs, material, application_material, tls_material):
     from scripts.ops.nebius_development_management_install import DevelopmentManagementRequest
-    from scripts.ops.nebius_management_bootstrap import BootstrapBinding
     from scripts.ops.nebius_development_management_tls import management_tls_secret_name
+    from scripts.ops.nebius_management_bootstrap import BootstrapBinding
 
     from loom_service.environment_management.deployment import ManagementDeployment
 
@@ -143,7 +143,7 @@ def test_missing_or_mismatched_public_certificate_blocks_before_bootstrap(instal
         request = replace(request, deployment=request.deployment.model_copy(update={'public_tls_secret_name': None}))
     with pytest.raises((ManagementInstallError, ValueError)):
         run((request, api), tmp_path)
-    assert not api.store.creates
+    assert api.store is None
 
 
 @pytest.mark.parametrize('phase', ['preflight', 'provider-storage', 'application', 'backup', 'public'])
@@ -266,7 +266,8 @@ def test_late_resource_drift_cannot_report_completed_installation(installation, 
     before = len(api.store.creates)
     with pytest.raises(ManagementInstallError):
         run(installation, tmp_path)
-    assert len(api.store.creates) == before + 1  # The already-qualified public Ingress only.
+    assert api.store.creates[before:] == ['Secret:' + installation[0].deployment.public_tls_secret_name,
+        'Ingress:loom-management']
 
 
 @pytest.mark.parametrize('failure', ['before', 'after'])

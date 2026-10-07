@@ -13,6 +13,7 @@ import pytest
 from tests.ops.test_nebius_application_setup import application_material as application_material
 from tests.ops.test_nebius_development_management_install import installation as installation
 from tests.ops.test_nebius_development_management_install import run, to_admission
+from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_management_live import Checks
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.unit.test_nebius_management_render import (
@@ -53,6 +54,50 @@ def test_connected_resources_exclude_legacy_cloud_and_authority(installation):
             api.resources(binding, phase)
     with pytest.raises(ManagementInstallError):
         api.resources(replace(binding, namespace='loom-nebius-management'), 'database')
+
+
+def test_live_tls_delivery_writes_only_the_bound_manager_secret_and_replays_reads(installation, tmp_path):
+    from scripts.ops.nebius_development_management_tls import deliver_management_tls
+    from scripts.ops.nebius_management_stage import ManagementStageError
+
+    request, _ = installation
+    api, binding = make_live(request, Checks()), bound(request)
+    retained, writes = {}, []
+    secret_path = '/api/v1/namespaces/loom-nebius-management-dev/secrets'
+
+    def handle(message):
+        if message.method == 'GET' and message.url.path in {
+                '/api/v1/namespaces/kube-system', '/api/v1/namespaces/loom-nebius-management-dev'}:
+            name = message.url.path.rsplit('/', 1)[-1]
+            return httpx.Response(200, json={'kind': 'Namespace', 'metadata': {
+                'name': name, 'uid': binding.kube_system_uid if name == 'kube-system' else binding.namespace_uid,
+                'labels': {'loom.nebius/management-installation': binding.installation_id,
+                           'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if message.method == 'GET':
+            assert message.url.path == secret_path + '/' + request.deployment.public_tls_secret_name
+            return httpx.Response(200, json=retained) if retained else httpx.Response(404)
+        assert message.method == 'POST' and message.url.path == secret_path
+        document = json.loads(message.content)
+        if message.url.query == b'dryRun=All':
+            return httpx.Response(201, json=document)
+        assert not message.url.query
+        writes.append(message.url.path)
+        retained.update(document)
+        retained['metadata'].update(uid=str(uuid4()), resourceVersion='7')
+        return httpx.Response(201, json=retained)
+
+    with api.resources(binding, 'tls') as transport:
+        transport.client.close()
+        transport.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(handle))
+        first = deliver_management_tls(material=request.tls_material, binding=binding,
+            api=transport, state_dir=tmp_path / 'tls')
+        assert deliver_management_tls(material=request.tls_material, binding=binding,
+            api=transport, state_dir=tmp_path / 'tls') == first
+        foreign = {**retained, 'metadata': {**retained['metadata'], 'namespace': 'loom-nebius-platform'}}
+        with pytest.raises(ManagementStageError):
+            transport.create_resource(foreign)
+    assert writes == [secret_path]
+    assert retained['type'] == 'kubernetes.io/tls'
 
 
 def test_application_transports_bind_exact_both_namespace_identities(installation):

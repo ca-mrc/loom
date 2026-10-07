@@ -21,6 +21,7 @@ from tests.ops.test_nebius_development_install import (
 )
 from tests.ops.test_nebius_development_live import live as live
 from tests.ops.test_nebius_development_management_install import installation as installation
+from tests.ops.test_nebius_development_management_tls import tls_material as tls_material
 from tests.ops.test_nebius_development_preflight import preflight as preflight
 from tests.ops.test_nebius_development_preflight import published_source as published_source
 from tests.ops.test_nebius_ingress_operation import inventory as inventory

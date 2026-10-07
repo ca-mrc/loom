@@ -1566,6 +1566,13 @@ separate exact-host management schema and entry point: it cannot request the
 shared wildcard, and the legacy two-subject entry point rejects that schema.
 Certificate issuance alone does not establish delivery, renewal activation or
 public readiness; those require the protected installer and live HTTPS proof.
+The fresh independent dev-manager composer requires a matching exact-host
+certificate and stages its immutable generation Secret before the public Ingress.
+The certificate, key and generation-derived Secret reference join the retained
+installation input identity. Lost create replies use exact readback, not another
+write; missing/replaced Secrets cannot be adopted on replay. This initial-delivery
+stage does not rotate certificates or patch the shared controller. The connected
+protected entry and installed renewal remain necessary before claiming readiness.
 
 Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
 backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,

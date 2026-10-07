@@ -27,6 +27,7 @@ from scripts.ops.nebius_development_management_install import (
     _setup,
     render_installation,
 )
+from scripts.ops.nebius_development_management_tls import HTTPSManagementTLSAPI
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
 from scripts.ops.nebius_management_install import ManagementInstallError
@@ -69,6 +70,9 @@ class HTTPSDevelopmentManagementAPI(HTTPSManagementInstallationAPI):
         if phase == 'supplied':
             return HTTPSSuppliedMaterialAPI(material=self.request.material, binding=binding, api_server=self.api_server,
                 ssl_context=self.ssl_context, token=self.token, application_only=True)
+        if phase == 'tls':
+            return HTTPSManagementTLSAPI(material=self.development_request.tls_material, binding=binding,
+                api_server=self.api_server, ssl_context=self.ssl_context, token=self.token)
         return super().resources(binding, phase)
 
     def application_resources(self, request: ApplicationSetupRequest, phase: str) -> HTTPSApplicationSetupAPI:

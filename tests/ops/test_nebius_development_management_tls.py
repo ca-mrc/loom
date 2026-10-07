@@ -78,7 +78,7 @@ def test_tls_binding_or_material_change_never_adopts_or_rotates(inputs, tmp_path
         secret, = inputs[2].resources.values()
         secret['metadata']['uid'] = str(uuid4())
     elif change == 'namespace':
-        values[1] = replace(inputs[1], namespace='loom-nebius-platform')
+        values[1] = replace(inputs[1], namespace='loom-nebius-management')
     elif change == 'host':
         values[0] = replace(inputs[0], public_host='foreign.example.com')
     else:

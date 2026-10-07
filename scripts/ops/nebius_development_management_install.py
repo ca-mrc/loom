@@ -25,6 +25,12 @@ from scripts.ops.nebius_application_setup import (
 from scripts.ops.nebius_application_setup import (
     _documents as application_documents,
 )
+from scripts.ops.nebius_development_management_tls import (
+    ManagementTLSMaterial,
+    deliver_management_tls,
+    management_tls_secret_name,
+)
+from scripts.ops.nebius_development_management_tls import _documents as tls_documents
 from scripts.ops.nebius_management_bootstrap import (
     BootstrapAPI,
     bootstrap_management,
@@ -65,7 +71,7 @@ _PHASES = {
     'database': '20-database.yaml', 'storage': None, 'migration': '30-migrate.yaml',
     **{'application-' + phase: None for phase in _APPLICATION_PHASES},
     'backup': '85-backup-verify.yaml', 'schedule': '80-backup.yaml',
-    'service': '40-services.yaml', 'public': '70-public.yaml',
+    'service': '40-services.yaml', 'tls': None, 'public': '70-public.yaml',
 }
 
 
@@ -73,6 +79,7 @@ _PHASES = {
 class DevelopmentManagementRequest(ManagementInstallRequest):
     application_material: ApplicationSetupMaterial
     shared_namespace_uid: str
+    tls_material: ManagementTLSMaterial
     qualification_digest: str | None = None
 
     def __post_init__(self) -> None:
@@ -127,7 +134,9 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
             or config['environment'] != 'development' or app is None
             or app.shared.platform_namespace != 'loom-dev'
             or not isinstance(app.runtime.kubernetes, ProjectedKubernetesConnection)
-            or app.runtime.build is not None or deployment.pool_catalog_operation_id is not None):
+            or app.runtime.build is not None or deployment.pool_catalog_operation_id is not None
+            or request.tls_material.public_host != deployment.public_host
+            or deployment.public_tls_secret_name != management_tls_secret_name(binding.installation_id, request.tls_material)):
         raise ManagementInstallError('development management requires independent application-only binding')
     # Validate both credential sets before any bootstrap write. The provisional
     # namespace UID is used only for pure rendering, never live qualification.
@@ -135,6 +144,7 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
                                     request.shared_namespace_uid, binding.kube_system_uid)
     supplied_documents(request.material, provisional, application_only=True)
     application_documents(_setup(request, provisional), 'material')
+    tls_documents(request.tls_material, provisional)
     rendered = render_management(deployment, candidate=request.candidate, profile=request.profile, repo_root=_ROOT)
     setup = render_application_setup(deployment, candidate=request.candidate, profile=request.profile, repo_root=_ROOT)
     files = copy.deepcopy(rendered.files)
@@ -205,6 +215,9 @@ def _final_readback(request: DevelopmentManagementRequest, api: DevelopmentManag
                 elif phase == 'supplied':
                     receipt = deliver_supplied_material(material=request.material, binding=binding,
                         api=stage_api, state_dir=phase_state, application_only=True)
+                elif phase == 'tls':
+                    receipt = deliver_management_tls(material=request.tls_material, binding=binding,
+                        api=stage_api, state_dir=phase_state)
                 else:
                     assert filename is not None
                     receipt = stage_management_resources(rendered=rendered, phase=filename,
@@ -232,6 +245,7 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
         fingerprint = digest({'binding': asdict(request.binding), 'deployment': request.deployment.model_dump(mode='json'),
             'candidate': request.candidate, 'profile': request.profile, 'material': request.material,
             'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid,
+            'tls_material': asdict(request.tls_material),
             'qualification_digest': request.qualification_digest})
         identity = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
                     'state_dir': str(state), 'binding': asdict(request.binding)}
@@ -291,6 +305,9 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
                             elif phase == 'supplied':
                                 receipt = deliver_supplied_material(material=request.material, binding=binding,
                                     api=stage_api, state_dir=phase_state, application_only=True)
+                            elif phase == 'tls':
+                                receipt = deliver_management_tls(material=request.tls_material, binding=binding,
+                                    api=stage_api, state_dir=phase_state)
                             else:
                                 assert filename is not None
                                 if phase == 'database':
