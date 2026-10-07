@@ -101,6 +101,53 @@ def test_expired_original_certificate_and_retired_operator_files_do_not_prevent_
     assert not set(map(Path, obsolete)) & result.files.keys()
 
 
+def test_renewal_reference_can_be_constructed_only_from_durable_initial_records(retained, monkeypatch):
+    from scripts.ops import nebius_certificates as certificates
+
+    # No transient request or test-injected qualification digest is available to
+    # an operator returning months later. Select solely persisted artifacts.
+    operation_path = Path(retained[0]['operation_path'])
+    operation_raw = operation_path.read_bytes()
+    operation = json.loads(operation_raw)
+    parent = json.loads((Path(operation['state_dir']) / 'installation.json').read_text())
+    reference = {'operation_path': operation_path, 'operation_sha256': hashlib.sha256(operation_raw).hexdigest(),
+        'installation_input_digest': parent['input_digest']}
+    inputs = json.loads(Path(operation['inputs_path']).read_text())
+    obsolete = {inputs['operator_connection']['credentials_file'], inputs['operator_connection']['ca_file'],
+        inputs['operator_cloud_credentials'], *inputs['application_files'].values()}
+    for path in map(Path, obsolete):
+        path.unlink()
+    monkeypatch.setattr(certificates, 'validate_management_certificate',
+        lambda *_, **__: pytest.fail('original expired certificate was revalidated'))
+    result = module().load_retained_management(module().RetainedManagementReference.model_validate(reference))
+    assert result.binding.installation_id == operation['installation_id']
+    assert not set(map(Path, obsolete)) & result.files.keys()
+
+
+def test_persisted_qualification_cannot_be_rebound_even_with_matching_parent_copy(retained):
+    operation = retained[1]
+    for path in (Path(operation['anchor_dir']) / (operation['installation_id'] + '.json'),
+                 Path(operation['state_dir']) / 'installation.json'):
+        value = json.loads(path.read_text())
+        value['qualification_digest'] = 'sha256:' + '0' * 64
+        path.write_text(json.dumps(value))
+    reference = {key: value for key, value in retained[0].items() if key != 'qualification_digest'}
+    with pytest.raises(ValueError, match='retained development management'):
+        module().load_retained_management(module().RetainedManagementReference.model_validate(reference))
+
+
+def test_legacy_history_requires_explicit_preserved_digest_without_reopening_old_credentials(retained):
+    for path in (Path(retained[1]['anchor_dir']) / (retained[1]['installation_id'] + '.json'),
+                 Path(retained[1]['state_dir']) / 'installation.json'):
+        value = json.loads(path.read_text())
+        value.pop('qualification_digest', None)
+        path.write_text(json.dumps(value))
+    assert load(retained).binding.installation_id == retained[1]['installation_id']
+    reference = {key: value for key, value in retained[0].items() if key != 'qualification_digest'}
+    with pytest.raises(ValueError, match='retained development management'):
+        module().load_retained_management(module().RetainedManagementReference.model_validate(reference))
+
+
 @pytest.mark.parametrize('damage', ['operation', 'anchor', 'parent', 'phase', 'incomplete', 'source-rebind', 'host-rebind'])
 def test_missing_changed_or_rebound_history_is_rejected(retained, damage):
     selector, operation, payload, _, _ = retained
