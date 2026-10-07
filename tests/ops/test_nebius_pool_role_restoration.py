@@ -40,7 +40,7 @@ class RoleAPI(TemplateAPI):
         from scripts.ops.nebius_pool_role_restoration import qualify_role_restoration
         from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending
 
-        pending = qualify_role_restoration(self.request, self, state=self.state, anchor=self.root / 'cutover-anchor')
+        pending = qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor)
         if pending is not None:
             return RecoveryDrainPending(pending)
         before = self.read_legacy_role(key)

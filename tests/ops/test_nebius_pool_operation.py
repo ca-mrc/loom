@@ -59,6 +59,7 @@ def operation(cutover_inputs, tmp_path, monkeypatch):
             roles = RoleAPI(fixture, template)
             restart = RestartAPI(fixture, roles)
             state.runtime = RemoteAPI(fixture, restart)
+            state.runtime.anchor = parent.anchor_dir
         return state.runtime
 
     monkeypatch.setattr(target, 'HTTPSPoolStartupAPI', startup)

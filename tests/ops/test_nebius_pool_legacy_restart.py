@@ -40,7 +40,7 @@ class RestartAPI(RoleAPI):
         from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
         from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending
 
-        pending = qualify_legacy_restart(self.request, self, state=self.state, anchor=self.root / 'cutover-anchor')
+        pending = qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor)
         if pending is not None:
             return RecoveryDrainPending(pending)
         before = self.read_workload(key)

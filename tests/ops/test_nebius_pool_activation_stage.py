@@ -25,6 +25,7 @@ class ActivationAPI:
     def __init__(self, fixture):
         self.request, _, _, self.startup, _, self.root = fixture
         self.state = self.startup.state
+        self.anchor = self.root / 'cutover-anchor'
         self.mode = 'closed'
         self.guards = {str(row.participant_id): 'held' for row in self.request.fencing.retirement.migration.guards}
         self.calls = []

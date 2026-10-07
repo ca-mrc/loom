@@ -49,7 +49,7 @@ class TemplateAPI(GatewayAPI):
             qualify_template_restoration,
         )
 
-        pending = qualify_template_restoration(self.request, self, state=self.state, anchor=self.root / 'cutover-anchor')
+        pending = qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor)
         if pending is not None:
             return RecoveryDrainPending(pending)
         before = self.read_workload(key)
