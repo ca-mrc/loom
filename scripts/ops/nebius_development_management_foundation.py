@@ -58,7 +58,8 @@ class RetainedDevelopmentReference(BaseModel):
     operation_path: Path
     operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     installation_input_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
-    qualification_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    # Older installer records require an explicitly preserved preimage.
+    qualification_digest: str | None = Field(default=None, pattern=r'^sha256:[0-9a-f]{64}$')
 
     @field_validator('operation_path')
     @classmethod
@@ -121,6 +122,12 @@ def load_retained_foundation(reference: RetainedDevelopmentReference) -> Retaine
         identity = {'schema': 'loom.nebius-development-install.v1',
             'input_digest': reference.installation_input_digest, 'state_dir': str(state), 'binding': asdict(inputs.binding)}
         started = read(anchor / (inputs.binding.installation_id + '.json'))
+        qualification = started.get('qualification_digest', reference.qualification_digest)
+        if (not isinstance(qualification, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', qualification)
+                or (reference.qualification_digest is not None and reference.qualification_digest != qualification)):
+            raise ValueError()
+        if 'qualification_digest' in started:
+            identity['qualification_digest'] = qualification
         if set(started) != {*identity, 'operation_id'} or any(started[key] != value for key, value in identity.items()):
             raise ValueError()
         _uuid(started['operation_id'])
@@ -187,7 +194,7 @@ def load_retained_foundation(reference: RetainedDevelopmentReference) -> Retaine
         storage = phases['supplied']['resources']['Secret:loom-platform-storage']['desired']['data']
         selection = DevelopmentStageInput(inputs.config, inputs.candidate, inputs.profile, inputs.keyring,
             {key: base64.b64decode(value, validate=True).decode() for key, value in storage.items()})
-        original = DevelopmentInstallRequest(inputs.binding, selection, reference.qualification_digest)
+        original = DevelopmentInstallRequest(inputs.binding, selection, qualification)
         if digest(asdict(original)) != reference.installation_input_digest:
             raise ValueError()
         return RetainedDevelopmentState(inputs, binding, bootstrap, phases, files)

@@ -268,7 +268,7 @@ def install_private_development(*, request: DevelopmentInstallRequest, api: Deve
         # Validate all frozen source/material inputs before any marker or mutation.
         provisional = DevelopmentResourceBinding(request.bootstrap, str(uuid4()), str(uuid4()))
         revision, _ = development_documents(request.selection, provisional, "config")
-        identity = {"schema": "loom.nebius-development-install.v1", "input_digest": digest(asdict(request)),
+        identity: dict[str, Any] = {"schema": "loom.nebius-development-install.v1", "input_digest": digest(asdict(request)),
             "state_dir": str(state), "binding": asdict(request.bootstrap)}
         with private_state._locked_state(anchor):
             marker, journal = anchor / (request.bootstrap.installation_id + ".json"), state / "installation.json"
@@ -279,12 +279,17 @@ def install_private_development(*, request: DevelopmentInstallRequest, api: Deve
                 if state.exists() or state.is_symlink():
                     raise DevelopmentInstallError("untracked development installation state; refusing adoption")
                 api.qualify(request, fresh=True)
+                identity['qualification_digest'] = request.qualification_digest
                 started = {**identity, "operation_id": str(uuid4())}
                 record = {**started, "phases": {}}
                 private_state._atomic_json(marker, started)
                 state.mkdir(mode=0o700)
             else:
                 started = json.loads(private_state._private_read(marker))
+                # Fresh records retain the qualification preimage for manager
+                # handoff; replay preserves older anchors without rewriting them.
+                if isinstance(started, dict) and 'qualification_digest' in started:
+                    identity['qualification_digest'] = request.qualification_digest
                 if (not isinstance(started, dict) or set(started) != {*identity, "operation_id"}
                         or any(started[key] != value for key, value in identity.items())):
                     raise DevelopmentInstallError("development installation recovery identity differs")

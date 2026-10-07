@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 from contextlib import contextmanager
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -124,6 +126,22 @@ def test_installer_resumes_storage_database_migration_and_service_barriers(input
     assert api.qualified.count(True) == 1
     assert api.dependencies == 2
     assert api.qualified_volumes
+
+
+def test_replay_preserves_old_anchor_format_without_reopening_writes(inputs, tmp_path):
+    request, api = setup(inputs)
+    request = replace(request, qualification_digest='sha256:' + 'a' * 64)
+    first = install(request, api, tmp_path)
+    paths = (tmp_path / 'state/installation.json', tmp_path / 'anchor' / (request.bootstrap.installation_id + '.json'))
+    for path in paths:
+        value = json.loads(path.read_text())
+        value.pop('qualification_digest')
+        path.write_text(json.dumps(value))
+    before = {path: path.read_bytes() for path in paths}
+    creates = copy.deepcopy((api.bootstrap.creates, api.stage.creates))
+    assert install(request, api, tmp_path) == first
+    assert (api.bootstrap.creates, api.stage.creates) == creates
+    assert {path: path.read_bytes() for path in paths} == before
 
 
 @pytest.mark.parametrize("change", ["pvc_uid", "pv_uid", "disk", "driver", "claim", "size", "class", "clone", "missing"])

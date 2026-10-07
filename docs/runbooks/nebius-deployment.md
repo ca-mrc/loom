@@ -295,6 +295,14 @@ an input. Policy headroom must cover the manager's separate recovery bucket; its
 database needs at least 10 GiB. Personal applications add no data PVCs or business
 buckets.
 
+The retained foundation reference pins the original operation path/hash and
+installation input digest. Fresh foundation installations also preserve the
+qualification digest in their independent anchor and installation journal; the
+manager verifies the original request fingerprint using this durable evidence,
+without reopening retired foundation operator or storage-credential files. Older
+foundation records need an explicitly preserved `qualification_digest`; missing
+evidence fails closed. Replay never rewrites the older record format.
+
 Prepare the bundle from the exact clean integrated checkout with the same locked
 dependency export and pinned uv toolchain described above, using
 `python -m scripts.ops.nebius_development_management_rollout --operation preflight
