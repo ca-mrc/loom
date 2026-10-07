@@ -38,6 +38,33 @@ def bound(request):
         str(uuid4()), request.binding.kube_system_uid)
 
 
+@pytest.mark.parametrize('phase', ['bootstrap', 'database', 'application'])
+def test_private_file_change_blocks_opening_next_phase(installation, tmp_path, phase):
+    from scripts.ops.nebius_development_management_install import _setup
+    from scripts.ops.nebius_development_management_live import HTTPSDevelopmentManagementAPI
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request = installation[0]
+    path = tmp_path / 'private-input'
+    path.write_bytes(b'original-private-value')
+    path.chmod(0o600)
+    api = HTTPSDevelopmentManagementAPI(request=request,
+        api_server=request.deployment.installation.foundation.platform_config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), runtime_ca_pem=None, token='operator-token', checks=Checks(),
+        private_files={path: path.read_bytes()})
+    binding = bound(request)
+    with api.bootstrap_api():
+        pass
+    path.write_bytes(b'changed-private-value')
+    with pytest.raises(ManagementInstallError, match='private input changed'):
+        if phase == 'bootstrap':
+            api.bootstrap_api()
+        elif phase == 'database':
+            api.resources(binding, phase)
+        else:
+            api.application_resources(_setup(request, binding), 'material')
+
+
 def test_connected_resources_exclude_legacy_cloud_and_authority(installation):
     from scripts.ops.nebius_management_install import ManagementInstallError
 
