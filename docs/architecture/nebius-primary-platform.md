@@ -1573,8 +1573,16 @@ installation input identity. Lost create replies use exact readback, not another
 write; missing/replaced Secrets cannot be adopted on replay. This initial-delivery
 stage does not rotate certificates or patch the shared controller. The connected
 protected entry pins the issuer installation and immutable generation, not a
-floating certificate selection. Installed renewal remains necessary before
-claiming operational readiness.
+floating certificate selection. A separate protected manager-only renewal entry
+qualifies the original retained installation, stages a new immutable generation,
+then uses a journalled UID/resourceVersion JSON Patch to change only the retained
+Ingress's certificate reference. It does not replay the initial renderer, require
+an unexpired predecessor, or mutate the shared controller/default certificate.
+One original-install lock serializes successors. Uncertain writes are resolved by
+exact readback, never repeated; newer generations cannot overtake unfinished work.
+Final route/Secret reads and normal-trust HTTPS must identify the new leaf. This
+source-level renewal path still requires installed proof before operational
+readiness; scheduled issuance/delivery is not provided.
 
 Fresh development management has a separate fixed operation and gateway, bound
 to `loom-nebius-management-dev`, its own private installation/anchor paths and a

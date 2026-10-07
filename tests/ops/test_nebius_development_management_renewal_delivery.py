@@ -214,3 +214,85 @@ def test_workflow_uses_dedicated_renewal_identity_and_serialized_protected_route
     assert runner['env']['DEPLOY_SSH_KEY'] == '${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY }}'
     assert runner['env']['NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON'] == '${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON }}'
     assert flow['concurrency']['cancel-in-progress'] is False
+
+
+@pytest.mark.parametrize("action", ["preflight", "renew"])
+def test_workflow_executes_fixed_renewal_selector_and_cleans_ephemeral_key(tmp_path, action):
+    flow = yaml.safe_load((Path(__file__).resolve().parents[2] / '.github/workflows/nebius-rollout.yml').read_text())
+    choices = flow.get("on", flow.get(True))["workflow_dispatch"]["inputs"]["operation"]["options"]
+    assert "development-management-renewal-" + action in choices
+    job = flow["jobs"]["development-management-renewal"]
+    assert job["permissions"] == {"contents": "read"}
+    assert job["environment"] == {"name": "nebius-integration", "deployment": False}
+    assert "workflow_dispatch" in job["if"] and "refs/heads/dev" in job["if"]
+    selector = next(s for s in job["steps"] if s.get("id") == "tooling")
+    runner = next(s for s in job["steps"] if s.get("name") == "Run fixed development management renewal operation")
+    assert runner["env"]["DEPLOY_SSH_KEY"] == "${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY }}"
+    assert runner["env"]["NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON"] == "${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON }}"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    git = bindir / "git"
+    git.write_text('#!/bin/sh\ntest "$1 $2 $3 $4" = "merge-base --is-ancestor $EXPECTED_SHA refs/remotes/origin/dev"\n')
+    git.chmod(0o700)
+    uv = bindir / "uv"
+    uv.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+assert sys.argv[sys.argv.index('--operation') + 1] == os.environ['EXPECTED_ACTION']
+assert 'scripts.ops.nebius_development_management_renewal_rollout' in sys.argv
+assert pathlib.Path(os.environ['LOOM_DEPLOY_SSH_KEY_FILE']).read_text().strip() == 'private-dev-key'
+assert json.loads(os.environ['NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON'])['namespace'] == 'loom-nebius-management-dev'
+pathlib.Path(os.environ['RUNNER_TEMP'], 'transport-invoked').write_text('selected')
+''')
+    uv.chmod(0o700)
+    env = os.environ | {"PATH": str(bindir) + ":" + os.environ["PATH"], "DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION": "development-management-renewal-" + action,
+        "NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON": json.dumps(operation(tmp_path)), "DEPLOY_SSH_KEY": "private-dev-key",
+        "DEPLOY_KNOWN_HOSTS": "test-host", "LOOM_DEPLOY_SSH_TARGET": "test-target", "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "outputs"), "EXPECTED_SHA": "a" * 40, "EXPECTED_ACTION": action}
+    for step in (selector, runner):
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], env=env, capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        assert "private-dev-key" not in result.stdout + result.stderr
+    assert (tmp_path / "outputs").read_text() == "sha=" + "a" * 40 + "\n"
+    assert (tmp_path / "transport-invoked").read_text() == "selected"
+    assert not (tmp_path / "nebius-development-management-renewal-key").exists()
+    (tmp_path / "transport-invoked").unlink()
+    for damage in ({"DEPLOY_SSH_KEY": ""}, {"DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION": "management-install"}):
+        result = subprocess.run(["bash", "-e", "-c", runner["run"]], env=env | damage, capture_output=True, timeout=20)
+        assert result.returncode != 0 and not (tmp_path / "transport-invoked").exists()
+    wrong = operation(tmp_path) | {"namespace": "loom-nebius-platform"}
+    result = subprocess.run(["bash", "-e", "-c", selector["run"]],
+        env=env | {"NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON": json.dumps(wrong)}, capture_output=True, timeout=20)
+    assert result.returncode != 0
+
+
+
+@pytest.mark.parametrize("damage", [None, "dirty", "untracked", "wrong-head", "not-integrated"])
+def test_renewal_publisher_requires_exact_clean_integrated_source(tmp_path, monkeypatch, damage):
+    repository = tmp_path / "checkout"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=repository, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.invalid")
+    (repository / "source").write_text("approved source\n")
+    git("add", "source")
+    git("commit", "-qm", "initial")
+    sha = git("rev-parse", "HEAD")
+    if damage != "not-integrated":
+        git("update-ref", "refs/remotes/origin/dev", sha)
+    metadata = operation(tmp_path) | {"source_sha": sha}
+    if damage == "dirty":
+        (repository / "source").write_text("changed")
+    elif damage == "untracked":
+        (repository / "untracked").write_text("unexpected")
+    elif damage == "wrong-head":
+        metadata.update(source_sha="b" * 40)
+    monkeypatch.setattr(module('rollout'), "ROOT", repository)
+    if damage:
+        with pytest.raises(module('rollout').RolloutError):
+            module('rollout').verify_source(metadata)
+    else:
+        module('rollout').verify_source(metadata)

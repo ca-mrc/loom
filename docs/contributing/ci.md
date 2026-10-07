@@ -50,6 +50,15 @@ foundation authorities are unchanged. The job has contents-read permissions,
 uses the protected `nebius-integration` environment without recording a staging
 deployment, removes its ephemeral key, and uploads only bounded outcome evidence.
 
+Its certificate successor uses the separate `development-management-renewal` job,
+with `development-management-renewal-preflight` and
+`development-management-renewal-renew`. Dedicated
+`NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON` and
+`NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY` pin the renewal bundle and operation;
+there is no initial-manager-key fallback. It shares the same protected queue and
+contents-read, dev-only, manual-dispatch restrictions. A successful renewal report
+is certificate-delivery evidence, not multi-owner execution acceptance.
+
 The same job and concurrency carry `management-pool-preflight`,
 `management-pool-install` and `management-pool-rollback`. They require dedicated
 `NEBIUS_MANAGEMENT_POOL_OPERATION_JSON` metadata and

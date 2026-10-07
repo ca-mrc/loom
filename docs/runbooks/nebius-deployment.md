@@ -320,8 +320,65 @@ not shared-dev public access, active source builds, task execution or multi-owne
 acceptance. Initial manager inputs must leave both source upload and image-build
 runtime unconfigured; their credentials and shared-pool admission belong to the
 later activation. Unsupported initial selections are rejected before bootstrap.
-Manager-only certificate renewal and its installed proof remain
-required before operational acceptance.
+Manager-only certificate renewal has the separate path below. Its installed proof
+remains required before operational acceptance.
+
+#### Renew the independent dev manager certificate
+
+Do not edit initial installation inputs or replay the initial installer to renew
+an expired leaf. Issue a new exact-host generation using the retained management
+issuer, then select it explicitly in a new renewal operation. The issuer UUID and
+configuration path must match the initial manager; a floating `selected.json` is
+never consumed. Renewal changes only the manager Ingress's TLS Secret reference,
+not the shared controller, default certificate, application configuration or
+staging. Existing certificate Secrets and installation history are preserved.
+
+Use `loom.nebius-development-management-renewal-operation.v1` with `source_sha`,
+`installation_id`, `operation_id`, `namespace`, `inputs_path` and `inputs_sha256`.
+The namespace is fixed to `loom-nebius-management-dev`. Each non-nil operation UUID
+has its own private input file at
+`.loom/nebius-development-management-renewal/<installation-id>/<operation-id>/inputs.json`.
+The `loom.nebius-development-management-renewal-inputs.v1` document contains:
+
+- `retained`: original manager operation path/hash, installation input digest and
+  original qualification digest, from the protected initial-install records;
+- `certificate`: original issuer configuration path/UUID and exact new generation;
+- `operator_connection`: explicit Kubernetes HTTPS endpoint, CA and credential files;
+- `route`: freshly qualified shared-ingress UIDs and configuration digests, using
+  the same route-settings shape as the initial installer. Legitimate shared
+  certificate/controller updates need fresh pins, not controller rollback.
+
+The initial manager source and its journals remain frozen. Renewal tooling uses
+its own exact clean integrated source revision and rechecks the retained route's
+UID/specification without requiring the original leaf to remain unexpired.
+Prepare its digest-bound bundle with
+`python -m scripts.ops.nebius_development_management_renewal_rollout --operation
+preflight --requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Through the approved operator route, preview then apply
+`scripts.ops.install_nebius_development_management_renewal_entrypoint` with
+`--bundle`, `--bundle-sha256`, and a dedicated `--public-key`. Existing grants are
+preserved; an existing key with different authority cannot be reused.
+
+Set `NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON` and the dedicated
+`NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY` in protected `nebius-integration`.
+Dispatch `development-management-renewal-preflight`, then
+`development-management-renewal-renew`, through `nebius-rollout` from `dev`.
+Both share the existing serialized rollout queue. Preflight is read-only;
+renewal delivers an immutable generation Secret and uses UID/resourceVersion
+tests to replace only `/spec/tls/0/secretName` on `loom-management`.
+
+`development_management_tls_renewed` means final Ingress/Secret readback and
+normal-trust HTTPS verification of the exact new leaf succeeded. `pending/public`
+can resume the same operation without repeating the update. `rejected` is a
+definite API rejection: requalify current state before preparing a new operation.
+An unknown write blocks newer operations and can resolve only by exact readback;
+do not delete journals or replay writes to force progress. Renewal journals live
+under the original manager's `tls-renewal` directory and use its original anchor
+lock, serializing initial install and all successors. Missing history is a failure.
+
+The operator remains responsible for renewal before expiry and for the DNS issuer
+credential's own expiry. This path provides explicit issuance-to-delivery operation,
+not a scheduled renewal service or proof that builds/tasks are ready.
 
 #### Owner commands
 
