@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,10 +28,17 @@ from loom.nebius_platform_render import digest
 Documents = dict[str, dict[str, Any]]
 
 
+class RecoveryDrainPending(Enum):
+    """Known drain result returned before an intent or mutation is attempted."""
+
+    POOL_CLEANUP = 'pending_pool_cleanup'
+    SUCCESSOR_DRAIN = 'pending_successor_drain'
+
+
 class PoolTemplateRestorationAPI(PoolGatewayRetirementAPI, Protocol):
     def preview_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
     def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
-                              record_intent: Callable[[dict[str, Any]], None]) -> bool: ...
+                              record_intent: Callable[[dict[str, Any]], None]) -> bool | RecoveryDrainPending: ...
 
 
 def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path, Path]:
@@ -154,20 +162,15 @@ def restore_pool_templates(*, request: PoolCutoverRequest, api: PoolTemplateRest
                 item = record['workloads'][key]
                 if item['phase'] == 'restored':
                     continue
-                actual = observe()[key]
-                pending = qualify()
-                if pending is not None:
-                    return result(pending)
                 if item['phase'] == 'prepared' and before[key] != desired:
+                    # Preview only the fixed target. The actual adapter owns the
+                    # full fresh qualification before recording intent and CAS.
+                    actual = api.read_workload(key)
                     preview = api.preview_legacy_template(key, actual, desired)
                     if preview is None:
                         return result('pending_template_restoration_update')
                     if _stable(preview) != desired:
                         raise ValueError
-                    observe()
-                    pending = qualify()
-                    if pending is not None:
-                        return result(pending)
 
                     def record_intent(fresh: dict[str, Any], *, item: dict[str, Any] = item, key: str = key) -> None:
                         nonlocal actual
@@ -189,11 +192,22 @@ def restore_pool_templates(*, request: PoolCutoverRequest, api: PoolTemplateRest
                         if item['phase'] != 'intent':
                             raise
                         accepted = None
+                    if isinstance(accepted, RecoveryDrainPending):
+                        if item != {'phase': 'prepared', 'before_resource_version': None}:
+                            raise ValueError
+                        return result(accepted.value)
                     if accepted is False:
                         item.update(phase='prepared', before_resource_version=None)
                         private_state._atomic_json(path, record)
                         return result('pending_template_restoration_update')
                     actual = api.read_workload(key)
+                else:
+                    # Unknown intents and no-op rows have no actual dispatch to
+                    # own their proof. Keep their fresh observation boundary.
+                    actual = observe()[key]
+                    pending = qualify()
+                    if pending is not None:
+                        return result(pending)
                 if not _matches(actual, desired, _uid(closed[key])):
                     if item['phase'] == 'intent' and _matches(actual, before[key], _uid(closed[key])):
                         return result('pending_template_restoration_outcome')

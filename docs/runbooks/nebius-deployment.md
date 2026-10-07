@@ -2089,12 +2089,12 @@ attempt forward-only closed-image qualification on an incomplete image tail.
 Forward repair still requires that qualification; recovery preflight neither
 completes an image correction nor authorizes reopening intake.
 
-Shutdown, template restoration and legacy restart finish their current
-recovery/drain checks before taking the final workload snapshot. The fixed adapter
-verifies unchanged UID and stable metadata and spec, records that snapshot's
+Shutdown, template and Role restoration, and legacy restart finish their current
+recovery/drain checks before taking the final object snapshot. The fixed adapter
+verifies unchanged UID and stable metadata and payload, records that snapshot's
 resourceVersion through the stage's write-ahead callback, then sends the full
-UID/version/metadata/spec CAS. Controller status
-updates during the earlier checks therefore do not force reuse of a stale version.
+UID/version/metadata CAS with the retained workload spec or Role rules. Controller
+status updates during earlier checks therefore do not force reuse of a stale version.
 A definite rejection may return the new attempt to prepared. An existing unknown
 intent retains its original version and is only observed, never refreshed or resent.
 
@@ -2108,14 +2108,18 @@ the whole-cluster authority inventory. No drain result or authority proof is
 cached across workload mutations or invocations. Dry-run success cannot authorize
 a stop; changed authority, fences, ancestry, UID or spec still blocks dispatch.
 
-Gateway Role retirement, template restoration and legacy Role restoration keep
-full qualification at the actual mutation boundary. Their dry-run adapters only
-validate the fixed journal-bound CAS and Kubernetes admission. Existing journals
-are qualified in the active-row and completion paths; starting a new journal
-still requires an initial proof. Template and Role restoration bracket the
-read-only gateway permission review with one fresh drain on each side. These
-checks are not cached across mutations or invocations, and unknown intents
-remain observation-only.
+Gateway Role retirement, template restoration, legacy Role restoration and legacy
+restart keep full qualification at the actual mutation boundary. Their dry-run
+adapters only validate the fixed journal-bound CAS and Kubernetes admission.
+For prepared template, Role and restart writes, the actual adapter owns the one
+fresh qualification; the stage does not repeat that chain before and after preview.
+A known cleanup or successor-drain pending result returns before intent is written.
+Only an exception after durable intent enters unknown-outcome observation.
+Starting a new journal still requires its initial proof; unchanged rows, unknown
+intents and completion retain their own fresh qualification. Before the first
+restart journal, every successor must still be proved stopped. Template and Role
+restoration bracket the read-only gateway permission review with one fresh drain
+on each side. These checks are not cached across mutations or invocations.
 
 Within one local recovery-record read, shared shutdown, machine and gateway
 ancestors are loaded in order once. Each current journal and independent anchor

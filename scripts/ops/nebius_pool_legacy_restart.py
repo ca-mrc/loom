@@ -20,7 +20,7 @@ from scripts.ops.nebius_pool_role_restoration import (
 )
 from scripts.ops.nebius_pool_shutdown import _shutdown_record
 from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
-from scripts.ops.nebius_pool_template_restoration import _template_record
+from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending, _template_record
 
 from loom.nebius_platform_render import digest
 
@@ -31,7 +31,7 @@ class PoolLegacyRestartAPI(PoolRoleRestorationAPI, Protocol):
     def qualify_gateway_readonly(self) -> None: ...
     def preview_legacy_restart(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
     def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
-                              record_intent: Callable[[dict[str, Any]], None]) -> bool: ...
+                              record_intent: Callable[[dict[str, Any]], None]) -> bool | RecoveryDrainPending: ...
 
 
 def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path, Path]:
@@ -158,14 +158,13 @@ def restart_pool_legacy(*, request: PoolCutoverRequest, api: PoolLegacyRestartAP
             def qualify() -> str | None:
                 return qualify_legacy_restart(request, api, state=state, anchor=anchor)
 
-            observe()
-            # Complete process retirement must be freshly proved before the first
-            # old workload can start. Afterwards only the gateway stays stopped.
-            pending = (qualify_role_restoration(request, api, state=state, anchor=anchor)
-                if record is None else qualify())
-            if pending is not None:
-                return result(pending)
             if record is None:
+                # Before the first restart journal, prove every successor stopped.
+                # Prepared dispatch later owns its fresh restart qualification.
+                observe()
+                pending = qualify_role_restoration(request, api, state=state, anchor=anchor)
+                if pending is not None:
+                    return result(pending)
                 record = {**identity, 'workloads': {key: {'phase': 'prepared', 'before_resource_version': None} for key in targets}}
                 private_state._atomic_json(marker, identity)
                 private_state._atomic_json(path, record)
@@ -173,20 +172,23 @@ def restart_pool_legacy(*, request: PoolCutoverRequest, api: PoolLegacyRestartAP
                 item = record['workloads'][key]
                 if item['phase'] == 'started':
                     continue
-                actual = observe()[key]
-                pending = qualify()
-                if pending is not None:
-                    return result(pending)
-                if item['phase'] == 'prepared' and before[key] != desired:
+                changing = item['phase'] == 'prepared' and before[key] != desired
+                if changing:
+                    actual = api.read_workload(key)
+                    if not _matches(actual, before[key], _uid(originals[key])):
+                        raise ValueError
+                else:
+                    # Unknown intents and unchanged rows remain observation-only.
+                    actual = observe()[key]
+                    pending = qualify()
+                    if pending is not None:
+                        return result(pending)
+                if changing:
                     preview = api.preview_legacy_restart(key, actual, desired)
                     if preview is None:
                         return result('pending_legacy_restart_update')
                     if _stable(preview) != desired:
                         raise ValueError
-                    observe()
-                    pending = qualify()
-                    if pending is not None:
-                        return result(pending)
 
                     def record_intent(fresh: dict[str, Any], *, item: dict[str, Any] = item, key: str = key) -> None:
                         nonlocal actual
@@ -208,6 +210,10 @@ def restart_pool_legacy(*, request: PoolCutoverRequest, api: PoolLegacyRestartAP
                         if item['phase'] != 'intent':
                             raise
                         accepted = None
+                    if isinstance(accepted, RecoveryDrainPending):
+                        if item != {'phase': 'prepared', 'before_resource_version': None}:
+                            raise ValueError
+                        return result(accepted.value)
                     if accepted is False:
                         item.update(phase='prepared', before_resource_version=None)
                         private_state._atomic_json(path, record)

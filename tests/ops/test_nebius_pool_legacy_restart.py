@@ -37,6 +37,12 @@ class RestartAPI(RoleAPI):
         return copy.deepcopy(desired)
 
     def restart_legacy_workload(self, key, before, desired, *, record_intent):
+        from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
+        from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending
+
+        pending = qualify_legacy_restart(self.request, self, state=self.state, anchor=self.root / 'cutover-anchor')
+        if pending is not None:
+            return RecoveryDrainPending(pending)
         before = self.read_workload(key)
         record_intent(before)
         assert json.loads((self.state / 'legacy-restart.json').read_bytes())['workloads'][key] == {

@@ -75,6 +75,9 @@ def test_connected_first_recovery_cas_bounds_full_qualification(retirement_http,
         def respond(message):
             if message.method == 'GET' and message.url.params.get('limit') == '100':
                 counts['inventory_pages'] += 1
+            if (message.method == 'GET' and message.url.params.get('limit') == '1000'
+                    and message.url.path.rsplit('/', 1)[-1] in {'replicasets', 'jobs', 'pods'}):
+                counts['process_collections'] += 1
             subject = message.headers.get('Impersonate-User', '')
             if phase == 'role' and message.url.path.endswith('/selfsubjectrulesreviews') and not subject.endswith(':loom-pool-gateway'):
                 namespace = json.loads(message.content)['spec']['namespace']
@@ -134,6 +137,11 @@ def test_connected_first_recovery_cas_bounds_full_qualification(retirement_http,
             counts['verify_retained'] += 1
             return verify()
         monkeypatch.setattr(api, 'verify_retained', counted_verify)
+        pool_drained = api.parent.history.recovery_pool_drained
+        def counted_pool_drained():
+            counts['pool_drain_reads'] += 1
+            return pool_drained()
+        monkeypatch.setattr(api.parent.history, 'recovery_pool_drained', counted_pool_drained)
         if damage is not None:
             method = {'gateway': 'restrict_gateway_role', 'template': 'restore_legacy_template',
                 'role': 'restore_legacy_role'}[phase]
@@ -152,20 +160,27 @@ def test_connected_first_recovery_cas_bounds_full_qualification(retirement_http,
                     controller['status']['observedGeneration'] = 0
                 return dispatch(key, *args, **kwargs)
             monkeypatch.setattr(api, method, drift_before_dispatch)
-            if phase == 'template':
-                with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
-                    run()
+            if phase in {'template', 'role'}:
+                if damage == 'authority':
+                    with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
+                        run()
+                else:
+                    assert run()['status'] == ('pending_pool_cleanup' if damage == 'drain' else 'pending_successor_drain')
             else:
                 assert run()['status'] == ('pending_gateway_role_outcome' if phase == 'gateway' else 'pending_role_restoration_outcome')
             assert len(dispatched) == 1 and counts['previews'] == 1
             row = json.loads((api.state / journal_name).read_bytes())[items_name][dispatched[0]]
-            assert row['phase'] == ('prepared' if phase == 'template' else 'intent')
+            assert row['phase'] == ('prepared' if phase in {'template', 'role'} else 'intent')
             assert not state.gateway_writes and not state.writes and not state.activation_writes
             return
         with pytest.raises(FirstMutationObserved):
             run()
         print('first recovery CAS', phase, 'prepared', prepared, dict(counts))
         assert counts['previews'] == 1
-        assert counts['verify_retained'] == ({'gateway': 8, 'template': 20, 'role': 20} if prepared
-            else {'gateway': 11, 'template': 41, 'role': 27})[phase]
+        assert counts['verify_retained'] == ({'gateway': 8, 'template': 6, 'role': 6} if prepared
+            else {'gateway': 11, 'template': 27, 'role': 13})[phase]
+        if phase == 'template':
+            assert counts['inventory_pages'] == (146 if prepared else 656)
+            assert counts['pool_drain_reads'] == (4 if prepared else 16)
+            assert counts['process_collections'] == (4 if prepared else 16) * len(api.targets)
         assert not state.gateway_writes and not state.writes and not state.activation_writes

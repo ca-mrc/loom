@@ -38,7 +38,7 @@ from tests.ops.test_nebius_pool_template_restoration_live import (
 
 
 @pytest.mark.timeout(600)
-def test_fixed_role_restoration_cas_lost_reply_and_retained_subject_isolation(retirement_http, closed_startup):
+def test_fixed_role_restoration_cas_lost_reply_and_retained_subject_isolation(retirement_http, closed_startup, monkeypatch):
     with retirement_http() as (api, state, apply_gateway):
         machine = SimpleNamespace(mode=state.mode, guards=state.guards, machine_phase='revoked')
         gateway = GatewayAPI(closed_startup, machine)
@@ -118,18 +118,41 @@ def test_fixed_role_restoration_cas_lost_reply_and_retained_subject_isolation(re
             api.restore_legacy_role(key, before, desired)
         assert api.preview_legacy_role(key, before, desired) == desired
         assert previews == [key] and not writes
-        journal.write_bytes(intent)
+        def record_intent(fresh):
+            nonlocal intent
+            current = json.loads(journal.read_bytes())
+            assert current['roles'][key] == {'phase': 'prepared', 'before_resource_version': None}
+            current['roles'][key] = {'phase': 'intent', 'before_resource_version': fresh['metadata']['resourceVersion']}
+            journal.write_text(json.dumps(current))
+            intent = journal.read_bytes()
+
         widened = copy.deepcopy(desired)
         widened['rules'][0]['verbs'].append('patch')
         with pytest.raises(ValueError):
-            api.restore_legacy_role(key, before, widened)
+            api.restore_legacy_role(key, before, widened, record_intent=record_intent)
         state.machine_phase = 'active'
         with pytest.raises(ValueError):
-            api.restore_legacy_role(key, before, desired)
+            api.restore_legacy_role(key, before, desired, record_intent=record_intent)
         state.machine_phase = 'revoked'
+        assert json.loads(journal.read_bytes())['roles'][key]['phase'] == 'prepared'
+        from scripts.ops import nebius_pool_activation_live as activation_live
+
+        qualify = activation_live.qualify_role_restoration
+        def advance_version_after_qualification(*args, **kwargs):
+            pending = qualify(*args, **kwargs)
+            assert pending is None
+            roles[key]['metadata']['resourceVersion'] = str(int(before['metadata']['resourceVersion']) + 1)
+            before['metadata']['resourceVersion'] = roles[key]['metadata']['resourceVersion']
+            return pending
+        stale = copy.deepcopy(before)
+        monkeypatch.setattr(activation_live, 'qualify_role_restoration', advance_version_after_qualification)
         with pytest.raises(ValueError) as error:
-            api.restore_legacy_role(key, before, desired)
+            api.restore_legacy_role(key, stale, desired, record_intent=record_intent)
         assert 'private-' not in str(error.value) and writes == [key]
+        # An uncertain durable intent cannot be dispatched again, even when a
+        # caller supplies a new intent callback.
+        with pytest.raises(ValueError):
+            api.restore_legacy_role(key, before, desired, record_intent=record_intent)
         assert _stable(api.read_legacy_role(key)) == desired
         api.verify_retained()
         assert state.objects == untouched and not state.writes and not state.activation_writes
