@@ -98,7 +98,8 @@ def development_object_client(config: dict[str, Any], material: dict[str, str], 
 
 class HTTPSDevelopmentInstallationAPI:
     def __init__(self, *, request: DevelopmentInstallRequest, settings: DevelopmentLiveSettings,
-                 api_server: str, ssl_context: ssl.SSLContext, token: str, state_dir: Path):
+                 api_server: str, ssl_context: ssl.SSLContext, token: str, state_dir: Path,
+                 private_files: dict[Path, bytes] | None = None):
         self.diagnostic_stage: str | None = "configuration"
         try:
             self.request = copy.deepcopy(request)
@@ -115,8 +116,10 @@ class HTTPSDevelopmentInstallationAPI:
                     or selected.config["kubernetes_api_server"].rstrip("/") != api_server.rstrip("/")
                     or settings.operator_cloud_credentials == settings.github_token_file):
                 raise ValueError()
-            self.private_inputs = {path: _private(path) for path in (
-                settings.operator_cloud_credentials, settings.github_token_file)}
+            self.private_inputs = copy.deepcopy(private_files or {})
+            for path in (settings.operator_cloud_credentials, settings.github_token_file):
+                self.private_inputs.setdefault(path, _private(path))
+            self._request(self.request)
             # Qualify TLS/endpoint/token shape now, before an installer can write.
             with self.bootstrap_api():
                 pass
@@ -134,11 +137,13 @@ class HTTPSDevelopmentInstallationAPI:
             raise DevelopmentInstallError("development live binding differs")
 
     def bootstrap_api(self) -> HTTPSDevelopmentBootstrapAPI:
+        self._request(self.request)
         return HTTPSDevelopmentBootstrapAPI(binding=self.request.bootstrap, api_server=self.api_server,
             ssl_context=self.ssl_context, token=self.token)
 
     def resources(self, binding: DevelopmentResourceBinding, selection: DevelopmentStageInput,
                   phase: str) -> HTTPSDevelopmentStageAPI:
+        self._request(self.request)
         self._binding(binding)
         if selection != self.request.selection:
             raise DevelopmentInstallError("development frozen selection differs")

@@ -93,7 +93,7 @@ def test_private_input_mismatch_cannot_open_connection_or_write_state(entry, cha
     monkeypatch.setattr(module(), "connected_api", lambda *args, **kwargs: pytest.fail("connection opened"))
     assert module().main(path, "install") == 1
     report = capsys.readouterr().out
-    assert json.loads(report) == {"status": "blocked", "stage": "inputs"}
+    assert json.loads(report) == {"status": "blocked", "stage": "operation" if change in {"namespace", "path"} else "inputs"}
     assert "secret" not in report and not Path(operation["state_dir"]).exists()
 
 
