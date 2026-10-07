@@ -118,7 +118,10 @@ async def check_installation(state, installation_id):
 
 
 def retained_namespace(state, installation_id):
-    from scripts.ops.nebius_development_bootstrap import DevelopmentBootstrapBinding, _namespace_document
+    from scripts.ops.nebius_development_bootstrap import (
+        DevelopmentBootstrapBinding,
+        _namespace_document,
+    )
 
     binding = DevelopmentBootstrapBinding(str(installation_id), str(state.client.settings.kube_system_uid),
         state.config["db_tls_secret_name"])
@@ -159,7 +162,7 @@ async def test_resume_counts_own_live_workloads_once_without_adopting_them(prefl
         await check(preflight)  # Existing public preflight remains fresh-only.
 
 
-@pytest.mark.parametrize("change", ["installation", "deleting", "policy", "replaced", "disappeared"])
+@pytest.mark.parametrize("change", ["installation", "deleting", "policy", "replaced", "disappeared", "cluster-race"])
 async def test_resume_rejects_foreign_or_changing_namespace_before_installation(preflight, change):
     identity = uuid4()
     row = retained_namespace(preflight, identity)
@@ -176,8 +179,10 @@ async def test_resume_rejects_foreign_or_changing_namespace_before_installation(
                 if preflight.namespace_reads == 2:
                     if change == "replaced":
                         row["metadata"]["uid"] = str(uuid4())
-                    else:
+                    elif change == "disappeared":
                         preflight.documents[request.url.path] = None
+                    else:
+                        preflight.documents["/api/v1/namespaces/kube-system"]["metadata"]["uid"] = str(uuid4())
         preflight.on_read = mutate
     with pytest.raises(module().DevelopmentPreflightError):
         await check_installation(preflight, identity)
@@ -211,6 +216,31 @@ async def test_resume_storage_quota_includes_foreign_pending_and_future_ordinal_
     preflight.rows["statefulsets"] = [other]
     result = await check_installation(preflight, identity)
     assert result.evidence["pending_storage_mib"] == (10 + 3 + 2 * 2) * 1024
+
+
+@pytest.mark.parametrize("change", [None, "foreign-claim", "foreign-pv-name"])
+async def test_resume_accepts_only_own_dynamic_volume_while_binding_is_pending(preflight, change):
+    identity = uuid4()
+    retained_namespace(preflight, identity)
+    uid = str(uuid4())
+    claim = {"metadata": {"name": "data-loom-postgres-0", "namespace": "loom-dev", "uid": uid,
+        "labels": {"loom.nebius/development-installation": str(identity)}},
+        "spec": {"storageClassName": preflight.config["storage_class"], "resources": {"requests": {"storage": "10Gi"}}}}
+    volume = {"metadata": {"name": "pvc-" + uid}, "spec": {
+        "storageClassName": preflight.config["storage_class"],
+        "claimRef": {"namespace": "loom-dev", "name": "data-loom-postgres-0", "uid": uid}},
+        "status": {"phase": "Pending"}}
+    preflight.rows.update(persistentvolumeclaims=[claim], persistentvolumes=[volume])
+    if change == "foreign-claim":
+        claim["metadata"]["labels"]["loom.nebius/development-installation"] = str(uuid4())
+    elif change == "foreign-pv-name":
+        volume["metadata"]["name"] = "old-imported-volume"
+    if change:
+        with pytest.raises(module().DevelopmentPreflightError):
+            await check_installation(preflight, identity)
+    else:
+        result = await check_installation(preflight, identity)
+        assert result.evidence["pending_storage_mib"] == 10 * 1024
 
 
 async def test_verified_source_and_fresh_resources_produce_readonly_not_installed_evidence(preflight):

@@ -1,4 +1,4 @@
-"""Read-only qualification for a fresh, private shared-development foundation.
+"""Read-only qualification for a private shared-development foundation.
 
 Not an installer, capacity reservation, recovery/adoption path or CLI. The protected
 caller must still qualify cloud quota and fresh credentials, and journal its fixed
@@ -16,7 +16,12 @@ from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from scripts.ops.nebius_management_capacity import qualify_platform_capacity
+from scripts.ops.nebius_development_bootstrap import (
+    DevelopmentBootstrapBinding,
+    _namespace_document,
+)
+from scripts.ops.nebius_ingress_stage import _snapshot, _uid
+from scripts.ops.nebius_management_capacity import _count, qualify_platform_capacity
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
@@ -27,6 +32,7 @@ from loom.nebius_development_foundation import (
 )
 from loom.nebius_environment_render import PlatformEnvelope
 from loom.nebius_platform_render import canonical, digest, validate_environment
+from loom_execution_capacity_collector.kubernetes import _quantity
 from loom_service.environment_management.candidates import (
     GitHubCandidateCatalog,
     ProtectedPublication,
@@ -92,6 +98,34 @@ class DevelopmentPreflightResult:
     evidence: dict[str, Any]
 
 
+def _pending_storage(claims: list[dict[str, Any]], controllers: list[dict[str, Any]],
+                     planned: list[dict[str, Any]]) -> int:
+    """Additional MiB, beyond provider usage, including other pending claims."""
+    existing = {(row["metadata"]["namespace"], row["metadata"]["name"]): row for row in claims}
+    if len(existing) != len(claims):
+        raise ValueError()
+    pending = 0
+    for claim in claims:
+        requested = _quantity(claim["spec"]["resources"]["requests"]["storage"], kind="storage")
+        allocated = (_quantity(claim["status"]["capacity"]["storage"], kind="storage")
+                     if claim.get("status", {}).get("phase") == "Bound" else 0)
+        pending += max(0, requested - allocated)
+    future: dict[tuple[str, str], int] = {}
+    for row in [*controllers, *planned]:
+        if row["kind"] != "StatefulSet":
+            continue
+        start = row["spec"].get("ordinals", {}).get("start", 0)
+        if type(start) is not int or not 0 <= start <= 10000:
+            raise ValueError()
+        for template in row["spec"].get("volumeClaimTemplates", []):
+            size = _quantity(template["spec"]["resources"]["requests"]["storage"], kind="storage")
+            for ordinal in range(start, start + _count(row)):
+                key = (row["metadata"]["namespace"], f'{template["metadata"]["name"]}-{row["metadata"]["name"]}-{ordinal}')
+                if key not in existing:
+                    future[key] = max(future.get(key, 0), size)
+    return pending + sum(future.values())
+
+
 class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
     """Fixed authenticated GETs; no ambient kubeconfig, write, redirect or retry."""
 
@@ -119,6 +153,24 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
             raise ValueError()
         self._cluster()
 
+    def _installation_identity(self, installation_id: UUID, config: dict[str, Any]) -> tuple[str, str] | None:
+        """Coarse installation/policy check, never substitute for anchored journals."""
+        self._cluster()
+        row = self._read("/api/v1/namespaces/" + _NAMESPACE)
+        self._cluster()
+        if row is None:
+            return None
+        binding = DevelopmentBootstrapBinding(str(installation_id), str(self.settings.kube_system_uid),
+            config["db_tls_secret_name"])
+        snapshot = _snapshot(row)
+        operation = snapshot["metadata"]["annotations"]["loom.nebius/development-bootstrap-operation"]
+        label = snapshot["metadata"].get("labels", {}).pop("kubernetes.io/metadata.name", _NAMESPACE)
+        spec = snapshot.pop("spec", {})
+        if (label != _NAMESPACE or spec not in ({}, {"finalizers": ["kubernetes"]})
+                or snapshot != _namespace_document(binding, operation)):
+            raise ValueError()
+        return _uid(row), operation
+
     def _inventory(self, api: str, resource: str, kind: str) -> list[dict[str, Any]]:
         def read(method: str, path: str) -> dict[str, Any] | None:
             if method != "GET":
@@ -140,6 +192,24 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
     async def inspect(self, *, config: dict[str, Any], keyring: dict[str, Any], github_token: str,
                       http: httpx.AsyncClient) -> DevelopmentPreflightResult:
         """Bind actual publication/source and fresh live inventory, with no writes."""
+        return await self._inspect(config=config, keyring=keyring, github_token=github_token, http=http,
+            installation_id=None)
+
+    async def inspect_installation(self, *, config: dict[str, Any], keyring: dict[str, Any], github_token: str,
+                                   http: httpx.AsyncClient, installation_id: UUID) -> DevelopmentPreflightResult:
+        """Requalify an anchored caller, before or after its namespace creation.
+
+        This does not load recovery journals, adopt resources or grant writes.
+        The calling installer must validate its independent anchor and every
+        retained UID/configuration before proceeding with any phase.
+        """
+        if not isinstance(installation_id, UUID) or not installation_id.int:
+            raise DevelopmentPreflightError("development installation identity invalid")
+        return await self._inspect(config=config, keyring=keyring, github_token=github_token, http=http,
+            installation_id=installation_id)
+
+    async def _inspect(self, *, config: dict[str, Any], keyring: dict[str, Any], github_token: str,
+                       http: httpx.AsyncClient, installation_id: UUID | None) -> DevelopmentPreflightResult:
         stage = "configuration"
         try:
             config, keyring = copy.deepcopy(config), copy.deepcopy(keyring)
@@ -160,8 +230,12 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
                 raise ValueError()
             stage = "render"
             rendered = render_development_foundation(config, selected.candidate, selected.profile, keyring, repo_root=ROOT)
-            stage = "fresh_identity"
-            self._fresh_identity()
+            namespace_identity = None
+            stage = "fresh_identity" if installation_id is None else "installation_identity"
+            if installation_id is None:
+                self._fresh_identity()
+            else:
+                namespace_identity = self._installation_identity(installation_id, config)
             stage = "storage_class"
             self._storage_class(config)
             stage = "inventory"
@@ -182,7 +256,8 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
                         # not an orphan with a known future replica envelope.
                         raise ValueError()
             stage = "fresh_resources"
-            if (any(row["metadata"]["namespace"] == _NAMESPACE for row in [*pods, *controllers, *claims, *hpas])
+            if installation_id is None and (
+                    any(row["metadata"]["namespace"] == _NAMESPACE for row in [*pods, *controllers, *claims, *hpas])
                     or any(row.get("spec", {}).get("claimRef", {}).get("namespace") == _NAMESPACE for row in volumes)):
                 raise ValueError()
             # Even with no dev claimRef, Kubernetes can bind a new PVC to an
@@ -192,6 +267,14 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
                 spec = volume["spec"]
                 if spec.get("storageClassName") == config["storage_class"]:
                     reference = spec.get("claimRef", {})
+                    if installation_id is not None and reference.get("namespace") == _NAMESPACE:
+                        matches = [claim for claim in claims if claim["metadata"]["namespace"] == _NAMESPACE
+                            and claim["metadata"]["name"] == reference.get("name")
+                            and claim["metadata"].get("uid") == reference.get("uid")
+                            and claim["metadata"].get("labels", {}).get("loom.nebius/development-installation") == str(installation_id)]
+                        if len(matches) != 1 or volume["metadata"]["name"] != "pvc-" + reference["uid"]:
+                            raise ValueError()
+                        continue  # Installer separately pins and qualifies its exact PV/disk.
                     if (volume.get("status", {}).get("phase") != "Bound"
                             or not all(reference.get(key) for key in ("namespace", "name", "uid"))):
                         raise ValueError()
@@ -219,22 +302,32 @@ class HTTPSDevelopmentPreflight(ManagementKubernetesTransport):
                     pod["metadata"].pop("ownerReferences", None)
             capacity = qualify_platform_capacity(nodes=nodes, pods=accounting_pods, controllers=controllers, planned=planned,
                 reserve=PlatformEnvelope(0, 0, 0, 0), reserve_pods=0)
+            stage = "storage_demand"
+            pending_storage_mib = _pending_storage(claims, controllers, planned)
             # No promise about future owners yet: this is only the private
             # foundation's actual Pods, including migration and rolling surge.
             stage = "readback"
             self._storage_class(config)
-            self._fresh_identity()
-            evidence = {
-                "schema_version": "loom.nebius-development-preflight.v1", "status": "fresh_dev_preflight_only",
+            if installation_id is None:
+                self._fresh_identity()
+            elif self._installation_identity(installation_id, config) != namespace_identity:
+                raise ValueError()
+            evidence: dict[str, Any] = {
+                "schema_version": "loom.nebius-development-preflight.v1",
+                "status": "fresh_dev_preflight_only" if installation_id is None else "installation_dev_preflight_only",
                 "namespace": _NAMESPACE, "kube_system_uid": str(self.settings.kube_system_uid),
                 "source_sha": selection.source_sha, "source_archive_sha256": source_digest,
                 "publication": selection.model_dump(mode="json"), "revision": rendered.revision,
                 "input_digest": digest({"config": config, "keyring": keyring, "settings": self.settings.model_dump(mode="json")}),
                 "storage_class_uid": str(self.settings.storage_class_uid),
                 "database_storage_mib": rendered.platform_envelope.storage_mib, "capacity": capacity,
+                "pending_storage_mib": pending_storage_mib,
                 "unverified": ["installer_bundle_authority", "provider_storage_quota", "credential_provenance", "installation", "runtime_isolation",
                                "public_access", "shared_pool_activation", "owner_acceptance"],
             }
+            if installation_id is not None:
+                evidence.update(installation_id=str(installation_id),
+                    namespace_uid=namespace_identity[0] if namespace_identity else None)
             return DevelopmentPreflightResult(rendered, evidence)
         except Exception:
             raise DevelopmentPreflightError("development foundation preflight failed: " + stage) from None
