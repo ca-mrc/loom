@@ -10,6 +10,7 @@ from typing import Any
 from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_management_gateway import POOL_SHUTDOWN_PENDING_REASONS
 from scripts.ops.nebius_pool_activation_live import HTTPSPoolActivationAPI
 from scripts.ops.nebius_pool_activation_stage import activation_record, advance_pool_activation
 from scripts.ops.nebius_pool_completion import complete_pool_cutover, load_pool_completion
@@ -115,7 +116,10 @@ own original journal lock and validates its predecessor before any side effect.
                 return None
             if not isinstance(status, str) or not status.startswith('pending_'):
                 raise ValueError
-            return {'status': 'pending', 'phase': name, 'operation_id': operation}
+            report = {'status': 'pending', 'phase': name, 'operation_id': operation}
+            if name == 'shutdown' and status in POOL_SHUTDOWN_PENDING_REASONS:
+                report['pending_reason'] = status
+            return report
 
         if action == 'preflight':
             phase = 'preflight'

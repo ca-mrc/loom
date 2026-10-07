@@ -109,6 +109,22 @@ def test_pool_authority_reports_terminal_history_but_never_installed_acceptance(
         gateway.safe_report(json.dumps({**common, 'status': 'pending', 'phase': 'private-value'}).encode(), metadata)
 
 
+@pytest.mark.parametrize('reason', [
+    'pending_pool_cleanup', 'pending_shutdown_update', 'pending_shutdown_outcome', 'pending_successor_drain',
+])
+def test_shutdown_pending_reason_survives_both_filters_only_in_its_fixed_phase(tmp_path, reason):
+    gateway = module()
+    metadata = pool_operation(tmp_path)
+    common = {key: metadata[key] for key in ('source_sha', 'candidate', 'installation_id', 'namespace', 'operation_id')}
+    report = {**common, 'status': 'pending', 'phase': 'shutdown', 'pending_reason': reason}
+    first = gateway.safe_report(json.dumps(report | {'private': 'never-export'}).encode(), metadata)
+    assert first == report
+    assert gateway.safe_report(json.dumps(first).encode(), metadata) == report
+    for damage in ({'pending_reason': reason + '-private-value'}, {'phase': 'startup'}):
+        with pytest.raises(gateway.GatewayError):
+            gateway.safe_report(json.dumps(report | damage).encode(), metadata)
+
+
 @pytest.mark.parametrize('result', [
     {'status': 'preflight_qualified'}, {'status': 'pending', 'phase': 'startup'},
     {'status': 'pending', 'phase': 'activation'}, {'status': 'pending', 'phase': 'legacy-reopening'},

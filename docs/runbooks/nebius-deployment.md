@@ -1404,7 +1404,13 @@ node-proxy fallback, additional permissions or automatic retries are introduced.
 
 `pending` means reconcile the same operation and named phase; it does not permit
 recreating an uncertain resource or resetting evidence. Replays select the newest
-recorded phase. Explicit rollback requires the completed closed cutover, fences
+recorded phase. Shutdown receipts optionally include a fixed `pending_reason`:
+`pending_pool_cleanup` waits for journal drain, `pending_shutdown_update` records
+a rejected stop preview/update, `pending_shutdown_outcome` requires readback of
+the original uncertain stop, and `pending_successor_drain` waits for stopped
+successor processes to disappear. Older receipts without a reason do not identify
+which barrier is pending. These diagnostics do not authorize a new write or retry.
+Explicit rollback requires the completed closed cutover, fences
 global admission first, settles startup writes and drains effects, stops successor
 processes, revokes machine authority, restricts gateway permissions, restores the
 original templates/roles, then proves legacy runtime readiness before reopening
