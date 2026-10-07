@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 from dataclasses import asdict, replace
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -19,6 +20,8 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from sqlalchemy.engine import make_url
+
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 def module():
@@ -132,8 +135,51 @@ def test_generated_keys_match_dev_database_only_and_contain_no_runtime_authority
         leaf.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
     assert set(material["loom-platform-auth"]) == {"jwt-signing-key", "secret-store-master-key"}
     other_binding, other = setup()
+    (tmp_path / "other").mkdir(mode=0o700)
     bootstrap(other_binding, other, tmp_path / "other")
     assert api.secrets["loom-platform-db"]["data"] != other.secrets["loom-platform-db"]["data"]
+
+
+def test_local_material_covers_rendered_consumers_but_requires_separate_storage(tmp_path, platform_inputs):
+    from loom.nebius_development_foundation import render_development_foundation
+
+    binding, api = setup()
+    bootstrap(binding, api, tmp_path)
+    config, candidate, profile = copy.deepcopy(platform_inputs)
+    config.update(namespace="loom-dev", execution_namespace="loom-nebius-dev-execution",
+                  db_tls_secret_name=binding.tls_secret_name)
+    candidate["source_ref"] = "refs/heads/dev"
+    rendered = render_development_foundation(config, candidate, profile, {},
+        repo_root=Path(__file__).resolve().parents[2])
+    external = set()
+    consumed = set()
+    for documents in rendered.files.values():
+        for doc in documents:
+            if doc["kind"] not in {"Deployment", "StatefulSet", "Job"}:
+                continue
+            pod = doc["spec"]["template"]["spec"]
+            for container in pod.get("initContainers", []) + pod["containers"]:
+                for row in container.get("env", []):
+                    ref = row.get("valueFrom", {}).get("secretKeyRef")
+                    if ref is None:
+                        continue
+                    if ref["name"] not in api.secrets:
+                        external.add((ref["name"], ref["key"]))
+                    else:
+                        assert ref["key"] in api.secrets[ref["name"]]["data"]
+                        consumed.add(ref["name"])
+            for volume in pod.get("volumes", []):
+                ref = volume.get("secret")
+                if ref is not None:
+                    assert ref["secretName"] in api.secrets
+                    consumed.add(ref["secretName"])
+                    for item in ref.get("items", []):
+                        assert item["key"] in api.secrets[ref["secretName"]]["data"]
+    assert consumed == {"loom-platform-db", "loom-platform-auth", "loom-admin-secret", binding.tls_secret_name}
+    assert external == {
+        ("loom-platform-storage", "access-key"), ("loom-platform-storage", "secret-key"),
+        ("loom-platform-storage", "source-access-key"), ("loom-platform-storage", "source-secret-key"),
+    }
 
 
 @pytest.mark.parametrize("target", ["namespace", "loom-platform-db", "loom-admin-secret"])
@@ -275,6 +321,29 @@ def test_anchor_must_be_independent_of_working_state(tmp_path):
         with pytest.raises(module().DevelopmentBootstrapError):
             module().bootstrap_development(binding=binding, api=api, state_dir=tmp_path / "state", anchor_dir=anchor)
     assert not api.creates
+
+
+def test_competing_anchor_cannot_overwrite_the_successful_private_journal(tmp_path, monkeypatch):
+    binding, api = setup()
+    atomic = module().private_state._atomic_json
+    before = None
+    winner = None
+
+    def competing_bootstrap(path, value):
+        nonlocal before, winner
+        if path.parent == tmp_path / "anchor" and path.name == binding.installation_id + ".json":
+            winner = module().bootstrap_development(binding=binding, api=api,
+                state_dir=tmp_path / "state", anchor_dir=tmp_path / "competing-anchor")
+            before = (tmp_path / "state/bootstrap.json").read_bytes()
+        atomic(path, value)
+
+    monkeypatch.setattr(module().private_state, "_atomic_json", competing_bootstrap)
+    with pytest.raises(module().DevelopmentBootstrapError):
+        bootstrap(binding, api, tmp_path)
+    assert (tmp_path / "state/bootstrap.json").read_bytes() == before
+    assert module().bootstrap_development(binding=binding, api=api,
+        state_dir=tmp_path / "state", anchor_dir=tmp_path / "competing-anchor") == winner
+    assert len(api.creates) == 5
 
 
 def test_https_adapter_scope_and_nonretrying_create(tmp_path):

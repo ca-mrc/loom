@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import ssl
 import subprocess
 from copy import deepcopy
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import yaml
@@ -127,5 +129,46 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
             row["metadata"]["namespace"] in namespaces
             for row in json.loads(result.output)["items"]
         )
+    finally:
+        container.stop()
+
+
+def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path) -> None:
+    """Exercise the actual HTTPS adapter, generated keys and recovery journal."""
+    from scripts.ops.nebius_development_bootstrap import (
+        DevelopmentBootstrapBinding,
+        HTTPSDevelopmentBootstrapAPI,
+        bootstrap_development,
+    )
+
+    container = _start_k3s()
+    try:
+        _, core, _ = _load_client(container)
+        configuration = core.api_client.configuration
+        trust = ssl.create_default_context(cafile=configuration.ssl_ca_cert)
+        trust.load_cert_chain(configuration.cert_file, configuration.key_file)
+        binding = DevelopmentBootstrapBinding(
+            installation_id=str(uuid4()),
+            kube_system_uid=core.read_namespace("kube-system").metadata.uid,
+            tls_secret_name="loom-development-db-tls",
+        )
+        with HTTPSDevelopmentBootstrapAPI(
+            binding=binding, api_server=configuration.host, ssl_context=trust,
+        ) as api:
+            first = bootstrap_development(binding=binding, api=api,
+                state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor")
+            journal = (tmp_path / "state/bootstrap.json").read_bytes()
+            assert bootstrap_development(binding=binding, api=api,
+                state_dir=tmp_path / "state", anchor_dir=tmp_path / "anchor") == first
+            assert (tmp_path / "state/bootstrap.json").read_bytes() == journal
+        assert first["namespace_uid"] == core.read_namespace("loom-dev").metadata.uid
+        secrets = core.list_namespaced_secret("loom-dev").items
+        assert {row.metadata.name for row in secrets} == {
+            "loom-platform-db", "loom-development-db-tls", "loom-platform-auth", "loom-admin-secret",
+        }
+        assert {row.metadata.name: row.metadata.uid for row in secrets} == first["secret_uids"]
+        assert all(row.immutable for row in secrets)
+        assert not core.list_namespaced_pod("loom-dev").items
+        assert not core.list_namespaced_persistent_volume_claim("loom-dev").items
     finally:
         container.stop()
