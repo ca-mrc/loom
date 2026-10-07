@@ -102,3 +102,43 @@ def test_management_hook_cannot_change_other_dns_names(tmp_path, monkeypatch, do
     with pytest.raises(module().CertificateError):
         module().management_certificate_hook(config_path(tmp_path), 'auth')
     assert not (tmp_path / 'certificate-state').exists()
+
+
+def test_management_hook_issues_and_cleans_only_its_exact_dns_record(tmp_path, monkeypatch):
+    import httpx
+    from scripts.ops import nebius_dns_challenge as dns
+
+    path = config_path(tmp_path)
+    state = tmp_path / 'certificate-state'
+    state.mkdir(mode=0o700)
+    monkeypatch.setenv('CERTBOT_DOMAIN', HOST)
+    monkeypatch.setenv('CERTBOT_VALIDATION', 'v' * 43)
+    records = [{'recordId': 'foreign', 'name': '_acme-challenge.development-management',
+        'type': 'TXT', 'ttl': 600, 'data': 'foreign'}]
+    factory = dns.GoDaddyDNS
+
+    def provider(zone, subject, token):
+        assert zone == 'example.test' and subject == HOST and token == 'private-pat'
+
+        def transport(request):
+            if request.method == 'GET':
+                return httpx.Response(200, json={'items': records[:]})
+            if request.method == 'POST':
+                record = json.loads(request.content)
+                assert record['name'] == '_acme-challenge.development-management'
+                records.append({'recordId': 'owned', **record})
+                return httpx.Response(201, json=records[-1])
+            assert request.method == 'DELETE' and request.url.path.endswith('/owned')
+            records.pop()
+            return httpx.Response(204)
+
+        return factory(zone, subject, token, transport=httpx.MockTransport(transport))
+
+    monkeypatch.setattr(dns, 'GoDaddyDNS', provider)
+    monkeypatch.setattr(dns, 'wait_for_txt', lambda *args: None)
+    assert module().management_certificate_hook(path, 'auth') == 'present'
+    with pytest.raises(module().CertificateError):
+        module()._clean_challenges(state, module().load_installation(path, management_only=True))
+    assert module().management_certificate_hook(path, 'cleanup') == 'cleaned'
+    assert [row['recordId'] for row in records] == ['foreign']
+    module()._clean_challenges(state, module().load_installation(path, management_only=True))

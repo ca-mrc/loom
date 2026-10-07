@@ -59,7 +59,25 @@ def validate_certificate(chain: bytes, key: bytes, *, child_domain: str, managem
     Tests can inject a local CA. Operational callers use the system public trust
     store, never a certificate-supplied root or a caller-selected CA file.
     """
-    names = certificate_names(child_domain, management_host)
+    return _validate_certificate(chain, key, names=certificate_names(child_domain, management_host),
+                                 now=now, roots=roots)
+
+
+def validate_management_certificate(chain: bytes, key: bytes, *, management_host: str,
+                                    now: datetime | None = None,
+                                    roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
+    """An independent manager receives exactly one host, never a shared wildcard."""
+    return _validate_certificate(chain, key, names=_management_names(management_host), now=now, roots=roots)
+
+
+def _management_names(host: str) -> list[str]:
+    if not isinstance(host, str) or len(host) > 250 or not _HOST.fullmatch(host):
+        raise CertificateError("invalid management certificate subject")
+    return [host]
+
+
+def _validate_certificate(chain: bytes, key: bytes, *, names: list[str], now: datetime | None,
+                          roots: Sequence[x509.Certificate] | None) -> dict[str, Any]:
     if not 0 < len(chain) <= 65_536 or not 0 < len(key) <= 16_384:
         raise CertificateError("certificate material exceeds bounds")
     now = now or datetime.now(UTC)
@@ -81,7 +99,7 @@ def validate_certificate(chain: bytes, key: bytes, *, child_domain: str, managem
                 != private.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)):
             raise CertificateError("certificate private key mismatch")
         sans = list(leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value)
-        if len(sans) != 2 or set(sans) != {x509.DNSName(name) for name in names}:
+        if len(sans) != len(names) or set(sans) != {x509.DNSName(name) for name in names}:
             raise CertificateError("certificate subjects differ from protected scope")
         if leaf.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
             raise CertificateError("certificate leaf must not be a CA")
@@ -92,7 +110,7 @@ def validate_certificate(chain: bytes, key: bytes, *, child_domain: str, managem
         trusted = list(roots) if roots is not None else [
             x509.load_der_x509_certificate(der) for der in ssl.create_default_context().get_ca_certs(binary_form=True)
         ]
-        (PolicyBuilder().store(Store(trusted)).time(now).build_server_verifier(x509.DNSName(management_host))
+        (PolicyBuilder().store(Store(trusted)).time(now).build_server_verifier(x509.DNSName(names[-1]))
          .verify(leaf, certificates[1:]))
         return {"sans": names, "expires_at": leaf.not_valid_after_utc.isoformat(),
                 "fingerprint_sha256": leaf.fingerprint(hashes.SHA256()).hex()}
@@ -230,18 +248,30 @@ def publish_certificate(root: Path, chain: bytes, key: bytes, *, child_domain: s
         return _publish(root, chain, key, report)
 
 
-def load_installation(path: Path) -> dict[str, Any]:
+def _installation_names(config: dict[str, Any]) -> list[str]:
+    if config['schema'] == 'loom.nebius-management-certificate-installation.v1':
+        return _management_names(config['management_host'])
+    if config['schema'] != 'loom.nebius-certificate-installation.v1':
+        raise CertificateError('invalid certificate subject scope')
+    return certificate_names(config['child_domain'], config['management_host'])
+
+
+def load_installation(path: Path, *, management_only: bool = False) -> dict[str, Any]:
     try:
         if not path.is_absolute() or path != path.resolve():
             raise CertificateError("protected certificate configuration must use an absolute private path")
         value = json.loads(_private_read(path, limit=16_384))
         fields = {"schema", "installation_id", "zone", "child_domain", "management_host", "credential_file", "state_dir", "email"}
+        schema = 'loom.nebius-certificate-installation.v1'
+        if management_only:
+            fields.remove('child_domain')
+            schema = 'loom.nebius-management-certificate-installation.v1'
         if (not isinstance(value, dict) or set(value) != fields
-                or value["schema"] != "loom.nebius-certificate-installation.v1"
+                or value["schema"] != schema
                 or not all(isinstance(value[field], str) for field in fields - {"email"})
                 or UUID(value["installation_id"]).int == 0):
             raise CertificateError("invalid protected certificate configuration")
-        names = certificate_names(value["child_domain"], value["management_host"])
+        names = _installation_names(value)
         if not _HOST.fullmatch(value["zone"]) or not all(name.endswith("." + value["zone"]) for name in names):
             raise CertificateError("certificate subjects must belong to the protected DNS zone")
         if value["email"] is not None and (not isinstance(value["email"], str)
@@ -265,7 +295,7 @@ def _bind_installation(root: Path, config: dict[str, Any]) -> None:
     except FileNotFoundError:
         _atomic_json(path, config)
     else:
-        if load_installation(path) != config:
+        if load_installation(path, management_only=config['schema'] == 'loom.nebius-management-certificate-installation.v1') != config:
             raise CertificateError("certificate state belongs to a different installation")
 
 
@@ -289,7 +319,7 @@ def _clean_challenges(root: Path, config: dict[str, Any]) -> None:
                 raise CertificateError("unresolved DNS challenge requires reconciliation")
             identity = {key: value[key] for key in ("schema", "zone", "domain", "validation")}
             if (identity["schema"] != "loom.dns-challenge.v1" or identity["zone"] != config["zone"]
-                    or identity["domain"] not in {config["child_domain"], config["management_host"]}
+                    or identity["domain"] not in {name.removeprefix('*.') for name in _installation_names(config)}
                     or not isinstance(identity["validation"], str)
                     or not re.fullmatch(r"[A-Za-z0-9_-]{43}", identity["validation"])
                     or hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest() != path.stem):
@@ -401,6 +431,17 @@ def _audit_recovery(root: Path, *, sync: bool) -> None:
 def issue_certificate(config_path: Path, *, now: datetime | None = None,
                       roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
     config = load_installation(config_path)
+    return _issue_certificate(config, now=now, roots=roots)
+
+
+def issue_management_certificate(config_path: Path, *, now: datetime | None = None,
+                                  roots: Sequence[x509.Certificate] | None = None) -> dict[str, Any]:
+    config = load_installation(config_path, management_only=True)
+    return _issue_certificate(config, now=now, roots=roots)
+
+
+def _issue_certificate(config: dict[str, Any], *, now: datetime | None,
+                       roots: Sequence[x509.Certificate] | None) -> dict[str, Any]:
     root = Path(config["state_dir"])
     try:
         with _locked_state(root):
@@ -417,7 +458,8 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
             for directory in ("acme", "work", "logs"):
                 _private_directory(root / directory)
             _audit_recovery(root, sync=False)
-            hook = [sys.executable, str(Path(__file__).resolve()), "hook"]
+            hook_action = ('management-hook' if config['schema'] == 'loom.nebius-management-certificate-installation.v1' else 'hook')
+            hook = [sys.executable, str(Path(__file__).resolve()), hook_action]
             args = [sys.executable, "-c", "from certbot.main import main; raise SystemExit(main())",
                     "certonly", "--config", "/dev/null", "--non-interactive",
                     "--agree-tos", "--server", "https://acme-v02.api.letsencrypt.org/directory", "--manual",
@@ -427,7 +469,7 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
                     "--manual-auth-hook", shlex.join([*hook, "auth", "--config", str(root / "installation.json")]),
                     "--manual-cleanup-hook", shlex.join([*hook, "cleanup", "--config", str(root / "installation.json")])]
             args += ["--email", config["email"]] if config["email"] else ["--register-unsafely-without-email"]
-            for name in certificate_names(config["child_domain"], config["management_host"]):
+            for name in _installation_names(config):
                 args += ["--domain", name]
             intent = {"schema": "loom.nebius-issuance.v1", "stage": "running", "started_at": (now or datetime.now(UTC)).isoformat()}
             _atomic_json(journal, intent)
@@ -440,8 +482,7 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
             _clean_challenges(root, config)
             _audit_recovery(root, sync=True)
             chain, key = _lineage_material(root)
-            report = validate_certificate(chain, key, child_domain=config["child_domain"],
-                                          management_host=config["management_host"], now=now, roots=roots)
+            report = _validate_certificate(chain, key, names=_installation_names(config), now=now, roots=roots)
             selected = _publish(root, chain, key, report)
             _atomic_json(journal, {**intent, "stage": "complete", "generation": selected["generation"]})
             return {"status": "qualified", "installation_id": config["installation_id"], **selected}
@@ -453,8 +494,18 @@ def issue_certificate(config_path: Path, *, now: datetime | None = None,
 
 def certificate_hook(config_path: Path, action: str) -> str:
     config = load_installation(config_path)
+    return _certificate_hook(config, action)
+
+
+def management_certificate_hook(config_path: Path, action: str) -> str:
+    config = load_installation(config_path, management_only=True)
+    return _certificate_hook(config, action)
+
+
+def _certificate_hook(config: dict[str, Any], action: str) -> str:
     domain = os.environ.get("CERTBOT_DOMAIN", "")
-    allowed = {config["child_domain"], "*." + config["child_domain"], config["management_host"]}
+    names = _installation_names(config)
+    allowed = {*names, *(name.removeprefix('*.') for name in names)}
     if domain not in allowed or action not in {"auth", "cleanup"}:
         raise CertificateError("certificate hook is outside the protected subject allowlist")
     # Imported only after scope checks; this module is an operations dependency,
@@ -469,15 +520,21 @@ def certificate_hook(config_path: Path, action: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="operation", required=True)
-    issue = sub.add_parser("issue")
-    issue.add_argument("--config", type=Path, required=True)
-    hook = sub.add_parser("hook")
-    hook.add_argument("action", choices=("auth", "cleanup"))
-    hook.add_argument("--config", type=Path, required=True)
+    for name in ('issue', 'issue-management'):
+        issue = sub.add_parser(name)
+        issue.add_argument("--config", type=Path, required=True)
+    for name in ('hook', 'management-hook'):
+        hook = sub.add_parser(name)
+        hook.add_argument("action", choices=("auth", "cleanup"))
+        hook.add_argument("--config", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        result = (issue_certificate(args.config) if args.operation == "issue"
-                  else {"status": certificate_hook(args.config, args.action)})
+        if args.operation in {'issue', 'issue-management'}:
+            issuer = issue_management_certificate if args.operation == 'issue-management' else issue_certificate
+            result = issuer(args.config)
+        else:
+            run_hook = management_certificate_hook if args.operation == 'management-hook' else certificate_hook
+            result = {"status": run_hook(args.config, args.action)}
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception:

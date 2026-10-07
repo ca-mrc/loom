@@ -1558,6 +1558,15 @@ described below. The management host is outside the child DNS zone and cannot
 replace the existing standalone host. The installation UUID labels its objects;
 labels alone are not permission to adopt existing objects.
 
+An independent manager may set `public_tls_secret_name` to an explicitly delivered
+namespace-local TLS Secret. Omission preserves the existing default-certificate
+route and serialized input identity. The renderer neither creates the Secret nor
+changes the shared ingress controller. The private certificate issuer has a
+separate exact-host management schema and entry point: it cannot request the
+shared wildcard, and the legacy two-subject entry point rejects that schema.
+Certificate issuance alone does not establish delivery, renewal activation or
+public readiness; those require the protected installer and live HTTPS proof.
+
 Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
 backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,
 execution namespace, cloud resource, public LoadBalancer or Secret is emitted.
