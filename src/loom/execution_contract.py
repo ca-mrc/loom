@@ -34,7 +34,7 @@ from loom.execution_requirements import (
     TaskExecutionRequirementsV1,
     execution_requirement_diagnostics,
 )
-from loom.hosted_harness import is_workspace_harness
+from loom.hosted_harness import hosted_harness, is_workspace_harness
 from loom.models.networking import (
     NetworkPolicy,
     TaskHttpEgress,
@@ -603,10 +603,13 @@ def workload_requirements_from_task(
     # A later verifier pod exists only for workspace-harness separate grading.
     # Callers that have the trial pass it, because that is what the compiler
     # uses. Task-only callers keep their historical projection (declared agent
-    # and env_mode) so stored comparisons that do not know the trial stay stable.
+    # and env_mode) so stored comparisons that do not know the trial stay stable;
+    # the declared harness's spec says whether it has that projection.
     if trial is None:
+        declared_harness = hosted_harness(task.agent.name)
         separate = (
-            task.agent.name == "terminus-2"
+            declared_harness is not None
+            and declared_harness.task_declared_separate_verifier
             and task.verifier.env_mode == "separate"
             and not _task_declares_guest_execution(task)
         )

@@ -214,6 +214,10 @@ class HostedHarnessSpec:
     # How the harness gets into the task sandbox; None means it is already
     # there (task image or trusted controller).
     setup: HarnessSetup | None = None
+    # Whether a task that declares this harness, with `env_mode: separate`,
+    # projects a separate verifier when its requirements are derived without
+    # a Trial. Frozen: stored requirement digests depend on it (#2296).
+    task_declared_separate_verifier: bool = False
     names: frozenset[str] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -231,6 +235,8 @@ class HostedHarnessSpec:
             raise ValueError(f"{self.name}: a response-only harness has no task sandbox")
         if self.execution_kind == "workspace" and not self.required_driver_capabilities:
             raise ValueError(f"{self.name}: a workspace harness must declare its driver operations")
+        if self.task_declared_separate_verifier and self.execution_kind != "workspace":
+            raise ValueError(f"{self.name}: only a workspace harness has a separate verifier")
         if self.stages_solution and self.model != "forbidden":
             raise ValueError(f"{self.name}: only a model-free harness may receive solution/")
         if self.setup is not None and (
@@ -284,6 +290,8 @@ TERMINUS_2 = HostedHarnessSpec(
         NativeOutput("agent/harbor/trajectory.json", "artifacts/harbor/trajectory.json", "agent_native", True),
         NativeOutput("agent/harbor/recording.cast", "artifacts/harbor/recording.cast", "agent_native", False),
     ),
+    # The only harness with this historical projection; keep it that way.
+    task_declared_separate_verifier=True,
 )
 
 ORACLE = HostedHarnessSpec(

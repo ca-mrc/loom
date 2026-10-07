@@ -87,6 +87,53 @@ def test_planner_source_has_no_harness_name_branches() -> None:
     assert "hosted_harness(" not in code  # the caller resolves the spec
 
 
+def test_execution_contract_has_no_harness_name_branches() -> None:
+    import loom.execution_contract as contract
+
+    code = re.sub(r'"""[\s\S]*?"""|#[^\n]*', "", inspect.getsource(contract))
+
+    assert not re.search(r"terminus|oracle|direct.completion|litellm|openhands|codex", code, re.I)
+    # Agent names are only ever registry lookup keys.
+    assert set(re.findall(r"[\w.(]*agent(?:_|\.)name\)?", code)) == {
+        "is_workspace_harness(trial.agent_name)", "hosted_harness(task.agent.name)",
+    }
+
+
+def _task_only_requirements(agent: str, env_mode: str):
+    from tests.unit.test_service_execution_terminus_plan import _inputs
+
+    task, _, _ = _inputs()
+    return workload_requirements_from_task(task.model_copy(update={
+        "agent": task.agent.model_copy(update={"name": agent}),
+        "verifier": task.verifier.model_copy(update={"env_mode": env_mode}),
+    }))
+
+
+def test_task_only_requirements_keep_their_stored_digests() -> None:
+    # Recorded from `dev` before the projection moved to the spec (#2296);
+    # stored requirement comparisons depend on these exact bytes.
+    import hashlib
+
+    def digest(agent: str, env_mode: str) -> str:
+        return hashlib.sha256(_task_only_requirements(agent, env_mode).model_dump_json().encode()).hexdigest()
+
+    assert digest("terminus-2", "separate") == "cfe3a0053e9f4662c64da598d4183455247e5091ef97187d759ff443fc5e14ee"
+    assert digest("terminus-2", "shared") == "a7f8aa3f3a598383c79729a5d3532b844fcce3017b3e5673c73eb7cb536774bd"
+
+
+@pytest.mark.parametrize("agent", [*sorted(hosted.HOSTED_HARNESSES), "no-such-agent"])
+@pytest.mark.parametrize("env_mode", ["separate", "shared"])
+def test_task_only_separate_verifier_projection_is_terminus_only(agent: str, env_mode: str) -> None:
+    # The historical rule was `task.agent.name == "terminus-2"`; every other
+    # declared harness, including later workspace harnesses, keeps in-attempt.
+    topology = _task_only_requirements(agent, env_mode).verifier_topology
+    historical = agent == "terminus-2" and env_mode == "separate"
+    assert topology == (VerifierTopology.SEPARATE_EXECUTION if historical else VerifierTopology.IN_ATTEMPT)
+    assert {spec.name for spec in hosted.HOSTED_HARNESSES.values() if spec.task_declared_separate_verifier} == {
+        "terminus-2",
+    }
+
+
 @pytest.mark.parametrize("name", ["direct-completion", "oracle-shared", "terminus-2-separate"])
 def test_many_artifact_paths_compile_without_oversized_environment(name: str) -> None:
     from loom.service_execution_materialization import compile_service_execution_plan

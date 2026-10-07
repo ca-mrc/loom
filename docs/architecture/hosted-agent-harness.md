@@ -72,7 +72,8 @@ declares only harness-owned facts:
 | `features` | Behaviour only some harnesses implement: `agent_continuation`, `pinned_versions`, `task_resource_requests`. |
 | `required_driver_capabilities` | Sandbox-driver operations the controller phase uses. If they exceed `NATIVE_SANDBOX_DRIVER_CAPABILITIES`, the harness is not natively runnable and admission fails closed (`direct_completion_required`). |
 | `native_outputs` | Harness-owned evidence files the plan declares (for example Harbor's trajectory). Common outputs are the planner's. |
-| `trace_format` | How the materializer validates the trace and usage (`completion-calls`, `terminus`, `oracle`). |
+| `trace_format` | How the materializer validates the trace and usage (`completion-calls`, `terminus`, `oracle`, `codex`). |
+| `task_declared_separate_verifier` | Frozen historical projection for requirements derived without a Trial: a task declaring this harness with `env_mode: separate` gets a separate verifier. Only Terminus-2 sets it; stored requirement digests depend on it, so new harnesses leave it off. |
 
 `NATIVE_EXECUTION_AGENT_NAMES` is derived from the registry, so the catalog
 and admission cannot disagree. Unknown names have no spec and are rejected;
