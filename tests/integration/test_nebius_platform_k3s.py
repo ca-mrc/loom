@@ -15,7 +15,7 @@ import yaml
 from loom.nebius_platform_render import build_platform
 from tests.integration.test_execution_actuator_k3s import _load_client, _start_k3s
 from tests.unit.test_nebius_management_render import management_inputs  # noqa: F401
-from tests.unit.test_nebius_platform_render import platform_inputs  # noqa: F401
+from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("LOOM_RUN_DISPOSABLE_K3S") != "1",
@@ -133,7 +133,7 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
         container.stop()
 
 
-def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path, platform_inputs) -> None:
+def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path, platform_inputs, monkeypatch) -> None:
     """Exercise the actual HTTPS adapter, generated keys and recovery journal."""
     from scripts.ops.nebius_development_bootstrap import (
         DevelopmentBootstrapBinding,
@@ -145,9 +145,37 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
         DevelopmentStageInput,
         HTTPSDevelopmentStageAPI,
         development_documents,
+        qualify_development_default,
         stage_development_resources,
     )
-    from scripts.ops.nebius_management_stage import _qualified_defaulted
+    from scripts.ops import nebius_development_stage as development_stage
+
+    original = development_stage._only_defaults
+
+    def explain_default_fields(actual, wanted, defaults):
+        try:
+            original(actual, wanted, defaults)
+        except development_stage.DevelopmentStageError:
+            # Field names only: never print generated keys or response payloads.
+            def changed_fields(left, right, prefix=""):
+                fields = []
+                for key in sorted(left.keys() | right.keys()):
+                    if left.get(key) == right.get(key):
+                        continue
+                    path = prefix + key
+                    if isinstance(left.get(key), dict) and isinstance(right.get(key), dict):
+                        fields.extend(changed_fields(left[key], right[key], path + "."))
+                    elif isinstance(left.get(key), list) and isinstance(right.get(key), list):
+                        fields.extend(changed_fields(
+                            {str(i): value for i, value in enumerate(left[key])},
+                            {str(i): value for i, value in enumerate(right[key])}, path + "."))
+                    else:
+                        fields.append(path)
+                return fields
+            fields = changed_fields(actual, wanted)
+            raise AssertionError("unexpected API default fields: " + ",".join(fields)) from None
+
+    monkeypatch.setattr(development_stage, "_only_defaults", explain_default_fields)
 
     container = _start_k3s()
     try:
@@ -190,6 +218,7 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
             "access-key": "test-dev-access", "secret-key": "test-dev-secret",
             "source-access-key": "test-source-access", "source-secret-key": "test-source-secret",
         })
+        default_failures = []
         for phase in ("config", "supplied", "database", "migration", "services"):
             with HTTPSDevelopmentStageAPI(binding=resource_binding, selection=selection, phase=phase,
                     api_server=configuration.host, ssl_context=trust) as api:
@@ -204,7 +233,11 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
                     _, documents = development_documents(selection, resource_binding, phase)
                     for doc in documents.values():
                         doc["metadata"].setdefault("annotations", {})["loom.nebius/development-stage-operation"] = str(uuid4())
-                        _qualified_defaulted(doc, api.default_resource(doc))
+                        try:
+                            qualify_development_default(doc, api.default_resource(doc))
+                        except AssertionError as error:
+                            default_failures.append(doc["kind"] + ":" + doc["metadata"]["name"] + " " + str(error))
+        assert not default_failures, "\n".join(default_failures)
         assert len(core.list_namespaced_secret("loom-dev").items) == 5
         assert not core.list_namespaced_pod("loom-dev").items
         assert not core.list_namespaced_persistent_volume_claim("loom-dev").items

@@ -131,6 +131,22 @@ def test_late_default_injection_is_rejected_before_first_persistent_write(inputs
     assert not inputs[2].creates
 
 
+@pytest.mark.parametrize("phase", ["database", "services"])
+def test_real_api_template_type_defaults_and_empty_env_values_are_accepted(inputs, tmp_path, phase):
+    def default(doc):
+        if doc["kind"] == "StatefulSet":
+            claim = doc["spec"]["volumeClaimTemplates"][0]
+            claim.update(apiVersion="v1", kind="PersistentVolumeClaim")
+        if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "loom-web":
+            container = doc["spec"]["template"]["spec"]["containers"][0]
+            for row in container["env"]:
+                if row.get("value") == "":
+                    row.pop("value")
+    inputs[2].default_change = default
+    first = run(inputs, tmp_path / phase, phase)
+    assert run(inputs, tmp_path / phase, phase) == first
+
+
 @pytest.mark.parametrize("injected", [
     {"dataSource": {"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": "foreign-data"}},
     {"dataSourceRef": {"kind": "PersistentVolumeClaim", "namespace": "loom-nebius-platform", "name": "data"}},
