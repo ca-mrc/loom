@@ -73,7 +73,8 @@ def live(preflight, cloud, tmp_path, monkeypatch):
         cloud=DevelopmentCloudScope.model_validate(cloud.scope),
         operator_cloud_credentials=credentials, github_token_file=token_file)
     api = mod.HTTPSDevelopmentInstallationAPI(request=request, settings=settings,
-        api_server=preflight.client.api_server, ssl_context=ssl.create_default_context(), token="operator-k8s-secret")
+        api_server=preflight.client.api_server, ssl_context=ssl.create_default_context(), token="operator-k8s-secret",
+        state_dir=tmp_path / "state")
 
     @contextmanager
     def actual_preflight(**kwargs):
@@ -100,7 +101,7 @@ def live(preflight, cloud, tmp_path, monkeypatch):
         monkeypatch.setattr(owner, name, lambda sdk, key=key: cloud.clients[key])
     lists = []
     state = SimpleNamespace(api=api, request=request, preflight=preflight, cloud=cloud,
-        credentials=credentials, lists=lists, closes=closes, objects_fail=False)
+        credentials=credentials, lists=lists, closes=closes, objects_fail=False, state_dir=tmp_path / "state")
 
     @contextmanager
     def s3(config, material, *, source):
@@ -114,6 +115,95 @@ def live(preflight, cloud, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "development_object_client", s3)
     return state
+
+
+@pytest.fixture
+def installed(live, monkeypatch):
+    from nebius.api.nebius.compute import v1 as compute
+    from scripts.ops.nebius_development_install import _storage_observation
+    from scripts.ops.nebius_development_stage import DevelopmentResourceBinding, stage_development_resources
+    from tests.ops.test_nebius_development_install import storage_ready
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    ns = retained_namespace(live.preflight, live.request.bootstrap.installation_id)
+    binding = DevelopmentResourceBinding(live.request.bootstrap, ns["metadata"]["uid"],
+        ns["metadata"]["annotations"]["loom.nebius/development-bootstrap-operation"])
+    backend = PhaseAPI(binding)
+    for phase in ("database", "services"):
+        stage_development_resources(selection=live.request.selection, binding=binding, phase=phase,
+            api=backend, state_dir=live.state_dir / phase)
+    claim, volume = storage_ready(SimpleNamespace(stage=backend), live.request.selection)
+    claim["metadata"]["creationTimestamp"] = "2026-10-07T12:00:01Z"
+    volume["metadata"]["creationTimestamp"] = "2026-10-07T12:00:03Z"
+    volume["spec"]["csi"]["volumeHandle"] = "computedisk-test"
+    observation = _storage_observation(live.request, binding, backend)
+    database = backend.resources["StatefulSet:loom-postgres"]
+    spec = copy.deepcopy(database["spec"]["template"]["spec"])
+    spec.setdefault("volumes", []).append({"name": "data", "persistentVolumeClaim": {"claimName": "data-loom-postgres-0"}})
+    spec.update(nodeName="computeinstance-test", hostname="loom-postgres-0", subdomain="loom-postgres")
+    pod = {"apiVersion": "v1", "kind": "Pod", "metadata": {"namespace": "loom-dev", "name": "loom-postgres-0",
+        "uid": str(uuid4()), "ownerReferences": [{"apiVersion": "apps/v1", "kind": "StatefulSet", "controller": True,
+            "uid": database["metadata"]["uid"], "name": "loom-postgres"}]}, "spec": spec}
+    node = {"apiVersion": "v1", "kind": "Node", "metadata": {"name": "computeinstance-test", "uid": str(uuid4())},
+        "spec": {"providerID": "nebius://computeinstance-test"}}
+    docs = {"/api/v1/namespaces/kube-system": live.preflight.documents["/api/v1/namespaces/kube-system"],
+        "/api/v1/namespaces/loom-dev": ns, "/api/v1/namespaces/loom-dev/pods/loom-postgres-0": pod,
+        "/api/v1/nodes/computeinstance-test": node}
+    resources = {"Service": ("/api/v1", "services"), "Deployment": ("/apis/apps/v1", "deployments"),
+        "StatefulSet": ("/apis/apps/v1", "statefulsets"), "PersistentVolumeClaim": ("/api/v1", "persistentvolumeclaims")}
+    for row in backend.resources.values():
+        if row["kind"] == "PersistentVolume":
+            path = "/api/v1/persistentvolumes/" + row["metadata"]["name"]
+        else:
+            prefix, plural = resources[row["kind"]]
+            path = prefix + "/namespaces/loom-dev/" + plural + "/" + row["metadata"]["name"]
+        docs[path] = row
+    reads = []
+    state = SimpleNamespace(live=live, binding=binding, backend=backend, observation=observation,
+        docs=docs, pod=pod, node=node, volume=volume, reads=reads, on_read=None)
+
+    def respond(request):
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == "Bearer operator-k8s-secret"
+        reads.append(request.url.path)
+        if state.on_read:
+            state.on_read(request.url.path)
+        row = docs.get(request.url.path)
+        return httpx.Response(404) if row is None else httpx.Response(200, json=row)
+
+    monkeypatch.setattr(module().httpx, "HTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
+    monkeypatch.setattr(compute, "DiskServiceClient", lambda sdk: live.cloud.clients["disks"])
+    return state
+
+
+def test_connected_disk_qualification_reads_recorded_controller_pod_node_and_provider(installed):
+    state = installed
+    state.live.api.qualify_volume(state.live.request, state.binding, state.observation)
+    assert ("get", "computedisk-test") in state.live.cloud.calls
+    assert "/api/v1/nodes/computeinstance-test" in state.reads
+    assert state.live.closes == [True]
+
+
+@pytest.mark.parametrize("change", ["controller", "pod-owner", "pod-claim", "node", "disk", "late-replacement"])
+def test_disk_proof_rejects_foreign_or_changing_live_ownership(installed, change):
+    state = installed
+    if change == "controller":
+        state.backend.resources["StatefulSet:loom-postgres"]["metadata"]["uid"] = str(uuid4())
+    elif change == "pod-owner":
+        state.pod["metadata"]["ownerReferences"][0]["uid"] = str(uuid4())
+    elif change == "pod-claim":
+        state.pod["spec"]["volumes"][-1]["persistentVolumeClaim"]["claimName"] = "staging"
+    elif change == "node":
+        state.node["spec"]["providerID"] = "nebius://computeinstance-foreign"
+    elif change == "disk":
+        state.live.cloud.rows["computedisk-test"][1]["metadata"]["parent_id"] = "project-foreign"
+    else:
+        def replace_pod(path):
+            if path.endswith("/pods/loom-postgres-0") and state.reads.count(path) == 2:
+                state.pod["metadata"]["uid"] = str(uuid4())
+        state.on_read = replace_pod
+    with pytest.raises(module().DevelopmentInstallError):
+        state.live.api.qualify_volume(state.live.request, state.binding, state.observation)
 
 
 def test_connected_checks_verify_actual_publication_inventory_provider_and_both_keys(live):
