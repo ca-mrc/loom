@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,7 +30,8 @@ Documents = dict[str, dict[str, Any]]
 class PoolLegacyRestartAPI(PoolRoleRestorationAPI, Protocol):
     def qualify_gateway_readonly(self) -> None: ...
     def preview_legacy_restart(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
-    def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool: ...
+    def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                              record_intent: Callable[[dict[str, Any]], None]) -> bool: ...
 
 
 def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path, Path]:
@@ -185,14 +187,26 @@ def restart_pool_legacy(*, request: PoolCutoverRequest, api: PoolLegacyRestartAP
                     pending = qualify()
                     if pending is not None:
                         return result(pending)
-                    version = actual['metadata']['resourceVersion']
-                    if not isinstance(version, str) or not 0 < len(version) <= 128:
-                        raise ValueError
-                    item.update(phase='intent', before_resource_version=version)
-                    private_state._atomic_json(path, record)
+
+                    def record_intent(fresh: dict[str, Any], *, item: dict[str, Any] = item, key: str = key) -> None:
+                        nonlocal actual
+                        # Qualification may outlast controller status updates.
+                        # Only a fresh prepared attempt may bind the final version;
+                        # uncertain intents keep their original write-ahead record.
+                        if item['phase'] != 'prepared' or not _matches(fresh, actual, _uid(originals[key])):
+                            raise ValueError
+                        version = fresh['metadata']['resourceVersion']
+                        if not isinstance(version, str) or not 0 < len(version) <= 128:
+                            raise ValueError
+                        actual = fresh
+                        item.update(phase='intent', before_resource_version=version)
+                        private_state._atomic_json(path, record)
+
                     try:
-                        accepted = api.restart_legacy_workload(key, actual, desired)
+                        accepted = api.restart_legacy_workload(key, actual, desired, record_intent=record_intent)
                     except Exception:
+                        if item['phase'] != 'intent':
+                            raise
                         accepted = None
                     if accepted is False:
                         item.update(phase='prepared', before_resource_version=None)

@@ -345,7 +345,8 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         except Exception:
             raise ValueError('pool_gateway_readonly_authority_unconfirmed') from None
 
-    def _legacy_template_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+    def _legacy_template_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
+                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
         try:
             self._scope()
             closed, originals, targets, _, record = _template_record(self.request, state=self.state, anchor=self.anchor)
@@ -353,13 +354,27 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             if (closed != self.closed or record is None or key not in targets or originals[key] == targets[key]
                     or not _matches(before, originals[key], _uid(closed[key])) or _stable(desired) != targets[key]
                     or not isinstance(version, str) or not 0 < len(version) <= 128
-                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
-                        'before_resource_version': None if preview else version}):
+                    or (not preview and record_intent is None)
+                    or record['workloads'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
             if qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _template_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
+            fresh = self.read_workload(key)
+            if not _matches(fresh, before, _uid(closed[key])):
+                raise ValueError
+            before = fresh
+            version = before['metadata']['resourceVersion']
+            if not isinstance(version, str) or not 0 < len(version) <= 128:
+                raise ValueError
+            if not preview:
+                assert record_intent is not None
+                record_intent(before)
+                expected = copy.deepcopy(record)
+                expected['workloads'][key] = {'phase': 'intent', 'before_resource_version': version}
+                if _template_record(self.request, state=self.state, anchor=self.anchor)[-1] != expected:
+                    raise ValueError
             patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(closed[key])},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
                 {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
@@ -374,8 +389,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def preview_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
         return copy.deepcopy(desired) if self._legacy_template_patch(key, before, desired, preview=True) else None
 
-    def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
-        return self._legacy_template_patch(key, before, desired, preview=False)
+    def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+        return self._legacy_template_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def read_legacy_role(self, key: str) -> dict[str, Any]:
         self._scope()
@@ -417,7 +433,8 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
         return self._legacy_role_patch(key, before, desired, preview=False)
 
-    def _legacy_restart_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+    def _legacy_restart_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
+                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
         try:
             self._scope()
             originals, stopped, targets, _, record = _restart_record(self.request, state=self.state, anchor=self.anchor)
@@ -425,13 +442,27 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             if (record is None or key not in targets or stopped[key] == targets[key]
                     or not _matches(before, stopped[key], _uid(originals[key])) or _stable(desired) != targets[key]
                     or not isinstance(version, str) or not 0 < len(version) <= 128
-                    or record['workloads'][key] != {'phase': 'prepared' if preview else 'intent',
-                        'before_resource_version': None if preview else version}):
+                    or (not preview and record_intent is None)
+                    or record['workloads'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
             if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _restart_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
+            fresh = self.read_workload(key)
+            if not _matches(fresh, before, _uid(originals[key])):
+                raise ValueError
+            before = fresh
+            version = before['metadata']['resourceVersion']
+            if not isinstance(version, str) or not 0 < len(version) <= 128:
+                raise ValueError
+            if not preview:
+                assert record_intent is not None
+                record_intent(before)
+                expected = copy.deepcopy(record)
+                expected['workloads'][key] = {'phase': 'intent', 'before_resource_version': version}
+                if _restart_record(self.request, state=self.state, anchor=self.anchor)[-1] != expected:
+                    raise ValueError
             field = 'suspend' if before['kind'] == 'CronJob' else 'replicas'
             patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(originals[key])},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
@@ -447,8 +478,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def preview_legacy_restart(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
         return copy.deepcopy(desired) if self._legacy_restart_patch(key, before, desired, preview=True) else None
 
-    def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
-        return self._legacy_restart_patch(key, before, desired, preview=False)
+    def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+        return self._legacy_restart_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def qualify_legacy_runtimes(self) -> None:
         """Fresh runtime proof behind recovery guards, never an opening receipt."""

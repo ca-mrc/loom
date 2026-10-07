@@ -36,7 +36,9 @@ class RestartAPI(RoleAPI):
         assert before == self.startup.documents[key]
         return copy.deepcopy(desired)
 
-    def restart_legacy_workload(self, key, before, desired):
+    def restart_legacy_workload(self, key, before, desired, *, record_intent):
+        before = self.read_workload(key)
+        record_intent(before)
         assert json.loads((self.state / 'legacy-restart.json').read_bytes())['workloads'][key] == {
             'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         assert self.machine_phase == 'revoked' and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}
