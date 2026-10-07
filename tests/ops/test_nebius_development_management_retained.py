@@ -132,3 +132,20 @@ def test_missing_changed_or_rebound_history_is_rejected(retained, damage):
         selector['operation_sha256'] = hashlib.sha256(raw_operation).hexdigest()
     with pytest.raises(ValueError, match='retained development management'):
         load(retained)
+
+
+@pytest.mark.parametrize('damage', ['observed', 'intent'])
+def test_public_route_history_must_match_both_create_intent_and_bound_host(retained, damage):
+    state = Path(retained[1]['state_dir'])
+    path = state / 'public/stage.json'
+    journal = json.loads(path.read_text())
+    item, = journal['resources'].values()
+    for part in (('observed',) if damage == 'observed' else ('desired', 'expected', 'observed')):
+        item[part]['spec']['rules'][0]['host'] = 'foreign.example.com'
+    path.write_text(json.dumps(journal))
+    parent_path = state / 'installation.json'
+    parent = json.loads(parent_path.read_text())
+    parent['phases']['public']['journals']['stage.json'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    parent_path.write_text(json.dumps(parent))
+    with pytest.raises(ValueError, match='retained development management'):
+        load(retained)
