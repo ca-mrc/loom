@@ -74,6 +74,25 @@ overwrite one another's journal. This primitive has no CLI or installed write
 authority and creates no workload, database volume or public route. Storage
 identity delivery and the source-bound protected installer remain prerequisites.
 
+Private installation sequencing now composes that bootstrap with fixed
+renderer-derived configuration/network, supplied-storage, database, migration and
+internal-service phases. An independently anchored installation journal freezes
+inputs and completed phase journals. Recovery rechecks the existing installation;
+it does not reuse the fresh namespace-absence preflight. Each phase previews server
+defaults, records create intent before writing, resolves ambiguous outcomes only
+by readback and retains exact resource UIDs/configuration. The installer pins the
+dev PVC, dynamically provisioned PV and CSI disk before migrations, requires a
+separate authenticated provider-disk qualification, and checks current workload
+generations and migration completion. A final readback covers earlier phases too.
+
+The sequencing library is not yet an installed entrypoint. The protected caller
+must implement live publication/source, cloud/credential/quota/headroom checks,
+provider-disk ownership and internal authenticated dependency probes. It must
+exclude competing privileged namespace or storage replacement. Its private
+completion receipt does not establish public access, shared execution/build
+admission or personal-owner acceptance. Existing management/staging installer
+scope and runtime behavior are unchanged.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile

@@ -158,11 +158,40 @@ is not database/application readiness.
 `loom-platform-storage` is deliberately separate: rendered consumers require
 `access-key`, `secret-key`, `source-access-key` and `source-secret-key` from
 independently qualified development identities. Do not borrow staging keys to
-satisfy these references. The fixed resource/database installer, PVC/CSI identity
-and readiness checks, protected source-bound gateway and dev-only workflow are
-still required. Namespace UID checks detect replacement during delivery; they
+satisfy these references. The protected source-bound gateway and dev-only workflow
+are still required. Namespace UID checks detect replacement during delivery; they
 do not replace the protected caller's authority and exclusion of competing
 namespace deletion/recreation.
+
+`scripts.ops.nebius_development_install.install_private_development` now composes
+the private installation in this fixed order: local bootstrap, configuration and
+network, supplied storage Secret, database controller, volume qualification,
+migration and internal services. `nebius_development_stage` derives every resource
+from the private renderer and frozen source/configuration; it is not a raw-manifest
+apply interface. Server dry-run defaults are checked before persistent creates.
+Neither stage adapter nor installer patches, replaces or deletes resources.
+
+The installation anchor and phase-journal hashes reject changed source/material,
+missing evidence and competing state directories. Pending PVC binding, database,
+migration or service readiness returns a `pending` receipt with the phase; resume
+using the exact original inputs and retained state. A failed migration requires
+explicit recovery, not another Job. Claim absence is recorded before database
+creation. Before migration, storage qualification binds the labelled dev claim,
+its UID-derived dynamically provisioned PV, exact claim reference, storage class,
+size and Nebius CSI handle. The protected `qualify_volume` implementation must
+query the actual disk and reject a foreign/reused disk or unexpected project,
+region or capacity; Kubernetes annotations are not provider proof.
+
+The caller's `qualify(fresh=True)` performs full fresh qualification before any
+write. `qualify(fresh=False)` requalifies frozen source/credentials and current
+resource fit on continuation without demanding namespace absence. After controller
+and migration readiness, `verify_private_dependencies` must probe actual internal
+authenticated API/database/object access. The installer rechecks all completed
+phases after those probes before returning `development_private_installed`.
+These live qualification/probe methods and the authenticated fixed gateway/workflow
+still need an installed implementation. Unit tests or disposable Kubernetes do not
+establish that receipt for Nebius, and no public/task/multi-owner acceptance follows
+from the private phase alone.
 
 #### Owner commands
 

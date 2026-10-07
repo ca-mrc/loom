@@ -135,6 +135,7 @@ def test_complete_platform_resources_and_pods_pass_server_admission(
 
 def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp_path: Path, platform_inputs, monkeypatch) -> None:
     """Exercise the actual HTTPS adapter, generated keys and recovery journal."""
+    from scripts.ops import nebius_development_stage as development_stage
     from scripts.ops.nebius_development_bootstrap import (
         DevelopmentBootstrapBinding,
         HTTPSDevelopmentBootstrapAPI,
@@ -148,7 +149,6 @@ def test_private_development_bootstrap_survives_real_api_defaults_and_replay(tmp
         qualify_development_default,
         stage_development_resources,
     )
-    from scripts.ops import nebius_development_stage as development_stage
 
     original = development_stage._only_defaults
 
