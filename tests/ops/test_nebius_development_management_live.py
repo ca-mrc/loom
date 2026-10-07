@@ -5,6 +5,7 @@ import json
 import ssl
 import tomllib
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -14,7 +15,9 @@ from tests.ops.test_nebius_development_management_install import installation as
 from tests.ops.test_nebius_development_management_install import run, to_admission
 from tests.ops.test_nebius_management_live import Checks
 from tests.ops.test_nebius_management_supplied import material as material
-from tests.unit.test_nebius_management_render import application_management_inputs as application_management_inputs
+from tests.unit.test_nebius_management_render import (
+    application_management_inputs as application_management_inputs,
+)
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
@@ -135,3 +138,96 @@ def test_public_readiness_requires_application_worker_and_own_retained_admin(ins
         api.verify_public(binding, api.rendered, material_dir)
         assert received.count('Bearer ' + expected) == 1
     assert 'Bearer operator-token' not in received
+
+
+@pytest.mark.parametrize('change', [None, 'account-after-token', 'account-during-probe', 'operator-subject', 'expired-token'])
+def test_actual_application_subject_is_qualified_from_retained_account(installation, tmp_path, monkeypatch, change):
+    from scripts.ops.nebius_application_setup import HTTPSApplicationSetupAPI
+    from scripts.ops.nebius_development_management_install import _setup
+    from scripts.ops.nebius_management_authority_probe import HTTPSManagementAuthorityProbe
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    request, external = installation
+    to_admission(installation, tmp_path)
+    external.admit()
+    run(installation, tmp_path)
+    authority = request.deployment.installation.applications.authority
+    account = external.store.resources['ServiceAccount:loom-application-provisioner']
+    uid, calls = account['metadata']['uid'], []
+    kinds = {'configmaps': 'ConfigMap', 'serviceaccounts': 'ServiceAccount', 'roles': 'Role',
+        'rolebindings': 'RoleBinding', 'clusterroles': 'ClusterRole', 'clusterrolebindings': 'ClusterRoleBinding',
+        'validatingadmissionpolicies': 'ValidatingAdmissionPolicy',
+        'validatingadmissionpolicybindings': 'ValidatingAdmissionPolicyBinding'}
+
+    def handle(req):
+        calls.append(req)
+        path = req.url.path
+        if req.method == 'GET':
+            assert req.headers['authorization'] == 'Bearer operator-token'
+            name = path.rsplit('/', 1)[-1]
+            if path.startswith('/api/v1/namespaces/') and path.count('/') == 4:
+                if name == request.binding.namespace:
+                    return httpx.Response(200, json=external.bootstrap.namespace)
+                return httpx.Response(200, json={'kind': 'Namespace', 'metadata': {'name': name,
+                    'uid': request.binding.kube_system_uid if name == 'kube-system' else request.shared_namespace_uid}})
+            return httpx.Response(200, json=external.store.resources[kinds[path.split('/')[-2]] + ':' + name])
+        doc = json.loads(req.content)
+        if path.endswith('/token'):
+            assert req.headers['authorization'] == 'Bearer operator-token'
+            assert doc['spec'] == {'audiences': [], 'expirationSeconds': 600}
+            if change == 'account-after-token':
+                account['metadata']['uid'] = str(uuid4())
+            return httpx.Response(201, json={'kind': 'TokenRequest', 'status': {'token': 'runtime-only-token',
+                'expirationTimestamp': (datetime.now(UTC) + timedelta(seconds=-5 if change == 'expired-token' else 600)).isoformat()}})
+        assert req.headers['authorization'] == 'Bearer runtime-only-token'
+        if path.endswith('/selfsubjectreviews'):
+            if change == 'account-during-probe':
+                account['metadata']['uid'] = str(uuid4())
+            return httpx.Response(201, json={'status': {'userInfo': {
+                'username': 'operator' if change == 'operator-subject' else
+                    'system:serviceaccount:loom-nebius-management-dev:loom-application-provisioner',
+                'uid': uid, 'groups': ['system:serviceaccounts', 'system:serviceaccounts:loom-nebius-management-dev', 'system:authenticated']}}})
+        if path.endswith('/selfsubjectaccessreviews'):
+            attrs = doc['spec']['resourceAttributes']
+            allowed = not attrs.get('namespace') and (attrs['verb'], attrs['resource']) in {
+                ('create', 'namespaces'), ('get', 'namespaces'), ('create', 'rolebindings'), ('bind', 'clusterroles')}
+            if attrs.get('namespace') == 'loom-dev':
+                allowed = (attrs['verb'], attrs['resource']) == ('get', 'networkpolicies') and attrs.get('name') in {
+                    authority.name + '-' + suffix for suffix in ('postgres', 'control-plane', 'gateway')}
+            return httpx.Response(201, json={'status': {'allowed': allowed}})
+        assert req.url.params['dryRun'] == 'All'
+        if path == '/api/v1/namespaces':
+            labels = doc['metadata']['labels']
+            if (doc['metadata']['name'].startswith('loom-dev-')
+                    and labels.get('loom.nebius/application-installation') == str(authority.installation_id)
+                    and labels.get('loom.nebius/data-environment-id') == str(authority.data_environment_id)
+                    and 'loom.nebius/namespace-installation' not in labels):
+                return httpx.Response(201, json=doc)
+            suffix = 'namespaces'
+        else:
+            assert path.endswith('/rolebindings')
+            suffix = 'bindings'
+        return httpx.Response(403, json={'kind': 'Status', 'reason': 'Forbidden', 'code': 403,
+            'message': authority.name + '-' + suffix + ': application ' + suffix + ' boundary'})
+
+    def connect(cls):
+        original = cls.__init__
+        def initialize(self, **kwargs):
+            original(self, **kwargs)
+            self.client.close()
+            self.client = httpx.Client(base_url=self.api_server, headers={'Authorization': 'Bearer ' + kwargs['token']},
+                transport=httpx.MockTransport(handle))
+        monkeypatch.setattr(cls, '__init__', initialize)
+
+    connect(HTTPSApplicationSetupAPI)
+    connect(HTTPSManagementAuthorityProbe)
+    api = make_live(request, Checks())
+    binding = replace(bound(request), namespace_uid=external.bootstrap.namespace['metadata']['uid'])
+    if change is None:
+        api.qualify_application(_setup(request, binding), tmp_path / 'state')
+        assert any(row.url.path.endswith('selfsubjectreviews') for row in calls)
+        assert api.runtime_trust is not api.ssl_context
+    else:
+        with pytest.raises(ManagementInstallError):
+            api.qualify_application(_setup(request, binding), tmp_path / 'state')
+    assert len([row for row in calls if row.url.path.endswith('/token')]) == 1
