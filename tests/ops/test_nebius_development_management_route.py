@@ -100,6 +100,61 @@ def test_final_route_requires_matching_new_manager_certificate(route):
     assert len(tls_names[-1][2]) == 64
 
 
+def test_renewal_route_uses_retained_tls_and_needs_no_old_leaf_or_wildcard(route, monkeypatch):
+    from scripts.ops import nebius_development_management_route as module
+
+    api, request, _, _, dns_names, tls_names, ingresses = route
+    expected = own_route(request)
+    expected['metadata']['uid'] = str(uuid4())
+    expected['spec']['tls'][0]['secretName'] = 'loom-management-tls-successor'
+    ingresses.append(copy.deepcopy(expected))
+    def expired(*args, **kwargs):
+        raise AssertionError('renewal must not validate the predecessor or probe wildcard TLS')
+    monkeypatch.setattr(module.certificates, 'validate_management_certificate', expired)
+    monkeypatch.setattr(module, 'qualify_tls_address', expired)
+    assert api.qualify_retained(deployment=request.deployment,
+        kube_system_uid=request.binding.kube_system_uid, expected=expected) == '8.8.8.8'
+    assert dns_names == [(request.deployment.public_host, '8.8.8.8')]
+    assert not tls_names
+
+
+@pytest.mark.parametrize('change', ['uid', 'annotation', 'deleting'])
+def test_renewal_route_requires_retained_identity_and_metadata(route, change):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    api, request, _, _, dns_names, _, ingresses = route
+    expected = own_route(request)
+    expected['metadata']['uid'] = str(uuid4())
+    row = copy.deepcopy(expected)
+    if change == 'uid':
+        row['metadata']['uid'] = str(uuid4())
+    elif change == 'annotation':
+        row['metadata'].setdefault('annotations', {})['foreign'] = 'true'
+    else:
+        row['metadata']['deletionTimestamp'] = '2026-10-07T00:00:00Z'
+    ingresses.append(row)
+    with pytest.raises(ManagementInstallError):
+        api.qualify_retained(deployment=request.deployment,
+            kube_system_uid=request.binding.kube_system_uid, expected=expected)
+    assert not dns_names
+
+
+def test_renewal_accepts_explicit_fresh_controller_pin_without_changing_controller(route):
+    from loom.nebius_platform_render import digest
+
+    api, request, resources, calls, _, _, ingresses = route
+    expected = own_route(request)
+    expected['metadata']['uid'] = str(uuid4())
+    ingresses.append(expected)
+    resources['controller']['spec']['template']['spec']['volumes'].append(
+        {'name': 'tls', 'secret': {'secretName': 'new-default-certificate'}})
+    api.settings = api.settings.model_copy(update={
+        'controller_spec_digest': digest(resources['controller']['spec'])})
+    assert api.qualify_retained(deployment=request.deployment,
+        kube_system_uid=request.binding.kube_system_uid, expected=expected) == '8.8.8.8'
+    assert not any('/secrets/' in path for path in calls)
+
+
 def own_route(request):
     from loom_service.environment_management.deployment import render_management
 
