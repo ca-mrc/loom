@@ -969,6 +969,97 @@ credential renewal, two-owner lifecycle, or shared task/build execution. Those
 remain separate installed acceptance steps; a green workflow alone does not
 establish the fully operational multi-person environment.
 
+### Scheduled gateway cache maintenance
+
+`scripts/ops/nebius_gateway_cleanup.py` reports disk pressure and reclaims only
+regenerable Python bytecode from complete retained **management** tooling
+releases. Run it as the gateway account that owns `.loom/nebius-management`,
+using Linux and Python 3.11 or newer. It needs no Loom virtual environment,
+cloud credential, database connection or Kubernetes access.
+
+The default is report-only. `--apply` permits deletion of regular, owned,
+non-hardlinked `__pycache__/*.cpython-*.pyc` files at least seven days old, only
+when an owned, readable, regular source `.py` exists beside the cache directory. The
+allowlist covers `scripts` and `venv` inside complete content-addressed releases
+in the base, upgrade, retirement, diagnostic/recovery, refresh, pool-cutover and
+pool-repair management scopes. `--min-age-days` accepts 1–3650; seven is the
+default. It never recursively deletes a directory. Incomplete releases,
+source/dependencies, sourceless bytecode, authority grants, inputs, journals,
+backups and recovery evidence remain retained. Certificate/ingress tooling,
+user results, databases and object storage are outside its scope.
+
+Each pass takes all discovered scopes' existing tooling locks, then existing
+operation locks under their state/anchor trees. It checks local process arguments
+in memory to detect older gateway invocations between lock stages, including
+preflight. Busy work causes `skipped_busy` with zero deletions. No process is
+signalled or cancelled. Locks remain held throughout inventory and deletion;
+an operation starting during maintenance may receive the existing busy-lock
+failure and require a normal retry. Do not run operations outside their protected
+entrypoints while maintenance is enabled. Report-only may create absent empty
+tooling lock files but removes no files. The pass is bounded to 256 scopes,
+250,000 scanned entries and four minutes, with a five-minute service timeout.
+
+Filesystem links and unsafe ownership/permissions cannot broaden deletion.
+Unsafe cache subdirectories are skipped; unsafe scope/lock state blocks the pass.
+The JSON report contains counts, candidate/deleted file bytes, filesystem space,
+and `normal`, `warning` (80%) or `critical` (90%) pressure. It contains no paths,
+process arguments, credentials or file contents. File bytes are logical sizes;
+the before/after available-space measurement is the actual filesystem readback.
+`blocked` exits 1; `reported`, `cleaned` and `skipped_busy` exit 0. The fixed
+`stage` identifies root validation, locks, process checking, inventory or deletion.
+If deletion stops partway through, the report retains the number already removed;
+the next pass re-evaluates the remaining caches. No retained evidence is removed.
+
+Install a reviewed integrated source through the existing **operator route**.
+Run these commands on the gateway as the owning account, from that reviewed
+checkout; installing this service does not grant a new forced-SSH action:
+
+```bash
+install -d -m 700 "$HOME/.local/libexec/loom" "$HOME/.config/systemd/user"
+install -m 600 scripts/ops/nebius_gateway_cleanup.py \
+  "$HOME/.local/libexec/loom/nebius_gateway_cleanup.py"
+install -m 600 deploy/systemd/loom-nebius-gateway-cleanup.service \
+  deploy/systemd/loom-nebius-gateway-cleanup.timer "$HOME/.config/systemd/user/"
+python3 -I -B "$HOME/.local/libexec/loom/nebius_gateway_cleanup.py"
+systemctl --user daemon-reload
+systemctl --user enable --now loom-nebius-gateway-cleanup.timer
+systemctl --user start loom-nebius-gateway-cleanup.service
+journalctl --user -u loom-nebius-gateway-cleanup.service -n 20 --no-pager
+systemctl --user list-timers loom-nebius-gateway-cleanup.timer
+```
+
+The user manager must persist after logout. Check `loginctl show-user "$USER"
+-p Linger`; if needed, an operator enables it with `sudo loginctl enable-linger
+"$USER"`. These are deployment steps, not a consequence of merging source. The
+timer runs daily with up to 30 minutes of jitter and catches a missed run after
+startup. Initially it only reports. Route the JSON pressure field or service
+failure into the installation's monitoring; journaling a warning is not an
+external alert or evidence that alert delivery is configured.
+
+After reviewing a successful report and the retained boundaries, enable deletion
+with `systemctl --user edit loom-nebius-gateway-cleanup.service` and this override:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py --apply
+```
+
+Reload the user manager, run the service once and inspect the JSON readback
+before relying on the schedule. To revert to report-only, remove that override
+and reload. To stop scheduling, run `systemctl --user disable --now
+loom-nebius-gateway-cleanup.timer`; stop the service too if a pass is already
+running. Removed caches regenerate on a subsequent ordinary import; no restore
+of releases or durable records is required.
+
+Cache cleanup does **not** retire whole releases, remove the eight-release
+installation limit or guarantee sufficient free space. Warning/critical pressure
+with few eligible caches requires explicit disk expansion or a separately
+reviewed release-retention operation that proves the release is unreferenced by
+active authorities and retained rollback/recovery. Never substitute an age-based
+`rm -rf` over `.loom`. Source tests and a timer definition do not prove the live
+timer is installed, enabled or has performed deletion.
+
 ### Retained management upgrade for shared-data applications
 
 The same protected `management-preflight` and `management-install` actions can

@@ -1,9 +1,11 @@
 """Real filesystem and process boundaries for gateway cache maintenance."""
 from __future__ import annotations
 
+import configparser
 import importlib
 import json
 import os
+import py_compile
 import subprocess
 import sys
 import time
@@ -14,6 +16,15 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'scripts/ops/nebius_gateway_cleanup.py'
 DAY = 86400
+
+
+@pytest.fixture(autouse=True)
+def private_umask():
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 def cleaner():
@@ -193,3 +204,103 @@ def test_cli_is_report_only_and_contains_no_paths_or_payloads(root):
     assert cache.exists()
     assert str(root) not in result.stdout and 'private operation' not in result.stdout
     assert result.stderr == ''
+
+
+@pytest.mark.parametrize(('used', 'free', 'pressure'), [(79, 21, 'normal'), (80, 20, 'warning'),
+    (89, 11, 'warning'), (90, 10, 'critical')])
+def test_pressure_thresholds(root, monkeypatch, used, free, pressure):
+    from types import SimpleNamespace
+
+    module = cleaner()
+    monkeypatch.setattr(module.os, 'statvfs', lambda _: SimpleNamespace(
+        f_blocks=100, f_bfree=free, f_bavail=free, f_frsize=4096))
+    report = module.clean(root)
+    assert report['disk_before']['pressure'] == pressure
+    assert report['disk_before']['used_percent'] == used
+
+
+def test_age_boundary_and_optimized_bytecode(root, monkeypatch):
+    _, cache = release(root)
+    module = cleaner()
+    now = time.time()
+    monkeypatch.setattr(module.time, 'time', lambda: now)
+    os.utime(cache, (now - 7 * DAY + 1,) * 2)
+    assert module.clean(root, apply=True)['deleted_files'] == 0
+    optimized = cache.with_name('module.cpython-312.opt-1.pyc')
+    cache.rename(optimized)
+    os.utime(optimized, (now - 7 * DAY,) * 2)
+    assert module.clean(root, apply=True)['deleted_files'] == 1
+
+
+def test_changed_candidate_is_preserved_before_unlink(root, monkeypatch):
+    _, cache = release(root)
+    module = cleaner()
+    unlink = module._unlink
+
+    def replaced(*args):
+        cache.unlink()
+        cache.symlink_to(cache.parent.parent / 'module.py')
+        return unlink(*args)
+
+    monkeypatch.setattr(module, '_unlink', replaced)
+    report = module.clean(root, apply=True)
+    assert report['status'] == 'blocked' and report['deleted_files'] == 0
+    assert cache.is_symlink() and cache.read_bytes() == b'value = 42\n'
+
+
+def test_scan_bound_refuses_partial_inventory(root, monkeypatch):
+    _, cache = release(root)
+    module = cleaner()
+    monkeypatch.setattr(module, 'MAX_ENTRIES', 1)
+    report = module.clean(root, apply=True)
+    assert report['status'] == 'blocked' and report['deleted_files'] == 0
+    assert cache.exists()
+
+
+def test_cache_can_be_regenerated_by_an_ordinary_import(root):
+    selected, original = release(root)
+    original.unlink()
+    source = original.parent.parent / 'module.py'
+    compiled = Path(py_compile.compile(str(source), doraise=True))
+    os.utime(compiled, (time.time() - 10 * DAY,) * 2)
+    report = cleaner().clean(root, apply=True)
+    assert report['deleted_files'] == 1 and not compiled.exists()
+    result = subprocess.run([sys.executable, '-I', '-c',
+        'import sys; sys.path.insert(0, sys.argv[1]); import module; print(module.value)', str(source.parent)],
+        capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == '42'
+    assert compiled.exists() and (selected / 'complete').read_bytes() == b'complete'
+
+
+def test_unreadable_source_is_not_a_regenerable_cache(root):
+    _, cache = release(root)
+    source = cache.parent.parent / 'module.py'
+    source.chmod(0o000)
+    assert cleaner().clean(root, apply=True)['deleted_files'] == 0
+    assert cache.exists()
+
+
+def test_symlink_loop_is_a_payload_free_blocked_report(root):
+    _, cache = release(root)
+    (root / 'upgrade').symlink_to(root / 'upgrade', target_is_directory=True)
+    cleaner()
+    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root), '--apply'],
+        capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stderr == ''
+    assert json.loads(result.stdout)['status'] == 'blocked'
+    assert str(root) not in result.stdout and cache.exists()
+
+
+def test_daily_user_service_defaults_to_report_only():
+    directory = SCRIPT.parents[2] / 'deploy/systemd'
+    service = configparser.ConfigParser(interpolation=None)
+    assert service.read(directory / 'loom-nebius-gateway-cleanup.service')
+    command = service['Service']['ExecStart']
+    assert command == '/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py'
+    assert service['Service']['UMask'] == '0077'
+    timer = configparser.ConfigParser(interpolation=None)
+    assert timer.read(directory / 'loom-nebius-gateway-cleanup.timer')
+    assert timer['Timer']['OnCalendar'] == 'daily'
+    assert timer['Timer']['Persistent'] == 'true'
+    assert timer['Timer']['Unit'] == 'loom-nebius-gateway-cleanup.service'

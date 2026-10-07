@@ -1,0 +1,13 @@
+[Unit]
+Description=Report retained Loom gateway cache usage
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=5min
+StandardOutput=journal
+StandardError=journal
