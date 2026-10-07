@@ -323,8 +323,11 @@ async def applying(r):
 
 @pytest.mark.parametrize("change", ["attempt", "nonterminal", "upload", "unpinned", "foreign_scope",
                                    "registry_hash", "oversized", "competing", "gc_object", "gc_authority"])
-async def test_owner_retention_registry_and_gc_guards(recovery, change):
+@pytest.mark.parametrize("equivalent", [False, True])
+async def test_owner_retention_registry_and_gc_guards(recovery, change, equivalent):
     r = recovery
+    if equivalent:
+        add_equivalent_versions(r)
     async with r.sessions() as session:
         trial = await session.get(Trial, UUID(r.payload["trial_id"]))
         authority = await session.get(DataLifecycleAuthority, r.authority_id)
@@ -506,10 +509,13 @@ async def test_lock_fences_conflicting_registry_inserts(recovery, monkeypatch):
     assert fenced == [True]
 
 
-async def test_cancelled_verification_cannot_apply_later(recovery, monkeypatch):
+@pytest.mark.parametrize("equivalent", [False, True])
+async def test_cancelled_verification_cannot_apply_later(recovery, monkeypatch, equivalent):
     from loom_control_plane import object_version_recovery as module
 
     r = recovery
+    if equivalent:
+        add_equivalent_versions(r)
     payload = await applying(r)
     before = await snapshot(r)
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -620,8 +626,11 @@ async def test_inventory_pagination_does_not_confuse_prefix_neighbors_with_exact
 
 
 @pytest.mark.parametrize("source_fault", ["manifest", "artifact", "producer", "runtime"])
-async def test_corrupt_persisted_source_identity_is_rejected(recovery, source_fault):
+@pytest.mark.parametrize("equivalent", [False, True])
+async def test_corrupt_persisted_source_identity_is_rejected(recovery, source_fault, equivalent):
     r = recovery
+    if equivalent:
+        add_equivalent_versions(r)
     before = await snapshot(r)
     response = await r.client.post(URL, headers=HEADERS, json=r.payload)
     assert response.status_code == 409, response.text
@@ -629,8 +638,11 @@ async def test_corrupt_persisted_source_identity_is_rejected(recovery, source_fa
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_gc_claim_under_old_registry_uuid_cannot_delete_adopted_version(recovery, legacy):
+@pytest.mark.parametrize("equivalent", [False, True])
+async def test_gc_claim_under_old_registry_uuid_cannot_delete_adopted_version(recovery, legacy, equivalent):
     r = recovery
+    if equivalent:
+        add_equivalent_versions(r)
     obj = r.objects[0]
     old_id, old_authority, deletion_token, run_id = uuid4(), uuid4(), uuid4(), uuid4()
     inventory = {"objects": [{"id": str(old_id), "authority_id": str(old_authority),
@@ -836,3 +848,76 @@ async def test_equivalent_versions_support_complete_paginated_inventory(recovery
     response = await r.client.post(URL, headers=HEADERS, json=await applying(r))
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "applied"
+
+
+@pytest.mark.parametrize("fault", ["version_receipt", "size_receipt", "latest_flag", "truncated_flag",
+                                  "duplicate_entry"])
+async def test_equivalent_inventory_and_older_receipts_fail_closed(recovery, monkeypatch, fault):
+    r = recovery
+    versions = add_equivalent_versions(r)
+    payload = await applying(r)
+    before = await snapshot(r)
+    if fault.endswith("receipt"):
+        original = r.s3.get_object
+
+        def malformed_receipt(**kwargs):
+            result = original(**kwargs)
+            if kwargs["VersionId"] == versions[0]:
+                if fault == "version_receipt":
+                    result["VersionId"] = versions[-1]
+                else:
+                    result["ContentLength"] = float(result["ContentLength"])
+            return result
+
+        monkeypatch.setattr(r.s3, "get_object", malformed_receipt)
+    else:
+        original = r.s3.list_object_versions
+
+        def malformed_inventory(**kwargs):
+            result = original(**kwargs)
+            if kwargs["Prefix"] == r.objects[0].object_key:
+                if fault == "truncated_flag":
+                    result["IsTruncated"] = 0
+                elif fault == "latest_flag":
+                    for obj in result["Versions"]:
+                        if obj["VersionId"] == versions[0]:
+                            obj["IsLatest"] = 0
+                else:
+                    result["Versions"] = [result["Versions"][0]] * 2
+            return result
+
+        monkeypatch.setattr(r.s3, "list_object_versions", malformed_inventory)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 409, response.text
+    assert await snapshot(r) == before
+
+
+async def test_complete_equivalent_verification_at_byte_budget_is_accepted(recovery, monkeypatch):
+    import loom_control_plane.object_version_recovery as module
+
+    r = recovery
+    add_equivalent_versions(r)
+    monkeypatch.setattr(module, "MAX_BYTES", sum(len(body) for body in r.bodies) + len(r.bodies[0]))
+    response = await r.client.post(URL, headers=HEADERS, json=await applying(r))
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "applied"
+
+
+async def test_equivalent_inventory_is_bound_to_preview_and_audit(recovery):
+    r = recovery
+    add_equivalent_versions(r)
+    payload = await applying(r)
+    modified = copy.deepcopy(payload)
+    modified["objects"][0]["equivalent_version_ids"].append("extra-version")
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=modified)
+    assert response.status_code == 409, response.text
+    assert "preview_plan_drift" in response.text
+    assert await snapshot(r) == before
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 200, response.text
+    after = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=modified)
+    assert response.status_code == 409, response.text
+    assert "operation_id_conflict" in response.text
+    assert await snapshot(r) == after
