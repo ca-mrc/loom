@@ -60,7 +60,7 @@ def root(tmp_path):
     return result
 
 
-def test_default_report_then_apply_then_repeat_preserves_evidence(root):
+def test_preview_then_default_cleanup_then_repeat_preserves_evidence(root):
     selected, cache = release(root)
     records = [private(root / name, b'keep exactly') for name in (
         'inputs.json', 'state/journal.json', 'anchor/recovery.json', 'backups/backup.dump',
@@ -389,7 +389,9 @@ def test_cli_age_override_is_explicit(root, tmp_path):
 @pytest.mark.parametrize('contents', [b'enabled = "false"', b'mode = "delete-all"',
     b'min_age_days = true', b'min_age_days = 0', b'min_age_days = 3651', b'min_age_days = 1.5',
     b'root = 42', b'root = "relative/path"', b'root = "/"', b'enabeld = false',
-    b'[unknown]\nkey = 1', b'mode = "private incomplete', b'#' * 16385, b'\xff'])
+    b'[unknown]\nkey = 1', b'mode = "private incomplete', b'#' * 16385, b'\xff'],
+    ids=['enabled-type', 'unknown-mode', 'boolean-age', 'zero-age', 'large-age', 'fractional-age',
+        'root-type', 'relative-root', 'wrong-root', 'unknown-key', 'unknown-section', 'syntax', 'size', 'encoding'])
 def test_invalid_config_blocks_without_falling_back_to_deletion(root, tmp_path, contents):
     _, cache = release(root)
     config = private(tmp_path / 'cleanup.toml', contents)
@@ -440,3 +442,41 @@ def test_default_configuration_location_and_absent_file_defaults(tmp_path, monke
     assert module.load_settings(default, required=False).mode == 'clean'
     private(default, b'mode = "report"\n')
     assert module.load_settings(default, required=False).mode == 'report'
+
+
+def test_configured_root_is_used_without_a_cli_override(root, tmp_path):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', ('root = ' + json.dumps(str(root)) + '\n').encode())
+    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--config', str(config)],
+        capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout)['deleted_files'] == 1 and not cache.exists()
+
+
+def test_cli_root_override_leaves_configured_root_untouched(root, tmp_path):
+    _, cache = release(root)
+    other = tmp_path / 'other/nebius-management'
+    _, other_cache = release(other)
+    config = private(tmp_path / 'cleanup.toml', ('root = ' + json.dumps(str(other)) + '\n').encode())
+    result = run_cli(root, config)
+    assert json.loads(result.stdout)['deleted_files'] == 1
+    assert not cache.exists() and other_cache.exists()
+
+
+def test_implicit_invalid_configuration_cannot_fall_back_to_cleanup(root, tmp_path, monkeypatch, capsys):
+    _, cache = release(root)
+    module = cleaner()
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    private(tmp_path / '.config/loom/gateway-cleanup.toml', b'mode = "typo"')
+    monkeypatch.setattr(sys, 'argv', [str(SCRIPT), '--root', str(root)])
+    assert module.main() == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'blocked' and report['stage'] == 'config'
+    assert cache.exists()
+
+
+@pytest.mark.parametrize('root_value', ['~//.loom/nebius-management', '~///.loom/nebius-management'])
+def test_home_root_with_repeated_slashes_remains_below_home(tmp_path, monkeypatch, root_value):
+    module = cleaner()
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    config = private(tmp_path / 'cleanup.toml', ('root = ' + json.dumps(root_value)).encode())
+    assert module.load_settings(config, required=True).root == tmp_path / '.loom/nebius-management'

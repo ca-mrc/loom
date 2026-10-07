@@ -1,0 +1,18 @@
+# Copy to ~/.config/loom/gateway-cleanup.toml on the deployment gateway.
+# The service reads this file each run; changing these settings needs no restart.
+
+# Pause all cleanup and reporting without disabling the installed timer.
+enabled = true
+
+# "clean" removes eligible old caches; "report" only reports what it would remove.
+# Only regenerable Python caches are eligible. Releases and recovery records stay.
+mode = "clean"
+
+# Keep caches younger than this many days. Allowed range: 1–3650.
+min_age_days = 7
+
+# Gateway account's management storage; ~/ expands to that account's home.
+root = "~/.loom/nebius-management"
+
+# The systemd timer runs daily with up to 30 minutes of jitter.
+# Schedule changes use: systemctl --user edit loom-nebius-gateway-cleanup.timer

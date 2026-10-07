@@ -14,10 +14,12 @@ import os
 import re
 import stat
 import time
+import tomllib
 from collections.abc import Iterator
 from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 SINGLE_SCOPES = ('upgrade', 'retirement', 'retirement-diagnostic', 'retirement-recovery')
@@ -34,6 +36,55 @@ class UnsafeStateError(Exception):
 
 class BusyError(Exception):
     """Existing work has priority over scheduled housekeeping."""
+
+
+@dataclass(frozen=True)
+class Settings:
+    root: Path
+    enabled: bool = True
+    mode: Literal['clean', 'report'] = 'clean'
+    min_age_days: int = 7
+
+
+def default_config() -> Path:
+    return Path.home() / '.config/loom/gateway-cleanup.toml'
+
+
+def load_settings(path: Path, *, required: bool) -> Settings:
+    """An invalid configured file never falls back to enabled cleanup defaults."""
+    settings = Settings(root=Path.home() / '.loom/nebius-management')
+    path = Path(os.path.abspath(path))
+    try:
+        _directory(path.parent)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        if required:
+            raise UnsafeStateError from None
+        return settings
+    try:
+        info = os.fstat(fd)
+        if not _trusted(info) or not info.st_mode & stat.S_IRUSR or info.st_size > 16384:
+            raise UnsafeStateError
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            raw = stream.read(16385)
+        if len(raw) > 16384:
+            raise UnsafeStateError
+    finally:
+        os.close(fd)
+    config = tomllib.loads(raw.decode('utf-8'))
+    if config.keys() - {'enabled', 'mode', 'min_age_days', 'root'}:
+        raise UnsafeStateError
+    enabled = config.get('enabled', settings.enabled)
+    mode = config.get('mode', settings.mode)
+    age = config.get('min_age_days', settings.min_age_days)
+    root = config.get('root', str(settings.root))
+    if (type(enabled) is not bool or not isinstance(mode, str) or mode not in ('clean', 'report')
+            or type(age) is not int or not 1 <= age <= 3650 or not isinstance(root, str)):
+        raise UnsafeStateError
+    expanded = Path.home() / root[2:].lstrip('/') if root.startswith('~/') else Path(root)
+    if not expanded.is_absolute() or expanded.name != 'nebius-management':
+        raise UnsafeStateError
+    return Settings(root=expanded, enabled=enabled, mode=cast(Literal['clean', 'report'], mode), min_age_days=age)
 
 
 def _trusted(info: os.stat_result, *, directory: bool = False) -> bool:
@@ -236,14 +287,18 @@ def _unlink(root: Path, path: Path, expected: os.stat_result) -> None:
         os.unlink(parts[-1], dir_fd=fd)
 
 
-def clean(root: Path, *, apply: bool = False, min_age_days: int = 7) -> dict[str, Any]:
-    """Report or remove old source-backed caches; all failures retain evidence."""
-    report: dict[str, Any] = {
+def _report(*, apply: bool, stage: str) -> dict[str, Any]:
+    return {
         'schema': 'loom.nebius-gateway-cleanup.v1', 'status': 'blocked',
-        'stage': 'root',
+        'stage': stage,
         'apply': apply, 'scopes': 0, 'complete_releases': 0, 'incomplete_releases': 0,
         'candidate_files': 0, 'candidate_bytes': 0, 'deleted_files': 0, 'deleted_bytes': 0,
     }
+
+
+def clean(root: Path, *, apply: bool = True, min_age_days: int = 7) -> dict[str, Any]:
+    """Report or remove old source-backed caches; all failures retain evidence."""
+    report = _report(apply=apply, stage='root')
     try:
         if (type(min_age_days) is not int or not 1 <= min_age_days <= 3650
                 or not root.is_absolute() or root.name != 'nebius-management'):
@@ -301,11 +356,29 @@ def clean(root: Path, *, apply: bool = False, min_age_days: int = 7) -> dict[str
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', type=Path, default=Path.home() / '.loom/nebius-management')
-    parser.add_argument('--apply', action='store_true', help='delete only qualified old bytecode caches')
-    parser.add_argument('--min-age-days', type=int, default=7)
+    parser.add_argument('--config', type=Path,
+        help='settings file (default: ~/.config/loom/gateway-cleanup.toml, if present)')
+    parser.add_argument('--root', type=Path, help='override the configured management storage root')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--dry-run', '--report-only', dest='mode', action='store_const', const='report',
+        help='preview eligible caches without deleting them')
+    mode.add_argument('--apply', dest='mode', action='store_const', const='clean',
+        help='explicitly select cleanup mode (already the default)')
+    parser.add_argument('--min-age-days', type=int, help='override cache retention age (default: 7 days)')
     args = parser.parse_args()
-    report = clean(args.root, apply=args.apply, min_age_days=args.min_age_days)
+    report = _report(apply=False, stage='config')
+    try:
+        settings = load_settings(args.config or default_config(), required=args.config is not None)
+        settings = replace(settings,
+            root=args.root if args.root is not None else settings.root,
+            mode=args.mode if args.mode is not None else settings.mode,
+            min_age_days=args.min_age_days if args.min_age_days is not None else settings.min_age_days)
+        if settings.enabled:
+            report = clean(settings.root, apply=settings.mode == 'clean', min_age_days=settings.min_age_days)
+        else:
+            report['status'] = 'disabled'
+    except (OSError, UnsafeStateError, ValueError, RuntimeError):
+        pass  # Keep the fixed config-stage failure; never print private values.
     print(json.dumps(report, sort_keys=True))
     return 1 if report['status'] == 'blocked' else 0
 

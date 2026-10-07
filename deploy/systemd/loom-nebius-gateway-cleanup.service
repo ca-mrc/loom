@@ -1,9 +1,9 @@
 [Unit]
-Description=Report retained Loom gateway cache usage
+Description=Clean obsolete Loom gateway Python caches
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py
+ExecStart=/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py --config %h/.config/loom/gateway-cleanup.toml
 UMask=0077
 NoNewPrivileges=true
 Nice=10

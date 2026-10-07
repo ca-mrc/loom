@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Loom gateway cache inventory
+Description=Daily Loom gateway cache maintenance
 
 [Timer]
 OnCalendar=daily
