@@ -12,12 +12,16 @@ import pytest
 from tests.ops.test_nebius_development_management_renewal import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_management_renewal import application_material as application_material
+from tests.ops.test_nebius_development_management_renewal import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_management_renewal import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_management_renewal import cloud as cloud
 from tests.ops.test_nebius_development_management_renewal import installation as installation
 from tests.ops.test_nebius_development_management_renewal import inventory as inventory
-from tests.ops.test_nebius_development_management_renewal import management_inputs as management_inputs
+from tests.ops.test_nebius_development_management_renewal import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_development_management_renewal import manager_entry as manager_entry
 from tests.ops.test_nebius_development_management_renewal import material as material
 from tests.ops.test_nebius_development_management_renewal import platform_inputs as platform_inputs
