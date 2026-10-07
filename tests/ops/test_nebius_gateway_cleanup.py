@@ -67,12 +67,12 @@ def test_default_report_then_apply_then_repeat_preserves_evidence(root):
         'authority/original/receipt.json')]
     records.extend([selected / 'operation.json', cache.parent.parent / 'module.py', selected / 'complete'])
     before = {path: path.read_bytes() for path in records}
-    report = cleaner().clean(root)
+    report = cleaner().clean(root, apply=False)
     assert report['status'] == 'reported'
     assert report['candidate_files'] == 1
     assert report['candidate_bytes'] == cache.stat().st_size
     assert report['deleted_bytes'] == 0 and cache.exists()
-    report = cleaner().clean(root, apply=True)
+    report = cleaner().clean(root)
     assert report['status'] == 'cleaned'
     assert report['deleted_files'] == 1 and report['deleted_bytes'] > 0
     assert not cache.exists() and selected.is_dir()
@@ -194,14 +194,15 @@ def test_unsafe_age_is_rejected(root, age):
     assert cache.exists()
 
 
-def test_cli_is_report_only_and_contains_no_paths_or_payloads(root):
+def test_cli_defaults_to_clean_and_contains_no_paths_or_payloads(root, tmp_path):
     _, cache = release(root)
     cleaner()
-    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root)],
+    config = private(tmp_path / 'cleanup.toml', b'')
+    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root), '--config', str(config)],
         capture_output=True, text=True, check=True)
     report = json.loads(result.stdout)
-    assert report['status'] == 'reported' and report['candidate_files'] == 1
-    assert cache.exists()
+    assert report['status'] == 'cleaned' and report['deleted_files'] == 1
+    assert not cache.exists()
     assert str(root) not in result.stdout and 'private operation' not in result.stdout
     assert result.stderr == ''
 
@@ -280,11 +281,13 @@ def test_unreadable_source_is_not_a_regenerable_cache(root):
     assert cache.exists()
 
 
-def test_symlink_loop_is_a_payload_free_blocked_report(root):
+def test_symlink_loop_is_a_payload_free_blocked_report(root, tmp_path):
     _, cache = release(root)
     (root / 'upgrade').symlink_to(root / 'upgrade', target_is_directory=True)
     cleaner()
-    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root), '--apply'],
+    config = private(tmp_path / 'cleanup.toml', b'')
+    result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root),
+        '--config', str(config), '--apply'],
         capture_output=True, text=True)
     assert result.returncode == 1
     assert result.stderr == ''
@@ -304,13 +307,15 @@ def test_typical_uv_interpreter_and_lib64_links_are_retained(root):
     assert (venv / 'lib64/python3.12/site-packages/example/module.py').is_file()
 
 
-def test_second_cleaner_cannot_enter_while_first_deletes(root, monkeypatch):
+def test_second_cleaner_cannot_enter_while_first_deletes(root, tmp_path, monkeypatch):
     _, cache = release(root)
     module = cleaner()
     unlink = module._unlink
+    config = private(tmp_path / 'cleanup.toml', b'')
 
     def while_locked(*args):
-        result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root), '--apply'],
+        result = subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root),
+            '--config', str(config), '--apply'],
             capture_output=True, text=True, check=True)
         report = json.loads(result.stdout)
         assert report['status'] == 'skipped_busy' and report['stage'] == 'locks'
@@ -322,15 +327,116 @@ def test_second_cleaner_cannot_enter_while_first_deletes(root, monkeypatch):
     assert not cache.exists()
 
 
-def test_daily_user_service_defaults_to_report_only():
+def test_daily_user_service_reads_the_operator_configuration():
     directory = SCRIPT.parents[2] / 'deploy/systemd'
     service = configparser.ConfigParser(interpolation=None)
     assert service.read(directory / 'loom-nebius-gateway-cleanup.service')
     command = service['Service']['ExecStart']
-    assert command == '/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py'
+    assert command == ('/usr/bin/python3 -I -B %h/.local/libexec/loom/nebius_gateway_cleanup.py '
+        '--config %h/.config/loom/gateway-cleanup.toml')
     assert service['Service']['UMask'] == '0077'
     timer = configparser.ConfigParser(interpolation=None)
     assert timer.read(directory / 'loom-nebius-gateway-cleanup.timer')
     assert timer['Timer']['OnCalendar'] == 'daily'
     assert timer['Timer']['Persistent'] == 'true'
     assert timer['Timer']['Unit'] == 'loom-nebius-gateway-cleanup.service'
+
+
+def run_cli(root, config, *options):
+    return subprocess.run([sys.executable, '-I', '-B', str(SCRIPT), '--root', str(root),
+        '--config', str(config), *options], capture_output=True, text=True)
+
+
+@pytest.mark.parametrize('option', ['--dry-run', '--report-only'])
+def test_preview_overrides_clean_configuration(root, tmp_path, option):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', b'mode = "clean"\n')
+    result = run_cli(root, config, option)
+    assert result.returncode == 0 and result.stderr == ''
+    assert json.loads(result.stdout)['status'] == 'reported' and cache.exists()
+
+
+def test_configuration_is_reread_without_service_edits(root, tmp_path):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', b'mode = "report"\n')
+    assert json.loads(run_cli(root, config).stdout)['status'] == 'reported'
+    assert cache.exists()
+    config.write_text('mode = "clean"\nmin_age_days = 14\n')
+    assert json.loads(run_cli(root, config).stdout)['deleted_files'] == 0
+    assert cache.exists()
+    config.write_text('mode = "clean"\nmin_age_days = 7\n')
+    assert json.loads(run_cli(root, config).stdout)['deleted_files'] == 1
+    assert not cache.exists()
+
+
+def test_disabled_configuration_touches_no_storage_even_with_apply(root, tmp_path):
+    config = private(tmp_path / 'cleanup.toml', b'enabled = false\n')
+    result = run_cli(root, config, '--apply')
+    assert result.returncode == 0 and result.stderr == ''
+    report = json.loads(result.stdout)
+    assert report['status'] == 'disabled' and report['deleted_files'] == 0
+    assert list(root.iterdir()) == []
+
+
+def test_cli_age_override_is_explicit(root, tmp_path):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', b'min_age_days = 14\nmode = "report"\n')
+    result = run_cli(root, config, '--min-age-days', '7', '--apply')
+    assert result.returncode == 0
+    assert json.loads(result.stdout)['deleted_files'] == 1 and not cache.exists()
+
+
+@pytest.mark.parametrize('contents', [b'enabled = "false"', b'mode = "delete-all"',
+    b'min_age_days = true', b'min_age_days = 0', b'min_age_days = 3651', b'min_age_days = 1.5',
+    b'root = 42', b'root = "relative/path"', b'root = "/"', b'enabeld = false',
+    b'[unknown]\nkey = 1', b'mode = "private incomplete', b'#' * 16385, b'\xff'])
+def test_invalid_config_blocks_without_falling_back_to_deletion(root, tmp_path, contents):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', contents)
+    result = run_cli(root, config, '--apply')
+    assert result.returncode == 1 and result.stderr == ''
+    report = json.loads(result.stdout)
+    assert report['status'] == 'blocked' and report['stage'] == 'config'
+    assert report['deleted_files'] == 0 and cache.exists()
+    assert str(root) not in result.stdout and 'private incomplete' not in result.stdout
+
+
+@pytest.mark.parametrize('damage', ['missing', 'symlink', 'writable', 'hardlink', 'unreadable'])
+def test_unavailable_explicit_configuration_never_enables_cleanup(root, tmp_path, damage):
+    _, cache = release(root)
+    config = private(tmp_path / 'cleanup.toml', b'mode = "clean"\n')
+    if damage == 'missing':
+        config.unlink()
+    elif damage == 'symlink':
+        other = private(tmp_path / 'other.toml', config.read_bytes())
+        config.unlink()
+        config.symlink_to(other)
+    elif damage == 'writable':
+        config.chmod(0o666)
+    elif damage == 'hardlink':
+        os.link(config, tmp_path / 'other.toml')
+    else:
+        config.chmod(0o000)
+    result = run_cli(root, config)
+    assert result.returncode == 1 and result.stderr == ''
+    assert json.loads(result.stdout)['status'] == 'blocked' and cache.exists()
+
+
+def test_example_configuration_has_clean_defaults_and_home_relative_storage(tmp_path, monkeypatch):
+    module = cleaner()
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    example = SCRIPT.parents[2] / 'config/nebius-gateway-cleanup.example.toml'
+    config = private(tmp_path / 'cleanup.toml', example.read_bytes())
+    settings = module.load_settings(config, required=True)
+    assert settings.enabled is True and settings.mode == 'clean'
+    assert settings.min_age_days == 7 and settings.root == tmp_path / '.loom/nebius-management'
+
+
+def test_default_configuration_location_and_absent_file_defaults(tmp_path, monkeypatch):
+    module = cleaner()
+    monkeypatch.setattr(module.Path, 'home', lambda: tmp_path)
+    default = tmp_path / '.config/loom/gateway-cleanup.toml'
+    assert module.default_config() == default
+    assert module.load_settings(default, required=False).mode == 'clean'
+    private(default, b'mode = "report"\n')
+    assert module.load_settings(default, required=False).mode == 'report'
