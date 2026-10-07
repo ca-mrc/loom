@@ -6,6 +6,7 @@ The anchored activation journal owns ordering and all uncertain outcomes.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from typing import Any
 
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
@@ -127,7 +128,8 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         except Exception:
             raise ValueError('pool_recovery_drain_unconfirmed') from None
 
-    def _stop_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+    def _stop_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
+                    record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
         try:
             from scripts.ops.nebius_pool_manager_image_history import (
                 IMAGE_MARKER,
@@ -148,13 +150,32 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or originals[key] == targets[key] or not any(_matches(before, row, _uid(closed[key])) for row in options)
                     or _stable(desired) != targets[key]
                     or not isinstance(version, str) or not 0 < len(version) <= 128
-                    or item != {'phase': 'prepared' if preview else 'intent',
-                        'before_resource_version': None if preview else version}):
+                    or item != {'phase': 'prepared', 'before_resource_version': None}
+                    or (not preview and record_intent is None)):
                 raise ValueError
             if self.recovery_drained() is not True:
                 raise ValueError
             if _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
+            # Controller status updates can advance resourceVersion during drain.
+            # Reobserve only before dispatch, preserving UID and stable metadata/spec.
+            fresh = self.read_workload(key)
+            if not _matches(fresh, before, _uid(closed[key])):
+                raise ValueError
+            before = fresh
+            version = before['metadata']['resourceVersion']
+            if not isinstance(version, str) or not 0 < len(version) <= 128:
+                raise ValueError
+            if not preview:
+                assert record_intent is not None
+                record_intent(before)
+                current = _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1]
+                expected = copy.deepcopy(record)
+                expected_item = expected['workloads'][key]
+                expected_item = expected_item.get('isolation_stop', expected_item)
+                expected_item.update(phase='intent', before_resource_version=version)
+                if current != expected:
+                    raise ValueError
             field = 'suspend' if targets[key]['kind'] == 'CronJob' else 'replicas'
             patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(closed[key])},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
@@ -172,8 +193,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def preview_stop(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
         return copy.deepcopy(desired) if self._stop_patch(key, before, desired, preview=True) else None
 
-    def stop_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
-        return self._stop_patch(key, before, desired, preview=False)
+    def stop_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                      record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+        return self._stop_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def successor_drained(self, key: str, desired: dict[str, Any]) -> bool:
         """Fresh process drain of the anchored closed successor or restored spec."""

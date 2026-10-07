@@ -123,11 +123,18 @@ own original journal lock and validates its predecessor before any side effect.
 
         if action == 'preflight':
             phase = 'preflight'
-            if image_binding is not None:
+            recovering = any(present(name) for name in _RECOVERY)
+            if present('activation'):
+                activation = activation_record(request, state_dir=state, anchor_dir=anchor)
+                recovering = recovering or (activation is not None and activation['cancellation'] != 'prepared')
+            # Forward image qualification deliberately rejects cancellation and
+            # recovery journals. Recovery instead validates the full retained
+            # chain and current fenced workloads below, even for an incomplete tail.
+            if image_binding is not None and not recovering:
                 image_entry = manager_image_entry(request, image_binding, state=state, anchor=anchor)
                 if not _completed(image_entry):
                     HTTPSPoolManagerImageAPI(parent=parent, binding=image_binding).qualify_closed()
-            if repair_binding is not None and not startup_repair_exists(request, state=state, anchor=anchor):
+            if repair_binding is not None and not recovering and not startup_repair_exists(request, state=state, anchor=anchor):
                 HTTPSPoolStartupRepairAPI(parent=parent, binding=repair_binding).qualify_closed()
             if any(present(name) for name in ('startup', 'activation', 'completion', *_RECOVERY)):
                 # Validate the whole selected chain, without creating a missing

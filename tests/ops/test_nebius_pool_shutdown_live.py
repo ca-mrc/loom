@@ -111,3 +111,89 @@ def test_connected_shutdown_is_intent_bound_observes_unknown_and_waits_for_termi
             assert run()['status'] == 'pool_successors_stopped'
             assert len(patches) == len(set(patches)) == len(api.targets)
             assert advance(cancel=True)['status'] == 'pool_activation_cancelled'
+
+
+@pytest.mark.timeout(600)
+@pytest.mark.parametrize('damage', [None, 'uid', 'spec'])
+def test_shutdown_reads_cas_after_slow_drain_and_rejects_real_drift(
+        activation_http, closed_startup, monkeypatch, damage):
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+
+    request, _, _, _, _, root = closed_startup
+    with activation_http() as (api, state, advance):
+        assert advance(cancel=True)['status'] == 'pool_activation_cancelled'
+        assert fence_pool_startup(request=request, api=api, state_dir=root / 'cutover',
+            anchor_dir=root / 'cutover-anchor')['status'] == 'startup_writes_fenced'
+        api.parent.history.recovery_pool_drained = lambda: True
+        api.parent.guards.recovery_participant_drained = lambda target: True
+        original_drain = api.recovery_drained
+        drains = 0
+
+        def drain():
+            nonlocal drains
+            result = original_drain()
+            drains += 1
+            # The CronJob controller updates status while the expensive recovery
+            # qualification runs. UID and spec remain unchanged in the regression.
+            for key in api.targets:
+                current = state.objects[key]
+                current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
+            if damage and drains == 2:
+                current = state.objects[next(reversed(api.targets))]
+                if damage == 'uid':
+                    current['metadata']['uid'] = str(uuid4())
+                else:
+                    current['spec']['suspend' if current['kind'] == 'CronJob' else 'replicas'] = (
+                        True if current['kind'] == 'CronJob' else 7)
+            return result
+
+        monkeypatch.setattr(api, 'recovery_drained', drain)
+        original_transport = api.parent.client._transport
+        writes = []
+
+        def respond(message):
+            if message.method == 'PATCH':
+                kind = 'CronJob' if '/cronjobs/' in message.url.path else 'Deployment'
+                key = kind + ':' + message.url.path.split('/')[-3] + ':' + message.url.path.split('/')[-1]
+                current = state.objects[key]
+                patch = json.loads(message.content)
+                version = next(row['value'] for row in patch if row['path'] == '/metadata/resourceVersion')
+                if version != current['metadata']['resourceVersion']:
+                    return httpx.Response(422, json={'apiVersion': 'v1', 'kind': 'Status',
+                        'status': 'Failure', 'code': 422, 'reason': 'Invalid'})
+                assert patch[:4] == [
+                    {'op': 'test', 'path': '/metadata/uid', 'value': current['metadata']['uid']},
+                    {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                    {'op': 'test', 'path': '/metadata', 'value': current['metadata']},
+                    {'op': 'test', 'path': '/spec', 'value': current['spec']}]
+                proposed = copy.deepcopy(current)
+                field = 'suspend' if kind == 'CronJob' else 'replicas'
+                proposed['spec'][field] = True if kind == 'CronJob' else 0
+                if not message.url.params:
+                    row = json.loads((root / 'cutover/shutdown.json').read_bytes())['workloads'][key]
+                    assert row == {'phase': 'intent', 'before_resource_version': version}
+                    writes.append(key)
+                    proposed['metadata'].update(resourceVersion=str(int(version) + 1),
+                        generation=current['metadata'].get('generation', 1) + 1)
+                    proposed['status'] = {'observedGeneration': proposed['metadata']['generation']}
+                    state.objects[key] = proposed
+                return httpx.Response(200, json=proposed)
+            if dict(message.url.params) == {'limit': '1000'}:
+                resource = message.url.path.rsplit('/', 1)[1]
+                kind, version = {'pods': ('Pod', 'v1'), 'jobs': ('Job', 'batch/v1'),
+                    'replicasets': ('ReplicaSet', 'apps/v1')}[resource]
+                return httpx.Response(200, json={'apiVersion': version, 'kind': kind + 'List',
+                    'metadata': {'resourceVersion': '50'}, 'items': []})
+            return original_transport.handle_request(message)
+
+        with httpx.MockTransport(respond) as transport:
+            monkeypatch.setattr(api.parent.client, '_transport', transport)
+            arguments = dict(request=request, api=api, state_dir=root / 'cutover', anchor_dir=root / 'cutover-anchor')
+            if damage:
+                with pytest.raises(ValueError):
+                    stop_pool_successors(**arguments)
+                assert not writes
+            else:
+                assert stop_pool_successors(**arguments)['status'] == 'pool_successors_stopped'
+                assert len(writes) == len(set(writes)) == len(api.targets)

@@ -939,9 +939,9 @@ def test_original_tooling_fence_can_be_resumed_without_rewriting_its_bytes(prepa
     if entry == 'late_shutdown':
         stop = api.stop_workload
 
-        def uncertain_manager_stop(key, observed, desired):
+        def uncertain_manager_stop(key, observed, desired, **kwargs):
             api.stop_failure = 'before' if key == _key(context.request.manager) else None
-            return stop(key, observed, desired)
+            return stop(key, observed, desired, **kwargs)
 
         monkeypatch.setattr(api, 'stop_workload', uncertain_manager_stop)
         assert stop_pool_successors(**arguments)['status'] == 'pending_shutdown_outcome'

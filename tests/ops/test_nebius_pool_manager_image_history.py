@@ -106,6 +106,41 @@ def persist(value, *, complete=False, anchor_only=False):
         }})
 
 
+@pytest.mark.parametrize('phase', ['cancelled', 'shutdown'])
+def test_preflight_qualifies_recovery_with_incomplete_image_without_forward_checks(
+        image_repair_case, monkeypatch, phase):
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_pool_operation as operation
+    from scripts.ops.nebius_pool_activation_stage import advance_pool_activation
+    from scripts.ops.nebius_pool_shutdown import stop_pool_successors
+    from scripts.ops.nebius_pool_startup_fence import fence_pool_startup
+    from tests.ops.test_nebius_pool_shutdown import ShutdownAPI
+
+    context, remote, state, anchor, binding = image_repair_case
+    persist(entry(image_repair_case))
+    api = ShutdownAPI((context.request, context.tokens, remote.closed, remote.startup, None, state.parent))
+    api.state = state
+    args = dict(request=context.request, api=api, state_dir=state, anchor_dir=anchor)
+    assert advance_pool_activation(**args, cancel=True)['status'] == 'pool_activation_cancelled'
+    if phase == 'shutdown':
+        assert fence_pool_startup(**args)['status'] == 'startup_writes_fenced'
+        api.stop_failure = 'conflict'
+        assert stop_pool_successors(**args)['status'] == 'pending_shutdown_update'
+    parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
+    monkeypatch.setattr(operation, 'HTTPSPoolActivationAPI', lambda **kwargs: api)
+    frozen = {path: path.read_bytes() for root in (state, anchor) for path in root.rglob('*.json')}
+    calls = copy.deepcopy((api.calls, api.stop_calls, remote.calls))
+    assert operation.run_pool_operation(parent=parent, tokens=context.tokens, action='preflight',
+        image_binding=binding)['status'] == 'preflight_qualified'
+    assert {path: path.read_bytes() for path in frozen} == frozen
+    assert (api.calls, api.stop_calls, remote.calls) == calls
+    api.retained = False
+    with pytest.raises(operation.PoolOperationError):
+        operation.run_pool_operation(parent=parent, tokens=context.tokens, action='preflight', image_binding=binding)
+    assert {path: path.read_bytes() for path in frozen} == frozen
+
+
 def test_image_entry_preserves_all_original_history_and_returns_fixed_stopped_targets(image_repair_case):
     context, _, state, anchor, _ = image_repair_case
     old = {path: path.read_bytes() for root in (state, anchor) for path in root.iterdir() if path.is_file()}
@@ -885,9 +920,9 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
         if moment in {"late_shutdown", "stopped"}:
             stop = api.stop_workload
 
-            def uncertain(key_, before, desired):
+            def uncertain(key_, before, desired, **kwargs):
                 api.stop_failure = "before" if moment == "late_shutdown" and key_ == key else None
-                return stop(key_, before, desired)
+                return stop(key_, before, desired, **kwargs)
 
             legacy.setattr(api, "stop_workload", uncertain)
             assert stop_pool_successors(**args)["status"] == (
@@ -937,9 +972,10 @@ def test_legacy_fence_resumes_image_enrollment_without_rewriting_frozen_evidence
         closed, _ = closed_startup_documents(context.request, state_dir=state, anchor_dir=anchor)
         adapter = SimpleNamespace(request=context.request, state=state, anchor=anchor, closed=closed,
             parent=SimpleNamespace(client=client), _scope=lambda: None,
-            _path=lambda key: "/deployments/loom-service", recovery_drained=api.recovery_drained)
-        monkeypatch.setattr(api, "stop_workload", lambda key, before, desired:
-            HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=False))
+            _path=lambda key: "/deployments/loom-service", recovery_drained=api.recovery_drained,
+            read_workload=remote.read_workload)
+        monkeypatch.setattr(api, "stop_workload", lambda key, before, desired, **kwargs:
+            HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=False, **kwargs))
         monkeypatch.setattr(api, "preview_stop", lambda key, before, desired: copy.deepcopy(desired)
             if HTTPSPoolActivationAPI._stop_patch(adapter, key, before, desired, preview=True) else None)
     api.stop_failure = None

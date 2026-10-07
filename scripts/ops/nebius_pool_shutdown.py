@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -36,7 +37,8 @@ class PoolShutdownAPI(PoolWorkloadReader, Protocol):
     def guard_state(self, participant: str) -> str: ...
     def recovery_drained(self) -> bool: ...
     def preview_stop(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
-    def stop_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool: ...
+    def stop_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                      record_intent: Callable[[dict[str, Any]], None]) -> bool: ...
     def successor_drained(self, key: str, desired: dict[str, Any]) -> bool: ...
 
 
@@ -223,17 +225,29 @@ def stop_pool_successors(*, request: PoolCutoverRequest, api: PoolShutdownAPI,
                         return result('pending_shutdown_update')
                     if _stable(preview) != target:
                         raise ValueError
-                    observe()
+                    actual = observe()[key]
                     if not drained():
                         return result('pending_pool_cleanup')
-                    version = actual['metadata']['resourceVersion']
-                    if not isinstance(version, str) or not 0 < len(version) <= 128:
-                        raise ValueError
-                    item.update(phase='intent', before_resource_version=version)
-                    private_state._atomic_json(state / 'shutdown.json', record)
+
+                    def record_intent(fresh: dict[str, Any], *, item: dict[str, Any] = item, key: str = key) -> None:
+                        nonlocal actual
+                        # The adapter finishes its live drain checks before this
+                        # last read and write-ahead record. Only a newly prepared
+                        # attempt may record a version; unknown intents never call it.
+                        if item['phase'] != 'prepared' or not _matches(fresh, actual, _uid(closed[key])):
+                            raise ValueError
+                        version = fresh['metadata']['resourceVersion']
+                        if not isinstance(version, str) or not 0 < len(version) <= 128:
+                            raise ValueError
+                        actual = fresh
+                        item.update(phase='intent', before_resource_version=version)
+                        private_state._atomic_json(state / 'shutdown.json', record)
+
                     try:
-                        accepted = api.stop_workload(key, actual, proposed)
+                        accepted = api.stop_workload(key, actual, proposed, record_intent=record_intent)
                     except Exception:
+                        if item['phase'] != 'intent':
+                            raise
                         accepted = None
                     if accepted is False:
                         item.update(phase='prepared', before_resource_version=None)

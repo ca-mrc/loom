@@ -1597,6 +1597,20 @@ Unknown writes remain readback-only. Current identity, metadata, spec and versio
 checks remain mandatory, including when a fresh observation replaces a stale
 pre-preview snapshot. Subsequent image corrections still require a completed tail.
 
+For an operation already cancelled or carrying recovery journals, preflight
+qualifies the retained recovery chain and current workload options. It does not
+attempt forward-only closed-image qualification on an incomplete image tail.
+Forward repair still requires that qualification; recovery preflight neither
+completes an image correction nor authorizes reopening intake.
+
+Shutdown finishes its current recovery/drain checks before taking the final
+workload snapshot. The fixed adapter verifies unchanged UID and stable metadata
+and spec, records that snapshot's resourceVersion through the stage's write-ahead
+callback, then sends the full UID/version/metadata/spec CAS. Controller status
+updates during the earlier checks therefore do not force reuse of a stale version.
+A definite rejection may return the new attempt to prepared. An existing unknown
+intent retains its original version and is only observed, never refreshed or resent.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected

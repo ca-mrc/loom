@@ -36,7 +36,9 @@ class ShutdownAPI(FenceAPI):
         assert before == self.startup.documents[key]
         return copy.deepcopy(desired)
 
-    def stop_workload(self, key, before, desired):
+    def stop_workload(self, key, before, desired, *, record_intent):
+        before = copy.deepcopy(self.startup.documents[key])
+        record_intent(before)
         row = json.loads((self.state / 'shutdown.json').read_bytes())['workloads'][key]
         assert row['phase'] == 'intent' and row['before_resource_version'] == before['metadata']['resourceVersion']
         assert self.cleanup_drained and self.mode == 'fenced' and set(self.guards.values()) == {'fenced'}
