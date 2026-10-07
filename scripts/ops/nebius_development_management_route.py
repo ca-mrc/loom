@@ -21,12 +21,13 @@ from scripts.ops import nebius_certificates as certificates
 from scripts.ops.nebius_development_management_foundation import HTTPSRetainedDevelopmentFoundation
 from scripts.ops.nebius_development_management_install import DevelopmentManagementRequest
 from scripts.ops.nebius_ingress_probe import _connect, probe_management
+from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_install import ManagementInstallError
 from scripts.ops.nebius_management_prerequisites import inventory_resources
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 from loom.nebius_platform_render import digest
-from loom_service.environment_management.deployment import render_management
+from loom_service.environment_management.deployment import ManagementDeployment, render_management
 
 
 class DevelopmentManagementRouteSettings(BaseModel):
@@ -85,13 +86,22 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
         return row
 
     def _observe(self, request: DevelopmentManagementRequest, *, installed: bool) -> str:
-        foundation = request.deployment.installation.foundation
-        namespace, host = foundation.ingress_namespace, request.deployment.public_host
-        if (request.binding.namespace != 'loom-nebius-management-dev'
+        expected = render_management(request.deployment, candidate=request.candidate, profile=request.profile,
+            repo_root=Path(__file__).resolve().parents[2]).files['70-public.yaml'][0]
+        return self._observe_bound(deployment=request.deployment, kube_system_uid=request.binding.kube_system_uid,
+            expected=expected, installed=installed)
+
+    def _observe_bound(self, *, deployment: ManagementDeployment, kube_system_uid: str,
+                       expected: dict[str, Any], installed: bool) -> str:
+        foundation = deployment.installation.foundation
+        namespace, host = foundation.ingress_namespace, deployment.public_host
+        if (deployment.namespace != 'loom-nebius-management-dev'
+                or expected['metadata'].get('namespace') != deployment.namespace
+                or expected['metadata'].get('name') != 'loom-management'
                 or foundation.platform_config['kubernetes_api_server'].rstrip('/') != self.api_server.rstrip('/')):
             raise ValueError()
         self._resource('/api/v1/namespaces/kube-system', kind='Namespace', name='kube-system',
-            uid=request.binding.kube_system_uid)
+            uid=kube_system_uid)
         self._resource('/api/v1/namespaces/' + namespace, kind='Namespace', name=namespace,
             uid=str(self.settings.namespace_uid))
         service = self._resource('/api/v1/namespaces/' + namespace + '/services/loom-web',
@@ -136,13 +146,13 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
         ip = ipaddress.IPv4Address(address['ip'])
         if not ip.is_global or ip.is_multicast or str(ip) != address['ip']:
             raise ValueError()
-        expected = render_management(request.deployment, candidate=request.candidate, profile=request.profile,
-            repo_root=Path(__file__).resolve().parents[2]).files['70-public.yaml'][0]
         found = False
         for row in inventory_resources(self._request, 'networking.k8s.io/v1', 'ingresses', 'Ingress'):
-            own = (row['metadata'].get('namespace'), row['metadata'].get('name')) == (request.binding.namespace, 'loom-management')
+            own = (row['metadata'].get('namespace'), row['metadata'].get('name')) == (deployment.namespace, 'loom-management')
             if own:
                 if row.get('spec') != expected['spec'] or row['metadata'].get('labels') != expected['metadata']['labels']:
+                    raise ValueError()
+                if 'uid' in expected['metadata'] and (_uid(row) != _uid(expected) or _snapshot(row) != _snapshot(expected)):
                     raise ValueError()
                 found = True
             for rule in row.get('spec', {}).get('rules', []):
@@ -152,6 +162,21 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
         if installed and not found:
             raise ValueError()
         return str(ip)
+
+    def qualify_retained(self, *, deployment: ManagementDeployment, kube_system_uid: str,
+                         expected: dict[str, Any]) -> str:
+        """Read-only renewal route proof, independent of expired/default TLS."""
+        try:
+            _uid(expected)
+            address = self._observe_bound(deployment=deployment, kube_system_uid=kube_system_uid,
+                expected=expected, installed=True)
+            qualify_dns_address(deployment.public_host, address)
+            if self._observe_bound(deployment=deployment, kube_system_uid=kube_system_uid,
+                    expected=expected, installed=True) != address:
+                raise ValueError()
+            return address
+        except Exception:
+            raise ManagementInstallError('development management retained route unqualified') from None
 
     def _qualify(self, request: DevelopmentManagementRequest, *, installed: bool) -> None:
         try:
