@@ -112,11 +112,13 @@ def restore_pool_roles(*, request: PoolCutoverRequest, api: PoolRoleRestorationA
             def qualify() -> str | None:
                 return qualify_role_restoration(request, api, state=state, anchor=anchor)
 
-            observe()
-            pending = qualify()
-            if pending is not None:
-                return result(pending)
             if record is None:
+                # Existing journals are freshly qualified in the active row or
+                # completion path; preparing new evidence still needs this proof.
+                observe()
+                pending = qualify()
+                if pending is not None:
+                    return result(pending)
                 record = {**identity, 'roles': {key: {'phase': 'prepared', 'before_resource_version': None} for key in targets}}
                 private_state._atomic_json(marker, identity)
                 private_state._atomic_json(path, record)

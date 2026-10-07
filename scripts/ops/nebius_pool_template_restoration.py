@@ -112,8 +112,10 @@ def qualify_template_restoration(request: PoolCutoverRequest, api: PoolGatewayRe
     pending = qualify_gateway_retirement_drain(request, api, state=state, anchor=anchor)
     if pending is not None:
         return pending
-    api.qualify_gateway_retired()
-    return None
+    # This boundary owns the drain before and after the effective rights review.
+    # Calling the retired wrapper here would repeat its initial full drain.
+    api.qualify_gateway_readonly()
+    return qualify_gateway_retirement_drain(request, api, state=state, anchor=anchor)
 
 
 def restore_pool_templates(*, request: PoolCutoverRequest, api: PoolTemplateRestorationAPI,
@@ -134,11 +136,13 @@ def restore_pool_templates(*, request: PoolCutoverRequest, api: PoolTemplateRest
             def qualify() -> str | None:
                 return qualify_template_restoration(request, api, state=state, anchor=anchor)
 
-            observe()
-            pending = qualify()
-            if pending is not None:
-                return result(pending)
             if record is None:
+                # Existing journals are freshly qualified in the active row or
+                # completion path; preparing new evidence still needs this proof.
+                observe()
+                pending = qualify()
+                if pending is not None:
+                    return result(pending)
                 record = {**identity, 'workloads': {key: {'phase': 'prepared', 'before_resource_version': None} for key in targets}}
                 private_state._atomic_json(marker, identity)
                 private_state._atomic_json(path, record)

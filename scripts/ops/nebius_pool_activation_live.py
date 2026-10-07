@@ -288,7 +288,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
                         'before_resource_version': None if preview else version}):
                 raise ValueError
-            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview and qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
@@ -357,7 +359,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or (not preview and record_intent is None)
                     or record['workloads'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
-            if qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview and qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _template_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
@@ -408,7 +412,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
                         'before_resource_version': None if preview else version}):
                 raise ValueError
-            if qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview and qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _role_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError

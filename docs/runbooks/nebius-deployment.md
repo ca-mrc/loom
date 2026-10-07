@@ -1251,7 +1251,12 @@ output or diagnose the underlying provider, network or filesystem error. A
 blocked report still fails the rollout and never dispatches the requested action.
 For dependency preparation failures, inspect gateway disk/inode availability and
 diagnose the dependency installation through the approved operator route before
-retrying. Preserve the failed release, bundle and operation records. The gateway
+retrying. Compare the provider's allocated boot disk capacity with the guest block
+device and filesystem sizes. If allocated capacity has not reached the guest,
+use the provider-supported stop/start maintenance window, preserve the recovery
+state and partition backup, and verify the retained static route after startup.
+Do not delete retained evidence to make preparation fit. Preserve the failed
+release, bundle and operation records. The gateway
 refuses an identical incomplete release. After correcting the cause, an anchored
 image repair can use a new tooling continuation as described below.
 The fixed Python entry uses `-I -B` for qualification and operation execution, so
@@ -2102,6 +2107,15 @@ global and participant ledgers and recheck the fenced journals without repeating
 the whole-cluster authority inventory. No drain result or authority proof is
 cached across workload mutations or invocations. Dry-run success cannot authorize
 a stop; changed authority, fences, ancestry, UID or spec still blocks dispatch.
+
+Gateway Role retirement, template restoration and legacy Role restoration keep
+full qualification at the actual mutation boundary. Their dry-run adapters only
+validate the fixed journal-bound CAS and Kubernetes admission. Existing journals
+are qualified in the active-row and completion paths; starting a new journal
+still requires an initial proof. Template and Role restoration bracket the
+read-only gateway permission review with one fresh drain on each side. These
+checks are not cached across mutations or invocations, and unknown intents
+remain observation-only.
 
 ## Refresh the retained application manager
 
