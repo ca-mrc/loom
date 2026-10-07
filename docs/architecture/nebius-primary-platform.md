@@ -50,6 +50,18 @@ before applying it. Public/management access and connection to the single shared
 pool remain separate activation requirements; a private bootstrap is not a
 working multi-person development environment.
 
+The fresh-only development preflight now binds the protected publication/source,
+cluster and StorageClass identities, refuses pre-existing dev resources or
+reusable old data volumes, and measures system capacity alongside existing
+workloads. It includes HPA maxima, rollout/maintenance demand and terminating
+Pods without changing other environments. Source preparation happens in the
+publisher checkout; live inspection needs no Git checkout on the gateway. The
+future protected gateway must authenticate the source-bound installer bundle.
+This read-only report is not installation authority, a capacity reservation or
+an interrupted-install recovery path. See the
+[foundation runbook](../runbooks/nebius-deployment.md#independent-shared-development-foundation)
+for the remaining write, credential and activation boundaries.
+
 Loom Service supports `LOOM_SVC_SERVICE_MODE=api_only` as a process-level building
 block for this model. It serves the same authenticated workload routes as the
 default `application` mode and retains schema, secret-store and execution-profile

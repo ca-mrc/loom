@@ -7,6 +7,7 @@ import importlib
 import io
 import json
 import ssl
+import subprocess
 import zipfile
 from types import SimpleNamespace
 from uuid import uuid4
@@ -55,7 +56,9 @@ def preflight(development_inputs, published_source, inventory):
     mod = module()
     config, _, _ = development_inputs
     settings = mod.DevelopmentPreflightSettings(
-        publication=published_source.reference, kube_system_uid=uuid4(), storage_class_uid=uuid4(), storage_parameters={})
+        publication=published_source.reference, registry_prefix=published_source.candidate["registry_prefix"],
+        source=mod.prepare_development_source(published_source.reference["source_sha"]),
+        kube_system_uid=uuid4(), storage_class_uid=uuid4(), storage_parameters={})
     client = mod.HTTPSDevelopmentPreflight(settings=settings, api_server=config["kubernetes_api_server"],
         ssl_context=ssl.create_default_context(), token="test-kubernetes-secret")
     client.client.close()
@@ -117,7 +120,7 @@ async def test_verified_source_and_fresh_resources_produce_readonly_not_installe
     assert evidence["revision"] == result.rendered.revision
     assert evidence["capacity"]["node_uid"] == preflight.rows["nodes"][0]["metadata"]["uid"]
     assert evidence["database_storage_mib"] == preflight.config["postgres_storage_gi"] * 1024
-    assert set(evidence["unverified"]) == {"provider_storage_quota", "credential_provenance", "installation",
+    assert set(evidence["unverified"]) == {"installer_bundle_authority", "provider_storage_quota", "credential_provenance", "installation",
         "runtime_isolation", "public_access", "shared_pool_activation", "owner_acceptance"}
     assert preflight.rows == before
     assert preflight.calls.count("/api/v1/namespaces/loom-dev") == 2
@@ -127,17 +130,15 @@ async def test_verified_source_and_fresh_resources_produce_readonly_not_installe
 
 
 @pytest.mark.parametrize("change", ["tracked", "untracked", "older-source"])
-async def test_unpublished_or_dirty_installer_cannot_qualify(preflight, source_checkout, change):
+def test_unpublished_or_dirty_installer_cannot_prepare_source(preflight, source_checkout, change):
     root, _, _ = source_checkout
     if change == "older-source":
-        preflight.publication.reference["source_sha"] = "0" * 40
-        # A selected publication for one SHA cannot run from another checkout.
-        preflight.client.settings = preflight.client.settings.model_copy(update={
-            "publication": preflight.client.settings.publication.model_copy(update={"source_sha": "0" * 40})})
+        # A valid approved publication cannot run an installer from a newer SHA.
+        subprocess.run(["git", "commit", "--allow-empty", "-qm", "newer installer"], cwd=root, check=True)
     else:
         (root / ("source.txt" if change == "tracked" else "feature.txt")).write_text("unpublished\n")
     with pytest.raises(module().DevelopmentPreflightError):
-        await check(preflight)
+        module().prepare_development_source(preflight.publication.reference["source_sha"])
     assert not preflight.calls
 
 
@@ -217,6 +218,65 @@ async def test_unqualified_storage_class_is_rejected(preflight, field, value):
         await check(preflight)
 
 
+@pytest.mark.parametrize("phase", ["Available", "Released", "Failed"])
+async def test_reusable_unowned_volume_cannot_become_fresh_dev_data(preflight, phase):
+    # Namespace absence is insufficient: a new PVC can bind a pre-existing PV.
+    preflight.rows["persistentvolumes"] = [{"metadata": {"name": "old-disk", "uid": str(uuid4())},
+        "spec": {"storageClassName": preflight.config["storage_class"],
+                 "capacity": {"storage": "100Gi"}, "accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": phase}}]
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check(preflight)
+
+
+async def test_staging_bound_volume_is_read_only_and_not_a_collision(preflight):
+    preflight.rows["persistentvolumes"] = [{"metadata": {"name": "staging-disk", "uid": str(uuid4())},
+        "spec": {"storageClassName": preflight.config["storage_class"], "claimRef": {
+            "namespace": "loom-nebius-platform", "name": "data-loom-postgres-0", "uid": str(uuid4())}},
+        "status": {"phase": "Bound"}}]
+    before = copy.deepcopy(preflight.rows)
+    result = await check(preflight)
+    assert result.evidence["status"] == "fresh_dev_preflight_only"
+    assert preflight.rows == before
+
+
+async def test_gateway_inspection_does_not_require_the_publishers_git_checkout(preflight, source_checkout):
+    root, _, _ = source_checkout
+    # The fixed gateway validates the prepared bundle, not an ambient checkout.
+    (root / ".git").rename(root / "git-unavailable")
+    result = await check(preflight)
+    assert result.evidence["source_sha"] == preflight.client.settings.source.source_sha
+
+
+@pytest.mark.parametrize("field,value", [("source_sha", "0" * 40), ("source_archive_sha256", "sha256:" + "0" * 64)])
+async def test_other_tooling_source_cannot_run_selected_publication(preflight, field, value):
+    settings = preflight.client.settings
+    preflight.client.settings = settings.model_copy(update={"source": settings.source.model_copy(update={field: value})})
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check(preflight)
+    assert not preflight.calls
+
+
+@pytest.mark.parametrize("field,value", [("source_archive_sha256", None), ("source_archive_sha256", "sha256:" + "0" * 64)])
+async def test_matching_commit_name_is_not_proof_of_published_source_bytes(preflight, field, value):
+    pub = preflight.publication
+    pub.candidate[field] = value
+    with zipfile.ZipFile(io.BytesIO(pub.payload)) as old:
+        profile = old.read("runtime-profile.json")
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        archive.writestr("candidate.json", json.dumps(pub.candidate))
+        archive.writestr("runtime-profile.json", profile)
+    pub.payload = data.getvalue()
+    digest = "sha256:" + hashlib.sha256(pub.payload).hexdigest()
+    pub.responses["actions/artifacts/123"].update(digest=digest, size_in_bytes=len(pub.payload))
+    preflight.client.settings = preflight.client.settings.model_copy(update={
+        "publication": preflight.client.settings.publication.model_copy(update={"artifact_sha256": digest})})
+    with pytest.raises(module().DevelopmentPreflightError, match="source"):
+        await check(preflight)
+    assert not preflight.calls
+
+
 async def test_foreign_staging_headroom_and_hpa_maximum_are_counted_without_changing_them(preflight):
     dep = workload("Deployment", "staging-api", cpu="1000m")
     dep["metadata"]["namespace"] = "loom-nebius-platform"
@@ -228,6 +288,46 @@ async def test_foreign_staging_headroom_and_hpa_maximum_are_counted_without_chan
     assert high.evidence["capacity"]["required"]["cpu_millis"] - low.evidence["capacity"]["required"]["cpu_millis"] == 5000
     assert dep["spec"]["replicas"] == 1
     preflight.rows["nodes"][0]["status"]["allocatable"]["cpu"] = "7"
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check(preflight)
+
+
+async def test_terminating_owned_pod_is_additional_to_future_staging_surge(preflight):
+    dep = workload("Deployment", "staging-api", cpu="1000m")
+    rs = workload("ReplicaSet", "staging-api-hash", cpu="1000m")
+    rs["spec"]["replicas"] = 1
+    rs["metadata"]["ownerReferences"] = [{"apiVersion": "apps/v1", "kind": "Deployment", "name": "staging-api",
+                                         "uid": dep["metadata"]["uid"], "controller": True}]
+    preflight.rows["deployments"] = [dep]
+    preflight.rows["replicasets"] = [rs]
+    low = await check(preflight)
+    pod = copy.deepcopy(dep["spec"]["template"])
+    pod.update(apiVersion="v1", kind="Pod", status={"phase": "Running"})
+    pod["metadata"].update(name="terminating", namespace=dep["metadata"]["namespace"], uid=str(uuid4()),
+        deletionTimestamp="2026-10-07T00:00:00Z", ownerReferences=[{"apiVersion": "apps/v1", "kind": "ReplicaSet",
+        "name": "staging-api-hash", "uid": rs["metadata"]["uid"], "controller": True}])
+    pod["spec"]["nodeName"] = "computeinstance-test"
+    preflight.rows["pods"].append(pod)
+    before = copy.deepcopy(preflight.rows)
+    high = await check(preflight)
+    assert high.evidence["capacity"]["required"]["cpu_millis"] == low.evidence["capacity"]["required"]["cpu_millis"] + 1000
+    assert high.evidence["capacity"]["required"]["pods"] == low.evidence["capacity"]["required"]["pods"] + 1
+    assert preflight.rows == before
+    preflight.rows["nodes"][0]["status"]["allocatable"]["cpu"] = str(low.evidence["capacity"]["required"]["cpu_millis"]) + "m"
+    with pytest.raises(module().DevelopmentPreflightError):
+        await check(preflight)
+
+
+@pytest.mark.parametrize("kind", ["ReplicaSet", "Pod"])
+async def test_visible_unsupported_owner_cannot_hide_future_controller_demand(preflight, kind):
+    if kind == "ReplicaSet":
+        row = workload("ReplicaSet", "custom-managed", cpu="100m")
+        row["spec"]["replicas"] = 1
+        preflight.rows["replicasets"] = [row]
+    else:
+        row = preflight.rows["pods"][0]
+    row["metadata"]["ownerReferences"] = [{"apiVersion": "argoproj.io/v1alpha1", "kind": "Rollout",
+        "name": "unobserved-controller", "uid": str(uuid4()), "controller": True}]
     with pytest.raises(module().DevelopmentPreflightError):
         await check(preflight)
 

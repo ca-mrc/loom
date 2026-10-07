@@ -102,6 +102,38 @@ and no worker tokens. It is not a cleanup or rollback tool for an existing stack
 There is no public owner access or installed task acceptance until dev-only
 ingress/management and the single shared-pool connection are separately qualified.
 
+`scripts.ops.nebius_development_preflight.HTTPSDevelopmentPreflight` provides the
+fresh-only, read-only part of that installer. Its protected settings bind the
+exact publication, registry, Kubernetes `kube-system` UID and StorageClass
+UID/parameters. `prepare_development_source` measures the exact clean publisher
+checkout's source archive. The future protected entrypoint must authenticate the
+bundle carrying that source record **and the installer code** before invoking
+live inspection; the record alone is not an attestation. Inspection resolves the
+actual GitHub publication and required checks, matches the bundle's source to the
+published digest, then renders that candidate's private foundation. It needs no
+Git checkout on the gateway. An older publication cannot qualify a newer
+installer's source record. This source restriction applies to the protected
+foundation, **not** personal feature builds.
+
+The check rejects an existing `loom-dev` namespace, orphan dev resources,
+retained dev claims/volumes and reusable unowned volumes in the selected storage
+class. It uses complete controller/Pod inventory, HPA maxima, maintenance,
+rolling surge and additional terminating Pods to check system-node fit beside
+other environments. Visible unsupported controller owners are rejected rather
+than treated as bounded orphan workloads. It never patches those environments or
+borrows unrelated nodes. Reads use explicit TLS
+trust and credentials, without ambient kubeconfig, redirects or retries.
+
+The returned `fresh_dev_preflight_only` report is neither a reservation nor a
+write/recovery permit. Protected installer bundle authority, provider disk quota,
+independent credential delivery, create-only installation journals and PVC/CSI
+identity qualification are still
+required at the protected write boundary. A repeated or interrupted installation
+must use its retained installation journal, not pass an existing namespace
+through this fresh-only check. Live isolation, HTTPS, shared-pool activation and
+ordinary-owner acceptance remain unverified by this check. There is no apply CLI
+or workflow dispatch for this partial implementation.
+
 #### Owner commands
 
 Use the verified management HTTPS origin and an ordinary owner **user session**
