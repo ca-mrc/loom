@@ -173,3 +173,24 @@ def test_handoff_rejects_changed_or_unready_live_foundation(handoff, monkeypatch
         row['status'] = {'conditions': [{'type': 'Failed', 'status': 'True'}]}
     with pytest.raises(ManagementInstallError):
         verify(handoff, monkeypatch, [])
+
+
+def test_newly_pinned_operation_cannot_rewrite_original_installation_inputs(handoff, monkeypatch):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+
+    reference = handoff[0]
+    path = Path(reference['operation_path'])
+    operation = json.loads(path.read_text())
+    inputs_path = Path(operation['inputs_path'])
+    inputs = json.loads(inputs_path.read_text())
+    inputs['candidate']['source_archive_sha256'] = 'sha256:' + 'a' * 64
+    inputs['settings']['preflight']['source']['source_archive_sha256'] = 'sha256:' + 'a' * 64
+    raw = json.dumps(inputs)
+    inputs_path.write_text(raw)
+    operation['inputs_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
+    path.write_text(json.dumps(operation))
+    reference['operation_sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    calls = []
+    with pytest.raises(ManagementInstallError):
+        verify(handoff, monkeypatch, calls)
+    assert not calls
