@@ -32,6 +32,7 @@ from tests.ops.test_nebius_pool_role_restoration_live import (
 from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, gateway_retired, restore
 
 
+@pytest.mark.timeout(600)
 @pytest.mark.parametrize('phase', ['template', 'restart'])
 @pytest.mark.parametrize('damage', [None, 'uid', 'metadata', 'spec'])
 def test_recovery_cas_uses_final_controller_version_after_qualification(closed_startup, monkeypatch, phase, damage):
