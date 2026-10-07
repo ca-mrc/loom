@@ -114,7 +114,10 @@ async def test_exact_project_provisioner_and_object_only_backup_are_qualified(cl
 
 @pytest.mark.asyncio
 async def test_backup_qualification_needs_no_legacy_provisioner_key_or_grants(cloud):
-    from scripts.ops.nebius_management_cloud_scope import ManagementBackupScope, qualify_backup_material
+    from scripts.ops.nebius_management_cloud_scope import (
+        ManagementBackupScope,
+        qualify_backup_material,
+    )
 
     scope = ManagementBackupScope.model_validate({key: value for key, value in cloud.scope.items()
         if key in {'tenant_id', 'region'} or key.startswith('backup_')})

@@ -24,6 +24,19 @@ class ManagementCloudScopeError(RuntimeError):
 _ProviderId = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,128}$")]
 
 
+class ManagementBackupScope(BaseModel):
+    """Object-only recovery identity, independent of the provisioning mode."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    tenant_id: _ProviderId
+    region: str = Field(pattern=r"^[a-z]+-[a-z]+[0-9]+$")
+    backup_project_id: _ProviderId
+    backup_account_id: _ProviderId
+    backup_group_id: _ProviderId
+    backup_bucket_id: _ProviderId
+    backup_key_id: _ProviderId
+
+
 class ManagementCloudScope(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     tenant_id: _ProviderId
@@ -115,7 +128,7 @@ async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, mater
             _require(subject.sub == scope.provisioning_account_id and subject.kid == scope.provisioning_key_id)
             public = subject.parse_private_key().public_key().public_bytes(
                 serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
-            for prefix in ("provisioning", "backup"):
+            for prefix in ("provisioning",):
                 project, account, group = (getattr(scope, prefix + "_" + field) for field in ("project_id", "account_id", "group_id"))
                 container = await _read(api["projects"].get, v1.GetProjectRequest(id=project))
                 _resource(container, project, scope.tenant_id)
@@ -132,20 +145,53 @@ async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, mater
                 # accepts only account subjects. Check all account memberships
                 # above; never query a fictional nested-group relationship.
                 permits = await _pages(api["permits"].list, v1.ListAccessPermitRequest, parent_id=group)
-                if prefix == "provisioning":
-                    _require(len(permits) == 1 and permits[0]["metadata"]["parent_id"] == group
-                             and permits[0]["spec"] == {"resource_id": project, "role": "admin"})
-                else:
-                    # Object access is in the one fixed bucket policy, not IAM
-                    # editor/admin grants over a project, bucket or tenant.
-                    _require(not permits)
+                _require(len(permits) == 1 and permits[0]["metadata"]["parent_id"] == group
+                         and permits[0]["spec"] == {"resource_id": project, "role": "admin"})
             row = await _read(api["public_keys"].get, v1.GetAuthPublicKeyRequest(id=subject.kid))
             _resource(row, scope.provisioning_key_id, scope.provisioning_project_id)
             _active_key(row, account=scope.provisioning_account_id, now=observed_at)
             registered = serialization.load_pem_public_key(row["spec"]["data"].encode()).public_bytes(
                 serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
             _require(registered == public)
-            aws_id = material["loom-platform-storage"]["backup-access-key"]
+            backup = await qualify_backup_material(sdk=sdk,
+                scope=ManagementBackupScope.model_validate(scope.model_dump(include=set(ManagementBackupScope.model_fields))),
+                material=material['loom-platform-storage'], bucket_name=bucket_name, backup_bytes=backup_bytes,
+                clients=api, now=observed_at)
+            return {"provisioning_account_id": scope.provisioning_account_id, **backup}
+    except Exception:
+        raise ManagementCloudScopeError("management cloud authority unqualified") from None
+
+
+async def qualify_backup_material(*, sdk: Any, scope: ManagementBackupScope, material: dict[str, str],
+                                  bucket_name: str, backup_bytes: int, clients: dict[str, Any] | None = None,
+                                  now: datetime | None = None) -> dict[str, str]:
+    """Read-only recovery qualification shared by legacy and application managers."""
+    from nebius.api.nebius.iam import v1, v2
+    from nebius.api.nebius.storage import v1 as storage
+
+    try:
+        async with asyncio.timeout(120):
+            api: dict[str, Any] = clients if clients is not None else {
+                'projects': v1.ProjectServiceClient(sdk), 'accounts': v1.ServiceAccountServiceClient(sdk),
+                'memberships': v1.GroupMembershipServiceClient(sdk), 'permits': v1.AccessPermitServiceClient(sdk),
+                'access_keys': v2.AccessKeyServiceClient(sdk), 'buckets': storage.BucketServiceClient(sdk)}
+            observed_at = now or datetime.now(UTC)
+            project, account, group = scope.backup_project_id, scope.backup_account_id, scope.backup_group_id
+            container = await _read(api['projects'].get, v1.GetProjectRequest(id=project))
+            _resource(container, project, scope.tenant_id)
+            _require(container['status']['container_state'] == 'ACTIVE' and container['status']['suspension_state'] == 'NONE'
+                and container['spec']['region'] == container['status']['region'] == scope.region)
+            row = await _read(api['accounts'].get, v1.GetServiceAccountRequest(id=account))
+            _resource(row, account, project)
+            _require(row['status']['active'] is True)
+            groups = await _pages(api['memberships'].list_member_of, v1.ListMemberOfRequest, subject_id=account)
+            _require(len(groups) == 1)
+            _resource(groups[0], group, project)
+            # Object access belongs to one bucket policy, never project grants.
+            _require(not await _pages(api['permits'].list, v1.ListAccessPermitRequest, parent_id=group))
+            _require(set(material) == {'backup-access-key', 'backup-secret-key'}
+                and all(isinstance(value, str) and 0 < len(value.encode()) <= 65536 for value in material.values()))
+            aws_id = material["backup-access-key"]
             row = await _read(api["access_keys"].get_by_aws_id, v2.GetAccessKeyByAwsIdRequest(aws_access_key_id=aws_id))
             _resource(row, scope.backup_key_id, scope.backup_project_id)
             _active_key(row, account=scope.backup_account_id, now=observed_at)
@@ -185,7 +231,6 @@ async def qualify_cloud_material(*, sdk: Any, scope: ManagementCloudScope, mater
                 else:
                     _require(not any(rule.get("group_id") == scope.backup_group_id
                                      for rule in item.get("spec", {}).get("bucket_policy", {}).get("rules", [])))
-            return {"provisioning_account_id": scope.provisioning_account_id, "backup_bucket_id": scope.backup_bucket_id,
-                    "backup_key_id": scope.backup_key_id}
+            return {"backup_bucket_id": scope.backup_bucket_id, "backup_key_id": scope.backup_key_id}
     except Exception:
         raise ManagementCloudScopeError("management cloud authority unqualified") from None
