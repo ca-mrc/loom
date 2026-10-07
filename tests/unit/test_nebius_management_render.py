@@ -91,6 +91,33 @@ def test_pool_catalog_binding_rejects_nil_operation(management_inputs):
         ManagementDeployment.model_validate({**management_inputs[0], 'pool_catalog_operation_id': '00000000-0000-0000-0000-000000000000'})
 
 
+def test_explicit_management_tls_uses_only_namespace_local_secret(management_inputs):
+    raw, candidate, profile = management_inputs
+    result = render(({**raw, 'public_tls_secret_name': 'loom-development-management-tls'}, candidate, profile))
+    ingress, = result.files['70-public.yaml']
+    assert ingress['metadata']['namespace'] == 'loom-nebius-management'
+    assert ingress['spec']['tls'] == [{'hosts': ['manage.example.com'],
+        'secretName': 'loom-development-management-tls'}]
+    assert not any(doc['kind'] == 'Secret' for doc in documents(result))
+    assert not any(doc['kind'] == 'Deployment' and doc['metadata']['name'] != 'loom-service'
+                   for doc in documents(result))
+
+
+def test_absent_management_tls_preserves_input_digest_and_default_route(management_inputs):
+    from loom_service.environment_management.deployment import ManagementDeployment
+
+    raw, candidate, profile = management_inputs
+    explicit = {**raw, 'public_tls_secret_name': None}
+    assert 'public_tls_secret_name' not in ManagementDeployment.model_validate(explicit).model_dump(mode='json')
+    assert render((explicit, candidate, profile)) == render(management_inputs)
+
+
+@pytest.mark.parametrize('name', ['', 'staging/secret', '../secret', 'UPPER', '-tls', 'x' * 64])
+def test_management_tls_rejects_invalid_local_reference(management_inputs, name):
+    with pytest.raises(ValueError):
+        render(({**management_inputs[0], 'public_tls_secret_name': name}, *management_inputs[1:]))
+
+
 def pod(doc):
     spec = doc["spec"]
     if doc["kind"] == "CronJob":
