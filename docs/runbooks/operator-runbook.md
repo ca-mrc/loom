@@ -281,9 +281,18 @@ and conflicting attempts are rejected. Other index schemas cannot omit it.
 3. Submit the preview and retain its complete `plan` and `plan_sha256`. The server
    derives all published locations, including the mirrored Trial artifact list,
    and verifies each version's full bytes against the published and registered
-   size and hash. Exactly one surviving concrete, non-null
-   version and no delete marker may exist at each exact key; a prefix match does
-   not establish identity. Conflicting registrations, even in other namespaces,
+   size and hash. By default, exactly one surviving concrete, non-null version
+   and no delete marker may exist at each exact key. A prefix match does not
+   establish identity. For a key with multiple retained copies, explicitly add
+   `equivalent_version_ids` to that object's request: the complete unique set of
+   2–8 concrete version IDs, including the selected `version_id`. Recovery accepts
+   only the sole latest version, and only after **every listed copy** matches the
+   published size and SHA-256. Complete inventories before and after content
+   verification must match the supplied set and latest identity. Missing or extra
+   versions, delete markers, conflicting bytes and malformed receipts are rejected.
+   The full set is bound into preview, apply and audit; its order is immaterial.
+   Omit this field (or use null) for the original single-version behavior.
+   Conflicting registrations, even in other namespaces,
    are rejected. Recovery needs version-listing and exact-version read permission,
    without bucket-configuration inspection or modification. Metadata is bounded
    to 4 MiB and inventory traversal to 16 pages
@@ -300,6 +309,14 @@ and conflicting attempts are rejected. Other index schemas cannot omit it.
    is unchanged. The plan records whether each version field was absent or null.
    Replay confirms the database receipt; it is not a fresh storage
    health probe. A changed request with the same operation UUID is rejected.
+
+The 256 MiB verification budget counts **all retained copies** in the request,
+including versions that will not be adopted. For example, two 130 MiB copies
+exceed this budget even though either copy alone would fit. Splitting an
+individual object's version set across requests is forbidden: each request must
+name and verify its complete inventory. Other retained versions remain untouched;
+this operation neither registers them for deletion nor establishes their original
+upload provenance. Recovery is not whole-key cleanup or lifecycle-GC acceptance.
 
 Verification is serialized per Control Plane process, with a 90-second request
 budget. Cancellation can leave a read-only SDK call finishing in the background;
