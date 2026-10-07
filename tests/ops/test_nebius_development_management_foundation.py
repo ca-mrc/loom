@@ -71,7 +71,8 @@ def handoff(entry, installation):
             secret_store_master_keys=original['loom-platform-auth']['secret-store-master-key']))
     reference = {'operation_path': operation_path,
         'operation_sha256': hashlib.sha256(Path(operation_path).read_bytes()).hexdigest(),
-        'installation_input_digest': json.loads((state / 'installation.json').read_text())['input_digest']}
+        'installation_input_digest': json.loads((state / 'installation.json').read_text())['input_digest'],
+        'qualification_digest': request.qualification_digest}
     return reference, manager, api, state, anchor
 
 

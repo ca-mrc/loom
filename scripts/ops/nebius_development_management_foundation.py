@@ -7,6 +7,7 @@ Publication and provider qualification remain the connected caller's obligations
 """
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import re
@@ -57,6 +58,7 @@ class RetainedDevelopmentReference(BaseModel):
     operation_path: Path
     operation_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
     installation_input_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    qualification_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
 
     @field_validator('operation_path')
     @classmethod
@@ -178,6 +180,16 @@ def load_retained_foundation(reference: RetainedDevelopmentReference) -> Retaine
                 'resource_uids': {key: item['uid'] for key, item in journal['resources'].items()}}
             if record['phases'][phase]['receipt'] != receipt:
                 raise ValueError()
+        # Reconstruct the original request's preimage, using its retained
+        # credential/qualification fingerprints, not today's operator files.
+        # Merely pinning a newly edited operation must not bless a different
+        # source/configuration under an old installation anchor.
+        storage = phases['supplied']['resources']['Secret:loom-platform-storage']['desired']['data']
+        selection = DevelopmentStageInput(inputs.config, inputs.candidate, inputs.profile, inputs.keyring,
+            {key: base64.b64decode(value, validate=True).decode() for key, value in storage.items()})
+        original = DevelopmentInstallRequest(inputs.binding, selection, reference.qualification_digest)
+        if digest(asdict(original)) != reference.installation_input_digest:
+            raise ValueError()
         return RetainedDevelopmentState(inputs, binding, bootstrap, phases, files)
     except Exception:
         raise ManagementInstallError('retained development installation history unqualified') from None
