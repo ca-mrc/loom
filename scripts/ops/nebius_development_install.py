@@ -62,9 +62,14 @@ class DevelopmentInstallRequest:
             raise DevelopmentInstallError("development qualification digest invalid")
 
 
-class DevelopmentStorageAPI(DevelopmentStageAPI, Protocol):
+class DevelopmentStorageObservationAPI(Protocol):
+    def verify_identity(self, binding: DevelopmentResourceBinding) -> None: ...
     def get_database_claim(self) -> dict[str, Any] | None: ...
     def get_database_volume(self) -> dict[str, Any] | None: ...
+
+
+class DevelopmentStorageAPI(DevelopmentStageAPI, DevelopmentStorageObservationAPI, Protocol):
+    """Installer transport also supplies staging; retained inspection is read-only."""
 
 
 class DevelopmentInstallationAPI(Protocol):
@@ -148,7 +153,7 @@ def _prepare_storage(binding: DevelopmentResourceBinding, revision: str, api: De
 
 
 def _storage_observation(request: DevelopmentInstallRequest, binding: DevelopmentResourceBinding,
-                         api: DevelopmentStorageAPI) -> dict[str, Any] | None:
+                         api: DevelopmentStorageObservationAPI) -> dict[str, Any] | None:
     api.verify_identity(binding)
     claim, volume = api.get_database_claim(), api.get_database_volume()
     if claim is None:

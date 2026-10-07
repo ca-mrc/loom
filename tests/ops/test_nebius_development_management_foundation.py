@@ -1,7 +1,6 @@
 """Handoff uses installed source-bound history, not a new rendering or staging."""
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import ssl
@@ -14,27 +13,33 @@ import pytest
 from tests.ops.test_nebius_application_setup import application_material as application_material
 from tests.ops.test_nebius_candidate import source_checkout as source_checkout
 from tests.ops.test_nebius_development_cloud import cloud as cloud
-from tests.ops.test_nebius_development_entry import entry as foundation_entry
-from tests.ops.test_nebius_development_install import InstallationAPI, storage_ready, workloads_ready
+from tests.ops.test_nebius_development_entry import entry as entry
+from tests.ops.test_nebius_development_install import (
+    InstallationAPI,
+    storage_ready,
+    workloads_ready,
+)
 from tests.ops.test_nebius_development_live import live as live
-from tests.ops.test_nebius_development_management_install import installation as manager_installation
+from tests.ops.test_nebius_development_management_install import installation as installation
 from tests.ops.test_nebius_development_preflight import preflight as preflight
 from tests.ops.test_nebius_development_preflight import published_source as published_source
 from tests.ops.test_nebius_ingress_operation import inventory as inventory
 from tests.ops.test_nebius_management_supplied import material as material
 from tests.unit.test_nebius_candidate_catalog import publication as publication
 from tests.unit.test_nebius_development_foundation import development_inputs as development_inputs
-from tests.unit.test_nebius_management_render import application_management_inputs as application_management_inputs
+from tests.unit.test_nebius_management_render import (
+    application_management_inputs as application_management_inputs,
+)
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
 @pytest.fixture
-def handoff(foundation_entry, manager_installation):
+def handoff(entry, installation):
     from scripts.ops.nebius_development_entry import load_inputs
     from scripts.ops.nebius_development_install import install_private_development
 
-    operation, _, operation_path, _ = foundation_entry
+    operation, _, operation_path, _ = entry
     inputs, request, _ = load_inputs(operation)
     api = InstallationAPI(request)
     state, anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
@@ -51,7 +56,7 @@ def handoff(foundation_entry, manager_installation):
     workloads_ready(api, 'Deployment')
     result = install()
     original = json.loads((state / 'bootstrap/bootstrap.json').read_text())['material']
-    manager = manager_installation[0]
+    manager = installation[0]
     raw = manager.deployment.model_dump(mode='json')
     raw['installation']['foundation']['platform_config_json'] = json.dumps(inputs.config)
     app = raw['installation']['applications']
