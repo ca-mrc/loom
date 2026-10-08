@@ -24,7 +24,10 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.dispatch_audit import request_dispatch_audit
-from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
+from loom_llm_gateway.execution_attempt_dispatch import (
+    authorize_trial_execution_dispatch,
+    authorize_trial_model,
+)
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -68,12 +71,6 @@ async def gemini_generate_content(
             status_code=403,
             detail="step-scoped token required",
         )
-    if settings.google_api_key is None:
-        raise HTTPException(
-            status_code=503,
-            detail="google_api_key not configured on Gateway",
-        )
-
     # Parse the model name out of "<name>:<action>" — e.g. the path
     # `gemini-2.0-flash:generateContent` yields model_name=gemini-2.0-flash,
     # action=generateContent. We record cost against model_name.
@@ -83,6 +80,12 @@ async def gemini_generate_content(
             detail="path must be <model>:<action>, e.g. gemini-2.0-flash:generateContent",
         )
     model_name, action = model_path.split(":", 1)
+    await authorize_trial_model(request, ctx, provider="google", model=model_name)
+    if settings.google_api_key is None:
+        raise HTTPException(
+            status_code=503,
+            detail="google_api_key not configured on Gateway",
+        )
     # Plan 9 audit fix: streaming variant loses the final usage block on
     # mid-stream connection close; refuse in v1.
     if action.startswith("stream"):

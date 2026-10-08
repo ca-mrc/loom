@@ -41,6 +41,7 @@ from loom_llm_gateway.attempt_deadline import (
 from loom_llm_gateway.config import GatewaySettings
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.dispatch_audit import request_dispatch_audit
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_model
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -88,15 +89,16 @@ async def messages(
             detail="execution-attempt tokens are restricted to the fenced Responses route",
         )
 
+    model_name = payload.get("model")
+    if not isinstance(model_name, str) or not model_name:
+        raise HTTPException(status_code=400, detail="`model` is required")
+    await authorize_trial_model(request, ctx, provider="anthropic", model=model_name)
     if settings.anthropic_api_key is None:
         raise HTTPException(
             status_code=503,
             detail="anthropic_api_key not configured on Gateway",
         )
     api_key = settings.anthropic_api_key.get_secret_value()
-    model_name = payload.get("model")
-    if not isinstance(model_name, str) or not model_name:
-        raise HTTPException(status_code=400, detail="`model` is required")
 
     if payload.get("stream"):
         return await _stream_messages(

@@ -60,6 +60,7 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.dispatch_audit import dispatch_request_headers, request_dispatch_audit
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_model
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.model_switch_correlation import (
     extract_and_strip_loom_fields,
@@ -135,6 +136,7 @@ async def openai_chat_facade(
 
     if not isinstance(payload.get("model"), str) or not payload["model"]:
         raise HTTPException(status_code=400, detail="`model` is required")
+    await authorize_trial_model(request, ctx, provider="openai", model=payload["model"])
 
     client_requested_stream = bool(payload.get("stream"))
     upstream_payload = dict(payload)

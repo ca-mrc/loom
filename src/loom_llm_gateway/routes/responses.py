@@ -33,6 +33,7 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.dialect import DIALECTS, TokenUsage
 from loom_llm_gateway.dispatch_audit import request_dispatch_audit
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_model
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.provider_dispatch import (
     ProviderDispatchError,
@@ -296,6 +297,7 @@ async def responses(
     model_name = payload.get("model")
     if not isinstance(model_name, str) or not model_name:
         raise HTTPException(status_code=400, detail="`model` is required")
+    await authorize_trial_model(request, ctx, provider="openai", model=model_name)
     provider_request_id = _execution_attempt_provider_request_id(
         ctx,
         x_loom_provider_request_id,
