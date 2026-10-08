@@ -43,16 +43,30 @@ def documents(namespace, catalog):
 
 
 @pytest.mark.timeout(180)
-def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build_inputs):
+@pytest.mark.parametrize('runtime_overhead', [None, 50, 500])
+def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build_inputs, runtime_overhead):
     from kubernetes import client, utils
     from kubernetes.client.exceptions import ApiException
 
     namespace, catalog, pods = policy_inputs(build_inputs)
+    if runtime_overhead is not None:
+        raw = catalog.model_dump(mode='json')
+        for kind in ('task_images', 'application_images'):
+            for profile in raw[kind]:
+                profile['target']['runtime_class_name'] = 'build-runtime-fixture'
+                profile['runtime_class_overhead'] = {'cpu_millis': 50, 'memory_mib': 32, 'storage_mib': 8}
+        catalog = PoolProfileCatalog.model_validate(raw)
+        for pod in pods:
+            pod['spec']['runtimeClassName'] = 'build-runtime-fixture'
     policies = documents(namespace, catalog)
     cluster = _start_k3s(ephemeral_storage_floor='1Gi')
     try:
         _, core, _ = _load_client(cluster)
         admission = client.AdmissionregistrationV1Api(core.api_client)
+        if runtime_overhead is not None:
+            client.NodeV1Api(core.api_client).create_runtime_class({'apiVersion': 'node.k8s.io/v1',
+                'kind': 'RuntimeClass', 'metadata': {'name': 'build-runtime-fixture'}, 'handler': 'runc',
+                'overhead': {'podFixed': {'cpu': f'{runtime_overhead}m', 'memory': '32Mi', 'ephemeral-storage': '8Mi'}}})
         client.SchedulingV1Api(core.api_client).create_priority_class({'apiVersion': 'scheduling.k8s.io/v1',
             'kind': 'PriorityClass', 'metadata': {'name': 'unapproved-build-priority'}, 'value': 1000000,
             'globalDefault': False, 'preemptionPolicy': 'PreemptLowerPriority'})
@@ -87,6 +101,11 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
             assert time.monotonic() < deadline, 'build policy was not enforced'
             time.sleep(0.1)
         for pod in pods:
+            if runtime_overhead == 500:
+                with pytest.raises(ApiException) as denied:
+                    core.create_namespaced_pod(namespace, pod, dry_run='All')
+                assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
+                continue
             core.create_namespaced_pod(namespace, pod, dry_run='All')
             for damage in ('host-network', 'host-pid', 'process-sharing', 'token', 'host-volume', 'credential-mount',
                     'extra-container', 'extra-init', 'trusted-command', 'trusted-image', 'trusted-env',
@@ -143,6 +162,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 with pytest.raises(ApiException) as denied:
                     core.create_namespaced_pod(namespace, changed, dry_run='All')
                 assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body, (damage, denied.value.body)
+        if runtime_overhead == 500:
+            return
         # This namespace-scoped policy must not govern a foreign/staging namespace.
         core.patch_namespace('unrelated-builds', {'metadata': {'labels': {'pod-security.kubernetes.io/enforce': 'privileged'}}})
         invalid['metadata']['namespace'] = 'unrelated-builds'
