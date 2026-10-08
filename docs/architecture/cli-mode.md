@@ -49,6 +49,39 @@ launch leaves the CLI login saved and requests a fresh browser login. This requi
 the managed child protocol in the deployed candidate; login alone is not proof
 that shared task execution or installed multi-owner acceptance is enabled.
 
+## Personal development applications
+
+`loom dev app` manages independently versioned frontend/API applications sharing
+development data. Use a management context for these commands; personal API
+instances do not expose management routes. The older `loom dev create` and
+`loom dev login` commands above use the separate isolated-environment contract.
+
+Before uploading source or requesting a build, inspect the selected manager:
+
+```sh
+loom --context management dev app capabilities
+loom --context management dev app capabilities --json
+```
+
+The authenticated, read-only report distinguishes application lifecycle, source
+upload, and image-build configuration. Lifecycle and build workers independently
+report healthy, unhealthy, or unavailable. A manager can support source upload
+without an installed builder. Missing capabilities or unhealthy workers require
+the platform operator's attention; the command does not configure or restart them.
+
+The report covers the management process only. It does not probe object storage,
+cloud permissions, pool admission, application readiness, or task execution.
+`execution` remains `not_checked`, including when a healthy builder is connected
+to a closed pool. A successful command means the report was read successfully,
+not that every capability is configured. `--json` returns the versioned
+`loom.nebius-application-capabilities.v1` contract for automation.
+
+Use `loom dev app status APPLICATION_ID` for retained application/operation state
+and `loom dev app build-status BUILD_ID` for a particular build. Personal
+application versions select frontend/API images; they do not replace shared
+controllers or select a task's execution image. See the
+[application contract](nebius-primary-platform.md#personal-application-control).
+
 ## Watching hosted trials
 
 `loom eval trial show TRIAL_ID --timeline` displays the public progress stage,
