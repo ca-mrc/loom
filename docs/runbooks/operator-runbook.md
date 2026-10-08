@@ -428,6 +428,56 @@ rolls back the entire repair; retain the reason and investigate before obtaining
 a fresh preview. Never replace this path with manual SQL or replay an old repair
 migration. Source-spool retention remains independent and may already be complete.
 
+##### Single large-object operator recovery
+
+For an individual historical reference that exceeds the ordinary API budget,
+the installed Control Plane provides
+`python -m loom_control_plane.large_object_version_recovery`. It accepts exactly
+one registry object, at most two complete equivalent versions, and at most
+**4 GiB summed across all copies**. It uses the existing 90-second full-byte
+verification deadline and 1 MiB read chunks. The ordinary HTTP limit remains
+256 MiB; there is no configurable byte-limit override.
+
+Use the published, installed Control Plane image through the authorized
+operator transport. Verify its immutable source and mounted platform directory,
+actual database schema, team and lifecycle scope before preparing the request.
+All ordinary source, ownership, GC, retention and metadata predicates above
+still apply. This does not authorize recovery of another team's data or another
+task execution.
+
+1. Prepare the ordinary preview request with one exact registry object, adding
+   `mode: "single_large_object_v1"`, `team_id`, the full 40-character installed
+   `candidate_sha`, and its four-digit `schema_head`. Supply the complete
+   inventory in `equivalent_version_ids` when two copies exist. Keep the request
+   below 16 KiB. Pass its JSON as `--request-json` and the installed platform
+   directory as `--platform`. With neither mode flag, the command only previews.
+2. Retain and inspect the complete plan. Save an apply request with the same
+   operation UUID and identity, `apply: true` and its exact `plan_sha256`.
+   Before submission, persist an exclusive, fsynced owner-local attempt marker
+   containing the request digest and installation identity. Invoke the command
+   once with `--apply`; retain its receipt and exit status.
+3. Observe the same apply document with `--readback` (without `--apply`). This
+   path uses read-only database transactions, does not read storage and never
+   calls recovery. `committed` requires the matching audit and unchanged full
+   post-state. `not_committed` means that operation's audit was absent in the
+   observed snapshot; it is not permission to replay an uncertain command.
+   Readback can use a later installed candidate with a matching current source
+   and database schema; historical request and audit identity remain exact.
+4. Verify ordinary downloads, retained versions, the audit, and unchanged
+   outcomes, attempts and retention. Keep the issue open until this consumer
+   acceptance is complete.
+
+Preview and apply hold the shared rollout admission lock and an independent
+nonblocking advisory lock that serializes large recovery across replicas.
+`rollout_guard_held` or `large_recovery_busy` refuses without changing an owner's
+guard. Storage reads hold no lifecycle row/table locks. The final apply uses
+the lock-owning transaction; losing that database connection cannot commit on
+a replacement connection. Cancellation retains locks until its SDK reader
+actually exits. A dedicated-process hard deadline of 150 seconds terminates
+a stuck reader; exit 124, transport loss or an incomplete receipt requires
+audit readback and investigation. Never retry automatically or clear the
+attempt marker to obtain another apply.
+
 The database commit is atomic; object storage and PostgreSQL do not share a
 transaction. Full content verification and a second complete version inventory
 precede the database fence. The active pinned authority prevents supported GC

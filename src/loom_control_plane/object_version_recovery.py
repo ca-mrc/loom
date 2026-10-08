@@ -515,6 +515,7 @@ def _verify_objects(client: Any, plan: dict[str, Any]) -> None:
 class ObjectVersionRecovery:
     def __init__(self) -> None:
         self._verification_slot = asyncio.Semaphore(1)
+        self._verification_workers: set[asyncio.Future[None]] = set()
 
     async def _verify(self, client: Any, plan: dict[str, Any]) -> None:
         # Cancellation abandons read-only storage work, never database work. Keep
@@ -522,8 +523,10 @@ class ObjectVersionRecovery:
         async with asyncio.timeout(VERIFICATION_SECONDS):
             await self._verification_slot.acquire()
             future = asyncio.get_running_loop().run_in_executor(None, _verify_objects, client, plan)
+            self._verification_workers.add(future)
 
             def finished(result: asyncio.Future[None]) -> None:
+                self._verification_workers.discard(result)
                 self._verification_slot.release()
                 if not result.cancelled():
                     result.exception()
@@ -531,9 +534,37 @@ class ObjectVersionRecovery:
             future.add_done_callback(finished)
             await asyncio.shield(future)
 
+    async def wait_for_verification(self) -> None:
+        """Keep external fences until abandoned read workers actually finish."""
+        cancelled = False
+        while self._verification_workers:
+            try:
+                await asyncio.shield(asyncio.gather(*self._verification_workers, return_exceptions=True))
+            except asyncio.CancelledError:
+                # Repeated cancellation must not release the caller's DB locks.
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def readback(
+        self, request: RecoveryRequest, *, sessions: async_sessionmaker[AsyncSession],
+    ) -> dict[str, Any]:
+        """Observe one exact audit without storage verification or repair replay."""
+        _require(request.apply, "readback_requires_apply_request")
+        async with asyncio.timeout(15), sessions() as session:
+            await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            await session.execute(text("SET LOCAL statement_timeout = '5s'"))
+            state = await _load(session, request, locked=False)
+            audit = await session.get(AdminAuditEvent, request.operation_id)
+            if audit is None:
+                return {"status": "not_committed", "operation_id": str(request.operation_id)}
+            result = self._replay(audit, request, state, metadata_digest(request.identity()))
+            return {**result, "status": "committed"}
+
     async def recover(
         self, request: RecoveryRequest, *, sessions: async_sessionmaker[AsyncSession],
         client: Any, actor: str, artifacts_bucket: str, trajectories_bucket: str,
+        apply_session: AsyncSession | None = None,
     ) -> dict[str, Any]:
         request_digest = metadata_digest(request.identity())
         async with asyncio.timeout(15), sessions() as session:
@@ -551,27 +582,41 @@ class ObjectVersionRecovery:
         await self._verify(client, plan)
         if not request.apply:
             return {"status": "preview", "plan_sha256": plan_digest, "plan": plan}
+        if apply_session is not None:
+            # Installed operators own this transaction and its admission locks.
+            # A lost lock connection must never commit on a different connection.
+            _require(apply_session.in_transaction(), "apply_transaction_required")
+            async with asyncio.timeout(15):
+                return await self._apply(request, apply_session, plan, plan_digest, request_digest,
+                    actor=actor, artifacts_bucket=artifacts_bucket, trajectories_bucket=trajectories_bucket)
         async with asyncio.timeout(15), sessions() as session, session.begin():
             # READ COMMITTED after waiting on the locks observes earlier winners.
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
-            state = await _load(session, request, locked=True)
-            audit = await session.get(AdminAuditEvent, request.operation_id)
-            if audit is not None:
-                return self._replay(audit, request, state, request_digest)
-            current_plan, storage, index = _plan(state, request, artifacts_bucket=artifacts_bucket,
-                                                 trajectories_bucket=trajectories_bucket)
-            _require(metadata_digest(current_plan) == plan_digest, "state_changed_during_verification")
-            state.artifact.storage, state.trial.trajectory_index = storage, index
-            versions = {item.registry_id: item.version_id for item in request.objects}
-            for obj in state.objects:
-                obj.version_id = versions[obj.id]
-            await session.flush()
-            session.add(AdminAuditEvent(id=request.operation_id, actor=actor, action=ACTION,
-                target_type="artifact", target_id=str(request.artifact_id),
-                request_id=str(request.operation_id), event_metadata={
-                    "request_sha256": request_digest, "plan_sha256": plan_digest, "plan": plan,
-                    "after_state_sha256": state.digest(),
-                }))
+            return await self._apply(request, session, plan, plan_digest, request_digest,
+                actor=actor, artifacts_bucket=artifacts_bucket, trajectories_bucket=trajectories_bucket)
+
+    async def _apply(
+        self, request: RecoveryRequest, session: AsyncSession, plan: dict[str, Any],
+        plan_digest: str, request_digest: str, *, actor: str, artifacts_bucket: str, trajectories_bucket: str,
+    ) -> dict[str, Any]:
+        state = await _load(session, request, locked=True)
+        audit = await session.get(AdminAuditEvent, request.operation_id)
+        if audit is not None:
+            return self._replay(audit, request, state, request_digest)
+        current_plan, storage, index = _plan(state, request, artifacts_bucket=artifacts_bucket,
+                                             trajectories_bucket=trajectories_bucket)
+        _require(metadata_digest(current_plan) == plan_digest, "state_changed_during_verification")
+        state.artifact.storage, state.trial.trajectory_index = storage, index
+        versions = {item.registry_id: item.version_id for item in request.objects}
+        for obj in state.objects:
+            obj.version_id = versions[obj.id]
+        await session.flush()
+        session.add(AdminAuditEvent(id=request.operation_id, actor=actor, action=ACTION,
+            target_type="artifact", target_id=str(request.artifact_id),
+            request_id=str(request.operation_id), event_metadata={
+                "request_sha256": request_digest, "plan_sha256": plan_digest, "plan": plan,
+                "after_state_sha256": state.digest(),
+            }))
         return {"status": "applied", "operation_id": str(request.operation_id),
                 "plan_sha256": plan_digest, "plan": plan}
 

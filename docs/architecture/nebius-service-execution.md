@@ -673,7 +673,20 @@ Replay requires an identical request and unchanged recorded post-state. This
 adopts verified surviving versions without inventing original write receipts,
 changing Trial outcomes or retention, or restarting execution. The storage
 observation and database transaction are separate; no storage IO occurs while
-the repair holds database locks.
+the repair holds lifecycle row or table locks.
+
+An installed operator can explicitly select `single_large_object_v1` for one
+object with at most two complete copies and at most 4 GiB across those copies.
+The ordinary HTTP model rejects this mode and keeps its 256 MiB limit. The
+operator request additionally binds the team, installed candidate and schema;
+the same ownership, retention, full-hash and final-state checks still apply.
+The command holds shared rollout admission and a separate database-wide
+nonblocking advisory lock through verification and commit. Apply uses the same
+connection that owns those locks, so connection loss cannot leave a later
+unfenced commit. Cancellation drains the read worker before releasing its
+locks, bounded by a 150-second dedicated-process deadline. A separate read-only
+audit command establishes the exact operation's committed state without
+replaying repair. See the [large-object operator procedure](../runbooks/operator-runbook.md#single-large-object-operator-recovery).
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
