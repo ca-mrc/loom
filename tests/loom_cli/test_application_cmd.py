@@ -252,3 +252,20 @@ def test_capabilities_network_failure_recommends_read_only_retry(application_htt
     output = capsys.readouterr()
     assert output.out == "" and "read-only" in output.err
     assert "printed retry command" not in output.err and "private upstream detail" not in output.err
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_capabilities_http_errors_never_print_arbitrary_server_material(application_http, capsys, status):
+    responses, requests = application_http
+    responses["GET", "/api/v1/application-capabilities"] = httpx.Response(status, json={
+        "detail": {"credential": "fixture-must-not-print"},
+    })
+    assert main(["dev", "app", "capabilities", "--json"]) == 1
+    assert len(requests) == 1 and requests[0].method == "GET"
+    output = capsys.readouterr()
+    assert output.out == "" and "fixture-must-not-print" not in output.err
+    assert f"HTTP {status}" in output.err
+    if status == 404:
+        assert "management context" in output.err
+    elif status in {401, 403}:
+        assert "read:own" in output.err

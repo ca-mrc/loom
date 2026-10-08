@@ -70,9 +70,19 @@ class ApplicationClient:
         self.http.close()
 
     def capabilities(self) -> ApplicationCapabilitiesV1:
-        return ApplicationCapabilitiesV1.model_validate(assert_2xx(
-            self.http.get("/api/v1/application-capabilities"), action="read personal application capabilities",
-        ))
+        response = self.http.get("/api/v1/application-capabilities")
+        if response.status_code // 100 != 2:
+            # Error bodies are outside the typed report and can contain private
+            # upstream material. This diagnostic needs only a bounded status.
+            hint = "Try this read-only command again or ask the platform operator to inspect the manager."
+            if response.status_code in {401, 403}:
+                hint = "Use an authenticated management context with an attributed user and read:own permission."
+            elif response.status_code == 404:
+                hint = "Select a management context whose server supports application capabilities."
+            raise server_client.HttpStatusError(
+                f"Could not read application capabilities: HTTP {response.status_code}. {hint}",
+            )
+        return ApplicationCapabilitiesV1.model_validate(response.json())
 
     def create_source_upload(self, source: PackagedApplicationSource, *, idempotency_key: str) -> ApplicationSourceUploadV1:
         request = _source_request(source)
