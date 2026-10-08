@@ -17,12 +17,16 @@ from tests.integration.test_nebius_pool_installation import installation as pool
 from tests.ops.test_nebius_development_management_retained import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_management_retained import application_material as application_material
+from tests.ops.test_nebius_development_management_retained import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_management_retained import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_management_retained import cloud as cloud
 from tests.ops.test_nebius_development_management_retained import installation as installation
 from tests.ops.test_nebius_development_management_retained import inventory as inventory
-from tests.ops.test_nebius_development_management_retained import management_inputs as management_inputs
+from tests.ops.test_nebius_development_management_retained import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_development_management_retained import manager_entry as manager_entry
 from tests.ops.test_nebius_development_management_retained import material as material
 from tests.ops.test_nebius_development_management_retained import platform_inputs as platform_inputs
@@ -49,13 +53,18 @@ def configured(retained):
     config['installation_id'] = retained[1]['installation_id']
     foundation = retained[3].deployment.installation.foundation.platform_config
     config['cluster_id'] = foundation['cluster_id']
+    config['node_group_id'] = foundation['execution_node_group_id']
+    config['node_selector']['nebius.com/node-group-id'] = config['node_group_id']
     participant, = config['participants']
     participant['installation_id'] = config['installation_id']
+    participant['environment_id'] = str(retained[3].deployment.installation.applications.shared.data_environment_id)
     participant['execution_namespace']['name'] = foundation['execution_namespace']
     participant['build_namespace']['name'] = foundation['execution_namespace'] + '-build'
     config['profiles']['execution'][0]['runtime']['namespace'] = participant['execution_namespace']['name']
+    config['profiles']['execution'][0]['runtime']['node_selector'] = copy.deepcopy(config['node_selector'])
     build = config['profiles']['task_images'][0]
     build['target']['namespace'] = build['settings']['namespace'] = participant['build_namespace']['name']
+    build['target']['node_selector'] = copy.deepcopy(config['node_selector'])
     return RetainedManagementReference.model_validate(retained[0]), PoolInstallation.model_validate(config)
 
 
@@ -69,8 +78,10 @@ class Server:
         self.calls = []
         self.complete = False
         self.failure = None
+        self.failure_kind = None
         self.pod = None
         self.damage_report = False
+        self.drift_on_log = False
 
     def handle(self, message):
         self.calls.append(message)
@@ -89,6 +100,10 @@ class Server:
                 'name': name, 'uid': identities[name], 'labels': {
                     'loom.nebius/management-installation': binding.installation_id,
                     'pod-security.kubernetes.io/enforce': 'restricted'}}})
+        if path.startswith('/api/v1/persistentvolumes/'):
+            assert method == 'GET'
+            value = self.store.resources.get('PersistentVolume:' + name)
+            return httpx.Response(404) if value is None else httpx.Response(200, json=copy.deepcopy(value))
         assert '/namespaces/' + binding.namespace + '/' in path
         if method == 'POST':
             doc = json.loads(message.content)
@@ -96,7 +111,7 @@ class Server:
             assert doc['metadata']['name'].startswith('loom-pool-registration-')
             if message.url.params.get('dryRun') == 'All':
                 return httpx.Response(201, json=self.store.default_resource(doc))
-            self.store.failure = self.failure
+            self.store.failure = self.failure if self.failure_kind in {None, doc['kind']} else None
             try:
                 self.store.create_resource(doc)
             except OSError:
@@ -119,6 +134,9 @@ class Server:
                 return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {},
                     'items': [self.pod]})
             if name == 'log':
+                if self.drift_on_log:
+                    volume, = [doc for doc in self.store.resources.values() if doc['kind'] == 'PersistentVolume']
+                    volume['spec']['csi']['volumeHandle'] = 'foreign-disk'
                 spec = registration.spec
                 report = {'schema_version': 'loom.pool-installation-receipt.v1', 'operation_id': str(spec.operation_id),
                     'pool_id': str(spec.pool_id), 'installation_sha256': hashlib.sha256(
@@ -129,7 +147,8 @@ class Server:
             return httpx.Response(200, json=self.pod)
         resource = path.split('/')[-2]
         kinds = {'secrets': 'Secret', 'services': 'Service', 'statefulsets': 'StatefulSet',
-            'deployments': 'Deployment', 'configmaps': 'ConfigMap', 'jobs': 'Job'}
+            'deployments': 'Deployment', 'configmaps': 'ConfigMap', 'jobs': 'Job',
+            'persistentvolumeclaims': 'PersistentVolumeClaim'}
         value = copy.deepcopy(self.store.resources.get(kinds[resource] + ':' + name))
         if value is None:
             return httpx.Response(404)
@@ -143,7 +162,9 @@ def registered(retained):
     reference, spec = configured(retained)
     request = module().prepare_registration(reference=reference, spec=spec)
     live = importlib.import_module('scripts.ops.nebius_development_pool_registration_live')
-    server = Server(request, retained[4].store.resources)
+    resources = {**retained[4].store.resources,
+        **{'Secret:' + name: doc for name, doc in retained[4].bootstrap.secrets.secrets.items()}}
+    server = Server(request, resources)
     api = live.HTTPSDevelopmentPoolRegistrationAPI(request=request,
         api_server=request.retained.inputs.operator_connection.endpoint, ssl_context=ssl.create_default_context())
     api.client.close()
@@ -207,7 +228,71 @@ def test_rebound_database_credentials_cannot_redirect_registration(registered):
     assert not registered.server.store.creates
 
 
-@pytest.mark.parametrize('damage', ['installation', 'cluster', 'staging', 'namespace'])
+@pytest.mark.parametrize('damage', ['Service:loom-postgres', 'StatefulSet:loom-postgres', 'Deployment:loom-service'])
+def test_same_uid_database_or_manager_drift_blocks_registration(registered, damage):
+    document = registered.server.store.resources[damage]
+    if document['kind'] == 'Service':
+        document['spec']['selector'] = {'app': 'foreign-database'}
+    else:
+        document['spec']['template']['spec']['containers'][0]['image'] = 'foreign.example.com/changed@sha256:' + 'a' * 64
+    with pytest.raises(ValueError, match='development pool registration'):
+        run(registered)
+    assert not registered.server.store.creates
+
+
+@pytest.mark.parametrize('damage', ['config', 'shared-secret', 'claim', 'volume', 'disk'])
+def test_rebound_runtime_configuration_or_database_storage_blocks_registration(registered, damage):
+    resources = registered.server.store.resources
+    if damage == 'config':
+        document, = [doc for doc in resources.values() if doc['kind'] == 'ConfigMap'
+            and doc['metadata']['name'].startswith('loom-management-applications-')]
+        value = json.loads(document['data']['installation.json'])
+        value['applications']['shared']['data_environment_id'] = str(uuid4())
+        document['data']['installation.json'] = json.dumps(value)
+    elif damage == 'shared-secret':
+        document, = [doc for doc in resources.values() if doc['kind'] == 'Secret'
+            and doc['metadata']['name'].startswith('loom-applications-shared-')]
+    elif damage == 'claim':
+        document = resources['PersistentVolumeClaim:data-loom-postgres-0']
+    else:
+        document, = [doc for doc in resources.values() if doc['kind'] == 'PersistentVolume']
+    if damage == 'disk':
+        document['spec']['csi']['volumeHandle'] = 'foreign-disk'
+    else:
+        document['metadata']['uid'] = str(uuid4())
+    with pytest.raises(ValueError, match='development pool registration'):
+        run(registered)
+    assert not registered.server.store.creates
+
+
+def test_tls_successor_and_retired_initial_credentials_preserve_registration(registered, retained, monkeypatch):
+    from scripts.ops.nebius_development_management_renewal import (
+        RenewalRequest,
+        renew_management_tls,
+    )
+    from tests.ops.test_nebius_development_management_renewal import RenewalAPI, new_material
+
+    previous = registered.request
+    renewal = RenewalRequest(retained=previous.retained, material=new_material(monkeypatch),
+        operation_id=uuid4(), qualification_digest='sha256:' + 'b' * 64)
+    renewal_api = RenewalAPI(retained[4].store)
+    assert renew_management_tls(request=renewal, api=renewal_api, execute=True)[
+        'status'] == 'development_management_tls_renewed'
+    registered.server.store.resources.update(copy.deepcopy(renewal_api.store.resources))
+    registered.server.store.resources['Ingress:loom-management'] = copy.deepcopy(renewal_api.ingress)
+    inputs = retained[2]
+    obsolete = {inputs['operator_connection']['credentials_file'], inputs['operator_connection']['ca_file'],
+        inputs['operator_cloud_credentials'], *inputs['application_files'].values()}
+    for path in map(Path, obsolete):
+        path.unlink()
+    registered.request = module().prepare_registration(reference=previous.reference, spec=previous.registration.spec)
+    assert registered.request.registration == previous.registration
+    registered.server.complete = True
+    assert run(registered)['status'] == 'development_pool_registered_closed'
+    assert len(registered.server.store.creates) == 2
+
+
+@pytest.mark.parametrize('damage', ['installation', 'cluster', 'staging', 'namespace', 'shared-environment', 'node-group'])
 def test_foreign_registration_scope_is_rejected(retained, damage):
     reference, spec = configured(retained)
     raw = spec.model_dump(mode='json')
@@ -218,9 +303,16 @@ def test_foreign_registration_scope_is_rejected(retained, damage):
         raw['cluster_id'] = 'foreign-cluster'
     elif damage == 'staging':
         raw['participants'][0]['environment_class'] = 'staging'
-    else:
+    elif damage == 'namespace':
         raw['participants'][0]['execution_namespace']['name'] = 'foreign-execution'
         raw['profiles']['execution'][0]['runtime']['namespace'] = 'foreign-execution'
+    elif damage == 'shared-environment':
+        raw['participants'][0]['environment_id'] = str(uuid4())
+    else:
+        raw['node_group_id'] = 'foreign-node-group'
+        raw['node_selector']['nebius.com/node-group-id'] = raw['node_group_id']
+        raw['profiles']['execution'][0]['runtime']['node_selector'] = copy.deepcopy(raw['node_selector'])
+        raw['profiles']['task_images'][0]['target']['node_selector'] = copy.deepcopy(raw['node_selector'])
     with pytest.raises(ValueError, match='development pool registration'):
         module().prepare_registration(reference=reference, spec=type(spec).model_validate(raw))
 
@@ -241,14 +333,59 @@ def test_unknown_create_never_starts_a_second_registration(registered, failure):
         assert len(registered.server.store.creates) == 2
 
 
-@pytest.mark.parametrize('damage', ['parent', 'stage', 'original', 'receipt'])
+@pytest.mark.parametrize('failure', ['before', 'after'])
+def test_unknown_job_create_is_readback_only_after_process_restart(registered, failure):
+    from scripts.ops.nebius_development_pool_registration_live import (
+        HTTPSDevelopmentPoolRegistrationAPI,
+    )
+
+    registered.server.failure_kind = 'Job'
+    registered.server.failure = failure
+    if failure == 'before':
+        with pytest.raises(ValueError):
+            run(registered)
+    else:
+        assert run(registered)['status'] == 'pending_registration'
+    assert len(registered.server.store.creates) == 2
+    previous = registered.request
+    fresh = module().prepare_registration(reference=previous.reference, spec=previous.registration.spec)
+    api = HTTPSDevelopmentPoolRegistrationAPI(request=fresh, api_server=registered.api.api_server,
+        ssl_context=ssl.create_default_context())
+    api.client.close()
+    api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(registered.server.handle))
+    registered.server.failure = None
+    registered.server.complete = True
+    with api:
+        if failure == 'before':
+            with pytest.raises(ValueError):
+                module().register_development_pool(request=fresh, api=api, execute=True)
+        else:
+            assert module().register_development_pool(request=fresh, api=api, execute=True)[
+                'status'] == 'development_pool_registered_closed'
+    assert len(registered.server.store.creates) == 2
+
+
+def test_database_drift_during_receipt_cannot_report_completion(registered):
+    assert run(registered)['status'] == 'pending_registration'
+    registered.server.complete = True
+    registered.server.drift_on_log = True
+    with pytest.raises(ValueError):
+        run(registered)
+    state = Path(registered.request.retained.operation['state_dir']).parent / 'pool-registration/registration.json'
+    assert json.loads(state.read_text())['phase'] == 'started'
+    assert len(registered.server.store.creates) == 2
+
+
+@pytest.mark.parametrize('damage', ['anchor', 'parent', 'stage', 'original', 'receipt'])
 def test_missing_or_changed_evidence_never_reopens_registration(registered, damage):
     run(registered)
     registered.server.complete = True
     run(registered)
     original = Path(registered.request.retained.operation['state_dir'])
     state = original.parent / 'pool-registration'
-    if damage == 'parent':
+    if damage == 'anchor':
+        (Path(registered.request.retained.operation['anchor_dir']) / 'pool-registration.json').unlink()
+    elif damage == 'parent':
         (state / 'registration.json').unlink()
     elif damage == 'stage':
         (state / 'resources' / 'stage.json').unlink()
