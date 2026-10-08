@@ -2365,3 +2365,30 @@ def test_private_catalog_cannot_leak_through_shared_connection(app_setup, postgr
         assert configure().status_code == 200
         assert share().status_code == 400
         assert c.get(path, headers=_auth(tokens["team_b"])).status_code == 404
+
+
+def test_model_metadata_preserves_discovery_visibility_and_entitlement(app_setup, monkeypatch):
+    app, tokens, _ = app_setup
+    c = _client(app)
+    conn_id = _create_conn(c, tokens["team_a"])
+    _stub_fetch_upstream_models(monkeypatch, returns=["gpt-5.4"])
+    original = c.post(
+        f"/api/v1/provider-connections/{conn_id}/models/refresh",
+        headers=_auth(tokens["team_a"]),
+    ).json()["items"][0]
+    path = f"/api/v1/provider-connections/{conn_id}/models/gpt-5.4/metadata"
+    payload = {"context_length": 1050000,
+               "specification_url": "https://developers.openai.com/api/docs/models/gpt-5.4"}
+    denied = c.patch(path, headers=_auth(tokens["team_b"]), json=payload)
+    assert denied.status_code == 404
+    updated = c.patch(path, headers=_auth(tokens["team_a"]), json=payload)
+    assert updated.status_code == 200, updated.text
+    result = updated.json()
+    assert result["context_length"] == 1050000
+    for key in ("source", "upstream_present", "visible", "hidden_reason", "last_preflight_status", "last_preflight_at"):
+        assert result[key] == original[key]
+    assert result["capabilities"]["context_specification_url"] == payload["specification_url"]
+    absent = c.patch(path.replace("gpt-5.4", "not-cached"), headers=_auth(tokens["team_a"]), json=payload)
+    assert absent.status_code == 404
+    secret_url = c.patch(path, headers=_auth(tokens["team_a"]), json={**payload, "specification_url": "https://user:secret@example.com/spec"})
+    assert secret_url.status_code == 422
