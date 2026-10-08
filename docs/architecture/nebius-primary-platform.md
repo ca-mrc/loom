@@ -2571,6 +2571,19 @@ Secret rendering alone proves neither live IAM authority nor usable capacity:
 the connected parent must qualify provider state and read the actual pool using
 that credential before starting the suspended observer.
 
+Native build material is projected into the closed catalog's build namespace.
+Task source copies only the retained artifacts credential; personal application
+source copies only the retained source credential. Conflicting Secret names are
+rejected instead of merging authorities. An enabled cache requires explicit
+material for one disposable cache bucket, distinct from data/source/backup;
+unused cache material is rejected. Registry publication accepts only an inline
+Nebius identity bound to the catalog repositories and a live-qualified registry
+`editor` permit, never project/tenant write permission. Object-access checks and
+actual publication/pull verification remain runtime/installed prerequisites.
+The fixed projection includes tokenless build service accounts and the existing
+DNS/public HTTP(S)-only native egress policy, but no namespace PSA changes,
+legacy actuator write grants, workload start or per-environment capacity quota.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
