@@ -10,6 +10,20 @@ from pathlib import Path
 from uuid import UUID
 
 import pytest
+from tests.ops.test_nebius_development_management_foundation import (
+    development_inputs as original_development_inputs,  # noqa: F401
+)
+from tests.ops.test_nebius_development_management_foundation import entry as entry
+from tests.ops.test_nebius_development_management_foundation import handoff as handoff
+from tests.ops.test_nebius_development_management_foundation import live as live
+from tests.ops.test_nebius_development_management_foundation import preflight as preflight
+from tests.ops.test_nebius_development_management_foundation import publication as publication
+from tests.ops.test_nebius_development_management_foundation import (
+    published_source as published_source,
+)
+from tests.ops.test_nebius_development_management_foundation import (
+    source_checkout as source_checkout,
+)
 from tests.ops.test_nebius_development_pool_install import (
     application_management_inputs as application_management_inputs,
 )
@@ -77,8 +91,44 @@ def module():
 
 
 @pytest.fixture
+def development_inputs(request):
+    config, candidate, profile = request.getfixturevalue('original_development_inputs')
+    # The public-manager fixture selects this host. Its completed foundation
+    # must have reserved that same endpoint, not a different earlier hostname.
+    config['public_host'] = 'shared.dev.example.com'
+    return config, candidate, profile
+
+
+@pytest.fixture
 def manager_entry(request):
+    mode = getattr(request, 'param', None)
+    foundation = request.getfixturevalue('handoff') if isinstance(mode, str) and mode.startswith('foundation') else None
     original = request.getfixturevalue('original_manager_entry')
+    if foundation is not None:
+        from dataclasses import asdict
+
+        from tests.ops.test_nebius_development_management_install import DevelopmentAPI
+        from tests.ops.test_nebius_development_source_intake import save_inputs
+
+        reference, manager, _, _, _ = foundation
+        operation, payload, path, _ = original
+        payload.update(binding=asdict(manager.binding), shared_namespace_uid=manager.shared_namespace_uid,
+            deployment=manager.deployment.model_dump(mode='json'))
+        applications = payload['deployment']['installation']['applications']
+        schema = '0159' if mode == 'foundation-old-schema' else '0174'
+        applications['shared']['schema_revision'] = schema
+        for release in applications['releases']:
+            release['schema_revision'] = schema
+        if mode == 'foundation-wrong-namespace':
+            payload['shared_namespace_uid'] = 'af74765d-efdb-4700-9aef-46d2b56d0e37'
+        payload['prerequisites']['foundation'] = reference
+        for name in ('ca_pem', 'secret_store_master_keys'):
+            if mode != 'foundation-wrong-' + name:
+                Path(payload['application_files'][name]).write_text(getattr(manager.application_material, name))
+        save_inputs(operation, payload, path)
+        api = DevelopmentAPI(manager.binding)
+        api.shared_uid = payload['shared_namespace_uid']
+        return operation, payload, path, api
     if getattr(request, 'param', False):
         from tests.ops.test_nebius_development_source_intake import source_inputs
 
@@ -228,6 +278,7 @@ def database_runtime(completed_pool, **changes):
     return importlib.import_module(name).prepare_database_runtime(reference(module(), completed_pool), **arguments)
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
 
@@ -269,7 +320,8 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert {row['name'] for row in container['volumeMounts']} == {'db-ca', 'runtime-setup'}
     assert {row['name'] for row in pod['volumes']} == {'db-ca', 'runtime-setup'}
     ca, = [row for row in pod['volumes'] if row['name'] == 'db-ca']
-    assert ca['secret'] == {'secretName': 'loom-platform-db', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}
+    assert ca['secret'] == {'secretName': 'loom-platform-db', 'defaultMode': 0o440,
+        'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}
     assert len(completed_pool[3].server.calls) == calls
     assert all(path.read_bytes() == raw for path, raw in foundation.files.items())
 
@@ -283,6 +335,78 @@ def test_runtime_database_delivery_refuses_invalid_material(completed_pool, chan
         pytest.fail('fixed development runtime database delivery is missing')
     with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
         database_runtime(completed_pool, **changes)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-old-schema', 'foundation-wrong-namespace',
+    'foundation-wrong-ca_pem', 'foundation-wrong-secret_store_master_keys'], indirect=True)
+def test_runtime_database_delivery_rejects_manager_foundation_mismatch(completed_pool):
+    calls = len(completed_pool[3].server.calls)
+    with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
+        database_runtime(completed_pool)
+    assert len(completed_pool[3].server.calls) == calls
+
+
+def runtime_database_stage(request, api, state):
+    from scripts.ops import nebius_development_runtime_setup as setup
+
+    if not hasattr(setup, 'stage_database_runtime'):
+        pytest.fail('fixed development runtime database stage is missing')
+    return setup.stage_database_runtime(request=request, api=api, state_dir=state)
+
+
+def runtime_database_api(request):
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    class NamespacedAPI(PhaseAPI):
+        @staticmethod
+        def key(doc):
+            return ':'.join((doc['kind'], doc['metadata']['namespace'], doc['metadata']['name']))
+
+    return NamespacedAPI(request.manager.retained.request.retained.binding)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_stage_retains_four_exact_creates_and_replays(completed_pool, tmp_path):
+    request = database_runtime(completed_pool)
+    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
+    first = runtime_database_stage(request, api, state)
+    before = copy.deepcopy(api.resources)
+    assert runtime_database_stage(request, api, state) == first
+    assert api.resources == before
+    name = 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f'
+    assert api.creates == ['Secret:loom-dev:' + name, 'Secret:loom-nebius-dev-execution:' + name,
+        'ConfigMap:loom-dev:' + name, 'Job:loom-dev:' + name]
+    assert first['status'] == 'management_phase_staged'
+    assert first['phase'] == 'development-runtime-database'
+    assert len(first['resource_uids']) == 4
+    assert 'runtime-actuator-' not in json.dumps(first)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+@pytest.mark.parametrize('failure', ['before', 'after'])
+def test_runtime_database_stage_never_retries_uncertain_create(completed_pool, tmp_path, failure):
+    request = database_runtime(completed_pool)
+    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
+    api.failure = failure
+    if failure == 'after':
+        receipt = runtime_database_stage(request, api, state)
+        assert runtime_database_stage(request, api, state) == receipt
+        assert len(api.creates) == 4
+    else:
+        for _ in range(2):
+            with pytest.raises(ValueError, match='development runtime database stage unqualified'):
+                runtime_database_stage(request, api, state)
+        assert len(api.creates) == 1
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_stage_refuses_caller_modified_job_before_writes(completed_pool, tmp_path):
+    request = database_runtime(completed_pool)
+    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
+    request.database[1]['spec']['template']['spec']['containers'][0]['command'] = ['sh', '-c', 'echo unapproved']
+    with pytest.raises(ValueError, match='development runtime database stage unqualified'):
+        runtime_database_stage(request, api, state)
+    assert not api.creates and not state.exists()
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
