@@ -129,19 +129,26 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
 
             def default_workload(key, before, desired):
                 assert before == closed.documents[key]
-                current = parent.read_workload(key)
-                value = _snapshot(desired)
-                value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
-                if not stale_dry_runs:
-                    # Exercise the real API-server rejection of a stale fixture
-                    # read before testing startup's separate CAS protocol.
-                    assert current['metadata']['resourceVersion'] != '1'
-                    value['metadata']['resourceVersion'] = '1'
-                response = parent.client.put(parent._workload_path(key) + '?dryRun=All', json=value)
-                if response.status_code == 409:
-                    stale_dry_runs.append(key)
-                response.raise_for_status()
-                return response.json()
+                for attempt in range(10):
+                    current = parent.read_workload(key)
+                    assert current['metadata']['uid'] == before['metadata']['uid']
+                    value = _snapshot(desired)
+                    value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
+                    if not stale_dry_runs:
+                        # Exercise the real API-server rejection of a stale fixture
+                        # read before testing startup's separate CAS protocol.
+                        assert current['metadata']['resourceVersion'] != '1'
+                        value['metadata']['resourceVersion'] = '1'
+                    response = parent.client.put(parent._workload_path(key) + '?dryRun=All', json=value)
+                    if response.status_code == 409:
+                        stale_dry_runs.append(key)
+                        if attempt < 9:
+                            # Controller status writes can race this fixture read.
+                            # Retry only a definitely rejected, nonmutating dry run.
+                            time.sleep(0.05)
+                            continue
+                    response.raise_for_status()
+                    return response.json()
 
             def retain_defaulted_workload(key, before, desired):
                 value = default_workload(key, before, desired)
