@@ -306,6 +306,8 @@ async def test_call_evidence_uses_independent_subject(baseline_setup):
     assert evidence.status_code == 200
     row = evidence.json()["items"][0]
     assert row["outcome"] == "completed" and row["input_tokens"] == 100
+    assert row["model"] == "gpt-4o"
+    assert row["response_model"] == "gpt-4o"
     assert "sk-upstream" not in evidence.text and info["token"] not in evidence.text
 
 

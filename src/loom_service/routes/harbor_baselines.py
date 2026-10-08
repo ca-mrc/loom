@@ -222,6 +222,8 @@ async def get_baseline_calls(baseline_id: UUID, dep: SessionAndCtx) -> dict[str,
                 "reserved_tokens": dispatch.reserved_tokens,
                 "reserved_cost_usd": str(dispatch.reserved_cost_usd),
                 "llm_call_id": str(call.id) if call is not None else None,
+                "model": call.model if call is not None else None,
+                "response_model": call.response_model if call is not None else None,
                 "input_tokens": call.input_tokens if call is not None else None,
                 "output_tokens": call.output_tokens if call is not None else None,
                 "cost_usd": str(call.cost_usd)
