@@ -568,6 +568,17 @@ prerequisites. Merely rendering the policy does not relax Pod Security: the
 protected parent must prove native enforcement before its journaled namespace
 label change, and must qualify required materials/networking before startup.
 
+The fresh collector's immutable credential Secret is separate from operator,
+database, source and registry material. Read-only cloud qualification binds its
+inline SDK private key to the registered active public key and retained dev
+project/tenant/region. The account must have exactly one tenant-owned group with
+exactly the existing Terraform observer permit: tenant `viewer`, needed for quota
+allowance reads. Extra memberships or write permits are rejected. Existing
+non-expiring observer keys are supported; expiring keys require a startup margin.
+Secret rendering alone proves neither live IAM authority nor usable capacity:
+the connected parent must qualify provider state and read the actual pool using
+that credential before starting the suspended observer.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission

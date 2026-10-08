@@ -1,9 +1,12 @@
 """Fresh dev capacity observation is catalog-bound and initially suspended."""
 from __future__ import annotations
 
+import base64
 import importlib
 
 import pytest
+from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
+from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
 from tests.ops.test_nebius_development_pool_retained import (
     application_management_inputs as application_management_inputs,
 )
@@ -75,6 +78,44 @@ def prepare(request):
     if importlib.util.find_spec(name) is None:
         pytest.fail('fresh suspended development pool collector is missing')
     return importlib.import_module(name).prepare_collector_runtime(request)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_collector_material_delivers_only_fixed_private_observer_secret(completed_pool, collector_cloud):
+    from scripts.ops import nebius_development_collector_runtime as runtime
+    from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
+
+    request = database_runtime(completed_pool)
+    scope = DevelopmentCollectorCloudScope.model_validate({**collector_cloud.scope,
+        'project_id': request.foundation.inputs.config['project_id']})
+    document = runtime.prepare_collector_material(request, scope=scope, credential=collector_cloud.credential)
+    assert document['metadata']['namespace'] == 'loom-nebius-dev-execution'
+    assert document['metadata']['name'] == 'loom-dev-collector-aecc7407b7b84c388d1fbca5dca9840f'
+    assert document['kind'] == 'Secret' and document['type'] == 'Opaque' and document['immutable'] is True
+    assert set(document['data']) == {'credentials.json'}
+    assert base64.b64decode(document['data']['credentials.json'], validate=True) == collector_cloud.credential
+    assert document['metadata']['labels']['loom.nebius/development-runtime-operation'] == str(request.operation_id)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['mutable-request', 'foreign-project', 'operator-identity'])
+def test_collector_material_refuses_changed_request_or_identity(completed_pool, collector_cloud, damage):
+    from scripts.ops import nebius_development_collector_runtime as runtime
+    from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
+
+    request = database_runtime(completed_pool)
+    scope = {**collector_cloud.scope, 'project_id': request.foundation.inputs.config['project_id']}
+    if damage == 'mutable-request':
+        request.database[0]['data']['setup.json'] = '{}'
+    elif damage == 'foreign-project':
+        scope['project_id'] = 'project-foreign'
+    else:
+        scope['account_id'] = 'serviceaccount-operator'
+    with pytest.raises(ValueError, match='development collector material unqualified'):
+        runtime.prepare_collector_material(request,
+            scope=DevelopmentCollectorCloudScope.model_validate(scope), credential=collector_cloud.credential)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
