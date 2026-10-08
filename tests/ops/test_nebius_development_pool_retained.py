@@ -663,8 +663,9 @@ def runtime_resources_api(request, phase, qualifier):
 def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_writer_grants(completed_pool, publisher_cloud, tmp_path):
     from scripts.ops.nebius_ingress_stage import _key
     from scripts.ops.nebius_management_stage import _stage_fixed_documents
-    from loom.nebius_platform_render import digest
     from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    from loom.nebius_platform_render import digest
 
     runtime, request = runtime_install_request(completed_pool, publisher_cloud)
     plan = runtime.prepare_runtime_install(request)
@@ -690,7 +691,7 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
         documents = plan.fixed[phase]
         paths = {}
         with runtime_resources_api(request, phase, qualify) as api:
-            def transport(message):
+            def transport(message, paths=paths):
                 if message.method == 'GET' and message.url.path in paths:
                     value = store.get_resource(paths[message.url.path])
                     return httpx.Response(200, json=value) if value else httpx.Response(404)
@@ -699,7 +700,7 @@ def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_w
                     paths[message.url.path + '/' + document['metadata']['name']] = document
                 return handle(message)
             api.client.close()
-            api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(transport))
+            api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
             args = dict(documents=documents, revision=digest(documents), phase='development-runtime-' + phase,
                 binding=binding, api=api, state_dir=tmp_path / phase)
             _stage_fixed_documents(**args)
@@ -733,7 +734,7 @@ def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, p
         def transport(message):
             calls.append(message)
             return httpx.Response(201, json=document)
-        api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(transport))
+        api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
         with pytest.raises(ValueError, match='outside fixed development runtime phase'):
             api.create_resource(document)
     assert not calls
