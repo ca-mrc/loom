@@ -44,7 +44,10 @@ from loom_llm_gateway.dispatch_audit import (
     request_dispatch_audit,
 )
 from loom_llm_gateway.errors import RateCardNotFoundError
-from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_execution_dispatch
+from loom_llm_gateway.execution_attempt_dispatch import (
+    authorize_trial_execution_dispatch,
+    authorize_trial_model,
+)
 from loom_llm_gateway.llm_calls import record_call, record_failed_call
 from loom_llm_gateway.rate_card import (
     compute_cost_usd,
@@ -263,6 +266,7 @@ async def chat_completions(
         provider, model_name = raw_model.split("/", 1)
     else:
         provider, model_name = "openai", raw_model
+    await authorize_trial_model(request, ctx, provider=provider, model=model_name)
 
     # Bug 6 fix: reject unsupported providers upfront with a clear message
     # rather than passing api_key=None into LiteLLM and getting a cryptic

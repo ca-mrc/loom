@@ -64,6 +64,8 @@ async def test_native_phase_deadline_is_signed_clamped_and_cancels_provider_tcp(
             lease.observed_state = "running"
             trial = await session.get(Trial, trial_id)
             trial.state = "running"
+            # The one model a native Trial is admitted with; the Gateway refuses others.
+            trial.config = {**trial.config, "agent_model": {"provider": "openai", "name": "fixture", "source": "api"}}
             await session.commit()
             # New phase deadline can outlive a rotating short-lived token.
             phase_end = datetime.now(UTC) + timedelta(seconds=900)

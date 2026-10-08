@@ -319,18 +319,26 @@ agent only that URL (`LOOM_GATEWAY_URL` + `/v1`) and the fixed placeholder key
 | Rendered Pod | Service-account token automount is off. The Pod identity token is projected only into the execution container. Task and verifier sandboxes mount only their socket, the read-only sandbox binary and their own network files, and receive no credential-bearing environment. |
 | Runtime broker | Forwards only canonical `POST` model routes: encoded, dot or empty path segments are rejected, so it is never a path to Gateway control endpoints. Replaces any caller `Authorization` with the Pod's workload token. Serves model calls only in the agent phase and before its deadline; setup and verifier phases cannot reopen access, and ending the agent phase cancels in-flight calls. |
 | Workload token | Minted per lease and phase, bound to the Trial's Provider Connection (`provider_connection_id_bound`). A caller-supplied `x-loom-provider-connection-id` that disagrees is rejected. |
-| Gateway | Builds upstream headers itself (decrypted connection key only). No caller header reaches the provider. |
+| Gateway | Builds upstream headers itself (decrypted connection key only). No caller header reaches the provider. Serves a native call only for the Trial's admitted model (below). |
 
 Revocation is the end of the agent phase. The token also expires with the
 lease deadline and is never present in the sandbox.
 
+**The model is bound to the Trial.** A native Trial has exactly one admitted
+`api` model (multi-model is not admitted). On every model route the broker can
+reach (OpenAI chat and Responses, Anthropic messages, Gemini, each in facade
+and plain form), the Gateway's `authorize_trial_model` compares the requested
+model, and the provider that route records, with the Trial's `agent_model`
+before any provider is contacted. A mismatch is a 403 (`service execution model
+forbidden`) that records no ledger row and incurs no cost. This is the same
+identity rule materialization applies to the ledger, which every installed
+harness's `trace_format` keeps as a second check. Only service-execution
+tokens are bound; other step tokens are unchanged. The rule lives in the
+Gateway rather than as a token claim because the Gateway already re-reads
+the Trial on every native call to check the live lease.
+
 Known limits, deliberate and shared with Terminus-2:
 
-- **The model is not bound in the token.** The Gateway serves any model the
-  Trial's connection offers. Materialization rejects a trace containing a call
-  under another model identity, so an off-model call fails the Trial. Its cost
-  is still incurred, within the lease deadline and the connection's limits.
-  Every installed harness's `trace_format` must keep that check.
 - **The broker's ledger route** (`/internal/loom/llm-calls`) is readable from
   the sandbox. It returns only this Trial's own Gateway calls.
 - **Guests** (#2362) do not share the Pod network namespace. QEMU user

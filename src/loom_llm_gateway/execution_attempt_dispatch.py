@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -164,4 +164,33 @@ async def authorize_trial_execution_dispatch(
         raise HTTPException(status_code=403, detail="service execution dispatch forbidden")
 
 
-__all__ = ["authorize_execution_attempt_dispatch", "authorize_trial_execution_dispatch"]
+async def authorize_trial_model(request: Request, ctx: AuthContext, *, provider: str, model: str) -> None:
+    """A native service-execution call may name only its Trial's admitted model.
+
+    Native Trials have exactly one model (multi-model is not admitted), and
+    materialization fails a Trial whose ledger holds any other identity. This
+    applies the same rule before a provider is contacted, so an off-model call
+    is refused instead of incurring cost. `provider` is the provider the
+    route's ledger dialect records; `model` is the model name it records.
+    """
+
+    if ctx.service_execution_lease_id is None or ctx.trial_id is None:
+        return
+    async with request.app.state.session_factory() as session:
+        config = (
+            await session.execute(select(Trial.config).where(Trial.id == ctx.trial_id))
+        ).scalar_one_or_none()
+    admitted = config.get("agent_model") if isinstance(config, dict) else None
+    if not (
+        isinstance(admitted, dict)
+        and admitted.get("provider") == provider
+        and admitted.get("name") == model
+    ):
+        raise HTTPException(status_code=403, detail="service execution model forbidden")
+
+
+__all__ = [
+    "authorize_execution_attempt_dispatch",
+    "authorize_trial_execution_dispatch",
+    "authorize_trial_model",
+]

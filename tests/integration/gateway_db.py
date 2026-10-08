@@ -8,9 +8,10 @@ must delete child ``team_quotas`` rows before ``teams`` or Postgres raises
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -135,3 +136,15 @@ async def delete_teams_by_name_async(
             delete(TeamQuota).where(TeamQuota.team_id == team_id),
         )
     await session.execute(delete(Team).where(Team.name.like(name_pattern)))
+
+
+async def admit_trial_model(app: Any, trial_id: UUID, *, name: str, provider: str = "openai") -> None:
+    """Give a seeded Trial the one `api` model a native Trial is admitted with.
+
+    The Gateway refuses native service-execution calls for any other model.
+    """
+    async with app.state.session_factory() as session:
+        await session.execute(update(Trial).where(Trial.id == trial_id).values(
+            config={"agent_model": {"provider": provider, "name": name, "source": "api"}},
+        ))
+        await session.commit()

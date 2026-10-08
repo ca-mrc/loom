@@ -22,6 +22,7 @@ from loom_llm_gateway.routes import (
     messages,
     responses,
 )
+from tests.integration.gateway_db import admit_trial_model
 from tests.integration.test_gateway_facade_openai import facade_setup  # noqa: F401
 
 
@@ -44,6 +45,10 @@ async def test_failed_facade_call_keeps_authenticated_native_binding(
         "gemini": (gemini, "/v1beta/models/glm-5.2:generateContent", "google"),
     }[dialect]
     auth_name = "require_llm_call_bearer" if dialect in {"chat", "gemini"} else "verify_facade_auth"
+    # The native Trial's admitted model, on the provider this route records.
+    await admit_trial_model(app, trial_id, name="glm-5.2", provider={
+        "anthropic": "anthropic", "messages": "anthropic", "google": "google", "gemini": "google",
+    }.get(dialect, "openai"))
     original_auth = getattr(module, auth_name)
 
     async def authenticated_lease(*args, **kwargs):
@@ -206,6 +211,7 @@ async def test_signed_deadline_audits_only_dispatched_calls(
     from loom_llm_gateway.attempt_deadline import GatewayAttemptDeadline
 
     app, token, _team_id, trial_id, connection_id, _captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
     lease_id = uuid4()
     original_auth = facade_openai.verify_facade_auth
     attempts = []

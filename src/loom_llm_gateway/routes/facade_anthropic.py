@@ -55,6 +55,7 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.dispatch_audit import request_dispatch_audit
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_model
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
@@ -137,6 +138,7 @@ async def anthropic_messages_facade(
 
     if not isinstance(payload.get("model"), str) or not payload["model"]:
         raise HTTPException(status_code=400, detail="`model` is required")
+    await authorize_trial_model(request, ctx, provider="anthropic", model=payload["model"])
 
     async with request.app.state.session_factory() as session:
         row = await resolve_facade_connection(

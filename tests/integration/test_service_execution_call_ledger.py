@@ -18,7 +18,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from loom.db.schema import LlmCall, ServiceExecutionTarget
 from loom_control_plane.service_execution import enqueue_execution_transition
 from loom_control_plane.service_execution_output import VerifiedExecutionPod
-from loom_llm_gateway.routes import facade_openai, service_execution
+from loom_llm_gateway.routes import (
+    chat,
+    facade_openai,
+    gemini,
+    messages,
+    responses,
+    service_execution,
+)
+from tests.integration.gateway_db import admit_trial_model
 from tests.integration.test_gateway_facade_openai import facade_setup  # noqa: F401
 from tests.integration.test_service_execution_leases import (
     _cleanup_service_execution_test_rows,  # noqa: F401
@@ -124,6 +132,7 @@ async def test_facade_records_lease_from_auth_for_json_and_sse(
     facade_setup, monkeypatch: pytest.MonkeyPatch, stream: bool,  # noqa: F811
 ) -> None:
     app, token, _team_id, trial_id, connection_id, _captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
     lease_id = uuid4()
     original_auth = facade_openai.verify_facade_auth
 
@@ -149,3 +158,86 @@ async def test_facade_records_lease_from_auth_for_json_and_sse(
         }
     if stream:
         assert "data: [DONE]" in response.text
+
+
+def _native_lease_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every model route see a native service-execution bearer.
+
+    The real bearer is authenticated first; only the lease fields a native
+    Pod token carries are added, as in the test above.
+    """
+    lease = {"service_execution_lease_id": uuid4(), "service_execution_generation": 1}
+    for module in (facade_openai, responses, messages):
+        original = module.verify_facade_auth
+
+        async def native(*args, _original=original, **kwargs):
+            return replace(await _original(*args, **kwargs), **lease)
+
+        monkeypatch.setattr(module, "verify_facade_auth", native)
+    for module in (chat, gemini):
+        bearer = module.require_llm_call_bearer
+
+        async def native_bearer(*args, _bearer=bearer, **kwargs):
+            return replace(await _bearer(*args, **kwargs), **lease)
+
+        monkeypatch.setattr(module, "require_llm_call_bearer", native_bearer)
+        # The live-lease re-check has its own tests; this one is about the model.
+        monkeypatch.setattr(module, "authorize_trial_execution_dispatch", AsyncMock())
+
+
+@pytest.mark.parametrize(("path", "body"), [
+    ("/openai/v1/chat/completions", {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/chat/completions", {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/chat/completions", {"model": "anthropic/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/responses", {"model": "gpt-4o", "input": "hi"}),
+    ("/v1/messages", {"model": "glm-5.2", "max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1beta/models/glm-5.2:generateContent", {"contents": [{"parts": [{"text": "hi"}]}]}),
+])
+async def test_native_call_for_another_model_is_refused_before_any_provider(
+    facade_setup, monkeypatch: pytest.MonkeyPatch, path: str, body: dict,  # noqa: F811
+) -> None:
+    """Native Trials may call only their admitted model. An off-model call,
+    including the admitted name on another provider's route, is refused
+    before any upstream request, so it records nothing and costs nothing."""
+    app, token, _team_id, trial_id, connection_id, captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
+    _native_lease_auth(monkeypatch)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, json=body, headers={
+            "Authorization": f"Bearer {token}", "x-loom-provider-connection-id": str(connection_id),
+        })
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == "service execution model forbidden"
+    assert captures["requests"] == []
+    async with app.state.session_factory() as session:
+        assert (await session.execute(select(LlmCall).where(LlmCall.trial_id == trial_id))).first() is None
+
+
+@pytest.mark.parametrize(("path", "body"), [
+    ("/openai/v1/chat/completions", {"model": "glm-5.2", "messages": [{"role": "user", "content": "hi"}]}),
+    ("/v1/chat/completions", {"model": "glm-5.2", "messages": [{"role": "user", "content": "hi"}]}),
+])
+async def test_native_call_for_the_admitted_model_is_served(
+    facade_setup, monkeypatch: pytest.MonkeyPatch, path: str, body: dict,  # noqa: F811
+) -> None:
+    app, token, _team_id, trial_id, connection_id, captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
+    _native_lease_auth(monkeypatch)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(path, json=body, headers={
+            "Authorization": f"Bearer {token}", "x-loom-provider-connection-id": str(connection_id),
+        })
+    assert response.status_code == 200, response.text
+    assert len(captures["requests"]) == 1
+
+
+async def test_non_native_calls_are_not_model_bound(facade_setup) -> None:  # noqa: F811
+    # Ordinary step tokens (no service-execution lease) keep their behaviour.
+    app, token, _team_id, trial_id, connection_id, captures = facade_setup
+    await admit_trial_model(app, trial_id, name="glm-5.2")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/openai/v1/chat/completions", json={
+            "model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}],
+        }, headers={"Authorization": f"Bearer {token}", "x-loom-provider-connection-id": str(connection_id)})
+    assert response.status_code == 200, response.text
+    assert len(captures["requests"]) == 1

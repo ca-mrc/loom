@@ -46,6 +46,7 @@ from loom_llm_gateway.attempt_deadline import (
 )
 from loom_llm_gateway.dialect import DIALECTS
 from loom_llm_gateway.dispatch_audit import request_dispatch_audit
+from loom_llm_gateway.execution_attempt_dispatch import authorize_trial_model
 from loom_llm_gateway.llm_calls import record_call
 from loom_llm_gateway.request_params import normalize_request_params
 from loom_llm_gateway.retry import send_with_retry
@@ -111,6 +112,7 @@ async def google_generate_content_facade(
             status_code=400,
             detail="<model> portion of path is required",
         )
+    await authorize_trial_model(request, ctx, provider="google", model=model_name)
 
     # Streaming variants ask for SSE — same blanket rejection rationale
     # as the openai/anthropic facade (final usageMetadata block needed
