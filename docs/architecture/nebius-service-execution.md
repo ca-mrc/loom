@@ -710,6 +710,22 @@ outcome, recording the previous state and failure in Artifact audit metadata.
 Runtime results, rewards and attempt counts remain unchanged. Timeouts and
 model/verifier failures cannot enter this recovery path.
 
+A pending Oracle archive that blocks idle rollout has a separate
+[bounded operator worker](../runbooks/operator-runbook.md#pending-oracle-archive-blocks-an-idle-rollout).
+It binds the installed projection, immutable source, task/Trial configuration,
+published recovery image and exact pending lease to a one-use audit. It runs the
+ordinary materializer with a longer, bounded claim and pre-commit qualification;
+all normal source verification and claim fences remain in force. It admits only
+the diagnosed multipart metadata-identity failure, successful zero-call Oracle
+output and unchanged projection bytes. It cannot deploy the platform, clear a
+foreign guard, restart execution or run cleanup/accounting loops.
+
+Caught one-shot archive recovery failures park the archive as `unavailable` with
+an Artifact audit and preserve the Trial outcome and source retention. This stops
+automatic archive retry and removes the archive from rollout activity accounting;
+it does not establish canonical acceptance. Cancellation retains claim ownership
+until its TTL, after which ordinary materializer recovery rules apply.
+
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
 Control Plane replicas mutually exclusive without imposing a serial transfer

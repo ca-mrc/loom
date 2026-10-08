@@ -208,6 +208,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     monkeypatch: pytest.MonkeyPatch,
     isolated_migration_postgres_url: str,
     independent_minio_endpoints: tuple[MinioContainer, MinioContainer],
+    oracle_recovery: bool = False,
+    oracle_recovery_failure: str | None = None,
 ) -> None:
     spool_container, canonical_container = independent_minio_endpoints
     if versioned:
@@ -292,6 +294,9 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 "agent_name": "direct-completion",
                 "agent_model": {"provider": "openai", "name": "gpt-5"},
             }
+            if oracle_recovery:
+                task.config = {**task.config, "agent": {"name": "oracle", "version": "1.0"}}
+                trial.config = {"agent_name": "oracle", "agent_model": None}
             if prepared_snapshot:
                 task.config = {**task.config, "environment": {
                     **task.config["environment"], "docker_image": None,
@@ -407,6 +412,11 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
             ),
             "verifier/output.json": b'{"rewards":{"passed":1.0}}',
         }
+        if oracle_recovery:
+            from loom.service_execution_oracle import oracle_usage
+            from tests.unit.test_native_oracle import _trace
+            payloads["trajectory/events.jsonl"] = _trace(trial_id)[1]
+            payloads["accounting/usage.json"] = canonical_document(oracle_usage())
         if missing_multipart_version:
             payloads["artifacts/answer.txt"] = b"42\n" * (3 * 1024**2)
         if terminus:
@@ -592,6 +602,10 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         # Docker may allocate a new ephemeral host port on container restart;
         # reconnect the fresh worker to that same canonical container/storage.
         canonical_store = _store(canonical_container)
+
+        if oracle_recovery:
+            await _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store, failure=oracle_recovery_failure)
+            return
 
         original_outcome = None
         original_execution = None
@@ -1070,3 +1084,135 @@ async def test_restart_probe_does_not_follow_server_retry_after() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store, *, failure=None):
+    from loom.db.schema_startup import service_schema_head
+    from loom_control_plane.pending_archive_recovery import (
+        ArchiveRecoveryRequest,
+        OracleRecoveryMaterializer,
+        RecoveryRefusedError,
+        claim_pending_archive,
+        committed_readback,
+        project_oracle,
+    )
+    # Retain an obsolete worker's completed projection, then relinquish its claim
+    # just as the metadata readback failure does before automatic retry.
+    old = materializer()
+    stale = await old.claim_one(lease_id=lease.id)
+    assert stale is not None
+    old_result = await old._load_and_materialize(stale)
+    await old._retry(stale, RuntimeError("multipart object readback identity mismatch"))
+    async with sessions() as session:
+        current = await session.get(ServiceExecutionLease, lease.id)
+        artifact = await session.scalar(select(Artifact).where(Artifact.control_producer_id == lease.id))
+        projected = await project_oracle(session, old, team_id=lease.team_id, lease_id=lease.id)
+        request = ArchiveRecoveryRequest(
+            team_id=lease.team_id, trial_id=lease.trial_id, lease_id=lease.id, artifact_id=artifact.id,
+            upload_session_id=current.output_upload_session_id, attempt=current.attempt,
+            generation=current.output_generation, output_manifest_sha256=current.output_manifest_sha256,
+            output_marker_sha256=current.output_marker_sha256, **projected,
+            cluster_id="mk8scluster-test", namespace="loom-test", installed_candidate="a"*40, candidate_sha="b"*40,
+            image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"4"*64,
+            installed_image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"a"*64,
+            schema_head=service_schema_head(),
+        )
+    async with sessions.begin() as session:
+        with pytest.raises(RecoveryRefusedError, match="pending_archive_not_eligible"):
+            await claim_pending_archive(session, request.model_copy(update={"team_id": uuid4()}))
+    # A foreign pause is respected even though no new execution is requested.
+    async with sessions.begin() as session:
+        await session.execute(text("INSERT INTO nebius_rollout_guard (id,owner,candidate_sha) VALUES (1,'test-owner',:sha)"),
+                              {"sha": "a"*40})
+    try:
+        async with sessions.begin() as session:
+            with pytest.raises(RecoveryRefusedError, match="rollout_guard_held"):
+                await claim_pending_archive(session, request)
+    finally:
+        async with sessions.begin() as session:
+            await session.execute(text("DELETE FROM nebius_rollout_guard WHERE owner='test-owner'"))
+
+    async def contender():
+        try:
+            async with sessions.begin() as session:
+                return await claim_pending_archive(session, request)
+        except RecoveryRefusedError:
+            return None
+
+    claims = await asyncio.gather(contender(), contender())
+    claim, = [row for row in claims if row is not None]
+    assert not await materializer().run_once(lease_id=lease.id)
+    recovery = OracleRecoveryMaterializer(request=request, session_factory=sessions,
+        source_store=old._source_store, source_bucket=old._source_bucket,
+        canonical_store=canonical_store, artifacts_bucket="artifacts", trajectories_bucket="trajectories")
+    if failure:
+        async with sessions() as session:
+            trial = await session.get(Trial, lease.trial_id)
+            before = {key: copy.deepcopy(getattr(trial, key)) for key in
+                      ('state', 'result', 'attempt_count', 'failure_reason', 'failure_message', 'finished_at', 'trajectory_index')}
+        # A non-derivation artifact is outside the initial read-only projection.
+        if failure == 'integrity':
+            await old._source_store.put_object(bucket=old._source_bucket,
+                key=f"service-executions/{lease.team_id}/{lease.id}/1/output/artifacts/{request.artifact_id}/artifacts/answer.txt", body=b'corrupt')
+        else:
+            load = recovery._load_and_materialize
+            async def changed_before_commit(owned_claim):
+                result = await load(owned_claim)
+                async with sessions.begin() as session:
+                    task = await session.get(Task, trial.task_id)
+                    task.config = {**task.config, 'description': 'changed since qualification'}
+                return result
+            recovery._load_and_materialize = changed_before_commit
+    await recovery.materialize_claim(claim, require_versions=True)
+    if failure:
+        async with sessions() as session:
+            trial = await session.get(Trial, lease.trial_id)
+            current = await session.get(ServiceExecutionLease, lease.id)
+            artifact = await session.get(Artifact, request.artifact_id)
+            assert {key: getattr(trial, key) for key in before} == before
+            assert current.materialization_state == 'unavailable'
+            assert current.source_cleanup_state == 'not_ready'
+            audit = artifact.artifact_metadata['pending_archive_recovery']
+            assert audit['failure']['code'] == ('source_object_size_mismatch' if failure == 'integrity' else 'recovery_incomplete')
+            assert audit['failure']['claim_id'] == str(claim.claim_id)
+            with pytest.raises(RecoveryRefusedError, match='canonical_commit_not_qualified'):
+                await committed_readback(session, request, claim)
+        assert not await old.run_once(lease_id=lease.id)
+        assert not await recovery.cleanup_source_once()
+        await old._retry(stale, RuntimeError('stale retry'))
+        await old._unavailable(stale, MaterializationIntegrityError('stale failure'))
+        async with sessions.begin() as session:
+            with pytest.raises(RecoveryRefusedError):
+                await claim_pending_archive(session, request)
+        return
+    async with sessions() as session:
+        report = await committed_readback(session, request, claim)
+        assert report["status"] == "committed" and report["execution_attempts"] == 1
+        assert report["materialization_attempts"] == 3
+    # Simulate late object writes from the obsolete worker. Ordinary latest-key
+    # readers still receive the qualified bytes, and none of its DB ACK paths win.
+    for uri, body in ((old_result.events_uri, old_result.events_body), (old_result.atif_uri, old_result.atif_body)):
+        key = uri.removeprefix("s3://trajectories/")
+        await canonical_store.put_object(bucket="trajectories", key=key, body=body)
+        assert await canonical_store.get_object(bucket="trajectories", key=key) == body
+    assert not await old._commit(stale, old_result)
+    await old._retry(stale, RuntimeError("late stale retry"))
+    await old._unavailable(stale, MaterializationIntegrityError("late_stale_integrity"))
+    async with sessions() as session:
+        assert await committed_readback(session, request, claim) == report
+    async with sessions.begin() as session:
+        with pytest.raises(RecoveryRefusedError):
+            await claim_pending_archive(session, request)
+
+
+@pytest.mark.parametrize('failure', [None, 'integrity', 'input-drift'])
+async def test_pending_oracle_recovery_fences_old_workers_and_duplicate_jobs(
+    monkeypatch, isolated_migration_postgres_url, independent_minio_endpoints, failure,
+):
+    await test_independent_spool_survives_outage_restart_and_ack_gated_gc(
+        terminus=False, legacy_repair=False, prepared_snapshot=False, typed_failure=False,
+        archival_recovery=False, corrupt_recovery=False, archival_history_upgrade=False,
+        usage_recovery=False, versioned=True, missing_multipart_version=False,
+        monkeypatch=monkeypatch, isolated_migration_postgres_url=isolated_migration_postgres_url,
+        independent_minio_endpoints=independent_minio_endpoints, oracle_recovery=True, oracle_recovery_failure=failure,
+    )
