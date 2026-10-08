@@ -2533,6 +2533,15 @@ phase-aware qualification after the closed control plane is replaced; original
 workload equality is not a valid successor check. These delivery components do
 not themselves start workers, grant Job-write permission or open admission.
 
+The fresh runtime network projection adds only development-scoped policies to the
+retained foundation. Its execution namespace, installation and pool labels must
+all match: the actuator may reach dev PostgreSQL on 5432, and execution-unit Pods
+may reach the dev LLM/credential gateway on 9100. Native task egress retains the
+existing DNS-and-gateway-only contract, with no direct database, API or control
+plane access. Existing shared-internal, personal API and public ingress policies
+remain intact; build and foreign namespaces receive no new access. These fixed
+documents do not change staging, activate workers or qualify live networking.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
