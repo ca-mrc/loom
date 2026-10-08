@@ -1,6 +1,7 @@
 """Runtime successors consume closed pool evidence without replaying installation."""
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import importlib
@@ -214,6 +215,74 @@ def test_runtime_rejects_mixed_source_publication_before_delivery(completed_pool
     with pytest.raises(ValueError, match='development manager runtime unqualified'):
         runtime.prepare_manager_runtime(reference(module(), completed_pool), publication=target)
     assert len(completed_pool[3].server.calls) == calls
+
+
+def database_runtime(completed_pool, **changes):
+    name = 'scripts.ops.nebius_development_runtime_setup'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development runtime database delivery is missing')
+    arguments = dict(publication=runtime_publication(completed_pool),
+        operation_id=UUID('aecc7407-b7b8-4c38-8d1f-bca5dca9840f'),
+        actuator_password='runtime-actuator-' + 'p' * 40, batch_runner_token='loom_br_' + 'r' * 64)
+    arguments.update(changes)
+    return importlib.import_module(name).prepare_database_runtime(reference(module(), completed_pool), **arguments)
+
+
+def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
+    from sqlalchemy.engine import make_url
+
+    calls = len(completed_pool[3].server.calls)
+    prepared = database_runtime(completed_pool)
+    manager, foundation = prepared.manager, prepared.foundation
+    shared, worker = prepared.material
+    config, job = prepared.database
+    participant, = manager.retained.request.registration.spec.participants
+    assert shared['metadata']['namespace'] == job['metadata']['namespace'] == config['metadata']['namespace'] == 'loom-dev'
+    assert worker['metadata']['namespace'] == participant.execution_namespace.name
+    assert shared['immutable'] is worker['immutable'] is config['immutable'] is True
+    assert set(shared['data']) == {'actuator-password', 'batch-runner-token'}
+    assert set(worker['data']) == {'actuator-url', 'ca.crt'}
+    material = {key: base64.b64decode(value).decode() for key, value in worker['data'].items()}
+    database = make_url(material['actuator-url'])
+    assert (database.username, database.password, database.host, database.database) == (
+        'loom_actuator', 'runtime-actuator-' + 'p' * 40, 'loom-postgres.loom-dev.svc', 'loom')
+    assert dict(database.query) == {'sslmode': 'verify-full', 'sslrootcert': '/var/run/loom-db/ca.crt'}
+    original = foundation.bootstrap['material']['loom-platform-db']
+    assert material['ca.crt'] == original['ca.crt']
+    assert original['postgres-password'] not in repr(material)
+    assert json.loads(config['data']['setup.json']) == {'namespace': 'loom-dev',
+        'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'schema_revision': '0174'}
+    pod = job['spec']['template']['spec']
+    container, = pod['containers']
+    assert container['command'] == ['python', '-m', 'loom.nebius_development_runtime_database']
+    assert container['image'] == manager.publication.bundle.candidate['images']['service']['image_ref']
+    assert pod['automountServiceAccountToken'] is False
+    assert pod['restartPolicy'] == 'Never' and job['spec']['backoffLimit'] == 0
+    assert not pod.get('initContainers')
+    assert container['securityContext']['allowPrivilegeEscalation'] is False
+    assert container['securityContext']['capabilities']['drop'] == ['ALL']
+    env = {row['name']: row for row in container['env']}
+    assert set(env) == {'LOOM_DEVELOPMENT_RUNTIME_CONFIG', 'LOOM_DB_URL', 'LOOM_DB_ACTUATOR_PASSWORD', 'LOOM_BATCH_RUNNER_TOKEN'}
+    assert env['LOOM_DB_URL']['valueFrom']['secretKeyRef'] == {'name': 'loom-platform-db', 'key': 'admin-url'}
+    for setting, key in [('LOOM_DB_ACTUATOR_PASSWORD', 'actuator-password'), ('LOOM_BATCH_RUNNER_TOKEN', 'batch-runner-token')]:
+        assert env[setting]['valueFrom']['secretKeyRef'] == {'name': shared['metadata']['name'], 'key': key}
+    assert {row['name'] for row in container['volumeMounts']} == {'db-ca', 'runtime-setup'}
+    assert {row['name'] for row in pod['volumes']} == {'db-ca', 'runtime-setup'}
+    ca, = [row for row in pod['volumes'] if row['name'] == 'db-ca']
+    assert ca['secret'] == {'secretName': 'loom-platform-db', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}
+    assert len(completed_pool[3].server.calls) == calls
+    assert all(path.read_bytes() == raw for path, raw in foundation.files.items())
+
+
+@pytest.mark.parametrize('changes', [{'operation_id': UUID(int=0)},
+    {'actuator_password': 'too-short'}, {'batch_runner_token': 'wrong-kind-' + 'r' * 64}])
+def test_runtime_database_delivery_refuses_invalid_material(completed_pool, changes):
+    # This protects the pre-write boundary, not merely the eventual SQL failure.
+    name = 'scripts.ops.nebius_development_runtime_setup'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development runtime database delivery is missing')
+    with pytest.raises(ValueError, match='development runtime database delivery unqualified'):
+        database_runtime(completed_pool, **changes)
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
