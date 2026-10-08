@@ -44,6 +44,7 @@ from loom.pipeline.keys import canonical_digest, canonical_document
 ACTION = "object_version_recovery"
 MAX_BYTES = 256 * 1024 * 1024
 SINGLE_OBJECT_MAX_BYTES = 4 * 1024**3
+MAX_VERSION_COPIES = 256
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 VERIFICATION_SECONDS = 90
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -59,7 +60,7 @@ class ObjectVersion(BaseModel):
 
     registry_id: UUID
     version_id: VersionId
-    equivalent_version_ids: list[VersionId] | None = Field(default=None, min_length=2, max_length=8)
+    equivalent_version_ids: list[VersionId] | None = Field(default=None, min_length=2, max_length=32)
 
     @field_validator("registry_id", mode="before")
     @classmethod
@@ -112,6 +113,11 @@ class RecoveryRequest(BaseModel):
     def validate_request(self) -> RecoveryRequest:
         if len({item.registry_id for item in self.objects}) != len(self.objects):
             raise ValueError("registry IDs must be unique")
+        # Preserve the former 32 objects x 8 versions worst-case work, while
+        # allowing larger complete inventories for fewer objects. Empty objects
+        # still incur verification requests and count toward this bound.
+        if sum(len(item.equivalent_version_ids or [item.version_id]) for item in self.objects) > MAX_VERSION_COPIES:
+            raise ValueError("version copy limit exceeded")
         if self.apply and self.plan_sha256 is None:
             raise ValueError("apply requires a verified preview plan digest")
         return self

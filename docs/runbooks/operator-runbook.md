@@ -386,7 +386,7 @@ and conflicting attempts are rejected. Other index schemas cannot omit it.
    and no delete marker may exist at each exact key. A prefix match does not
    establish identity. For a key with multiple retained copies, explicitly add
    `equivalent_version_ids` to that object's request: the complete unique set of
-   2–8 concrete version IDs, including the selected `version_id`. Recovery accepts
+   2–32 concrete version IDs, including the selected `version_id`. Recovery accepts
    only the sole latest version, and only after **every listed copy** matches the
    published size and SHA-256. Complete inventories before and after content
    verification must match the supplied set and latest identity. Missing or extra
@@ -411,8 +411,11 @@ and conflicting attempts are rejected. Other index schemas cannot omit it.
    Replay confirms the database receipt; it is not a fresh storage
    health probe. A changed request with the same operation UUID is rejected.
 
-The 256 MiB verification budget counts **all retained copies** in the request,
-including versions that will not be adopted. For example, two 130 MiB copies
+Each request permits at most 256 version copies across its objects, counting
+single-version and empty objects too. This preserves the prior maximum of
+32 objects with eight versions each while supporting larger complete inventories
+for fewer objects. The 256 MiB verification budget counts **all retained copies**
+in the request, including versions that will not be adopted. For example, two 130 MiB copies
 exceed this budget even though either copy alone would fit. Splitting an
 individual object's version set across requests is forbidden: each request must
 name and verify its complete inventory. Other retained versions remain untouched;
