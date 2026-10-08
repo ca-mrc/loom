@@ -120,7 +120,7 @@ def manager_entry(request):
         payload.update(binding=asdict(manager.binding), shared_namespace_uid=manager.shared_namespace_uid,
             deployment=manager.deployment.model_dump(mode='json'))
         applications = payload['deployment']['installation']['applications']
-        schema = '0159' if mode == 'foundation-old-schema' else '0174'
+        schema = '0159' if mode == 'foundation-old-schema' else '0175'
         applications['shared']['schema_revision'] = schema
         for release in applications['releases']:
             release['schema_revision'] = schema
@@ -673,7 +673,7 @@ def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credent
     assert material['ca.crt'] == original['ca.crt']
     assert original['postgres-password'] not in repr(material)
     assert json.loads(config['data']['setup.json']) == {'namespace': 'loom-dev',
-        'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'schema_revision': '0174'}
+        'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'schema_revision': '0175'}
     pod = job['spec']['template']['spec']
     container, = pod['containers']
     assert container['command'] == ['python', '-m', 'loom.nebius_development_runtime_database']

@@ -49,7 +49,7 @@ def database(private_database):
 
 
 def install(module, database, **changes):
-    arguments = dict(operation_id=OPERATION, schema_revision='0174',
+    arguments = dict(operation_id=OPERATION, schema_revision='0175',
         actuator_password=PASSWORD, batch_runner_token=TOKEN)
     arguments.update(changes)
     return module.install_runtime_database(database, **arguments)
@@ -105,6 +105,7 @@ def test_fresh_runtime_preserves_services_and_replay_identity(database):
     {'operation_id': UUID('8c882972-b457-4d02-b11a-e0ba93506a72')},
     {'batch_runner_token': 'loom_br_' + 'c' * 64},
     {'schema_revision': '0173'},
+    {'schema_revision': '0174'},
 ])
 def test_replay_rejects_changed_authority_without_rotating(database, changes):
     module = runtime()
@@ -175,7 +176,7 @@ def test_replay_rejects_delegation_and_future_table_authority(database, grant):
 
 def test_fixed_job_command_emits_only_receipt_and_refuses_staging(database, monkeypatch, tmp_path, capsys):
     module = runtime()
-    config = {'namespace': 'loom-dev', 'operation_id': str(OPERATION), 'schema_revision': '0174'}
+    config = {'namespace': 'loom-dev', 'operation_id': str(OPERATION), 'schema_revision': '0175'}
     path = tmp_path / 'runtime.json'
     path.write_text(json.dumps(config))
     monkeypatch.setenv('LOOM_DEVELOPMENT_RUNTIME_CONFIG', str(path))
