@@ -79,14 +79,21 @@ def prepare_intent(*, reference: RetainedManagementReference, catalog: dict[str,
         # personal application archives use the separate shared source bucket.
         # Both adapters enforce this binding at admission, so qualify it before
         # freezing the one-shot catalog, not after workers have been installed.
-        for profiles, bucket in ((spec.profiles.task_images, 'artifacts'),
-                                 (spec.profiles.application_images, 'source')):
-            for profile in profiles:
-                settings = profile.settings
-                if (settings.service_image != candidate['images']['service']['image_ref']
-                        or (settings.storage_endpoint, settings.storage_region, settings.source_bucket) != (
-                            config['storage_endpoint'], config['region'], config['buckets'][bucket])):
-                    raise ValueError()
+        builds = [(row, row.cpu_arch, 'artifacts') for row in spec.profiles.task_images] + [
+            (row, row.recipe.cpu_arch, 'source') for row in spec.profiles.application_images]
+        for profile, architecture, bucket in builds:
+            settings = profile.settings
+            selector = profile.target.node_selector or {}
+            # Native rendering translates reserved os/arch labels to the
+            # provider-owned ones. The pool wrapper requires that exact final
+            # selector; reject unusable immutable catalogs before any writes.
+            if (selector.get('loom.nebius/node-os') != 'linux'
+                    or selector.get('loom.nebius/node-arch') != {'x86_64': 'amd64', 'arm64': 'arm64'}[architecture]
+                    or {'kubernetes.io/os', 'kubernetes.io/arch'} & selector.keys()
+                    or settings.service_image != candidate['images']['service']['image_ref']
+                    or (settings.storage_endpoint, settings.storage_region, settings.source_bucket) != (
+                        config['storage_endpoint'], config['region'], config['buckets'][bucket])):
+                raise ValueError()
         if set(tokens) != {row.machine_id for row in spec.machines}:
             raise ValueError()
         for machine in spec.machines:

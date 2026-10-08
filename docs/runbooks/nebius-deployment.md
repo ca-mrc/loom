@@ -562,7 +562,13 @@ must match. Task-image profiles read ordinary TaskSet bundles from
 `buckets.artifacts`; application-image profiles read personal application archives
 from `buckets.source`. These are distinct intake paths even though both use the
 shared build pool. Do not point task-image profiles at the application-source
-bucket. Credentials must already be issued and unexpired before initial
+bucket. Both build-profile kinds must use the final owned placement labels:
+`loom.nebius/node-os: linux` and `loom.nebius/node-arch: amd64` for `x86_64`, or
+`loom.nebius/node-arch: arm64` for `arm64`. Do not use reserved
+`kubernetes.io/os` or `kubernetes.io/arch` labels in these profiles; native build
+rendering translates them, but admission requires the final selector to match
+the immutable catalog exactly. Additional placement labels are preserved.
+Credentials must already be issued and unexpired before initial
 namespace/registration writes. Registration also checks validity using database
 time; completed registration evidence remains readable after credential expiry.
 
