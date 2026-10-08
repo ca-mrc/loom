@@ -266,6 +266,33 @@ worker may write another version, but its bytes must be identical, and its old
 claim cannot commit, retry or fail the new owner. This is not a general recovery
 path for other harnesses or changed projection semantics.
 
+If a caught Job failure parks the archive with `recovery_incomplete`, preserve the
+failed Job UID, logs, original request and Artifact audit. Do not replay its Job or
+claim. After the repaired candidate and migration `0175` are installed through
+normal protected rollout, the supported follow-up is
+`python -m loom_control_plane.pending_archive_retry` in the installed Control
+Plane, with its unchanged runtime environment and mounted platform configuration.
+The Job renderer now requires explicit lifecycle environment/namespace settings;
+preflight rejects mismatched existing lifecycle ownership.
+
+Prepare a private JSON request containing `operation_id`, `team_id`, `lease_id`,
+`previous_request_sha256`, `previous_claim_id`, `candidate_sha` and `schema_head`.
+The previous digest and claim identify the original failed audit; candidate and
+schema identify the currently installed repair. Do not rewrite historical fields
+in the original request. Supply `--request-json` and `--platform`; the default is
+a read-only preview. Review the returned request digest, original audit digest,
+counter and unchanged source/projection qualification before invoking `--apply`
+once with that exact request. After an uncertain apply response, use `--readback`
+only. The distinct `pending_archive_retry` audit and lease state establish whether
+the transition committed. This command neither runs the task nor copies objects;
+the ordinary archive worker performs the qualified storage work.
+
+A `requeued` reply is not acceptance. Retain the original failed Job report
+separately from follow-up evidence; verify the canonical acknowledgement, every
+version and download, original runtime result/reward/execution count, and source
+retention after the ordinary worker commits. No object deletion or cleanup is
+part of this repair.
+
 The recovery owns a 3,600-second claim. Its process has a 1,500-second soft limit,
 1,700-second hard watchdog and 1,800-second Job deadline, with no Pod restart or
 Job retry. The Job projects only the database CA from the database Secret and

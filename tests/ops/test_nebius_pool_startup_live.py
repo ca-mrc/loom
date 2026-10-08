@@ -103,7 +103,7 @@ def startup_http(closed_startup, cutover_binding_inventory):
         return {'status': 'qualified'}
 
     guards = SimpleNamespace(request=migration, guard=guard, runtime_role=runtime_role,
-        cutover_readiness_page=lambda target, after: {'status': 'observed', 'schema_revision': '0174', 'rows': []})
+        cutover_readiness_page=lambda target, after: {'status': 'observed', 'schema_revision': '0175', 'rows': []})
 
     def respond(message):
         state.calls.append(message)

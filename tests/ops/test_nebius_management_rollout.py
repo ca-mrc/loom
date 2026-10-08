@@ -114,7 +114,7 @@ def test_image_repair_bundle_binds_schema_head_from_source_and_rejects_wrong_sou
     files, selected = unpack_bundle(content)
     assert selected == operation
     assert json.loads(files['manager-schema.json']) == {
-        'schema': 'loom.nebius-manager-schema.v1', 'source_sha': operation['source_sha'], 'revision': '0174'}
+        'schema': 'loom.nebius-manager-schema.v1', 'source_sha': operation['source_sha'], 'revision': '0175'}
     proof = json.loads(files['manager-schema.json'])
     proof['source_sha'] = 'f' * 40
     files['manager-schema.json'] = json.dumps(proof, sort_keys=True).encode()

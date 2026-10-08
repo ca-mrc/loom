@@ -43,7 +43,7 @@ def management_history(database_guard, monkeypatch):
         database=replace(previous.target.database, statefulset=copy.deepcopy(database), service=copy.deepcopy(service)))
     origin = PoolWorkOriginV1(data_environment_id=request.registration.spec.participants[0].environment_id,
         submission_id=uuid4(), kind='environment', application=None)
-    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0174', 'read_only': True,
+    report = {'schema': 'loom.pool-management-history.v1', 'schema_revision': '0175', 'read_only': True,
         'rows': [{'ordinal': 1, 'origin': origin.model_dump(mode='json'), 'application': None, 'operation': None}]}
     state = SimpleNamespace(request=request, target=target, participant=previous.target, origin=origin, report=report,
         database=database, service=service, pod=pod, secret=secret, calls=[], executed=False, after_drift=False)

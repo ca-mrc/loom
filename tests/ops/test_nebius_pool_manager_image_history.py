@@ -603,7 +603,7 @@ def private_image_repair(image_repair_case, monkeypatch):
     save_private(operation, payload)
     proof = Path(operation["inputs_path"]).with_name("manager-schema.json")
     private_state._atomic_json(proof, {"schema": "loom.nebius-manager-schema.v1", "source_sha": binding.source_sha,
-        "revision": "0174"})
+        "revision": "0175"})
     monkeypatch.setattr(target, "SCHEMA_PROOF_PATH", proof)
     return operation, payload, proof, context
 
@@ -652,7 +652,7 @@ def tooling_continuation(private_image_repair, image_repair_case, target="manage
     wrapper = {"schema_version": "loom.nebius-pool-image-tooling-private-inputs.v1", "repair_operation": previous}
     save_private(operation, wrapper)
     private_state._atomic_json(proof, {"schema": "loom.nebius-manager-schema.v1", "source_sha": "c" * 40,
-        "revision": "0174"})
+        "revision": "0175"})
     return operation, wrapper, fixture
 
 
@@ -760,7 +760,7 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
     operation, payload, proof, _ = private_image_repair
     if damage.startswith("schema_"):
         content = json.loads(proof.read_bytes())
-        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0175"
+        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0174"
         private_state._atomic_json(proof, content)
     elif damage == "candidate":
         payload["binding"]["candidate"]["candidate_sha"] = "f" * 40

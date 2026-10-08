@@ -102,9 +102,9 @@ def load_image_repair_inputs(operation: dict[str, Any]) -> ImageRepairContext:
             raise ValueError
         # The protected bundle builder derives this head from its exact source's
         # Alembic graph; manifest + fixed installer digest bind these bytes. The
-        # retained pool's closed-manager SQL independently requires schema0174.
+        # retained pool's closed-manager SQL independently requires schema0175.
         # A different head needs a separate migration workflow, not this switch.
-        expected = {'schema': 'loom.nebius-manager-schema.v1', 'source_sha': authority['source_sha'], 'revision': '0174'}
+        expected = {'schema': 'loom.nebius-manager-schema.v1', 'source_sha': authority['source_sha'], 'revision': '0175'}
         if _private(SCHEMA_PROOF_PATH, 4096) != json.dumps(expected, sort_keys=True).encode():
             raise ValueError
         state, anchor = Path(original.operation['state_dir']), Path(original.operation['anchor_dir'])

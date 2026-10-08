@@ -19,7 +19,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from loom.db.schema import Artifact, ArtifactUploadSession, LlmCall, ServiceExecutionLease, Trial
+from loom.data_lifecycle import DataClass, OwnerKind
+from loom.data_lifecycle_registry import RuntimeLifecycleScope, _validate_existing
+from loom.db.schema import (
+    Artifact,
+    ArtifactUploadSession,
+    DataLifecycleAuthority,
+    LlmCall,
+    ServiceExecutionLease,
+    Trial,
+)
 from loom.db.schema_startup import service_schema_head
 from loom.execution_runtime_contract import ExecutionRuntimeResultV1
 from loom.models.task import TaskConfig
@@ -221,9 +230,38 @@ PROJECTION_FIELDS = ("trial_config_sha256", "task_config_sha256", "runtime_resul
                      "derivation_sha256", "events_sha256", "atif_sha256")
 
 
+async def qualify_lifecycle_scope(session: AsyncSession, request: ArchiveRecoveryRequest) -> RuntimeLifecycleScope:
+    """Verify existing ownership before copying; never create a parent in preflight."""
+    scope = RuntimeLifecycleScope.from_environ()
+    if scope.namespace != request.namespace:
+        raise RecoveryRefusedError("lifecycle_namespace_changed")
+    trial = await session.get(Trial, request.trial_id)
+    artifact = await session.get(Artifact, request.artifact_id)
+    if (trial is None or artifact is None or trial.team_id != request.team_id
+            or artifact.team_id != request.team_id or artifact.trial_id != trial.id
+            or trial.lifecycle_authority_id is None):
+        raise RecoveryRefusedError("lifecycle_parent_missing")
+    owners: list[tuple[Trial | Artifact, DataClass, OwnerKind, datetime]] = [
+        (trial, DataClass.TRIAL, OwnerKind.TRIAL, trial.submitted_at)]
+    if artifact.lifecycle_authority_id is not None:
+        owners.append((artifact, DataClass.ARTIFACT, OwnerKind.ARTIFACT, artifact.created_at))
+    for owner, data_class, owner_kind, created_at in owners:
+        authority = await session.get(DataLifecycleAuthority, owner.lifecycle_authority_id)
+        if authority is None:
+            raise RecoveryRefusedError("lifecycle_authority_missing")
+        spec = scope.authority_spec(team_id=request.team_id, data_class=data_class,
+            owner_kind=owner_kind, owner_id=str(owner.id), created_at=created_at)
+        try:
+            _validate_existing(authority, spec)
+        except RuntimeError:
+            raise RecoveryRefusedError("lifecycle_authority_changed") from None
+    return scope
+
+
 async def qualify_inputs(
     session: AsyncSession, request: ArchiveRecoveryRequest, lease: ServiceExecutionLease, trial: Trial,
 ) -> None:
+    await qualify_lifecycle_scope(session, request)
     snapshot = await resolve_service_execution_task_snapshot(session, lease=lease, trial=trial)
     call = await session.scalar(select(LlmCall.id).where(
         LlmCall.team_id == request.team_id, LlmCall.trial_id == request.trial_id).limit(1))
@@ -290,6 +328,18 @@ class OracleRecoveryMaterializer(ServiceExecutionMaterializer):
     def __init__(self, *, request: ArchiveRecoveryRequest, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.request = request
+
+    async def _qualify_before_copy(
+        self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial, artifact: Artifact,
+    ) -> None:
+        await qualify_inputs(session, self.request, lease, trial)
+        audit = (artifact.artifact_metadata or {}).get(AUDIT_KEY, {})
+        if (audit.get("request_sha256") != self.request.digest
+                or audit.get("claim_id") != str(lease.materialization_claim_id)):
+            raise RecoveryRefusedError("recovery_projection_changed")
+        projected = await project_oracle(session, self, team_id=self.request.team_id, lease_id=self.request.lease_id)
+        if any(projected[key] != getattr(self.request, key) for key in PROJECTION_FIELDS):
+            raise RecoveryRefusedError("installed_projection_differs")
 
     async def _park_failure(self, claim: MaterializationClaim, *, code: str) -> None:
         """Fence a caught failure without rewriting the original Trial outcome.
@@ -372,6 +422,7 @@ async def run_recovery(request: ArchiveRecoveryRequest, settings: ControlPlaneSe
                 source_retention_seconds=settings.service_execution_source_retention_sec)
             async with sessions.begin() as session:
                 await session.execute(text("SET TRANSACTION READ ONLY"))
+                await qualify_lifecycle_scope(session, request)
                 projected = await project_oracle(session, materializer, team_id=request.team_id, lease_id=request.lease_id)
             if any(projected[key] != getattr(request, key) for key in PROJECTION_FIELDS):
                 raise RecoveryRefusedError("installed_projection_differs")

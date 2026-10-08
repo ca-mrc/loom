@@ -2047,7 +2047,7 @@ recovery or completion descendant.
 The tooling source and protected publication source must be the same integrated
 commit. The bundle builder derives its single Alembic head from that source and
 binds `manager-schema.json` in the immutable bundle. Entry requires the existing
-pool's manager revision `0174`; a different head requires a separate migration,
+pool's manager revision `0175`; a different head requires a separate migration,
 which this action cannot perform. The retained publication reader and keyring
 must verify the new image before operator connections are opened.
 
@@ -2138,7 +2138,7 @@ latest image-repair anchor, and retains its exact binding, image publication,
 execution profile and journal. A tooling continuation cannot enroll a new image
 repair, reference another tooling continuation, or change the installation,
 namespace or original pool operation. The new bundle must independently prove
-schema revision `0174`; the original image publication must still qualify. It
+schema revision `0175`; the original image publication must still qualify. It
 uses the original dispatch lock and the same fixed image-update/activation paths.
 Unknown writes remain readback-only. Current identity, metadata, spec and version
 checks remain mandatory, including when a fresh observation replaces a stale
