@@ -76,7 +76,7 @@ def handoff(entry, installation):
     return reference, manager, api, state, anchor
 
 
-def verify(handoff, monkeypatch, calls):
+def verify(handoff, monkeypatch, calls, *, retained_only=False):
     from scripts.ops.nebius_development_management_foundation import (
         HTTPSRetainedDevelopmentFoundation,
         RetainedDevelopmentReference,
@@ -106,7 +106,25 @@ def verify(handoff, monkeypatch, calls):
     api.client.close()
     api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(handle))
     with api:
+        if retained_only:
+            if not hasattr(api, 'verify_retained'):
+                pytest.fail('read-only retained foundation verification is missing')
+            return api.verify_retained(reference=RetainedDevelopmentReference.model_validate(reference))
         return api.verify(reference=RetainedDevelopmentReference.model_validate(reference), request=request)
+
+
+def test_runtime_qualifies_original_foundation_without_initial_manager_request(handoff, monkeypatch):
+    operation = json.loads(Path(handoff[0]['operation_path']).read_text())
+    inputs = json.loads(Path(operation['inputs_path']).read_text())
+    for path in {inputs['operator_connection']['credentials_file'], inputs['operator_connection']['ca_file'],
+            *inputs['storage_files'].values()}:
+        Path(path).unlink()
+    calls = []
+    result = verify(handoff, monkeypatch, calls, retained_only=True)
+    assert result['namespace'] == 'loom-dev'
+    assert result['namespace_uid'] == handoff[1].shared_namespace_uid
+    assert result['data_environment_id'] == operation['installation_id']
+    assert calls and all(row.method == 'GET' for row in calls)
 
 
 def test_completed_foundation_handoff_never_rerenders_or_replays_installation(handoff, monkeypatch):
