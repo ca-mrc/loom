@@ -88,6 +88,7 @@ class DevelopmentManagementRequest(ManagementInstallRequest):
     tls_material: ManagementTLSMaterial
     qualification_digest: str | None = None
     shared_public_route: bool = False
+    source_material: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
         if type(self.shared_public_route) is not bool:
@@ -127,7 +128,8 @@ class DevelopmentManagementAPI(Protocol):
 
 def _setup(request: DevelopmentManagementRequest, binding: ManagementBinding) -> ApplicationSetupRequest:
     return ApplicationSetupRequest(request.deployment, request.candidate, request.profile, binding,
-        request.shared_namespace_uid, _ROOT, request.application_material, request.shared_public_route)
+        request.shared_namespace_uid, _ROOT, request.application_material, request.shared_public_route,
+        request.source_material)
 
 
 def render_installation(request: DevelopmentManagementRequest) -> RenderedManagement:
@@ -143,7 +145,8 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
             or config['environment'] != 'development' or app is None
             or app.shared.platform_namespace != 'loom-dev'
             or not isinstance(app.runtime.kubernetes, ProjectedKubernetesConnection)
-            or app.runtime.build is not None or app.runtime.source_upload is not None
+            or app.runtime.build is not None
+            or (app.runtime.source_upload is None) != (request.source_material is None)
             or deployment.pool_catalog_operation_id is not None
             or request.tls_material.public_host != deployment.public_host
             or deployment.public_tls_secret_name != management_tls_secret_name(binding.installation_id, request.tls_material)):
@@ -262,6 +265,7 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
             'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid,
             'tls_material': asdict(request.tls_material),
             'qualification_digest': request.qualification_digest,
+            **({'source_material': request.source_material} if request.source_material is not None else {}),
             **({'shared_public_route': True} if request.shared_public_route else {})})
         identity: dict[str, Any] = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
                     'state_dir': str(state), 'binding': asdict(request.binding)}

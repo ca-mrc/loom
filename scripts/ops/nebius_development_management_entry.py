@@ -76,6 +76,7 @@ class DevelopmentManagementPrivateInputs(BaseModel):
     material_files: dict[str, dict[str, Path]]
     application_files: dict[str, Path]
     shared_public_route: bool = Field(default=False, strict=True, exclude_if=lambda value: value is False)
+    source_files: dict[str, Path] | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 def _certificate(selection: ManagementCertificateSelection, public_host: str) -> tuple[ManagementTLSMaterial, dict[Path, bytes]]:
@@ -125,6 +126,10 @@ def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentManagementPrivate
                 raise ValueError()
             materials.extend(inputs.material_files[name].values())
         materials.extend(inputs.application_files.values())
+        if inputs.source_files is not None:
+            if set(inputs.source_files) != {'access-key', 'secret-key'}:
+                raise ValueError()
+            materials.extend(inputs.source_files.values())
         if (len(set(materials)) != len(materials) or set(materials) & (operators | files.keys())
                 or operators & files.keys()):
             raise ValueError()
@@ -133,6 +138,8 @@ def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentManagementPrivate
             raise ValueError()
         request = DevelopmentManagementRequest(binding=inputs.binding, deployment=inputs.deployment,
             shared_public_route=inputs.shared_public_route,
+            source_material={key: files[item].decode() for key, item in inputs.source_files.items()}
+                if inputs.source_files is not None else None,
             candidate=inputs.candidate, profile=inputs.profile, shared_namespace_uid=str(inputs.shared_namespace_uid),
             material={name: {key: files[item].decode() for key, item in selected.items()}
                 for name, selected in inputs.material_files.items()},
