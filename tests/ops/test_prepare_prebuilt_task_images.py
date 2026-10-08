@@ -231,10 +231,10 @@ def test_large_realistic_reports_keep_cli_success_and_critical_classification(
     def large_report(argv, **kwargs):
         result = run(argv, **kwargs)
         if "--format" in argv and argv[argv.index("--format") + 1] == "json":
-            # Actual canonical reports are 29-41 MB. JSON whitespace retains the
-            # same image identity and vulnerability content at this realistic size.
+            # Canonical browser-image reports reach 85 MB. JSON whitespace
+            # preserves image identity and vulnerability content at this size.
             with Path(argv[argv.index("--output") + 1]).open("ab") as handle:
-                handle.write(b" " * (33 * 1024**2))
+                handle.write(b" " * (82 * 1024**2))
         return result
 
     monkeypatch.setattr(prepare, "_run", large_report)
@@ -248,14 +248,14 @@ def test_large_realistic_reports_keep_cli_success_and_critical_classification(
 
 @pytest.mark.parametrize("label", ["vulnerability", "SBOM"])
 def test_scanner_report_budget_accepts_exact_limit_and_rejects_next_byte(tmp_path, label):
-    assert prepare.MAX_IMAGE_REPORT_BYTES == 64 * 1024**2
+    assert prepare.MAX_IMAGE_REPORT_BYTES == 128 * 1024**2
     report = tmp_path / "report.json"
     with report.open("wb") as handle:
         handle.truncate(prepare.MAX_IMAGE_REPORT_BYTES)
     assert len(prepare._read_image_report(report, label=label)) == prepare.MAX_IMAGE_REPORT_BYTES
     with report.open("ab") as handle:
         handle.write(b" ")
-    with pytest.raises(ValueError, match="64 MiB report budget"):
+    with pytest.raises(ValueError, match="128 MiB report budget"):
         prepare._read_image_report(report, label=label)
 
 
