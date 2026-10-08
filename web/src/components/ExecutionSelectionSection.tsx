@@ -1,4 +1,5 @@
 import type { components } from "../api/schema";
+import { executionClassLabel, isolationLabel } from "../lib/sandbox";
 import { networkPolicyLabel } from "../lib/networkPolicy";
 
 type Requested = components["schemas"]["RequestedExecutionSelection"];
@@ -13,7 +14,7 @@ function harnessLabel(requested: Requested): string {
 function effectiveLabel(item: Effective): string {
   const grading = item.fresh_sandbox_grading ? "graded in a fresh sandbox" : "graded in the attempt";
   const count = item.trial_count != null ? ` · ${item.trial_count} trial${item.trial_count === 1 ? "" : "s"}` : "";
-  return `${item.isolation} · ${item.verification} (${grading}) · ${item.execution_class_id}${count}`;
+  return `${executionClassLabel(item.execution_class_id)} · ${item.verification} (${grading}) · ${item.execution_class_id}${count}`;
 }
 
 /** Requested axes beside what the frozen attempt plans actually ran. */
@@ -43,7 +44,7 @@ export function ExecutionSelectionSection({
         </div>
         <div>
           <dt className="text-slate-500">Isolation</dt>
-          <dd>{requested.isolation}</dd>
+          <dd>{isolationLabel(requested.isolation)}</dd>
         </div>
       </dl>
       <div className="text-sm">

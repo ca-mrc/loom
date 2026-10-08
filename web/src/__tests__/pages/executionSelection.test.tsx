@@ -136,7 +136,7 @@ describe("execution selection readback", () => {
     expect(screen.getByText("terminus-2 @ default")).toBeTruthy();
     expect(screen.getByText("task default")).toBeTruthy();
     expect(
-      screen.getByText("guest · shared (graded in the attempt) · linux-amd64-cpu-guest-v1 · 2 trials"),
+      screen.getByText("VM sandbox · shared (graded in the attempt) · linux-amd64-cpu-guest-v1 · 2 trials"),
     ).toBeTruthy();
   });
 

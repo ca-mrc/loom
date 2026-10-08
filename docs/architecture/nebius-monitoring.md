@@ -50,7 +50,22 @@ deployed browser journey in issue #1981, nor require another paid model batch.
 Admission's conservative zero is not a capacity measurement. The public
 projection returns unknown slot estimates when calibration/binding or fresh
 observations are unavailable, while retaining confirmed zero forecasts and
-unchanged admission decisions. Disabled targets appear under Inactive regions,
+unchanged admission decisions. The monitor API retains `execution_class_id` and
+explicit `capacity_owner_target_id` for each target. Capacity cards group only by
+that owner identity, never by pool name or region: independent owners in one
+region remain separate, and older responses without ownership retain separate
+cards. Node inventory, quota, policy and on-demand placement appear once per
+physical capacity owner. Missing owners and non-active/unhealthy owners remain
+explicit rather than borrowing a sibling's healthy state.
+
+Runtime entries use Container sandbox, VM sandbox, and VM sandbox · Emulated
+authentication. Each entry retains its own health, lifecycle, command backlog,
+blockers and calibrated slot estimates. These estimates are alternative uses of
+the same resources and must not be summed. Backend execution-class IDs and the
+`container` / `guest` API values remain unchanged; the batch isolation control
+and execution readback use the same user-facing sandbox names.
+
+Disabled and retired targets appear under Inactive execution environments,
 not as active service faults; their historical observations remain in the API.
 Draining targets remain visible with node occupancy until their resources are released.
 

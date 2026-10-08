@@ -79,12 +79,12 @@ export default function NewBatchAdvancedFields({ advanced, setAdv, batchPurpose,
             onChange={(e) => setAdv("isolation", e.target.value as AdvancedState["isolation"])}
           >
             <option value="">Auto (from task requirements)</option>
-            <option value="container">Container</option>
-            <option value="guest">Dedicated guest VM</option>
+            <option value="container">Container sandbox</option>
+            <option value="guest">VM sandbox</option>
           </select>
           <Help>
-            Guest runs each attempt in its own kernel and grades in that attempt. Container cannot
-            run tasks that declare guest capabilities.
+            VM sandbox runs each attempt with its own Linux kernel and grades in that attempt.
+            Container sandbox cannot run tasks that require a VM sandbox.
           </Help>
         </label>
         <label className="block max-w-sm">
