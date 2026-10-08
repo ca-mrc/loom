@@ -12,6 +12,8 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
+from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
 from tests.ops.test_nebius_development_management_foundation import (
     development_inputs as original_development_inputs,  # noqa: F401
 )
@@ -331,6 +333,42 @@ def database_runtime(completed_pool, **changes):
         actuator_password='runtime-actuator-' + 'p' * 40, batch_runner_token='loom_br_' + 'r' * 64)
     arguments.update(changes)
     return importlib.import_module(name).prepare_database_runtime(reference(module(), completed_pool), **arguments)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_collector_material_delivers_only_fixed_private_observer_secret(completed_pool, collector_cloud):
+    from scripts.ops import nebius_development_collector_runtime as runtime
+    from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
+
+    request = database_runtime(completed_pool)
+    scope = DevelopmentCollectorCloudScope.model_validate({**collector_cloud.scope,
+        'project_id': request.foundation.inputs.config['project_id']})
+    document = runtime.prepare_collector_material(request, scope=scope, credential=collector_cloud.credential)
+    assert document['metadata']['namespace'] == 'loom-nebius-dev-execution'
+    assert document['metadata']['name'] == 'loom-dev-collector-aecc7407b7b84c388d1fbca5dca9840f'
+    assert document['kind'] == 'Secret' and document['type'] == 'Opaque' and document['immutable'] is True
+    assert set(document['data']) == {'credentials.json'}
+    assert base64.b64decode(document['data']['credentials.json'], validate=True) == collector_cloud.credential
+    assert document['metadata']['labels']['loom.nebius/development-runtime-operation'] == str(request.operation_id)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('damage', ['mutable-request', 'foreign-project', 'operator-identity'])
+def test_collector_material_refuses_changed_request_or_identity(completed_pool, collector_cloud, damage):
+    from scripts.ops import nebius_development_collector_runtime as runtime
+    from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
+
+    request = database_runtime(completed_pool)
+    scope = {**collector_cloud.scope, 'project_id': request.foundation.inputs.config['project_id']}
+    if damage == 'mutable-request':
+        request.database[0]['data']['setup.json'] = '{}'
+    elif damage == 'foreign-project':
+        scope['project_id'] = 'project-foreign'
+    else:
+        scope['account_id'] = 'serviceaccount-operator'
+    with pytest.raises(ValueError, match='development collector material unqualified'):
+        runtime.prepare_collector_material(request,
+            scope=DevelopmentCollectorCloudScope.model_validate(scope), credential=collector_cloud.credential)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
