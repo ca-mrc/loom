@@ -231,6 +231,33 @@ class Kubectl:
         result = self.run("get", kind, name, "-n", namespace, "--ignore-not-found", "-o", "json")
         return json.loads(result) if result else {}
 
+    def legacy_pool_completion(self, operation: str) -> dict[str, Any]:
+        from scripts.ops.nebius_legacy_pool_completion import (
+            canonical_uuid,
+            read_completion,
+            validate_projection,
+        )
+
+        try:
+            canonical_uuid(operation)
+            target = os.environ.get("LOOM_DEPLOY_SSH_TARGET")
+            if not target:
+                return read_completion(operation)
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target):
+                raise ValueError
+            command = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15",
+                "-o", "ServerAliveCountMax=3", "-o", "IdentitiesOnly=yes",
+                "-o", "UserKnownHostsFile=" + os.environ["LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"],
+                "-i", os.environ["LOOM_DEPLOY_SSH_KEY_FILE"], target,
+                shlex.join(["loom-nebius-legacy-pool-completion-v1", operation])]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+            if result.returncode or len(result.stdout) > 512 * 1024:
+                raise ValueError
+            return validate_projection(json.loads(result.stdout), operation)
+        except Exception:
+            raise DeploymentError("legacy pool completion unavailable; preserve protected recovery") from None
+
 
 def install_task_identity_policy(
     kube: Kubectl, config: dict[str, Any], snapshot_root: Path,
@@ -442,13 +469,20 @@ def migration_readiness(kube: Kubectl, namespace: str, expected_head: str | None
     return {"migration_needed": needed}
 
 
-def verify_standalone_pool_boundary(kube: Kubectl, config: dict[str, Any]) -> None:
+def verify_standalone_pool_boundary(kube: Kubectl, config: dict[str, Any], *,
+        completions: dict[str, dict[str, Any]] | None = None, allow_load: bool = True) -> None:
     """The legacy standalone renderer cannot retire or overwrite global wiring.
 
-    This is a safety barrier, not the protected pool refresh implementation.
-    Check again under the idle guard: a cutover can complete after preflight.
+    Retirement metadata survives rollback. Its anchored terminal legacy outcome
+    permits ordinary upgrades; it never excuses current global wiring. Reuse
+    that immutable proof under the idle guard, but reread live marker and UID.
     """
+    from scripts.ops.nebius_legacy_pool_completion import validate_projection
+
     from loom.nebius_guest_target import guest_target_ids
+
+    if completions is None:
+        completions = {}
 
     processes = [(config["namespace"], name) for name in ("loom-service", "loom-control-plane")]
     processes.append((config["execution_namespace"], "loom-execution-actuator"))
@@ -459,12 +493,25 @@ def verify_standalone_pool_boundary(kube: Kubectl, config: dict[str, Any]) -> No
     for namespace, name in processes:
         current = kube.get("deployment", name, namespace)
         annotations = current.get("metadata", {}).get("annotations", {})
-        if "loom.nebius/pool-retirement-operation" in annotations or any(
+        if any(
             row.get("name") in settings
             for container in current.get("spec", {}).get("template", {}).get("spec", {}).get("containers", [])
             for row in container.get("env", [])
         ):
             raise DeploymentError("pool runtime preservation requires its protected cutover or refresh")
+        if "loom.nebius/pool-retirement-operation" in annotations:
+            operation = annotations["loom.nebius/pool-retirement-operation"]
+            try:
+                if operation not in completions:
+                    if not allow_load:
+                        raise ValueError
+                    completions[operation] = validate_projection(kube.legacy_pool_completion(operation), operation)
+                proof = completions[operation]
+                key = "Deployment:" + namespace + ":" + name
+                if key not in proof["workloads"] or proof["workloads"][key] != current.get("metadata", {}).get("uid"):
+                    raise ValueError
+            except Exception:
+                raise DeploymentError("historical pool retirement requires its completed legacy rollback") from None
 
 
 def preflight(
@@ -473,10 +520,11 @@ def preflight(
     config: dict[str, Any],
     files: dict[str, list[dict[str, Any]]],
     expected_cluster_id: str,
+    *, pool_completions: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     verify_cluster_identity(kube, config, expected_cluster_id)
     verify_ingress_mode(kube, config)
-    verify_standalone_pool_boundary(kube, config)
+    verify_standalone_pool_boundary(kube, config, completions=pool_completions)
     for (namespace, secret), required in sorted(secret_requirements(files, config).items()):
         # Return only names of populated keys, never secret values.
         observed = kube.run(
@@ -758,7 +806,8 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
         )
         kube = kube or Kubectl(args.kubeconfig)
         phase("preflight")
-        state = preflight(kube, manifest, config, files, args.expected_cluster_id)
+        pool_completions: dict[str, dict[str, Any]] = {}
+        state = preflight(kube, manifest, config, files, args.expected_cluster_id, pool_completions=pool_completions)
         evidence["preflight"] = state
         retire_target = getattr(args, "retire_target", None)
         current = kube.get("configmap", "loom-platform-config", config["namespace"])
@@ -805,7 +854,7 @@ def deploy(args: argparse.Namespace, *, kube: Kubectl | None = None) -> dict[str
             # A same-candidate ingress cutover may have finished after preflight
             # but before we acquired the shared rollout guard.
             verify_ingress_mode(kube, config)
-            verify_standalone_pool_boundary(kube, config)
+            verify_standalone_pool_boundary(kube, config, completions=pool_completions, allow_load=False)
             current = kube.get("configmap", "loom-platform-config", ns)
             validate_target_replacement(current, config, retire_target)
             if retire_target is not None and canonical(current.get("data", {})) != replacement_source:
