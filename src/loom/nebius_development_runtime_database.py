@@ -28,7 +28,7 @@ from loom.nebius_platform_bootstrap import (
 )
 
 _ROLE = 'loom_actuator'
-_REVISION = '0174'
+_REVISION = '0175'
 _OPTIONS = '-c statement_timeout=30000 -c lock_timeout=10000 -c search_path=pg_catalog,public,pg_temp'
 _TABLE_PRIVILEGES = ('SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER')
 _COLUMN_PRIVILEGES = ('SELECT', 'INSERT', 'UPDATE', 'REFERENCES')
