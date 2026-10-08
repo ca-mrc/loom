@@ -1,15 +1,22 @@
 """Owner-scoped app version evidence and non-mutating schema compatibility."""
 from __future__ import annotations
 
+import asyncio
+import copy
+import hashlib
 from dataclasses import replace
 from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from loom.db.nebius_application_operation_schema import NebiusApplicationOperation
-from loom.nebius_application_contract import ApplicationCreateRequestV1, ApplicationOperationRequestV1
+from loom.db.schema import Token
+from loom.nebius_application_contract import (
+    ApplicationCreateRequestV1,
+    ApplicationOperationRequestV1,
+)
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_application_credentials import database_access as database_access
 from tests.integration.test_nebius_application_credentials import shared_ca as shared_ca
@@ -18,7 +25,9 @@ from tests.integration.test_nebius_application_material import management_key as
 from tests.integration.test_nebius_application_operations import applications as applications
 from tests.integration.test_nebius_application_preparation import preparation as preparation
 from tests.integration.test_nebius_application_ready import ready_context as ready_context
-from tests.integration.test_nebius_environment_management import environment_registry as environment_registry
+from tests.integration.test_nebius_environment_management import (
+    environment_registry as environment_registry,
+)
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
 
@@ -88,6 +97,111 @@ async def test_schema_mismatch_can_be_checked_before_create_and_cannot_mutate(ap
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "application_schema_mismatch"
     assert not await service.registry.list_applications(principal=principal)
+
+
+@pytest.mark.parametrize("scope,attributed,status", [("read:own", True, 200), ("submit", True, 403), ("read:own", False, 403)])
+async def test_version_and_compatibility_reads_require_attributed_read_permission(application_api, scope, attributed, status):
+    app, client, _, service, release, principal = application_api
+    operation = await service.create(principal, ApplicationCreateRequestV1(slug="alice", release_id=release.release_id),
+                                     idempotency_key="read-permissions")
+    minted = await client.post("/api/v1/tokens", json={"name": "versions", "type": "team", "scopes": [scope], "expires_in_days": 1})
+    assert minted.status_code == 201, minted.text
+    token = minted.json()["token"]
+    if not attributed:
+        async with service.registry.session_factory.begin() as session:
+            await session.execute(update(Token).where(Token.token_hash == hashlib.sha256(token.encode()).digest())
+                                  .values(created_by_user_id=None))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example.com",
+                                headers={"Authorization": "Bearer " + token}) as bearer:
+        for path in (f"/api/v1/application-releases/{release.release_id}/compatibility",
+                     f"/api/v1/applications/{operation.application_id}/versions"):
+            response = await bearer.get(path)
+            assert response.status_code == status, response.text
+            assert token not in response.text
+
+
+async def test_unqualified_frozen_release_is_not_exposed(application_api):
+    _, client, _, service, release, principal = application_api
+    operation = await service.create(principal, ApplicationCreateRequestV1(slug="alice", release_id=release.release_id),
+                                     idempotency_key="damaged-version")
+    async with service.registry.session_factory.begin() as session:
+        row = await session.get(NebiusApplicationOperation, operation.operation_id)
+        plan = copy.deepcopy(row.plan_json)
+        plan["release"]["credential"] = "fixture-private-material"
+        row.plan_json = plan
+    response = await client.get(f"/api/v1/applications/{operation.application_id}/versions")
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "application_versions_unqualified"
+    assert "fixture-private-material" not in response.text
+
+
+async def test_two_teammates_keep_distinct_versions_and_lifecycle_intents(application_api):
+    _, alice, bob, service, alice_release, principal = application_api
+    bob_release = alice_release.model_copy(update={"release_id": uuid4(), "source_digest": "sha256:" + "b" * 64,
+        "service_image_ref": "registry.example/bob@sha256:" + "c" * 64})
+    service._releases[bob_release.release_id] = bob_release
+    replies = await asyncio.gather(*[
+        client.post("/api/v1/applications", json={"slug": slug, "release_id": str(release.release_id)},
+                    headers={"Idempotency-Key": "concurrent-onboarding"})
+        for client, slug, release in ((alice, "alice", alice_release), (bob, "bob", bob_release))
+    ])
+    assert all(reply.status_code == 202 for reply in replies), [reply.text for reply in replies]
+    ids = [reply.json()["application_id"] for reply in replies]
+    before = await asyncio.gather(*[client.get(f"/api/v1/applications/{identity}/versions")
+                                   for client, identity in zip((alice, bob), ids, strict=True)])
+    reports = [reply.json() for reply in before]
+    assert reports[0]["requested_release"] != reports[1]["requested_release"]
+    assert reports[0]["status"]["registration"]["data_environment_id"] == reports[1]["status"]["registration"]["data_environment_id"]
+    assert (await alice.get(f"/api/v1/applications/{ids[1]}/versions")).status_code == 403
+    assert (await bob.get(f"/api/v1/applications/{ids[0]}/versions")).status_code == 403
+    stopped, peer = await asyncio.gather(
+        alice.post(f"/api/v1/applications/{ids[0]}/operations", json={"action": "suspend", "expected_generation": 1},
+                   headers={"Idempotency-Key": "alice-stop"}),
+        bob.get(f"/api/v1/applications/{ids[1]}/versions"),
+    )
+    assert stopped.status_code == 202, stopped.text
+    assert peer.json() == reports[1]
+    assert (await bob.get(f"/api/v1/applications/{ids[1]}/versions")).json() == reports[1]
+    assert (await service.registry.list_applications(principal=principal))[0].desired_state == "suspended"
+
+
+async def test_fifth_owner_onboards_without_replacing_four_existing_applications(applications, platform_inputs):
+    from loom.db.nebius_application_operation_schema import NebiusApplicationReservation
+    from loom.db.schema import User
+    from loom_service.application_management.versions import read_application_versions
+
+    registry, factory, (alice, bob), _, _, _ = applications
+    service, release = manager(registry, platform_inputs)
+    principals = [alice, bob]
+    async with factory.begin() as session:
+        for name in ("charlie", "diana", "eve"):
+            identity = uuid4()
+            session.add(User(id=identity, username=name, username_normalized=name, status="active"))
+            principals.append(replace(alice, user_id=identity))
+    releases = [release.model_copy(update={"release_id": uuid4(), "source_digest": "sha256:" + str(i + 1) * 64})
+                for i in range(5)]
+    service._releases = {item.release_id: item for item in releases}
+
+    async def create(index):
+        return await service.create(principals[index],
+            ApplicationCreateRequestV1(slug=f"teammate-{index}", release_id=releases[index].release_id),
+            idempotency_key="same-owner-local-key")
+
+    existing = await asyncio.gather(*[create(index) for index in range(4)])
+    await create(4)
+    for principal, original in zip(principals, existing, strict=False):
+        assert (await registry.status(original.application_id, principal=principal)).operation == original
+        report = await read_application_versions(factory, original.application_id, principal=principal,
+                                                 shared_schema_revision=service.shared.schema_revision)
+        assert report.last_completed_deployment is None  # No deployed-worker evidence is fabricated.
+    async with factory() as session:
+        operations = list(await session.scalars(select(NebiusApplicationOperation)))
+        assert len(operations) == 5
+        assert len({op.plan_json["registration"]["application_namespace"] for op in operations}) == 5
+        assert len({op.plan_json["shared"]["data_environment_id"] for op in operations}) == 1
+        assert all(value == 0 for value in await session.scalars(select(NebiusApplicationReservation.storage_mib)))
+        assert all(doc["kind"] not in {"StatefulSet", "PersistentVolumeClaim"}
+                   for op in operations for group in op.plan_json["files"].values() for doc in group)
 
 
 async def test_pending_update_and_suspend_preserve_last_completed_version(ready_context, platform_inputs):

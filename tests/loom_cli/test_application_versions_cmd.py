@@ -11,9 +11,11 @@ from tests.loom_cli.test_application_cmd import (
     APPLICATION,
     OPERATION,
     RELEASE,
-    application_http as application_http,
     operation,
     registration,
+)
+from tests.loom_cli.test_application_cmd import (
+    application_http as application_http,
 )
 
 
@@ -90,7 +92,7 @@ def test_read_diagnostics_bound_http_errors_and_retries(application_http, capsys
     assert len(requests) == 2 and all(r.method == "GET" for r in requests)
 
 
-@pytest.mark.parametrize("damage", ["wrong_owner_application", "future_completion", "secret", "inconsistent_schema"])
+@pytest.mark.parametrize("damage", ["wrong_owner_application", "future_completion", "secret", "inconsistent_schema", "pending_completion"])
 def test_versions_reject_inconsistent_or_private_responses(application_http, capsys, damage):
     responses, _ = application_http
     payload = versions()
@@ -100,9 +102,28 @@ def test_versions_reject_inconsistent_or_private_responses(application_http, cap
         payload["last_completed_deployment"]["deployment_generation"] = 3
     elif damage == "inconsistent_schema":
         payload["shared_schema_revision"] = "0173"
+    elif damage == "pending_completion":
+        payload["last_completed_deployment"].update(operation_id=OPERATION, deployment_generation=2, release=release())
     else:
         payload["credential"] = "fixture-private-material"
     responses["GET", f"/api/v1/applications/{APPLICATION}/versions"] = httpx.Response(200, json=payload)
     assert main(["dev", "app", "versions", APPLICATION, "--json"]) == 1
     out = capsys.readouterr()
     assert out.out == "" and "fixture-private-material" not in out.err
+
+
+@pytest.mark.parametrize("command", ["create", "update"])
+def test_schema_rejection_explains_teammate_recovery_without_private_error_body(application_http, capsys, command):
+    responses, requests = application_http
+    path = "/api/v1/applications" if command == "create" else f"/api/v1/applications/{APPLICATION}/operations"
+    responses["POST", path] = httpx.Response(409, json={"detail": {
+        "code": "application_schema_mismatch", "release_schema_revision": "0175", "shared_schema_revision": "0174",
+        "credential": "fixture-private-material",
+    }})
+    args = ["dev", "app", command, "alice" if command == "create" else APPLICATION, "--release", RELEASE,
+            "--idempotency-key", "schema-test", *(["--expected-generation", "2"] if command == "update" else [])]
+    assert main(args) == 1
+    out = capsys.readouterr()
+    assert "0175" in out.err and "0174" in out.err and "disposable local" in out.err
+    assert "fixture-private-material" not in out.err and "check-release" in out.err
+    assert len(requests) == 1
