@@ -6,9 +6,11 @@ import copy
 import hashlib
 import importlib
 import json
+import ssl
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from tests.ops.test_nebius_development_management_foundation import (
     development_inputs as original_development_inputs,  # noqa: F401
@@ -434,6 +436,141 @@ def test_runtime_database_proof_binds_job_operation_role_and_token(completed_poo
     for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
         with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
             setup.validate_database_runtime_proof(request, state, {**proof, field: value})
+
+
+@pytest.fixture
+def runtime_database_live(completed_pool, handoff, monkeypatch):
+    from types import SimpleNamespace
+
+    request = database_runtime(completed_pool)
+    store = runtime_database_api(request)
+    foundation, pool = handoff[2], completed_pool[3].server
+    original = pool.handle
+    state = SimpleNamespace(request=request, store=store, foundation=foundation, pool=pool,
+        calls=[], complete=False, pod=None, report=None, on_log=None)
+    kinds = {'secrets': 'Secret', 'configmaps': 'ConfigMap', 'serviceaccounts': 'ServiceAccount',
+        'services': 'Service', 'networkpolicies': 'NetworkPolicy', 'statefulsets': 'StatefulSet',
+        'deployments': 'Deployment', 'jobs': 'Job', 'persistentvolumeclaims': 'PersistentVolumeClaim',
+        'persistentvolumes': 'PersistentVolume'}
+
+    def handle(message):
+        path, method = message.url.path, message.method
+        state.calls.append(message)
+        name = path.rsplit('/', 1)[-1]
+        if method == 'POST':
+            document = json.loads(message.content)
+            assert document['metadata']['name'] == 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f'
+            assert document['kind'] in {'Secret', 'ConfigMap', 'Job'}
+            if message.url.params.get('dryRun') == 'All':
+                return httpx.Response(201, json=store.default_resource(document))
+            try:
+                store.create_resource(document)
+            except OSError:
+                raise httpx.ReadTimeout('response lost') from None
+            return httpx.Response(201, json=store.get_resource(document))
+        assert method == 'GET'
+        if '/namespaces/loom-dev/pods' in path:
+            job, = [row for row in store.resources.values() if row['kind'] == 'Job']
+            if state.pod is None:
+                state.pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {
+                    **copy.deepcopy(job['spec']['template']['metadata']), 'namespace': 'loom-dev',
+                    'name': job['metadata']['name'] + '-abc', 'uid': str(uuid4()),
+                    'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job', 'controller': True,
+                        'name': job['metadata']['name'], 'uid': job['metadata']['uid']}]},
+                    'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
+                        'containerStatuses': [{'name': job['spec']['template']['spec']['containers'][0]['name'],
+                            'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}]}}
+            if name == 'pods':
+                return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': [state.pod]})
+            if name == 'log':
+                if state.on_log:
+                    state.on_log()
+                report = state.report or {'status': 'development_runtime_database_installed',
+                    'operation_id': str(request.operation_id), 'role': 'loom_actuator', 'role_oid': 17000,
+                    'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}
+                return httpx.Response(200, json=report)
+            assert name == state.pod['metadata']['name']
+            return httpx.Response(200, json=state.pod)
+        if name.startswith('loom-dev-runtime-'):
+            collection = path.split('/')[-2]
+            value = store.resources.get(':'.join((kinds[collection], path.split('/')[4], name)))
+            value = copy.deepcopy(value)
+            if value is not None and value['kind'] == 'Job' and state.complete:
+                value['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
+            return httpx.Response(404) if value is None else httpx.Response(200, json=value)
+        if path == '/api/v1/namespaces/loom-dev':
+            return httpx.Response(200, json=foundation.bootstrap.namespace)
+        if '/namespaces/loom-dev/' in path or '/persistentvolumes/' in path:
+            kind = kinds[path.split('/')[-2]]
+            value = (foundation.bootstrap.secrets.get(name) if kind == 'Secret' else
+                foundation.stage.resources.get(kind + ':' + name))
+            if value is not None:
+                return httpx.Response(200, json=value)
+        return original(message)
+
+    monkeypatch.setattr(pool, 'handle', handle)
+    return state
+
+
+def runtime_database_https(live):
+    name = 'scripts.ops.nebius_development_runtime_database_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development runtime database HTTPS adapter is missing')
+    return importlib.import_module(name).HTTPSDevelopmentRuntimeDatabaseAPI(request=live.request,
+        api_server=live.request.foundation.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context())
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_https_waits_for_bound_sql_receipt_and_replays(runtime_database_live, tmp_path):
+    live, state = runtime_database_live, tmp_path / 'runtime-database'
+    with runtime_database_https(live) as api:
+        runtime_database_stage(live.request, api, state)
+        assert api.database_report(state) is None
+        live.complete = True
+        proof = api.database_report(state)
+        assert proof['database']['role'] == 'loom_actuator'
+        assert proof['database']['operation_id'] == 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f'
+        before = list(live.store.creates)
+        runtime_database_stage(live.request, api, state)
+        assert api.database_report(state) == proof
+        assert live.store.creates == before and len(before) == 4
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+@pytest.mark.parametrize('damage', ['database', 'execution-namespace'])
+def test_runtime_database_https_rejects_live_identity_drift_before_writes(runtime_database_live, tmp_path, damage):
+    live = runtime_database_live
+    if damage == 'database':
+        live.foundation.bootstrap.secrets['loom-platform-db']['metadata']['uid'] = str(uuid4())
+    else:
+        live.pool.namespaces['loom-nebius-dev-execution']['metadata']['uid'] = str(uuid4())
+    with runtime_database_https(live) as api, pytest.raises(ValueError, match='development runtime database stage unqualified'):
+        runtime_database_stage(live.request, api, tmp_path / 'runtime-database')
+    assert not live.store.creates
+    assert all(message.method == 'GET' for message in live.calls)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_https_rejects_receipt_and_late_drift(runtime_database_live, tmp_path):
+    live, state = runtime_database_live, tmp_path / 'runtime-database'
+    with runtime_database_https(live) as api:
+        runtime_database_stage(live.request, api, state)
+        live.complete = True
+        first = api.database_report(state)
+        live.report = {**first['database'], 'role': 'postgres'}
+        with pytest.raises(ValueError, match='development runtime database execution unqualified'):
+            api.database_report(state)
+        live.report = None
+        live.pod['status']['containerStatuses'][0]['restartCount'] = 1
+        with pytest.raises(ValueError, match='development runtime database execution unqualified'):
+            api.database_report(state)
+        live.pod['status']['containerStatuses'][0]['restartCount'] = 0
+        def drift():
+            live.foundation.bootstrap.secrets['loom-platform-db']['metadata']['uid'] = str(uuid4())
+        live.on_log = drift
+        with pytest.raises(ValueError, match='development runtime database execution unqualified'):
+            api.database_report(state)
+        assert len(live.store.creates) == 4
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
