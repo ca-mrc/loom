@@ -37,6 +37,12 @@ class RestartAPI(RoleAPI):
         return copy.deepcopy(desired)
 
     def restart_legacy_workload(self, key, before, desired, *, record_intent):
+        from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
+        from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending
+
+        pending = qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor)
+        if pending is not None:
+            return RecoveryDrainPending(pending)
         before = self.read_workload(key)
         record_intent(before)
         assert json.loads((self.state / 'legacy-restart.json').read_bytes())['workloads'][key] == {
@@ -69,6 +75,7 @@ def restart(api):
     return restart_pool_legacy(request=api.request, api=api, state_dir=api.state, anchor_dir=api.root / 'cutover-anchor')
 
 
+@pytest.mark.timeout(300)
 def test_restart_boundary_rejects_authority_drift_during_final_drain(closed_startup, monkeypatch):
     from scripts.ops.nebius_pool_legacy_restart import qualify_legacy_restart
 

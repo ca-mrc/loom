@@ -84,7 +84,7 @@ def test_recovery_cas_uses_final_controller_version_after_qualification(closed_s
                 'pool_state', 'machine_authority', 'guard_state', 'qualify_legacy_roles',
                 'qualify_gateway_readonly', 'qualify_gateway_retired', 'successor_drained') if hasattr(api, name)})
         qualify = getattr(live, qualify_name)
-        active, qualifications = [], []
+        active, qualifications, dispatches = [], [], []
 
         def slow_qualification(*args, **kwargs):
             result = qualify(*args, **kwargs)
@@ -93,7 +93,7 @@ def test_recovery_cas_uses_final_controller_version_after_qualification(closed_s
             # checks without changing any UID, stable metadata or spec.
             for current in api.startup.documents.values():
                 current['metadata']['resourceVersion'] = str(int(current['metadata']['resourceVersion']) + 1)
-            if damage is not None and len(qualifications) == 2:
+            if damage is not None and dispatches:
                 current = api.startup.documents[active[-1]]
                 if damage == 'uid':
                     current['metadata']['uid'] = 'foreign-controller'
@@ -107,14 +107,17 @@ def test_recovery_cas_uses_final_controller_version_after_qualification(closed_s
             active.append(key)
             return copy.deepcopy(desired) if patch_method(adapter, key, before, desired, preview=True) else None
 
+        def dispatch(key, before, desired, **kwargs):
+            dispatches.append(key)
+            return patch_method(adapter, key, before, desired, preview=False, **kwargs)
+
         monkeypatch.setattr(live, qualify_name, slow_qualification)
         monkeypatch.setattr(api, 'preview_legacy_' + phase, preview)
-        monkeypatch.setattr(api, 'restore_legacy_template' if phase == 'template' else 'restart_legacy_workload',
-            lambda key, before, desired, **kwargs: patch_method(adapter, key, before, desired, preview=False, **kwargs))
+        monkeypatch.setattr(api, 'restore_legacy_template' if phase == 'template' else 'restart_legacy_workload', dispatch)
         if damage is not None:
             with pytest.raises(ValueError, match='unconfirmed_preserve_evidence'):
                 restore(closed_startup, api) if phase == 'template' else restart(api)
-            assert len(qualifications) == 2 and not writes
+            assert qualifications and dispatches == [active[-1]] and not writes
             journal = json.loads((api.state / journal_name).read_bytes())
             assert journal['workloads'][active[-1]] == {'phase': 'prepared', 'before_resource_version': None}
             return

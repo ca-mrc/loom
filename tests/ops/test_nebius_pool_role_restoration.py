@@ -36,7 +36,15 @@ class RoleAPI(TemplateAPI):
         assert before == self.legacy_roles[key]
         return copy.deepcopy(desired)
 
-    def restore_legacy_role(self, key, before, desired):
+    def restore_legacy_role(self, key, before, desired, *, record_intent):
+        from scripts.ops.nebius_pool_role_restoration import qualify_role_restoration
+        from scripts.ops.nebius_pool_template_restoration import RecoveryDrainPending
+
+        pending = qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor)
+        if pending is not None:
+            return RecoveryDrainPending(pending)
+        before = self.read_legacy_role(key)
+        record_intent(before)
         assert json.loads((self.state / 'role-restoration.json').read_bytes())['roles'][key] == {
             'phase': 'intent', 'before_resource_version': before['metadata']['resourceVersion']}
         assert self.mode == 'fenced' and set(self.guards.values()) == {'fenced'} and self.machine_phase == 'revoked'

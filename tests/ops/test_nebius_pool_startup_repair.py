@@ -1064,6 +1064,7 @@ def test_original_legacy_completion_is_preserved_with_repair_ancestry(original_f
             return self.processes_drained
 
     runtime = RecoveryAPI(chain, restart)
+    runtime.anchor = anchor
     runtime.mode, runtime.guards = cancelled_api.mode, cancelled_api.guards
     parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
     monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: runtime)

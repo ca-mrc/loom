@@ -106,6 +106,7 @@ def test_repair_rollback_restores_templates_roles_and_completes_legacy(prepared_
             return self.processes_drained
 
     runtime = RecoveryAPI(fixture, restart)
+    runtime.anchor = anchor
     parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
     monkeypatch.setattr(target, 'HTTPSPoolActivationAPI', lambda **kwargs: runtime)
     result = target.run_pool_operation(parent=parent, tokens=context.tokens, action='rollback', repair_binding=binding)

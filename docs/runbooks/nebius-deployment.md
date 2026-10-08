@@ -1251,7 +1251,12 @@ output or diagnose the underlying provider, network or filesystem error. A
 blocked report still fails the rollout and never dispatches the requested action.
 For dependency preparation failures, inspect gateway disk/inode availability and
 diagnose the dependency installation through the approved operator route before
-retrying. Preserve the failed release, bundle and operation records. The gateway
+retrying. Compare the provider's allocated boot disk capacity with the guest block
+device and filesystem sizes. If allocated capacity has not reached the guest,
+use the provider-supported stop/start maintenance window, preserve the recovery
+state and partition backup, and verify the retained static route after startup.
+Do not delete retained evidence to make preparation fit. Preserve the failed
+release, bundle and operation records. The gateway
 refuses an identical incomplete release. After correcting the cause, an anchored
 image repair can use a new tooling continuation as described below.
 The fixed Python entry uses `-I -B` for qualification and operation execution, so
@@ -2084,12 +2089,12 @@ attempt forward-only closed-image qualification on an incomplete image tail.
 Forward repair still requires that qualification; recovery preflight neither
 completes an image correction nor authorizes reopening intake.
 
-Shutdown, template restoration and legacy restart finish their current
-recovery/drain checks before taking the final workload snapshot. The fixed adapter
-verifies unchanged UID and stable metadata and spec, records that snapshot's
+Shutdown, template and Role restoration, and legacy restart finish their current
+recovery/drain checks before taking the final object snapshot. The fixed adapter
+verifies unchanged UID and stable metadata and payload, records that snapshot's
 resourceVersion through the stage's write-ahead callback, then sends the full
-UID/version/metadata/spec CAS. Controller status
-updates during the earlier checks therefore do not force reuse of a stale version.
+UID/version/metadata CAS with the retained workload spec or Role rules. Controller
+status updates during earlier checks therefore do not force reuse of a stale version.
 A definite rejection may return the new attempt to prepared. An existing unknown
 intent retains its original version and is only observed, never refreshed or resent.
 
@@ -2102,6 +2107,26 @@ global and participant ledgers and recheck the fenced journals without repeating
 the whole-cluster authority inventory. No drain result or authority proof is
 cached across workload mutations or invocations. Dry-run success cannot authorize
 a stop; changed authority, fences, ancestry, UID or spec still blocks dispatch.
+
+Gateway Role retirement, template restoration, legacy Role restoration and legacy
+restart keep full qualification at the actual mutation boundary. Their dry-run
+adapters only validate the fixed journal-bound CAS and Kubernetes admission.
+For prepared template, Role and restart writes, the actual adapter owns the one
+fresh qualification; the stage does not repeat that chain before and after preview.
+A known cleanup or successor-drain pending result returns before intent is written.
+Only an exception after durable intent enters unknown-outcome observation.
+Starting a new journal still requires its initial proof; unchanged rows, unknown
+intents and completion retain their own fresh qualification. Before the first
+restart journal, every successor must still be proved stopped. Template and Role
+restoration bracket the read-only gateway permission review with one fresh drain
+on each side. These checks are not cached across mutations or invocations.
+
+Within one local recovery-record read, shared shutdown, machine and gateway
+ancestors are loaded in order once. Each current journal and independent anchor
+is still read from disk and checked against its parent hash and expected phase.
+This reuse ends when that record read returns; subsequent observations and
+dispatches reread the evidence. It does not cache mutable journals or live
+authority, and does not remove any ledger, process-drain, fence or CAS checks.
 
 ## Refresh the retained application manager
 

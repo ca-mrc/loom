@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -13,6 +14,7 @@ from scripts.ops.nebius_pool_gateway_retirement import PoolGatewayRetirementAPI
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_role_fencing import role_fence_documents
 from scripts.ops.nebius_pool_template_restoration import (
+    RecoveryDrainPending,
     _template_record,
     qualify_template_restoration,
 )
@@ -25,7 +27,8 @@ Documents = dict[str, dict[str, Any]]
 class PoolRoleRestorationAPI(PoolGatewayRetirementAPI, Protocol):
     def read_legacy_role(self, key: str) -> dict[str, Any]: ...
     def preview_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
-    def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool: ...
+    def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                            record_intent: Callable[[dict[str, Any]], None]) -> bool | RecoveryDrainPending: ...
     def qualify_legacy_roles(self) -> None: ...
 
 
@@ -112,11 +115,13 @@ def restore_pool_roles(*, request: PoolCutoverRequest, api: PoolRoleRestorationA
             def qualify() -> str | None:
                 return qualify_role_restoration(request, api, state=state, anchor=anchor)
 
-            observe()
-            pending = qualify()
-            if pending is not None:
-                return result(pending)
             if record is None:
+                # Existing journals are freshly qualified in the active row or
+                # completion path; preparing new evidence still needs this proof.
+                observe()
+                pending = qualify()
+                if pending is not None:
+                    return result(pending)
                 record = {**identity, 'roles': {key: {'phase': 'prepared', 'before_resource_version': None} for key in targets}}
                 private_state._atomic_json(marker, identity)
                 private_state._atomic_json(path, record)
@@ -124,34 +129,48 @@ def restore_pool_roles(*, request: PoolCutoverRequest, api: PoolRoleRestorationA
                 item = record['roles'][key]
                 if item['phase'] == 'restored':
                     continue
-                actual = observe()[key]
-                pending = qualify()
-                if pending is not None:
-                    return result(pending)
                 if item['phase'] == 'prepared':
+                    # The actual adapter owns the fresh authority/drain proof;
+                    # preview only validates the fixed target and CAS shape.
+                    actual = api.read_legacy_role(key)
                     preview = api.preview_legacy_role(key, actual, desired)
                     if preview is None:
                         return result('pending_role_restoration_update')
                     if _stable(preview) != desired:
                         raise ValueError
-                    observe()
-                    pending = qualify()
-                    if pending is not None:
-                        return result(pending)
-                    version = actual['metadata']['resourceVersion']
-                    if not isinstance(version, str) or not 0 < len(version) <= 128:
-                        raise ValueError
-                    item.update(phase='intent', before_resource_version=version)
-                    private_state._atomic_json(path, record)
+                    def record_intent(fresh: dict[str, Any], *, item: dict[str, Any] = item, key: str = key) -> None:
+                        nonlocal actual
+                        if item['phase'] != 'prepared' or not _matches(fresh, actual, _uid(originals[key])):
+                            raise ValueError
+                        version = fresh['metadata']['resourceVersion']
+                        if not isinstance(version, str) or not 0 < len(version) <= 128:
+                            raise ValueError
+                        actual = fresh
+                        item.update(phase='intent', before_resource_version=version)
+                        private_state._atomic_json(path, record)
+
                     try:
-                        accepted = api.restore_legacy_role(key, actual, desired)
+                        accepted = api.restore_legacy_role(key, actual, desired, record_intent=record_intent)
                     except Exception:
+                        if item['phase'] != 'intent':
+                            raise
                         accepted = None
+                    if isinstance(accepted, RecoveryDrainPending):
+                        if item != {'phase': 'prepared', 'before_resource_version': None}:
+                            raise ValueError
+                        return result(accepted.value)
                     if accepted is False:
                         item.update(phase='prepared', before_resource_version=None)
                         private_state._atomic_json(path, record)
                         return result('pending_role_restoration_update')
                     actual = api.read_legacy_role(key)
+                else:
+                    # An unknown intent is observation-only and still needs its
+                    # own fresh qualification; never resend its PATCH.
+                    actual = observe()[key]
+                    pending = qualify()
+                    if pending is not None:
+                        return result(pending)
                 if not _matches(actual, desired, _uid(originals[key])):
                     if item['phase'] == 'intent' and _matches(actual, before[key], _uid(originals[key])):
                         return result('pending_role_restoration_outcome')

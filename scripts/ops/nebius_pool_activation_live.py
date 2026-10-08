@@ -51,6 +51,7 @@ from scripts.ops.nebius_pool_startup_fence import (
 )
 from scripts.ops.nebius_pool_startup_live import HTTPSPoolStartupAPI
 from scripts.ops.nebius_pool_template_restoration import (
+    RecoveryDrainPending,
     _template_record,
     qualify_template_restoration,
     template_restoration_exists,
@@ -288,7 +289,9 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
                         'before_resource_version': None if preview else version}):
                 raise ValueError
-            if qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview and qualify_gateway_retirement_drain(self.request, self, state=self.state, anchor=self.anchor) is not None:
                 raise ValueError
             if _gateway_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
@@ -346,7 +349,7 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             raise ValueError('pool_gateway_readonly_authority_unconfirmed') from None
 
     def _legacy_template_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
-                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
         try:
             self._scope()
             closed, originals, targets, _, record = _template_record(self.request, state=self.state, anchor=self.anchor)
@@ -357,8 +360,12 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or (not preview and record_intent is None)
                     or record['workloads'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
-            if qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
-                raise ValueError
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview:
+                pending = qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor)
+                if pending is not None:
+                    return RecoveryDrainPending(pending)
             if _template_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
             fresh = self.read_workload(key)
@@ -390,14 +397,15 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         return copy.deepcopy(desired) if self._legacy_template_patch(key, before, desired, preview=True) else None
 
     def restore_legacy_template(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
-                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
         return self._legacy_template_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def read_legacy_role(self, key: str) -> dict[str, Any]:
         self._scope()
         return self.parent.fencing.read_role(key)
 
-    def _legacy_role_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> bool:
+    def _legacy_role_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
+                           record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
         try:
             self._scope()
             originals, reduced, targets, _, record = _role_record(self.request, state=self.state, anchor=self.anchor)
@@ -405,13 +413,31 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             if (record is None or key not in targets or not _matches(before, reduced[key], _uid(originals[key]))
                     or _stable(desired) != targets[key]
                     or not isinstance(version, str) or not 0 < len(version) <= 128
-                    or record['roles'][key] != {'phase': 'prepared' if preview else 'intent',
-                        'before_resource_version': None if preview else version}):
+                    or (not preview and record_intent is None)
+                    or record['roles'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
-            if qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor) is not None:
-                raise ValueError
+            # Dry-run validates the fixed CAS; the actual mutation independently
+            # proves current authority and drain immediately before dispatch.
+            if not preview:
+                pending = qualify_role_restoration(self.request, self, state=self.state, anchor=self.anchor)
+                if pending is not None:
+                    return RecoveryDrainPending(pending)
             if _role_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
+            fresh = self.read_legacy_role(key)
+            if not _matches(fresh, before, _uid(originals[key])):
+                raise ValueError
+            before = fresh
+            version = before['metadata']['resourceVersion']
+            if not isinstance(version, str) or not 0 < len(version) <= 128:
+                raise ValueError
+            if not preview:
+                assert record_intent is not None
+                record_intent(before)
+                expected = copy.deepcopy(record)
+                expected['roles'][key] = {'phase': 'intent', 'before_resource_version': version}
+                if _role_record(self.request, state=self.state, anchor=self.anchor)[-1] != expected:
+                    raise ValueError
             patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(originals[key])},
                 {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
                 {'op': 'test', 'path': '/metadata', 'value': before['metadata']},
@@ -430,11 +456,12 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def preview_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
         return copy.deepcopy(desired) if self._legacy_role_patch(key, before, desired, preview=True) else None
 
-    def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
-        return self._legacy_role_patch(key, before, desired, preview=False)
+    def restore_legacy_role(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
+                            record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
+        return self._legacy_role_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def _legacy_restart_patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool,
-                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+                               record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
         try:
             self._scope()
             originals, stopped, targets, _, record = _restart_record(self.request, state=self.state, anchor=self.anchor)
@@ -445,8 +472,10 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                     or (not preview and record_intent is None)
                     or record['workloads'][key] != {'phase': 'prepared', 'before_resource_version': None}):
                 raise ValueError
-            if qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor) is not None:
-                raise ValueError
+            if not preview:
+                pending = qualify_legacy_restart(self.request, self, state=self.state, anchor=self.anchor)
+                if pending is not None:
+                    return RecoveryDrainPending(pending)
             if _restart_record(self.request, state=self.state, anchor=self.anchor)[-1] != record:
                 raise ValueError
             fresh = self.read_workload(key)
@@ -479,7 +508,7 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         return copy.deepcopy(desired) if self._legacy_restart_patch(key, before, desired, preview=True) else None
 
     def restart_legacy_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any], *,
-                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool:
+                              record_intent: Callable[[dict[str, Any]], None] | None = None) -> bool | RecoveryDrainPending:
         return self._legacy_restart_patch(key, before, desired, preview=False, record_intent=record_intent)
 
     def qualify_legacy_runtimes(self) -> None:

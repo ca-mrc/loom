@@ -65,6 +65,9 @@ class GatewayAPI(MachineAPI):
         return True
 
     def qualify_gateway_retired(self):
+        self.qualify_gateway_readonly()
+
+    def qualify_gateway_readonly(self):
         self.permission_checks += 1
         if not self.effective_readonly:
             raise ValueError('private-effective-authority')

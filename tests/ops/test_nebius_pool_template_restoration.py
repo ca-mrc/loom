@@ -44,6 +44,14 @@ class TemplateAPI(GatewayAPI):
         return copy.deepcopy(desired)
 
     def restore_legacy_template(self, key, before, desired, *, record_intent):
+        from scripts.ops.nebius_pool_template_restoration import (
+            RecoveryDrainPending,
+            qualify_template_restoration,
+        )
+
+        pending = qualify_template_restoration(self.request, self, state=self.state, anchor=self.anchor)
+        if pending is not None:
+            return RecoveryDrainPending(pending)
         before = self.read_workload(key)
         record_intent(before)
         assert json.loads((self.state / 'template-restoration.json').read_bytes())['workloads'][key] == {

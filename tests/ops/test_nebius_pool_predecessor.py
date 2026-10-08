@@ -57,7 +57,7 @@ def finish_cutover(operation, *, legacy=False, source_credentials=None):
         anchor_dir=anchor)['status'] == 'pool_startup_staged_closed'
     fixture = (context.request, context.tokens, closed, startup, None, state.parent)
     api = ActivationAPI(fixture)
-    api.state = state
+    api.state, api.anchor = state, anchor
     assert advance_pool_activation(request=context.request, api=api, state_dir=state,
         anchor_dir=anchor)['status'] == 'pool_activation_complete'
     if legacy:
@@ -85,6 +85,7 @@ def finish_cutover(operation, *, legacy=False, source_credentials=None):
         def operation_init(self, selected):
             initialize(self, selected)
             self.state = selected[3].state
+            self.anchor = anchor
         with patch.object(ActivationAPI, '__init__', operation_init):
             machine = MachineAPI(fixture)
             machine.mode, machine.guards = api.mode, api.guards.copy()

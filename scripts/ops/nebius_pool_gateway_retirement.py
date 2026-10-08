@@ -31,6 +31,7 @@ class PoolGatewayRetirementAPI(PoolMachineRetirementAPI, Protocol):
     def preview_gateway_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None: ...
     def restrict_gateway_role(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool: ...
     def qualify_gateway_retired(self) -> None: ...
+    def qualify_gateway_readonly(self) -> None: ...
 
 
 def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path, Path]:
@@ -41,6 +42,13 @@ def _paths(request: PoolCutoverRequest, state: Path, anchor: Path) -> tuple[Path
 def _gateway_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                     ) -> tuple[Documents, Documents, dict[str, Any], dict[str, Any] | None]:
     _, _, machine = _machine_record(request, state=state, anchor=anchor)
+    return _read_gateway_record(request, state=state, anchor=anchor, machine=machine)
+
+
+def _read_gateway_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                         machine: dict[str, Any] | None
+                         ) -> tuple[Documents, Documents, dict[str, Any], dict[str, Any] | None]:
+    """Read current gateway evidence after the same call's machine journal read."""
     if machine is None or machine['phase'] != 'revoked':
         raise ValueError('gateway_retirement_requires_revoked_machines')
     rendered = {_key(row): row for row in cutover_documents(request)['authority']}
@@ -149,11 +157,13 @@ def retire_gateway_roles(*, request: PoolCutoverRequest, api: PoolGatewayRetirem
             def drain() -> str | None:
                 return qualify_gateway_retirement_drain(request, api, state=state, anchor=anchor)
 
-            observe()
-            pending = drain()
-            if pending is not None:
-                return result(pending)
             if record is None:
+                # Existing journals are freshly qualified in the active row or
+                # completion path; preparing new evidence still needs this proof.
+                observe()
+                pending = drain()
+                if pending is not None:
+                    return result(pending)
                 record = {**identity, 'roles': {key: {'phase': 'prepared', 'before_resource_version': None} for key in targets}}
                 private_state._atomic_json(marker, identity)
                 private_state._atomic_json(path, record)

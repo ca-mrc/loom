@@ -1038,6 +1038,7 @@ def test_legacy_completion_preserves_receipt_and_carries_unstarted_image_ancestr
             return self.processes_drained
 
     runtime = RecoveryAPI(chain, restart)
+    runtime.anchor = anchor
     parent = SimpleNamespace(request=context.request, state_dir=state, anchor_dir=anchor, refresh=None)
     monkeypatch.setattr(operation, "HTTPSPoolActivationAPI", lambda **kwargs: runtime)
     with monkeypatch.context() as legacy:
