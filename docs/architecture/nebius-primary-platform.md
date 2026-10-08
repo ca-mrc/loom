@@ -1618,6 +1618,16 @@ not per-owner data volumes. A manager completion receipt still does not establis
 source-build/task admission or multi-owner acceptance. See the
 [delivery runbook](../runbooks/nebius-deployment.md#independent-development-manager-delivery).
 
+The fresh installer can opt into the existing owner-scoped source-upload runtime
+without enabling builds or tasks. Its `source_files` pair must match the
+live-qualified retained dev foundation's source-storage identity. Only those two
+keys are delivered in the revision-named immutable source Secret, before manager
+startup. The configured concurrency's bounded ephemeral spool is included in
+platform capacity accounting. No per-owner bucket, policy or PVC is introduced.
+The option and credential bytes are frozen in installation identity; omitted
+inputs retain historical hashes, and TLS renewal reconstructs source-enabled
+history from retained evidence rather than reopening old credential files.
+
 For a fresh independent manager, protected `shared_public_route: true` adds a final
 shared-dev public phase. It creates only a fixed NetworkPolicy and Ingress in
 `loom-dev`, using the existing shared ingress default wildcard certificate. The
@@ -2598,6 +2608,27 @@ closed-registration commit receipt. Changed identities, configuration, logs or
 final readback cannot qualify. Staging alone proves neither database registration nor writer retirement;
 the parent migration must qualify candidate publication, namespace ownership,
 successful runtime execution and the no-dual-writer barrier before opening intake.
+
+The independent development registration parent instead consumes a completed
+`RetainedManagementReference`. It derives the original published service image,
+management namespace and database identity from that installation, without a
+legacy upgrade predecessor. Its connected HTTPS adapter compares the original
+database Secret, Service, StatefulSet and manager Deployment, their mounted
+configuration/Secret identities, the retained PVC/PV/CSI disk binding, and namespace
+UIDs before registration and completion. The participant's shared data-environment
+ID and physical node group must match that original dev installation.
+Only the fixed registration ConfigMap and Job
+can be created; the transaction uses the manager's existing database.
+
+One anchored parent operation per manager retains the actual closed-registration
+receipt. Changed inputs, lost journals, replaced resources and uncertain creates
+cannot start another registration. TLS-only renewal does not change this database
+identity. This fresh composition accepts the one shared-development participant;
+it does not attach staging/production, create a physical worker pool, deliver
+machine-token Secrets or grant Job-write roles. It is an internal protected stage,
+not a deployed CLI or a replacement for runtime delivery, sole-writer qualification
+and admission activation. Its completion explicitly reports admission closed and
+writer migration incomplete.
 
 The migration's initial closure stage binds every qualified data participant and
 its retained control-plane Deployment/namespace identity. Environment classes do

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
+from uuid import UUID
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
@@ -39,6 +40,23 @@ class PoolRegistrationRequest:
     spec: PoolInstallation
     binding: ManagementBinding
     candidate: dict[str, Any]
+
+
+def validate_registration_proof(request: PoolRegistrationRequest, state: Path, proof: Any) -> None:
+    """Bind a parent's closed receipt to the recorded fixed Job's identity."""
+    record = json.loads(private_state._private_read(state / 'stage.json', limit=4 * 1024**2))
+    job, = (row for row in record['resources'].values() if row['desired']['kind'] == 'Job')
+    if (not isinstance(proof, dict) or set(proof) != {'job_uid', 'pod_uid', 'registration'}
+            or job['status'] != 'created' or job['uid'] != proof['job_uid']
+            or any(str(UUID(proof[key])) != proof[key] or not UUID(proof[key]).int for key in ('job_uid', 'pod_uid'))):
+        raise ValueError('pool registration proof differs')
+    spec = request.spec
+    expected = {'schema_version': 'loom.pool-installation-receipt.v1', 'operation_id': str(spec.operation_id),
+        'pool_id': str(spec.pool_id), 'installation_sha256': installation_digest(spec.model_dump(mode='json')),
+        'mode': 'closed', 'participants': len(spec.participants), 'machines': len(spec.machines)}
+    report = proof['registration']
+    if report != expected or type(report.get('participants')) is not int or type(report.get('machines')) is not int:
+        raise ValueError('pool registration receipt differs')
 
 
 def registration_documents(request: PoolRegistrationRequest) -> dict[str, dict[str, Any]]:
