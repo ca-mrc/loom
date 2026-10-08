@@ -23,13 +23,15 @@ from tests.integration.test_execution_actuator_k3s import (
 from tests.ops.test_nebius_development_pool_retained import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_pool_retained import application_material as application_material
+from tests.ops.test_nebius_development_pool_retained import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_pool_retained import build_inputs as build_inputs
 from tests.ops.test_nebius_development_pool_retained import capacity_checks as capacity_checks
 from tests.ops.test_nebius_development_pool_retained import cloud as cloud
 from tests.ops.test_nebius_development_pool_retained import completed_pool as completed_pool
 from tests.ops.test_nebius_development_pool_retained import connected as connected
-from tests.ops.test_nebius_development_pool_retained import database_runtime
+from tests.ops.test_nebius_development_pool_retained import database_runtime, network_runtime
 from tests.ops.test_nebius_development_pool_retained import development_inputs as development_inputs
 from tests.ops.test_nebius_development_pool_retained import entry as entry
 from tests.ops.test_nebius_development_pool_retained import handoff as handoff
@@ -39,13 +41,18 @@ from tests.ops.test_nebius_development_pool_retained import live as live
 from tests.ops.test_nebius_development_pool_retained import management_inputs as management_inputs
 from tests.ops.test_nebius_development_pool_retained import manager_entry as manager_entry
 from tests.ops.test_nebius_development_pool_retained import material as material
-from tests.ops.test_nebius_development_pool_retained import network_runtime
 from tests.ops.test_nebius_development_pool_retained import (
     original_development_inputs as original_development_inputs,
 )
-from tests.ops.test_nebius_development_pool_retained import original_manager_entry as original_manager_entry
-from tests.ops.test_nebius_development_pool_retained import original_platform_inputs as original_platform_inputs
-from tests.ops.test_nebius_development_pool_retained import original_pool_inputs as original_pool_inputs
+from tests.ops.test_nebius_development_pool_retained import (
+    original_manager_entry as original_manager_entry,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_platform_inputs as original_platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_retained import (
+    original_pool_inputs as original_pool_inputs,
+)
 from tests.ops.test_nebius_development_pool_retained import platform_inputs as platform_inputs
 from tests.ops.test_nebius_development_pool_retained import pool_entry as pool_entry
 from tests.ops.test_nebius_development_pool_retained import pool_inputs as pool_inputs
@@ -91,8 +98,8 @@ async def test_dev_runtime_network_allows_required_peers_and_denies_cross_scope(
                 {'metadata': {'name': 'network-fixture'}, 'automountServiceAccountToken': False})
         # Include the actual retained foundation policies: additive runtime rules
         # must work without replacing its shared-internal/personal/public access.
-        base = [row['observed'] for phase in request.foundation.phases.values()
-            for row in phase['resources'].values() if row['observed']['kind'] == 'NetworkPolicy']
+        base = [row['observed'] for row in request.foundation.phases['config']['resources'].values()
+            if row['observed']['kind'] == 'NetworkPolicy']
         for document in [*base, *policies]:
             await asyncio.to_thread(utils.create_from_dict, api, document)
 
