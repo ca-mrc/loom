@@ -911,7 +911,14 @@ class MinioObjectStore:
             def read_owned_version(client: Any) -> str | None:
                 head = client.head_object(Bucket=upload.bucket, Key=upload.key)
                 metadata = head.get("Metadata")
-                if not isinstance(metadata, Mapping) or metadata.get("loom-write-id") != write_identity:
+                # S3 user metadata names are case-insensitive HTTP headers;
+                # compatible providers can preserve that casing in this map.
+                # Require one unambiguous field and its exact original value.
+                identities = [
+                    value for name, value in metadata.items()
+                    if isinstance(name, str) and name.lower() == "loom-write-id"
+                ] if isinstance(metadata, Mapping) else []
+                if identities != [write_identity]:
                     raise ValueError("multipart object readback identity mismatch")
                 return _object_write_version_id(head)
 
