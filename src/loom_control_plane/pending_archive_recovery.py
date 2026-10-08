@@ -71,7 +71,7 @@ class ArchiveRecoveryRequest(BaseModel):
     output_manifest_sha256: Sha256
     output_marker_sha256: Sha256
     runtime_result_sha256: Sha256
-    cluster_id: str = Field(pattern=r"^mk8s-[a-z0-9-]{1,100}$")
+    cluster_id: str = Field(pattern=r"^mk8scluster-[a-z0-9]+$")
     namespace: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,62}$")
     installed_candidate: GitSha
     candidate_sha: GitSha

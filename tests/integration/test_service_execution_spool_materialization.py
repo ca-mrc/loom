@@ -1112,7 +1112,7 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
             upload_session_id=current.output_upload_session_id, attempt=current.attempt,
             generation=current.output_generation, output_manifest_sha256=current.output_manifest_sha256,
             output_marker_sha256=current.output_marker_sha256, **projected,
-            cluster_id="mk8s-test", namespace="loom-test", installed_candidate="a"*40, candidate_sha="b"*40,
+            cluster_id="mk8scluster-test", namespace="loom-test", installed_candidate="a"*40, candidate_sha="b"*40,
             image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"4"*64,
             installed_image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"a"*64,
             schema_head=service_schema_head(),

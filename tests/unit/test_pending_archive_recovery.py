@@ -20,7 +20,7 @@ def qualified():
         output_manifest_sha256='sha256:' + '1' * 64,
         output_marker_sha256='sha256:' + '2' * 64,
         runtime_result_sha256='sha256:' + '3' * 64,
-        cluster_id='mk8s-test', namespace='loom-test', installed_candidate='a' * 40,
+        cluster_id='mk8scluster-test', namespace='loom-test', installed_candidate='a' * 40,
         candidate_sha='b' * 40, image_ref='cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:' + '4' * 64,
         installed_image_ref='cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:'+'a'*64,
         schema_head='0173', trial_config_sha256='sha256:'+'5'*64,
