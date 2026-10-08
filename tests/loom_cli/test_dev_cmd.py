@@ -16,6 +16,25 @@ ENVIRONMENT = "20000000-0000-4000-8000-000000000001"
 OPERATION = "30000000-0000-4000-8000-000000000001"
 
 
+def test_top_level_help_recommends_application_workflow(capsys):
+    with pytest.raises(SystemExit) as result:
+        main(["--help"])
+    assert result.value.code == 0
+    assert "loom dev app" in " ".join(capsys.readouterr().out.split())
+
+
+def test_dev_help_puts_recommended_app_before_explicit_legacy_controls(capsys):
+    with pytest.raises(SystemExit) as result:
+        main(["dev", "--help"])
+    assert result.value.code == 0
+    output = capsys.readouterr().out
+    assert "Recommended: loom dev app" in " ".join(output.split())
+    command_rows = [line.strip() for line in output.splitlines() if line.startswith("    ")]
+    assert command_rows[0].startswith("app ")
+    for command in ("create", "list", "destroy", "login", "status", "retry", "wait"):
+        assert any(row.startswith(f"{command} ") and "Legacy" in row for row in command_rows)
+
+
 @pytest.fixture
 def management_http(monkeypatch, tmp_path):
     from loom_cli import environment_client
@@ -50,9 +69,18 @@ def test_create_uses_selected_candidate_and_replay_key(management_http, capsys):
     responses["POST", "/api/v1/environments"] = httpx.Response(202, json=operation())
     assert main(["dev", "create", "alice", "--candidate", CANDIDATE, "--idempotency-key", "same-request"]) == 0
     assert len(requests) == 1
+    assert requests[0].url.path == "/api/v1/environments"
     assert json.loads(requests[0].content) == {"slug": "alice", "candidate_id": CANDIDATE}
     assert requests[0].headers["Idempotency-Key"] == "same-request"
     assert json.loads(capsys.readouterr().out)["operation_id"] == OPERATION
+
+
+def test_legacy_list_keeps_environment_endpoint_and_json_shape(management_http, capsys):
+    requests, responses = management_http
+    responses["GET", "/api/v1/environments"] = httpx.Response(200, json={"items": []})
+    assert main(["dev", "list"]) == 0
+    assert [(request.method, request.url.path) for request in requests] == [("GET", "/api/v1/environments")]
+    assert json.loads(capsys.readouterr().out) == {"items": []}
 
 
 def test_create_prints_replay_key_before_failed_network_response(management_http, capsys):

@@ -7635,6 +7635,7 @@ export interface components {
             /** Estimated Cost Usd */
             estimated_cost_usd?: number | null;
             execution_phases?: components["schemas"]["TrialExecutionPhases"] | null;
+            execution_provenance?: components["schemas"]["TrialExecutionProvenance"];
             execution_selection?: components["schemas"]["TrialExecutionSelection"];
             /** Failure Reason */
             failure_reason: string | null;
@@ -7978,6 +7979,37 @@ export interface components {
             verifier_state: string | null;
         } & {
             [key: string]: unknown;
+        };
+        /** TrialExecutionProvenance */
+        TrialExecutionProvenance: {
+            /** Agent Image Digest */
+            agent_image_digest?: string | null;
+            /** Attempt */
+            attempt?: number | null;
+            /** Candidate Sha */
+            candidate_sha?: string | null;
+            /** Image Source */
+            image_source?: "frozen_runtime_plan" | null;
+            /** Lease Id */
+            lease_id?: string | null;
+            /** Resource Generation */
+            resource_generation?: number | null;
+            /** Runtime Binary Sha256 */
+            runtime_binary_sha256?: string | null;
+            /** Runtime Contract Sha256 */
+            runtime_contract_sha256?: string | null;
+            /** Runtime Image Digest */
+            runtime_image_digest?: string | null;
+            /** Started At */
+            started_at?: string | null;
+            /**
+             * State
+             * @default unavailable
+             * @enum {string}
+             */
+            state: "unavailable" | "planned" | "execution_started" | "runtime_reported";
+            /** Task Image Digest */
+            task_image_digest?: string | null;
         };
         /** TrialExecutionSelection */
         TrialExecutionSelection: {

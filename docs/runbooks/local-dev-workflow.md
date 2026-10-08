@@ -168,8 +168,11 @@ Postgres or object-store data.
 
 ## Shared environments
 
-Do not use this local workflow to mutate staging or production. Personal
-`dev-<name>` candidates go through the remote environment API. Protected
-staging and production targets use the candidate-bound cluster rollout and its
-backup, registry publication, migration, release-gate, smoke, and convergence
-evidence.
+For a personal frontend/API against shared development data, follow the
+[personal application workflow](personal-development.md) through `loom dev app`.
+The direct `loom dev create --candidate` and `loom service up --environment dev-<name>`
+paths retain their legacy isolated-environment contracts.
+
+Do not use local Compose to mutate shared development, staging or production.
+Protected shared targets use their qualified deployment workflow and its backup,
+registry publication, migration, release-gate, smoke and convergence evidence.

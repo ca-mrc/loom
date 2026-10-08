@@ -15,6 +15,7 @@ from loom.nebius_application_contract import (
     new_application_registration,
 )
 from loom.nebius_application_render import RenderedApplication, render_application
+from loom.nebius_application_versions import ApplicationReleaseCompatibilityV1
 from loom.nebius_environment_contract import FoundationBinding
 from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.registry import ApplicationRegistry
@@ -43,12 +44,25 @@ class ApplicationManager:
             raise ValueError("application builder differs from shared authority")
         self.builds = builds
 
-    async def _prepare(self, row: ApplicationRegistrationV1, principal: AuthContext) -> tuple[RenderedApplication, ApplicationReleaseV1]:
-        release = self._releases.get(row.release_id)
+    async def _release(self, release_id: UUID, principal: AuthContext) -> ApplicationReleaseV1:
+        release = self._releases.get(release_id)
         if release is None and self.builds is not None:
-            release = await self.builds.release(row.release_id, principal=principal)
+            release = await self.builds.release(release_id, principal=principal)
         if release is None:
             raise ManagementError("application_release_unavailable", 404)
+        return release
+
+    async def check_release(self, principal: AuthContext, release_id: UUID) -> ApplicationReleaseCompatibilityV1:
+        owner_identity(principal)
+        release = await self._release(release_id, principal)
+        return ApplicationReleaseCompatibilityV1(release=release, shared_schema_revision=self.shared.schema_revision,
+            compatibility="compatible" if release.schema_revision == self.shared.schema_revision else "schema_mismatch")
+
+    async def _prepare(self, row: ApplicationRegistrationV1, principal: AuthContext) -> tuple[RenderedApplication, ApplicationReleaseV1]:
+        release = await self._release(row.release_id, principal)
+        if release.schema_revision != self.shared.schema_revision:
+            raise ManagementError("application_schema_mismatch", 409, details={
+                "release_schema_revision": release.schema_revision, "shared_schema_revision": self.shared.schema_revision})
         try:
             return render_application(row, release, self.shared, self.foundation, authority=self.authority), release
         except (ValueError, KeyError, TypeError):

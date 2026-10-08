@@ -12,6 +12,7 @@ Compose development remain supported; users can select external inference APIs.
 | Author tasks, agents or provider integrations | [Integration guides](integrations/README.md) |
 | Deploy, diagnose or recover Loom | [Operator runbook](runbooks/operator-runbook.md) and [procedure index](runbooks/README.md) |
 | Develop and validate a change | [Contributor quickstart](contributing/contributor-quickstart.md) and [contribution policy](../CONTRIBUTING.md) |
+| Build your own frontend/API against shared development data | [Personal application workflow](runbooks/personal-development.md) |
 | Find code, configuration or migration history | [Repository map](contributing/repository-layout.md) |
 | Understand benchmark reward semantics | [Score contract](score-alignment/README.md) |
 | Inspect admission schemas and compatibility | [Validation artifacts](evidence/README.md) |
