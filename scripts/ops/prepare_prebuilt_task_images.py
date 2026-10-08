@@ -39,6 +39,17 @@ from loom.execution_image_admission import (
 from loom.prebuilt_task_images import validate_prebuilt_image_pins
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 
+MAX_IMAGE_REPORT_BYTES = 64 * 1024**2
+
+
+def _read_image_report(path: Path, *, label: str) -> bytes:
+    """Bound each scanner report before parsing or retaining it in memory."""
+    with path.open("rb") as handle:
+        payload = handle.read(MAX_IMAGE_REPORT_BYTES + 1)
+    if len(payload) > MAX_IMAGE_REPORT_BYTES:
+        raise ValueError(f"{label} evidence exceeds the 64 MiB report budget")
+    return payload
+
 
 def _run(argv: list[str], *, timeout: int = 120) -> str:
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
@@ -98,17 +109,15 @@ def scan_image(image: str, directory: Path, trivy: str, cache: Path) -> dict[str
         "memory",
     ]
     _run([*common, "--format", "json", "--output", str(report), image], timeout=1260)
-    payload = report.read_bytes()
-    if len(payload) > 24 * 1024**2 or json.loads(payload).get("ArtifactName") != image:
+    payload = _read_image_report(report, label="vulnerability")
+    if json.loads(payload).get("ArtifactName") != image:
         raise ValueError("vulnerability evidence differs from the resolved image")
     severity = _severity(payload)  # Existing policy rejects CRITICAL, including unfixed findings.
     _run(
         [*common, "--skip-db-update", "--format", "cyclonedx", "--output", str(sbom), image],
         timeout=1260,
     )
-    sbom_bytes = sbom.read_bytes()
-    if len(sbom_bytes) > 24 * 1024**2:
-        raise ValueError("SBOM evidence exceeds its bound")
+    sbom_bytes = _read_image_report(sbom, label="SBOM")
     _validate_sbom(sbom_bytes)
     report.chmod(0o600)
     sbom.chmod(0o600)

@@ -221,6 +221,44 @@ def test_all_resolved_images_are_classified_after_a_critical_failure(inputs, mon
     assert not (inputs.output / "runtime-profile.json").exists()
 
 
+@pytest.mark.parametrize("severity", ["HIGH", "CRITICAL"])
+def test_large_realistic_reports_keep_cli_success_and_critical_classification(
+    inputs, monkeypatch, severity
+):
+    scanner(monkeypatch, severity=severity)
+    run = prepare._run
+
+    def large_report(argv, **kwargs):
+        result = run(argv, **kwargs)
+        if "--format" in argv and argv[argv.index("--format") + 1] == "json":
+            # Actual canonical reports are 29-41 MB. JSON whitespace retains the
+            # same image identity and vulnerability content at this realistic size.
+            with Path(argv[argv.index("--output") + 1]).open("ab") as handle:
+                handle.write(b" " * (33 * 1024**2))
+        return result
+
+    monkeypatch.setattr(prepare, "_run", large_report)
+    assert cli(monkeypatch, inputs) == (1 if severity == "CRITICAL" else 0)
+    rows = json.loads((inputs.output / "image-qualification.json").read_text())
+    assert rows[0]["status"] == ("rejected" if severity == "CRITICAL" else "qualified")
+    if severity == "CRITICAL":
+        assert rows[0]["reason"] == "critical_vulnerability"
+        assert not (inputs.output / "runtime-profile.json").exists()
+
+
+@pytest.mark.parametrize("label", ["vulnerability", "SBOM"])
+def test_scanner_report_budget_accepts_exact_limit_and_rejects_next_byte(tmp_path, label):
+    assert prepare.MAX_IMAGE_REPORT_BYTES == 64 * 1024**2
+    report = tmp_path / "report.json"
+    with report.open("wb") as handle:
+        handle.truncate(prepare.MAX_IMAGE_REPORT_BYTES)
+    assert len(prepare._read_image_report(report, label=label)) == prepare.MAX_IMAGE_REPORT_BYTES
+    with report.open("ab") as handle:
+        handle.write(b" ")
+    with pytest.raises(ValueError, match="64 MiB report budget"):
+        prepare._read_image_report(report, label=label)
+
+
 def test_checked_in_tb21_source_list_is_complete_and_deduplicated():
     source = Path(__file__).resolve().parents[2] / "deploy/catalog/tb21-r6-prebuilt-images.json"
     document = json.loads(source.read_text())
