@@ -279,6 +279,24 @@ class HTTPSRetainedDevelopmentFoundation(ManagementKubernetesTransport):
                     or database.database != request.application_material.database_name or database.username != 'postgres'
                     or database.query != {'sslmode': 'verify-full', 'sslrootcert': '/var/run/loom-db/ca.crt'}):
                 raise ValueError()
+            return self._verify_retained(retained)
+        except Exception:
+            raise ManagementInstallError('retained development foundation unqualified') from None
+
+    def verify_retained(self, *, reference: RetainedDevelopmentReference) -> dict[str, Any]:
+        """Qualify original live resources without retired initial manager inputs.
+
+        Runtime callers separately bind their prepared successor to this exact
+        foundation. This read-only result does not approve a changed workload.
+        """
+        return self._verify_retained(load_retained_foundation(reference))
+
+    def _verify_retained(self, retained: RetainedDevelopmentState) -> dict[str, Any]:
+        try:
+            inputs, binding = retained.inputs, retained.binding
+            if self.api_server.rstrip('/') != inputs.config['kubernetes_api_server'].rstrip('/'):
+                raise ValueError()
+            material = retained.bootstrap['material']
             self.verify_identity(binding)
             for name, doc in _secret_documents(material, inputs.binding, binding.operation_id).items():
                 row = self.get_resource(doc)
