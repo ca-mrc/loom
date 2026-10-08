@@ -285,6 +285,8 @@ async def _load(
     authority = await session.get(DataLifecycleAuthority, artifact.lifecycle_authority_id, with_for_update=locked)
     _require(all(row is not None for row in (lease, trial, upload, authority)), "owner_missing")
     assert lease is not None and trial is not None and upload is not None and authority is not None
+    if isinstance(request, SingleObjectRecoveryRequest):
+        _require(request.team_id == trial.team_id, "operator_team_conflict")
     ids = [item.registry_id for item in request.objects]
     objects = list((await session.scalars(select(DataLifecycleObject).where(
         DataLifecycleObject.id.in_(ids),
@@ -341,7 +343,7 @@ async def _load(
             DataLifecycleObject.object_key == obj.object_key,
             DataLifecycleObject.id != obj.id,
         ).limit(1)) is None, "competing_registry_object")
-    _require(sum(obj.size_bytes for obj in objects) <= MAX_BYTES, "byte_limit_exceeded")
+    _require(sum(obj.size_bytes for obj in objects) <= verification_byte_limit(request), "byte_limit_exceeded")
     return state
 
 
@@ -414,7 +416,7 @@ def _plan(
     proposed = {item.registry_id: item for item in request.objects}
     # The storage budget charges every copy, including versions not adopted.
     _require(sum(obj.size_bytes * len(proposed[obj.id].equivalent_version_ids or [proposed[obj.id].version_id])
-        for obj in state.objects) <= MAX_BYTES, "byte_limit_exceeded")
+        for obj in state.objects) <= verification_byte_limit(request), "byte_limit_exceeded")
     changes = []
     for obj in state.objects:
         refs = references.get((obj.bucket, obj.object_key), [])
