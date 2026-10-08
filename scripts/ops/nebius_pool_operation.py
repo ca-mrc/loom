@@ -42,7 +42,7 @@ from scripts.ops.nebius_pool_startup_repair import (
     startup_repair_exists,
 )
 from scripts.ops.nebius_pool_startup_repair_live import HTTPSPoolStartupRepairAPI
-from scripts.ops.nebius_pool_template_restoration import restore_pool_templates
+from scripts.ops.nebius_pool_template_restoration import _template_record, restore_pool_templates
 
 _RECOVERY = ('startup-fence', 'shutdown', 'machine-retirement', 'gateway-retirement',
     'template-restoration', 'role-restoration', 'legacy-restart', 'legacy-reopening')
@@ -239,6 +239,13 @@ own original journal lock and validates its predecessor before any side effect.
                         request=request, api=api, state_dir=state, anchor_dir=anchor)),
                 )
                 start = max((index for index, (name, _, _) in enumerate(steps) if present(name)), default=0)
+                if steps[start][0] == 'template-restoration':
+                    phase = 'template-restoration'
+                    templates = _template_record(request, state=state, anchor=anchor)[-1]
+                    if templates is not None and all(row['phase'] == 'restored' for row in templates['workloads'].values()):
+                        # Role preparation freshly proves the same completed
+                        # ancestry and live drain before creating its journal.
+                        start += 1
                 for name, success, call in steps[start:]:
                     pending = advance(name, success, call)
                     if pending is not None:

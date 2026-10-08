@@ -2155,6 +2155,11 @@ authority, and does not remove any ledger, process-drain, fence or CAS checks.
 Successor drain builds its template projection and shutdown record together for
 each observation. The observation after the workload and process reads starts
 again from disk; it never reuses the evidence read before those HTTP requests.
+When rollback resumes at an existing template journal whose validated rows are
+all restored, it enters Role preparation directly. Role preparation still checks
+the complete ancestry and fresh live authority and drain before creating its
+journal. Incomplete templates and unknown intents resume template restoration;
+the standalone template-completion check is unchanged.
 
 ## Refresh the retained application manager
 
