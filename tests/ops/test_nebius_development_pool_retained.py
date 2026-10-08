@@ -165,6 +165,7 @@ def pool_inputs(request, retained):
         for profile in value['profiles']['execution']:
             profile['runtime']['target_id'] = config['target_id']
             profile['runtime']['credential_broker_url'] = 'http://loom-llm-gateway.loom-dev.svc.cluster.local:9100/internal/service-execution'
+            profile['runtime']['service_account_name'] = 'loom-execution-attempt'
         for profile in value['profiles']['task_images']:
             profile['target']['target_id'] = config['target_id']
         if mode == 'foundation-runtime-bad-keyring':
