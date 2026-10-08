@@ -39,7 +39,9 @@ from tests.ops.test_nebius_development_pool_retained import (
 )
 from tests.ops.test_nebius_development_pool_retained import platform_inputs as platform_inputs
 from tests.ops.test_nebius_development_pool_retained import pool_entry as pool_entry
-from tests.ops.test_nebius_development_pool_retained import pool_inputs as runtime_pool_inputs  # noqa: F401
+from tests.ops.test_nebius_development_pool_retained import (
+    pool_inputs as runtime_pool_inputs,  # noqa: F401
+)
 from tests.ops.test_nebius_development_pool_retained import preflight as preflight
 from tests.ops.test_nebius_development_pool_retained import provider_checks as provider_checks
 from tests.ops.test_nebius_development_pool_retained import publication as publication
@@ -89,7 +91,7 @@ def test_collector_binds_closed_pool_observer_and_ignores_ambient_authority(comp
     prefix = 'LOOM_EXECUTION_CAPACITY_COLLECTOR_'
     assert data[prefix + 'COLLECTION_MODE'] == 'pool'
     assert data[prefix + 'POOL_ID'] == str(spec.pool_id)
-    assert data[prefix + 'NEBIUS_PROJECT_ID'] == 'project-test'
+    assert data[prefix + 'NEBIUS_PROJECT_ID'] == 'project-compute'
     assert data[prefix + 'NEBIUS_QUOTA_PARENT_ID'] == 'tenant-test'
     assert data[prefix + 'NEBIUS_REGION'] == 'eu-north1'
     assert data[prefix + 'NEBIUS_NODE_GROUP_ID'] == request.foundation.inputs.config['execution_node_group_id']
