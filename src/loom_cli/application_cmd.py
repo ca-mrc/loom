@@ -46,7 +46,25 @@ def _run(args: argparse.Namespace) -> int:
             if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", key) is None:
                 raise ValueError("invalid idempotency key")
         with ApplicationClient() as client:
-            if request is not None:
+            if command == "capabilities":
+                capabilities = client.capabilities()
+                if args.json:
+                    print(capabilities.model_dump_json())
+                else:
+                    labels = {
+                        "not_configured": "not configured; ask the platform operator to enable it",
+                        "configured": "configured",
+                        "worker_unavailable": "configured; worker unavailable; ask the platform operator to inspect it",
+                        "worker_unhealthy": "configured; worker unhealthy; ask the platform operator to inspect it",
+                        "worker_healthy": "configured; worker healthy",
+                    }
+                    print(f"Application lifecycle: {labels[capabilities.application_lifecycle]}")
+                    print(f"Source upload: {labels[capabilities.source_upload]}")
+                    print(f"Image builds: {labels[capabilities.image_builds]}")
+                    print("Task execution: not checked")
+                    print("Reports management configuration and worker health only. "
+                          "Storage access, pool admission, and deployed applications are not checked.")
+            elif request is not None:
                 _retry_hint(["create", request.slug, "--release", str(request.release_id)], key)
                 print(client.create(request, idempotency_key=key).model_dump_json())
             elif command in {"update", "suspend", "resume", "destroy"}:
@@ -99,7 +117,7 @@ def _run(args: argparse.Namespace) -> int:
     except (NotLoggedInError, HttpStatusError) as exc:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
-        hint = ("Run this read-only evidence command again." if args.application_command == "evidence"
+        hint = ("Run this read-only command again." if args.application_command in {"evidence", "capabilities"}
                 else "Reuse the printed retry command.")
         print(f"Management request failed ({type(exc).__name__}); no automatic retry. {hint}", file=sys.stderr)
     except OSError:
@@ -114,6 +132,8 @@ def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # 
 
     parser = commands.add_parser("app", help="Manage personal frontend/API applications sharing development data")
     sub = parser.add_subparsers(dest="application_command", required=True)
+    capabilities = sub.add_parser("capabilities", help="Read management configuration and worker health; not execution readiness")
+    capabilities.add_argument("--json", action="store_true", help="Print the typed capability report as JSON")
     create = sub.add_parser("create", help="Create a personal application from a qualified release")
     create.add_argument("slug")
     create.add_argument("--release", required=True, help="Qualified application release UUID")

@@ -20,6 +20,7 @@ from loom.application_source_upload import (
     ApplicationSourceUploadRequestV1,
     ApplicationSourceUploadV1,
 )
+from loom.nebius_application_capabilities import ApplicationCapabilitiesV1
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
     ApplicationOperationRequestV1,
@@ -67,6 +68,11 @@ class ApplicationClient:
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
                  traceback: TracebackType | None) -> None:
         self.http.close()
+
+    def capabilities(self) -> ApplicationCapabilitiesV1:
+        return ApplicationCapabilitiesV1.model_validate(assert_2xx(
+            self.http.get("/api/v1/application-capabilities"), action="read personal application capabilities",
+        ))
 
     def create_source_upload(self, source: PackagedApplicationSource, *, idempotency_key: str) -> ApplicationSourceUploadV1:
         request = _source_request(source)

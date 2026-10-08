@@ -1,6 +1,7 @@
 """Authenticated application-only controls, without caller-supplied authority."""
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -15,6 +16,10 @@ from loom.application_source_upload import (
     ApplicationSourceUploadRequestV1,
     ApplicationSourceUploadV1,
 )
+from loom.nebius_application_capabilities import (
+    ApplicationCapabilitiesV1,
+    ApplicationWorkerCapability,
+)
 from loom.nebius_application_contract import (
     ApplicationCreateRequestV1,
     ApplicationOperationRequestV1,
@@ -27,8 +32,9 @@ from loom_service.application_management.build_registry import ApplicationBuildR
 from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.operation_evidence import read_operation_evidence
+from loom_service.application_management.service_runtime import ApplicationServiceRuntime
 from loom_service.application_management.source_upload import ApplicationSourceUploader
-from loom_service.environment_management.registry import ManagementError
+from loom_service.environment_management.registry import ManagementError, owner_identity
 from loom_service.routes.environments import ManagementPrincipal
 
 router = APIRouter()
@@ -54,6 +60,44 @@ def build_registry(request: Request) -> ApplicationBuildRegistry:
     if not isinstance(value, ApplicationBuildRegistry):
         raise ManagementError("application_build_not_configured", 503)
     return value
+
+
+def _worker_capability(configured: bool, task: asyncio.Task[None] | None,
+                       healthy: bool) -> ApplicationWorkerCapability:
+    if not configured:
+        return "not_configured"
+    if task is None:
+        return "worker_unavailable"
+    return "worker_healthy" if not task.done() and healthy else "worker_unhealthy"
+
+
+@router.get("/application-capabilities")
+async def application_capabilities(request: Request, response: Response,
+                                   principal: ManagementPrincipal) -> ApplicationCapabilitiesV1:
+    """Observe installed process handles; never probe or change provider/pool state."""
+    owner_identity(principal)
+    response.headers["Cache-Control"] = "no-store"
+    state = request.app.state
+    application = getattr(state, "application_runtime", None)
+    runtime = application if isinstance(application, ApplicationServiceRuntime) else None
+    build = runtime.build_worker if runtime is not None else None
+    return ApplicationCapabilitiesV1(
+        scope="management_process",
+        application_lifecycle=_worker_capability(
+            isinstance(getattr(state, "application_manager", None), ApplicationManager),
+            runtime.task if runtime is not None else None,
+            runtime.worker.healthy if runtime is not None else False,
+        ),
+        source_upload="configured" if isinstance(
+            getattr(state, "application_source_uploader", None), ApplicationSourceUploader,
+        ) else "not_configured",
+        image_builds=_worker_capability(
+            isinstance(getattr(state, "application_build_registry", None), ApplicationBuildRegistry),
+            runtime.build_task if runtime is not None and build is not None else None,
+            build.healthy if build is not None else False,
+        ),
+        execution="not_checked",
+    )
 
 
 @router.post("/application-builds", status_code=201)
