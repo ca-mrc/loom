@@ -111,7 +111,7 @@ async def test_recovery_rejects_unversioned_writes_before_canonical_ack(version)
     assert worker.retried and not worker.committed
 
 
-@pytest.mark.parametrize('phase', ['projection-drift', 'timeout'])
+@pytest.mark.parametrize('phase', ['scope-drift', 'projection-drift', 'timeout'])
 async def test_entry_rejects_projection_before_claim_and_keeps_timeout_owned(monkeypatch, phase):
     import asyncio
     from contextlib import asynccontextmanager
@@ -138,6 +138,9 @@ async def test_entry_rejects_projection_before_claim_and_keeps_timeout_owned(mon
         if phase == 'projection-drift':
             values['events_sha256'] = 'sha256:' + 'f' * 64
         return values
+    async def lifecycle(*a, **k):
+        if phase == 'scope-drift':
+            raise RecoveryRefusedError('lifecycle_namespace_changed')
     async def claim(*a, **k):
         calls.append('claim')
         return SimpleNamespace(lease_id=request.lease_id, claim_id=uuid4())
@@ -146,6 +149,7 @@ async def test_entry_rejects_projection_before_claim_and_keeps_timeout_owned(mon
         assert k['require_versions']
         await asyncio.Future()
     monkeypatch.setattr(module, 'project_oracle', projection)
+    monkeypatch.setattr(module, 'qualify_lifecycle_scope', lifecycle)
     monkeypatch.setattr(module, 'claim_pending_archive', claim)
     monkeypatch.setattr(module.OracleRecoveryMaterializer, 'materialize_claim', materialize)
     monkeypatch.setattr(module, 'SOFT_TIMEOUT', 0.05)
@@ -153,9 +157,9 @@ async def test_entry_rejects_projection_before_claim_and_keeps_timeout_owned(mon
     settings = SimpleNamespace(db_engine_url='test', db_engine_connect_args={}, minio_endpoint='test',
         minio_access_key=secret, minio_secret_key=secret, minio_region='test', artifacts_bucket='artifacts',
         trajectories_bucket='trajectories', service_execution_source_retention_sec=86400)
-    with pytest.raises(RecoveryRefusedError if phase == 'projection-drift' else TimeoutError):
+    with pytest.raises(TimeoutError if phase == 'timeout' else RecoveryRefusedError):
         await module.run_recovery(request, settings)
-    assert calls == ([] if phase == 'projection-drift' else ['claim', 'materialize']) + ['close', 'close']
+    assert calls == (['claim', 'materialize'] if phase == 'timeout' else []) + ['close', 'close']
     engine.dispose.assert_awaited_once()
 
 
@@ -185,3 +189,39 @@ def test_request_accepts_nebius_provider_cluster_identity():
     values = request.model_dump(mode='json')
     values['cluster_id'] = 'mk8scluster-test123'
     assert ArchiveRecoveryRequest.model_validate(values).cluster_id == values['cluster_id']
+
+
+@pytest.mark.parametrize('damage', [None, 'default-namespace', 'foreign-environment', 'foreign-owner', 'deleted', 'missing-parent'])
+async def test_lifecycle_scope_qualifies_existing_parent_without_writes(monkeypatch, damage):
+    from loom.db.schema import Artifact, DataLifecycleAuthority, Trial
+    from loom_control_plane.pending_archive_recovery import qualify_lifecycle_scope
+
+    request, _, trial, artifact, now = qualified()
+    monkeypatch.setenv('LOOM_ENV', 'development')
+    monkeypatch.setenv('LOOM_NAMESPACE', request.namespace)
+    parent = SimpleNamespace(id=uuid4(), environment='development', namespace=request.namespace,
+        team_id=request.team_id, data_class='trial', owner_kind='trial', owner_id=str(request.trial_id),
+        created_at=now, expires_at=None, pinned=True, state='active')
+    trial.submitted_at = now
+    trial.lifecycle_authority_id = parent.id
+    artifact.lifecycle_authority_id = None
+    if damage == 'default-namespace':
+        monkeypatch.delenv('LOOM_NAMESPACE')
+    if damage == 'foreign-environment':
+        monkeypatch.setenv('LOOM_ENV', 'production')
+    if damage == 'foreign-owner':
+        parent.owner_id = str(uuid4())
+    if damage == 'deleted':
+        parent.state = 'deleted'
+    if damage == 'missing-parent':
+        trial.lifecycle_authority_id = None
+    class ReadOnly:
+        async def get(self, model, ident):
+            return {(Trial, trial.id): trial, (Artifact, artifact.id): artifact,
+                    (DataLifecycleAuthority, parent.id): parent}.get((model, ident))
+    if damage:
+        with pytest.raises(RecoveryRefusedError, match='lifecycle_'):
+            await qualify_lifecycle_scope(ReadOnly(), request)
+    else:
+        scope = await qualify_lifecycle_scope(ReadOnly(), request)
+        assert scope.namespace == request.namespace and scope.environment == 'development'

@@ -151,7 +151,7 @@ async def test_real_connected_cutover_stages_closed_workloads_and_replays_withou
 
             def cutover_readiness_page(self, target, *, after):
                 assert target in self.request.guards and after is None
-                return {"status": "observed", "schema_revision": "0174", "rows": []}
+                return {"status": "observed", "schema_revision": "0175", "rows": []}
 
         class Checks:
             def qualify_binding(self, actual, manager):

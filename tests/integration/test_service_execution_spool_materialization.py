@@ -211,6 +211,9 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
     oracle_recovery: bool = False,
     oracle_recovery_failure: str | None = None,
 ) -> None:
+    if oracle_recovery:
+        monkeypatch.setenv("LOOM_ENV", "development")
+        monkeypatch.setenv("LOOM_NAMESPACE", "loom-test")
     spool_container, canonical_container = independent_minio_endpoints
     if versioned:
         for bucket in ("artifacts", "trajectories"):
@@ -295,8 +298,12 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
                 "agent_model": {"provider": "openai", "name": "gpt-5"},
             }
             if oracle_recovery:
+                from loom.data_lifecycle_registry import ensure_trial_lifecycle_authority
+
                 task.config = {**task.config, "agent": {"name": "oracle", "version": "1.0"}}
                 trial.config = {"agent_name": "oracle", "agent_model": None}
+                trial.lifecycle_authority_id = await ensure_trial_lifecycle_authority(
+                    session, trial_id=trial.id, team_id=trial.team_id, created_at=trial.submitted_at)
             if prepared_snapshot:
                 task.config = {**task.config, "environment": {
                     **task.config["environment"], "docker_image": None,
@@ -604,7 +611,8 @@ async def test_independent_spool_survives_outage_restart_and_ack_gated_gc(
         canonical_store = _store(canonical_container)
 
         if oracle_recovery:
-            await _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store, failure=oracle_recovery_failure)
+            await _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store,
+                failure=oracle_recovery_failure, database_url=isolated_migration_postgres_url)
             return
 
         original_outcome = None
@@ -1086,8 +1094,7 @@ async def test_restart_probe_does_not_follow_server_retry_after() -> None:
         thread.join(timeout=2)
 
 
-async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store, *, failure=None):
-    from loom.db.schema_startup import service_schema_head
+async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canonical_store, *, failure=None, database_url):
     from loom_control_plane.pending_archive_recovery import (
         ArchiveRecoveryRequest,
         OracleRecoveryMaterializer,
@@ -1099,6 +1106,11 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
     # Retain an obsolete worker's completed projection, then relinquish its claim
     # just as the metadata readback failure does before automatic retry.
     old = materializer()
+    requeue = bool(failure and failure.startswith('scope-retry'))
+    if requeue:
+        # The failed Job's request belongs to the historical schema, not the
+        # later repair candidate. Exercise upgrade without rewriting that audit.
+        await asyncio.to_thread(command.downgrade, _config(database_url), '0174')
     stale = await old.claim_one(lease_id=lease.id)
     assert stale is not None
     old_result = await old._load_and_materialize(stale)
@@ -1115,11 +1127,24 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
             cluster_id="mk8scluster-test", namespace="loom-test", installed_candidate="a"*40, candidate_sha="b"*40,
             image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"4"*64,
             installed_image_ref="cr.eu-north1.nebius.cloud/test/loom-control-plane@sha256:"+"a"*64,
-            schema_head=service_schema_head(),
+            schema_head=await session.scalar(text('SELECT version_num FROM alembic_version')),
         )
     async with sessions.begin() as session:
         with pytest.raises(RecoveryRefusedError, match="pending_archive_not_eligible"):
             await claim_pending_archive(session, request.model_copy(update={"team_id": uuid4()}))
+    # Admission prebinds the Trial in a nondefault namespace. Losing that runtime
+    # setting must fail before owning a claim or writing new canonical versions.
+    with pytest.MonkeyPatch.context() as scope:
+        scope.delenv("LOOM_NAMESPACE")
+        async with sessions.begin() as session:
+            with pytest.raises(RecoveryRefusedError, match="lifecycle_namespace_changed"):
+                await claim_pending_archive(session, request)
+    async with sessions() as session:
+        current = await session.get(ServiceExecutionLease, lease.id)
+        artifact = await session.get(Artifact, request.artifact_id)
+        assert current.materialization_state == "pending"
+        assert current.materialization_claim_id is None
+        assert "pending_archive_recovery" not in (artifact.artifact_metadata or {})
     # A foreign pause is respected even though no new execution is requested.
     async with sessions.begin() as session:
         await session.execute(text("INSERT INTO nebius_rollout_guard (id,owner,candidate_sha) VALUES (1,'test-owner',:sha)"),
@@ -1154,7 +1179,7 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
         if failure == 'integrity':
             await old._source_store.put_object(bucket=old._source_bucket,
                 key=f"service-executions/{lease.team_id}/{lease.id}/1/output/artifacts/{request.artifact_id}/artifacts/answer.txt", body=b'corrupt')
-        else:
+        elif failure == 'input-drift':
             load = recovery._load_and_materialize
             async def changed_before_commit(owned_claim):
                 result = await load(owned_claim)
@@ -1163,7 +1188,16 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
                     task.config = {**task.config, 'description': 'changed since qualification'}
                 return result
             recovery._load_and_materialize = changed_before_commit
-    await recovery.materialize_claim(claim, require_versions=True)
+    if requeue:
+        from unittest.mock import AsyncMock
+
+        recovery._copy_source = AsyncMock(side_effect=AssertionError('scope must qualify before copying'))
+        with pytest.MonkeyPatch.context() as scope:
+            scope.setenv('LOOM_NAMESPACE', 'foreign')
+            await recovery.materialize_claim(claim, require_versions=True)
+        recovery._copy_source.assert_not_awaited()
+    else:
+        await recovery.materialize_claim(claim, require_versions=True)
     if failure:
         async with sessions() as session:
             trial = await session.get(Trial, lease.trial_id)
@@ -1184,6 +1218,15 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
         async with sessions.begin() as session:
             with pytest.raises(RecoveryRefusedError):
                 await claim_pending_archive(session, request)
+        if requeue:
+            await asyncio.to_thread(command.upgrade, _config(database_url), 'head')
+            await _qualify_parked_archive_retry(sessions, materializer, request, claim, audit, before, failure)
+            await asyncio.to_thread(command.downgrade, _config(database_url), '0174')
+            async with sessions() as session:
+                retained = await session.get(Artifact, request.artifact_id)
+                assert retained.artifact_metadata['pending_archive_recovery'] == audit
+                assert retained.artifact_metadata['pending_archive_recovery']['request']['schema_head'] == '0174'
+                assert 'pending_archive_retry' in retained.artifact_metadata
         return
     async with sessions() as session:
         report = await committed_readback(session, request, claim)
@@ -1205,7 +1248,8 @@ async def _qualify_pending_oracle_recovery(sessions, materializer, lease, canoni
             await claim_pending_archive(session, request)
 
 
-@pytest.mark.parametrize('failure', [None, 'integrity', 'input-drift'])
+@pytest.mark.parametrize('failure', [None, 'integrity', 'input-drift', 'scope-retry',
+                                   'scope-retry-precopy', 'scope-retry-commit', 'scope-retry-version'])
 async def test_pending_oracle_recovery_fences_old_workers_and_duplicate_jobs(
     monkeypatch, isolated_migration_postgres_url, independent_minio_endpoints, failure,
 ):
@@ -1216,3 +1260,119 @@ async def test_pending_oracle_recovery_fences_old_workers_and_duplicate_jobs(
         monkeypatch=monkeypatch, isolated_migration_postgres_url=isolated_migration_postgres_url,
         independent_minio_endpoints=independent_minio_endpoints, oracle_recovery=True, oracle_recovery_failure=failure,
     )
+
+
+async def _qualify_parked_archive_retry(sessions, materializer, original, failed_claim, original_audit, original_trial, failure):
+    from loom.db.schema_startup import service_schema_head
+    from loom_control_plane.pending_archive_retry import ArchiveRetryRequest, requeue_parked_archive
+
+    request = ArchiveRetryRequest(operation_id=uuid4(), team_id=original.team_id,
+        lease_id=original.lease_id, previous_request_sha256=original.digest,
+        previous_claim_id=failed_claim.claim_id, candidate_sha='c' * 40, schema_head=service_schema_head())
+    for field, value in [('previous_claim_id', uuid4()), ('previous_request_sha256', 'sha256:' + '0' * 64),
+                         ('team_id', uuid4()), ('schema_head', '0174')]:
+        with pytest.raises(ValueError):
+            await requeue_parked_archive(sessions, materializer(), request.model_copy(update={field: value}))
+    preview = await requeue_parked_archive(sessions, materializer(), request, apply=False)
+    assert preview['status'] == 'preview'
+    await _check_parked_retry_database_guard(sessions, original, preview)
+    async with sessions() as session:
+        artifact = await session.get(Artifact, original.artifact_id)
+        lease = await session.get(ServiceExecutionLease, original.lease_id)
+        assert artifact.artifact_metadata['pending_archive_recovery'] == original_audit
+        assert 'pending_archive_retry' not in artifact.artifact_metadata
+        assert lease.materialization_recovery_requested_at is None
+        assert lease.materialization_state == 'unavailable'
+
+    async def contender():
+        try:
+            return await requeue_parked_archive(sessions, materializer(), request, apply=True)
+        except ValueError:
+            return None
+    replies = await asyncio.gather(contender(), contender())
+    accepted, = [reply for reply in replies if reply is not None]
+    assert accepted['status'] == 'requeued'
+    with pytest.raises(ValueError):
+        await requeue_parked_archive(sessions, materializer(), request, apply=True)
+    worker = materializer()
+    if failure != 'scope-retry':
+        from dataclasses import replace
+        from unittest.mock import AsyncMock
+
+        if failure in {'scope-retry-commit', 'scope-retry-version'}:
+            load = worker._load_and_materialize
+            async def drift_after_copy(claim):
+                result = await load(claim)
+                if failure == 'scope-retry-version':
+                    return replace(result, events_version_id=None)
+                async with sessions.begin() as session:
+                    trial = await session.get(Trial, original.trial_id)
+                    task = await session.get(Task, trial.task_id)
+                    task.config = {**task.config, 'description': 'changed during storage retry'}
+                return result
+            worker._load_and_materialize = drift_after_copy
+            assert await worker.run_once(lease_id=original.lease_id)
+        else:
+            worker._copy_source = AsyncMock(side_effect=AssertionError('must refuse before any destination writes'))
+            with pytest.MonkeyPatch.context() as scope:
+                scope.setenv('LOOM_NAMESPACE', 'foreign')
+                assert await worker.run_once(lease_id=original.lease_id)
+            worker._copy_source.assert_not_awaited()
+        async with sessions() as session:
+            lease = await session.get(ServiceExecutionLease, original.lease_id)
+            trial = await session.get(Trial, original.trial_id)
+            artifact = await session.get(Artifact, original.artifact_id)
+            assert lease.materialization_state == 'unavailable'
+            assert lease.materialization_error_code == 'archive_retry_qualification_failed'
+            assert lease.source_cleanup_state == 'not_ready' and lease.source_retain_until is None
+            assert {key: getattr(trial, key) for key in original_trial} == original_trial
+            assert artifact.artifact_metadata['pending_archive_recovery'] == original_audit
+        with pytest.raises(ValueError):
+            await requeue_parked_archive(sessions, materializer(), request, apply=True)
+        return
+    assert await worker.run_once(lease_id=original.lease_id)
+    async with sessions() as session:
+        artifact = await session.get(Artifact, original.artifact_id)
+        lease = await session.get(ServiceExecutionLease, original.lease_id)
+        trial = await session.get(Trial, original.trial_id)
+        assert artifact.artifact_metadata['pending_archive_recovery'] == original_audit
+        assert artifact.artifact_metadata['pending_archive_retry']['request'] == request.model_dump(mode='json')
+        assert lease.materialization_state == 'committed' and trial.state == 'succeeded'
+        assert lease.materialization_attempts == original_audit['previous_materialization_attempts'] + 2
+        assert trial.result == original_trial['result'] and trial.attempt_count == original_trial['attempt_count'] == 1
+        assert lease.output_manifest_sha256 == original.output_manifest_sha256
+        assert lease.output_marker_sha256 == original.output_marker_sha256
+        assert lease.canonical_trajectory_sha256 == original.events_sha256
+        assert lease.canonical_atif_sha256 == original.atif_sha256
+        assert lease.source_cleanup_state == 'retained'
+        assert all(row['version_id'] for row in [*artifact.storage['files'], *artifact.storage['source_evidence']])
+
+
+async def _check_parked_retry_database_guard(sessions, original, preview):
+    # These transactions always roll back. Even a privileged ORM caller cannot
+    # reopen an unavailable archive without both audits or change a fifth field.
+    for damage in ['absent-audit', 'foreign-claim', 'foreign-team', 'wrong-time', 'extra-field', None]:
+        async with sessions() as session:
+            lease = await session.get(ServiceExecutionLease, original.lease_id, with_for_update=True)
+            artifact = await session.get(Artifact, original.artifact_id, with_for_update=True)
+            now = datetime.now(UTC)
+            audit = {**copy.deepcopy(preview), 'status': 'requeued', 'requested_at': now.isoformat()}
+            if damage == 'foreign-claim':
+                audit['request']['previous_claim_id'] = str(uuid4())
+            if damage == 'foreign-team':
+                audit['request']['team_id'] = str(uuid4())
+            if damage != 'absent-audit':
+                artifact.artifact_metadata = {**artifact.artifact_metadata, 'pending_archive_retry': audit}
+                await session.flush([artifact])
+            lease.materialization_state = 'pending'
+            lease.materialization_recovery_requested_at = now
+            lease.materialization_next_attempt_at = now + timedelta(seconds=1) if damage == 'wrong-time' else now
+            lease.updated_at = now
+            if damage == 'extra-field':
+                lease.materialization_attempts += 1
+            if damage is None:
+                await session.flush()
+            else:
+                with pytest.raises(DBAPIError):
+                    await session.flush()
+            await session.rollback()

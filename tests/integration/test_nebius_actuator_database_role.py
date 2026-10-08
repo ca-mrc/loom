@@ -225,7 +225,7 @@ async def test_global_handoff_runs_as_restricted_actuator_after_guarded_role_sta
                 with pytest.raises(psycopg.errors.RaiseException, match="not closed and idle"):
                     db.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 db.rollback()
-                db.execute("INSERT INTO alembic_version(version_num) VALUES('0174')")
+                db.execute("INSERT INTO alembic_version(version_num) VALUES('0175')")
             with db.cursor() as cursor:
                 cursor.execute(migration.pool_runtime_role_sql(owner=owner, candidate=candidate, action="stage"), prepare=False)
                 reports = []

@@ -16,6 +16,7 @@ def inputs():
                 for name in ('LOOM_CP_DB_URL', 'LOOM_CP_MINIO_ACCESS_KEY', 'LOOM_CP_MINIO_SECRET_KEY',
                              'LOOM_CP_SERVICE_EXECUTION_SOURCE_ACCESS_KEY', 'LOOM_CP_SERVICE_EXECUTION_SOURCE_SECRET_KEY')
             ] + [{'name': name, 'value': value} for name, value in {
+                'LOOM_ENV': 'development', 'LOOM_NAMESPACE': request.namespace,
                 'LOOM_CP_MINIO_ENDPOINT':'https://storage.test', 'LOOM_CP_MINIO_REGION':'region',
                 'LOOM_CP_ARTIFACTS_BUCKET':'artifacts', 'LOOM_CP_TRAJECTORIES_BUCKET':'trajectories',
                 'LOOM_CP_SERVICE_EXECUTION_SOURCE_ENDPOINT':'https://storage.test',
@@ -32,6 +33,39 @@ def inputs():
     cp['spec']['template']['spec']['containers'][0]['volumeMounts'] = [
         {'name': 'db-ca', 'mountPath': '/var/run/loom-db', 'readOnly': True}]
     return request, cp
+
+
+def test_recovery_preserves_installed_lifecycle_scope(monkeypatch):
+    from loom.data_lifecycle_registry import RuntimeLifecycleScope
+
+    request, cp = inputs()
+    installed = cp['spec']['template']['spec']['containers'][0]['env']
+    job = recovery_job(request, cp)
+    supplied = {item['name']: item for item in job['spec']['template']['spec']['containers'][0]['env']}
+    for item in installed:
+        if item['name'] in {'LOOM_ENV', 'LOOM_NAMESPACE'}:
+            assert supplied.get(item['name']) == item
+            monkeypatch.setenv(item['name'], supplied[item['name']]['value'])
+    scope = RuntimeLifecycleScope.from_environ()
+    assert scope.namespace == request.namespace
+    assert scope.environment == 'development'
+
+
+@pytest.mark.parametrize('change', ['missing-environment', 'missing-namespace', 'foreign-namespace', 'indirect-scope'])
+def test_recovery_rejects_unqualified_lifecycle_scope_before_launch(change):
+    request, cp = inputs()
+    env = cp['spec']['template']['spec']['containers'][0]['env']
+    if change.startswith('missing'):
+        missing = 'LOOM_ENV' if change == 'missing-environment' else 'LOOM_NAMESPACE'
+        env[:] = [item for item in env if item['name'] != missing]
+    elif change == 'foreign-namespace':
+        next(item for item in env if item['name'] == 'LOOM_NAMESPACE')['value'] = 'foreign'
+    else:
+        item = next(item for item in env if item['name'] == 'LOOM_NAMESPACE')
+        item.pop('value')
+        item['valueFrom'] = {'fieldRef': {'fieldPath': 'metadata.namespace'}}
+    with pytest.raises(ValueError, match='lifecycle_scope'):
+        recovery_job(request, cp)
 
 
 def test_recovery_is_one_digest_pinned_nonservice_worker_with_no_authority_token():
@@ -137,7 +171,8 @@ def test_recovery_uses_real_rendered_ca_projection():
               if doc['kind'] == 'Deployment' and doc['metadata']['name'] == 'loom-control-plane')
     original = cp['spec']['template']['spec']
     request, *_ = qualified()
-    request = request.model_copy(update={'installed_image_ref': original['containers'][0]['image']})
+    request = request.model_copy(update={'installed_image_ref': original['containers'][0]['image'],
+                                         'namespace': config['namespace']})
     job = recovery_job(request, cp)
     pod = job['spec']['template']['spec']
     ca = next(v for v in pod['volumes'] if v['name'] == 'db-ca')
