@@ -12,6 +12,9 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from tests.ops.test_nebius_development_build_cloud import publisher_cloud as publisher_cloud
+from tests.ops.test_nebius_development_collector_cloud import collector_cloud as collector_cloud
+from tests.ops.test_nebius_development_collector_cloud import original_cloud as original_cloud
 from tests.ops.test_nebius_development_management_foundation import (
     development_inputs as original_development_inputs,  # noqa: F401
 )
@@ -174,6 +177,17 @@ def pool_inputs(request, retained):
             for kind, key in (('execution', 'runtime'), ('task_images', 'target'), ('application_images', 'target')):
                 for profile in value['profiles'].get(kind, []):
                     profile[key]['node_selector'].update(labels)
+        if mode.startswith('foundation-runtime-build-material'):
+            for kind, purpose in (('task_images', 'task'), ('application_images', 'application')):
+                for profile in value['profiles'][kind]:
+                    profile['settings'].update(source_secret_name='loom-build-' + purpose + '-source',
+                        registry_secret_name='loom-build-registry', registry_auth_kind='nebius',
+                        registry_repository='cr.eu-north1.nebius.cloud/builds/' + purpose + '-images',
+                        cache_secret_name=None, cache_bucket=None)
+                    if mode.endswith('cache'):
+                        profile['settings'].update(cache_secret_name='loom-build-cache', cache_bucket='loom-native-cache')
+                    if mode.endswith('collision'):
+                        profile['settings']['source_secret_name'] = 'loom-build-shared-source'
         if mode == 'foundation-runtime-bad-keyring':
             value['profiles']['image_admission_keyring'] = {'schema_version': 1, 'keys': []}
         elif mode == 'foundation-runtime-bad-broker':
@@ -331,6 +345,77 @@ def database_runtime(completed_pool, **changes):
         actuator_password='runtime-actuator-' + 'p' * 40, batch_runner_token='loom_br_' + 'r' * 64)
     arguments.update(changes)
     return importlib.import_module(name).prepare_database_runtime(reference(module(), completed_pool), **arguments)
+
+
+def build_material(request, publisher_cloud, **changes):
+    from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
+
+    name = 'scripts.ops.nebius_development_build_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed native development build material delivery is missing')
+    scope = DevelopmentRegistryCloudScope.model_validate({**publisher_cloud.scope,
+        'project_id': request.foundation.inputs.config['project_id']})
+    arguments = dict(registry_scope=scope, registry_credential=publisher_cloud.credential, cache_material=None)
+    arguments.update(changes)
+    return importlib.import_module(name).prepare_build_runtime(request, **arguments)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material',
+    'foundation-runtime-build-material-cache'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_build_material_keeps_task_application_cache_and_publisher_credentials_separate(completed_pool, publisher_cloud):
+    request = database_runtime(completed_pool)
+    profiles = request.manager.retained.request.registration.spec.profiles
+    cache = {'access-key': 'cache-test-access', 'secret-key': 'cache-test-secret'} if profiles.task_images[0].settings.cache_bucket else None
+    documents = build_material(request, publisher_cloud, cache_material=cache)
+    assert {row['kind'] for row in documents} == {'Secret', 'ServiceAccount', 'NetworkPolicy'}
+    assert all(row['metadata']['namespace'] == 'loom-nebius-dev-execution-build' for row in documents)
+    secrets = {row['metadata']['name']: row for row in documents if row['kind'] == 'Secret'}
+    assert set(secrets) == {'loom-build-task-source', 'loom-build-application-source', 'loom-build-registry'} | (
+        {'loom-build-cache'} if cache else set())
+    retained = request.foundation.phases['supplied']['resources']['Secret:loom-platform-storage']['desired']['data']
+    assert retained['access-key'] != retained['source-access-key']
+    for purpose, prefix in (('task', ''), ('application', 'source-')):
+        assert secrets['loom-build-' + purpose + '-source']['data'] == {
+            key: retained[prefix + key] for key in ('access-key', 'secret-key')}
+    assert secrets['loom-build-registry']['data'] == {
+        'credentials.json': base64.b64encode(publisher_cloud.credential).decode()}
+    if cache:
+        assert secrets['loom-build-cache']['data'] == {key: base64.b64encode(value.encode()).decode() for key, value in cache.items()}
+    assert all(row['immutable'] is True and row['type'] == 'Opaque' for row in secrets.values())
+    accounts = [row for row in documents if row['kind'] == 'ServiceAccount']
+    assert {row['metadata']['name'] for row in accounts} == {
+        profile.target.service_account_name for profile in (*profiles.task_images, *profiles.application_images)}
+    assert all(row['automountServiceAccountToken'] is False for row in accounts)
+    network, = [row for row in documents if row['kind'] == 'NetworkPolicy']
+    assert network['spec']['ingress'] == [] and set(network['spec']['policyTypes']) == {'Ingress', 'Egress'}
+    public = network['spec']['egress'][1]
+    assert public['ports'] == [{'protocol': 'TCP', 'port': 80}, {'protocol': 'TCP', 'port': 443}]
+    assert {'10.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12', '192.168.0.0/16'} <= set(public['to'][0]['ipBlock']['except'])
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material-collision',
+    'foundation-runtime-build-material-cache'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_build_material_rejects_colliding_authorities_or_missing_cache_key(completed_pool, publisher_cloud):
+    with pytest.raises(ValueError, match='development build runtime unqualified'):
+        build_material(database_runtime(completed_pool), publisher_cloud)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['changed-request', 'unneeded-cache', 'wrong-registry'])
+def test_build_material_refuses_unbound_input_without_emitting_documents(completed_pool, publisher_cloud, damage):
+    request = database_runtime(completed_pool)
+    changes = {}
+    if damage == 'changed-request':
+        request.database[0]['data']['setup.json'] = '{}'
+    elif damage == 'unneeded-cache':
+        changes['cache_material'] = {'access-key': 'unused-access', 'secret-key': 'unused-secret'}
+    else:
+        publisher_cloud.scope['registry_fqdn'] = 'cr.eu-north1.nebius.cloud/foreign'
+    with pytest.raises(ValueError, match='development build runtime unqualified'):
+        build_material(request, publisher_cloud, **changes)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
