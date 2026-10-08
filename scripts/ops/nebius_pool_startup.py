@@ -10,7 +10,7 @@ import copy
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol, TypedDict
+from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _copy_document, _key, _snapshot, _uid
@@ -28,6 +28,9 @@ from scripts.ops.nebius_pool_projection import pure_projection
 from scripts.ops.nebius_pool_retirement import retirement_documents, stopped_documents
 
 from loom.nebius_platform_render import digest
+
+if TYPE_CHECKING:
+    from scripts.ops.nebius_pool_shutdown import ShutdownRecord
 
 
 class PoolWorkloadReader(Protocol):
@@ -184,6 +187,17 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     Nothing here asserts health, write rejection or permission to roll back.
     Callers must match their actual retained UID against one of these templates.
     """
+    current = _startup_workload_state(request, state_dir=state_dir, anchor_dir=anchor_dir)
+    return None if current is None else current[0]
+
+
+def _startup_workload_state(request: PoolCutoverRequest, *, state_dir: Path, anchor_dir: Path
+                            ) -> tuple[dict[str, tuple[dict[str, Any], ...]], ShutdownRecord | None] | None:
+    """Fresh projection and its shutdown record from one local ancestry read.
+
+    Returned data is only for this observation. A later observation must call
+    this reader again, never feed its preceding journal values back as inputs.
+    """
     operation = str(request.fencing.retirement.migration.registration.spec.operation_id)
     paths = (state_dir / "startup.json", anchor_dir / (operation + "-startup.json"))
     from scripts.ops.nebius_pool_legacy_restart import (
@@ -191,11 +205,16 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
         restarted_legacy_options,
     )
     from scripts.ops.nebius_pool_manager_image_history import manager_image_options
-    from scripts.ops.nebius_pool_shutdown import shutdown_exists, shutdown_workload_options
+    from scripts.ops.nebius_pool_shutdown import (
+        _read_shutdown_record,
+        _shutdown_workload_options,
+        shutdown_exists,
+    )
     from scripts.ops.nebius_pool_startup_fence import fenced_startup_options, startup_fence_exists
     from scripts.ops.nebius_pool_startup_repair import repaired_startup_options
     from scripts.ops.nebius_pool_template_restoration import (
-        restored_template_options,
+        _read_template_record,
+        _restored_template_options,
         template_restoration_exists,
     )
 
@@ -218,9 +237,19 @@ def startup_workload_options(request: PoolCutoverRequest, *, state_dir: Path,
     choices = manager_image_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
     choices = fenced_startup_options(request, state=state_dir, anchor=anchor_dir,
         closed=closed, targets=targets, startup=record, choices=choices)
-    choices = shutdown_workload_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
-    choices = restored_template_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
-    return restarted_legacy_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
+    shutdown = None
+    restoring = template_restoration_exists(request, state=state_dir, anchor=anchor_dir)
+    if shutdown_exists(request, state=state_dir, anchor=anchor_dir) or restoring:
+        shutdown = _read_shutdown_record(request, state=state_dir, anchor=anchor_dir,
+            closed=closed, targets=targets, startup=record)
+        choices = _shutdown_workload_options(request, state=state_dir, anchor=anchor_dir,
+            choices=choices, shutdown=shutdown)
+    if restoring:
+        assert shutdown is not None
+        _, before, restored, _, templates = _read_template_record(request, state=state_dir, anchor=anchor_dir, shutdown=shutdown)
+        choices = _restored_template_options(choices=choices, before=before, targets=restored, record=templates)
+    choices = restarted_legacy_options(request, state=state_dir, anchor=anchor_dir, choices=choices)
+    return choices, shutdown
 
 
 def stage_pool_startup(*, request: PoolCutoverRequest, api: PoolStartupAPI,

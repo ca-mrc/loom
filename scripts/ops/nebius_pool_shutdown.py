@@ -30,6 +30,7 @@ from scripts.ops.nebius_pool_startup_repair import original_recovery_repair
 from loom.nebius_platform_render import digest
 
 Documents = dict[str, dict[str, Any]]
+ShutdownRecord = tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]
 
 
 class PoolShutdownAPI(PoolWorkloadReader, Protocol):
@@ -56,6 +57,13 @@ def _shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                      ) -> tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]:
     closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
     _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
+    return _read_shutdown_record(request, state=state, anchor=anchor,
+        closed=closed, targets=targets, startup=startup)
+
+
+def _read_shutdown_record(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                          closed: Documents, targets: Documents, startup: dict[str, Any] | None) -> ShutdownRecord:
+    """Read current shutdown evidence using this call's freshly read ancestors."""
     # These ancestors are freshly read together, without intervening remote I/O.
     # The standalone fence reader still qualifies its own complete ancestry.
     _, cancellation = _activation_record(request, state=state, anchor=anchor)
@@ -125,7 +133,14 @@ def shutdown_workload_options(request: PoolCutoverRequest, *, state: Path, ancho
                                choices: dict[str, tuple[dict[str, Any], ...]]) -> dict[str, tuple[dict[str, Any], ...]]:
     if not shutdown_exists(request, state=state, anchor=anchor):
         return choices
-    _, original, desired, _, record = _shutdown_record(request, state=state, anchor=anchor)
+    shutdown = _shutdown_record(request, state=state, anchor=anchor)
+    return _shutdown_workload_options(request, state=state, anchor=anchor, choices=choices, shutdown=shutdown)
+
+
+def _shutdown_workload_options(request: PoolCutoverRequest, *, state: Path, anchor: Path,
+                               choices: dict[str, tuple[dict[str, Any], ...]], shutdown: ShutdownRecord
+                               ) -> dict[str, tuple[dict[str, Any], ...]]:
+    _, original, desired, _, record = shutdown
     if record is None:
         raise ValueError
     repair = original_recovery_repair(request, state=state, anchor=anchor)

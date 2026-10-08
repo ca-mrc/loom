@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections import Counter
 from types import SimpleNamespace
 
 import httpx
@@ -31,6 +32,60 @@ from tests.ops.test_nebius_pool_gateway_retirement_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
 )
 from tests.ops.test_nebius_pool_template_restoration import TemplateAPI, restore
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize('damage', [None, 'shutdown.json', 'cutover.json', 'template-restoration.json'])
+def test_single_successor_drain_reads_real_recovery_projection(retirement_http, closed_startup, monkeypatch, damage):
+    from scripts.ops import nebius_certificates as private_state
+    from scripts.ops.nebius_pool_shutdown import _shutdown_record
+
+    with retirement_http() as (api, state, apply_role):
+        machine = SimpleNamespace(mode=state.mode, guards=state.guards, machine_phase='revoked')
+        gateway = GatewayAPI(closed_startup, machine)
+        assert gateway_retire(closed_startup, gateway)['status'] == 'pool_gateway_roles_retired'
+        for key in gateway.role_calls:
+            apply_role(key)
+        remote = TemplateAPI(closed_startup, gateway)
+        monkeypatch.setattr(remote, 'preview_legacy_template', lambda *_: None)
+        assert restore(closed_startup, remote)['status'] == 'pending_template_restoration_update'
+        targets = _shutdown_record(api.request, state=api.state, anchor=api.anchor)[2]
+        key = next(iter(targets))
+        operation = api.request.fencing.retirement.migration.registration.spec.operation_id
+        marker = api.anchor / (str(operation) + '-cutover.json')
+        private_read = private_state._private_read
+        counts = Counter()
+        transport = api.parent.client._transport
+
+        def read(path, **kwargs):
+            counts['private_reads'] += 1
+            counts['closure_reads'] += path == marker
+            return private_read(path, **kwargs)
+
+        def respond(message):
+            response = transport.handle_request(message)
+            if message.method == 'GET' and message.url.params.get('limit') == '1000':
+                counts['process_collections'] += 1
+                if damage is not None and message.url.path.endswith('/pods'):
+                    path = api.state / damage
+                    document = json.loads(path.read_bytes())
+                    document['unexpected'] = True
+                    path.write_text(json.dumps(document))
+                    counts['damage_between_reads'] += 1
+            return response
+
+        monkeypatch.setattr(private_state, '_private_read', read)
+        monkeypatch.setattr(api.parent.client, '_transport', httpx.MockTransport(respond))
+        if damage is not None:
+            with pytest.raises(ValueError, match='pool_successor_drain_unconfirmed'):
+                api.successor_drained(key, targets[key])
+            assert counts['damage_between_reads'] == 1
+            assert not state.writes and not state.gateway_writes
+            return
+        assert api.successor_drained(key, targets[key]) is True
+        print('single successor drain', dict(counts))
+        assert counts['process_collections'] == 2
+        assert counts['closure_reads'] == 2
 
 
 def test_original_shutdown_drain_stays_strict_without_restoration(retirement_http):

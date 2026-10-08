@@ -39,8 +39,8 @@ from scripts.ops.nebius_pool_role_restoration import _role_record, qualify_role_
 from scripts.ops.nebius_pool_shutdown import _shutdown_record
 from scripts.ops.nebius_pool_startup import (
     _startup_record,
+    _startup_workload_state,
     closed_startup_documents,
-    startup_workload_options,
 )
 from scripts.ops.nebius_pool_startup_fence import (
     _fence_record,
@@ -211,17 +211,20 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
     def successor_drained(self, key: str, desired: dict[str, Any]) -> bool:
         """Fresh process drain of the anchored closed successor or restored spec."""
         try:
-            def projection() -> dict[str, tuple[dict[str, Any], ...]] | None:
+            def observation():
                 if not template_restoration_exists(self.request, state=self.state, anchor=self.anchor):
-                    return None
-                return startup_workload_options(self.request, state_dir=self.state, anchor_dir=self.anchor)
+                    return _shutdown_record(self.request, state=self.state, anchor=self.anchor), None
+                current = _startup_workload_state(self.request, state_dir=self.state, anchor_dir=self.anchor)
+                if current is None or current[1] is None:
+                    raise ValueError
+                return current[1], current[0]
 
-            closed, _, targets, _, record = _shutdown_record(self.request, state=self.state, anchor=self.anchor)
+            shutdown, options = observation()
+            closed, _, targets, _, record = shutdown
             if (closed != self.closed or record is None or key not in targets
                     or record['workloads'][key]['phase'] != 'stopped' or _stable(desired) != targets[key]):
                 raise ValueError
             current = self.read_workload(key)
-            options = projection()
             choices = (targets[key],) if options is None else options[key]
             expected, = (row for row in choices if _matches(current, row, _uid(closed[key])))
             namespace = str(current['metadata']['namespace'])
@@ -229,9 +232,10 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
                 else '/apis/batch/v1/namespaces/' + namespace + '/jobs')
             children = self.parent._request('GET', path + '?limit=1000')
             pods = self.parent._request('GET', '/api/v1/namespaces/' + namespace + '/pods?limit=1000')
-            if (children is None or pods is None or _stable(self.read_workload(key)) != _stable(current)
-                    or _shutdown_record(self.request, state=self.state, anchor=self.anchor)[-1] != record
-                    or projection() != options):
+            if children is None or pods is None or _stable(self.read_workload(key)) != _stable(current):
+                raise ValueError
+            after, current_options = observation()
+            if after[-1] != record or current_options != options:
                 raise ValueError
             return qualify_closed_workload_drain(original=closed[key], desired=expected,
                 current=current, children=children, pods=pods)
