@@ -493,7 +493,8 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
             return httpx.Response(200, json=state.pod)
         if name.startswith('loom-dev-runtime-'):
             collection = path.split('/')[-2]
-            value = store.resources.get(':'.join((kinds[collection], path.split('/')[4], name)))
+            namespace = path.split('/namespaces/', 1)[1].split('/', 1)[0]
+            value = store.resources.get(':'.join((kinds[collection], namespace, name)))
             value = copy.deepcopy(value)
             if value is not None and value['kind'] == 'Job' and state.complete:
                 value['status'] = {'conditions': [{'type': 'Complete', 'status': 'True'}], 'succeeded': 1}
@@ -502,8 +503,9 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
             return httpx.Response(200, json=foundation.bootstrap.namespace)
         if '/namespaces/loom-dev/' in path or '/persistentvolumes/' in path:
             kind = kinds[path.split('/')[-2]]
-            value = (foundation.bootstrap.secrets.get(name) if kind == 'Secret' else
-                foundation.stage.resources.get(kind + ':' + name))
+            value = foundation.bootstrap.secrets.get(name) if kind == 'Secret' else None
+            if value is None:
+                value = foundation.stage.resources.get(kind + ':' + name)
             if value is not None:
                 return httpx.Response(200, json=value)
         return original(message)
@@ -512,12 +514,12 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
     return state
 
 
-def runtime_database_https(live):
+def runtime_database_https(live, **options):
     name = 'scripts.ops.nebius_development_runtime_database_live'
     if importlib.util.find_spec(name) is None:
         pytest.fail('fixed development runtime database HTTPS adapter is missing')
     return importlib.import_module(name).HTTPSDevelopmentRuntimeDatabaseAPI(request=live.request,
-        api_server=live.request.foundation.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context())
+        api_server=live.request.foundation.inputs.config['kubernetes_api_server'], ssl_context=ssl.create_default_context(), **options)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
@@ -571,6 +573,18 @@ def test_runtime_database_https_rejects_receipt_and_late_drift(runtime_database_
         with pytest.raises(ValueError, match='development runtime database execution unqualified'):
             api.database_report(state)
         assert len(live.store.creates) == 4
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_https_private_inputs_cannot_shadow_retained_evidence(runtime_database_live):
+    live = runtime_database_live
+    path = live.request.reference.operation_path
+    changed = path.read_bytes() + b' '
+    with runtime_database_https(live, private_files={path: changed}) as api:
+        path.write_bytes(changed)
+        with pytest.raises(ValueError, match='development runtime database prerequisites unqualified'):
+            api.verify_identity(api.binding)
+    assert not live.store.creates
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
