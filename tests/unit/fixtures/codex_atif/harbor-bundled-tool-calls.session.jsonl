@@ -1,0 +1,10 @@
+{"type": "session_meta", "payload": {"id": "session-1"}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:00Z", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan the fix."}]}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:01Z", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Inspecting."}]}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:02Z", "payload": {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{\"command\": \"ls\"}"}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:03Z", "payload": {"type": "function_call_output", "call_id": "call_1", "output": "README.md"}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:04Z", "payload": {"type": "function_call", "call_id": "call_2", "name": "shell", "arguments": "{\"command\": \"cat README.md\"}"}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:05Z", "payload": {"type": "function_call_output", "call_id": "call_2", "output": "hello"}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 100, "output_tokens": 20, "cached_input_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 120}, "total_token_usage": {"input_tokens": 100, "output_tokens": 20, "cached_input_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 120}}}}
+{"type": "response_item", "timestamp": "2026-01-01T00:00:06Z", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]}}
+{"type": "event_msg", "payload": {"type": "token_count", "info": {"last_token_usage": {"input_tokens": 150, "output_tokens": 5, "cached_input_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 155}, "total_token_usage": {"input_tokens": 150, "output_tokens": 5, "cached_input_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 155}}}}

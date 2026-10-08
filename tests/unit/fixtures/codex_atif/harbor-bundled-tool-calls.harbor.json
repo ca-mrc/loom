@@ -1,0 +1,105 @@
+{
+ "model_name": "openai/o3",
+ "trajectory": {
+  "schema_version": "ATIF-v1.7",
+  "session_id": "session-1",
+  "agent": {
+   "name": "codex",
+   "version": "unknown",
+   "model_name": "openai/o3"
+  },
+  "steps": [
+   {
+    "step_id": 1,
+    "timestamp": "2026-01-01T00:00:01Z",
+    "source": "agent",
+    "model_name": "openai/o3",
+    "message": "Inspecting.",
+    "reasoning_content": "Plan the fix.",
+    "tool_calls": [
+     {
+      "tool_call_id": "call_1",
+      "function_name": "shell",
+      "arguments": {
+       "command": "ls"
+      }
+     },
+     {
+      "tool_call_id": "call_2",
+      "function_name": "shell",
+      "arguments": {
+       "command": "cat README.md"
+      }
+     }
+    ],
+    "observation": {
+     "results": [
+      {
+       "source_call_id": "call_1",
+       "content": "README.md"
+      },
+      {
+       "source_call_id": "call_2",
+       "content": "hello"
+      }
+     ]
+    },
+    "metrics": {
+     "prompt_tokens": 100,
+     "completion_tokens": 20,
+     "extra": {
+      "reasoning_output_tokens": 0,
+      "total_tokens": 120
+     }
+    },
+    "llm_call_count": 1,
+    "extra": {
+     "api_call_id": "api_call_1",
+     "tool_call_details": {
+      "call_1": {
+       "raw_arguments": "{\"command\": \"ls\"}"
+      },
+      "call_2": {
+       "raw_arguments": "{\"command\": \"cat README.md\"}"
+      }
+     }
+    }
+   },
+   {
+    "step_id": 2,
+    "timestamp": "2026-01-01T00:00:06Z",
+    "source": "agent",
+    "model_name": "openai/o3",
+    "message": "Done.",
+    "metrics": {
+     "prompt_tokens": 150,
+     "completion_tokens": 5,
+     "extra": {
+      "reasoning_output_tokens": 0,
+      "total_tokens": 155
+     }
+    },
+    "llm_call_count": 1,
+    "extra": {
+     "api_call_id": "api_call_2"
+    }
+   }
+  ],
+  "final_metrics": {
+   "total_prompt_tokens": 150,
+   "total_completion_tokens": 5,
+   "total_steps": 2,
+   "extra": {
+    "reasoning_output_tokens": 0,
+    "total_tokens": 155,
+    "last_token_usage": {
+     "input_tokens": 150,
+     "output_tokens": 5,
+     "cached_input_tokens": 0,
+     "reasoning_output_tokens": 0,
+     "total_tokens": 155
+    }
+   }
+  }
+ }
+}

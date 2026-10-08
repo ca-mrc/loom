@@ -24,6 +24,8 @@ from sqlalchemy import cast as sql_cast
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from loom.agent.terminus2.mapper import Terminus2TrajectoryMapper
+from loom.codex_atif import clean_trajectory as clean_codex_trajectory
+from loom.codex_atif import harbor_trajectory as harbor_codex_trajectory
 from loom.data_lifecycle_registry import (
     ensure_artifact_lifecycle_authority,
     ensure_trial_event_lifecycle_authority,
@@ -110,6 +112,8 @@ def _raise_if_cancellation_requested(exc: Exception) -> None:
 _TRACE_PATH = "trajectory/events.jsonl"
 _USAGE_PATH = "accounting/usage.json"
 _VERIFIER_PATH = "verifier/output.json"
+# Codex's session log (`hosted_harness.CODEX`), the source of its ATIF steps.
+_CODEX_SESSION_PATH = "artifacts/codex/session.jsonl"
 _RESULT_PATH = "result.json"
 _EXCEPTION_PATHS = {"diagnostics/agent-exception.json", "diagnostics/verifier-exception.json"}
 _MAX_DERIVATION_BYTES = 256 * 1024 * 1024
@@ -541,6 +545,7 @@ def build_canonical_events(
 
 def build_canonical_atif(
     events: Sequence[TrajectoryEvent], *, task_id: str, agent_name: str, agent_version: str,
+    codex_session: bytes | None = None,
 ) -> bytes:
     """Use the existing per-turn Harbor exporter for Terminus execution.
 
@@ -552,6 +557,8 @@ def build_canonical_atif(
     generic = project_to_atif(
         events, task_id=task_id, agent_name=agent_name, agent_version=agent_version,
     )
+    if _trace_format(agent_name) == "codex" and codex_session is not None:
+        return _codex_atif(events, generic, codex_session, agent_name=agent_name)
     if _trace_format(agent_name) != "terminus":
         return generic.model_dump_json(indent=2).encode("utf-8")
     if generic.metadata.final_state == "succeeded":
@@ -573,6 +580,28 @@ def build_canonical_atif(
         "trajectory_id": generic.trajectory_id,
         "session_id": generic.session_id,
         "metadata": generic.metadata.model_dump(mode="json"),
+    })
+    return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _codex_atif(
+    events: Sequence[TrajectoryEvent], generic: Any, session: bytes, *, agent_name: str,
+) -> bytes:
+    """Codex's per-request ATIF steps (Harbor's conversion of its session log),
+    cleaned, with Loom's identity, verifier result and ledger accounting.
+
+    A session log without steps keeps the generic projection.
+    """
+    model = next((event.model for event in events if isinstance(event, LLMCallEvent)), None)
+    converted = harbor_codex_trajectory(session, model_name=model.name if model else None)
+    if converted is None:
+        return cast(bytes, generic.model_dump_json(indent=2).encode("utf-8"))
+    document = clean_codex_trajectory(converted)
+    document.update({
+        "trajectory_id": generic.trajectory_id,
+        "session_id": generic.session_id,
+        "metadata": generic.metadata.model_dump(mode="json"),
+        "accounting": codex_usage(list(events), TrialConfig(agent_name=agent_name, agent_model=model)),
     })
     return json.dumps(document, ensure_ascii=False, indent=2).encode("utf-8")
 
@@ -1059,6 +1088,7 @@ class ServiceExecutionMaterializer:
                 _TRACE_PATH,
                 _USAGE_PATH,
                 _VERIFIER_PATH,
+                _CODEX_SESSION_PATH,
                 *_EXCEPTION_PATHS,
             }:
                 derivation_inputs[file.relative_path] = await self._read_exact(
@@ -1252,6 +1282,7 @@ class ServiceExecutionMaterializer:
             task_id=trial_task_id,
             agent_name=trial_config.agent_name,
             agent_version=trial_config.agent_version or task_config.agent.version or "service-execution-v1",
+            codex_session=derivation_inputs.get(_CODEX_SESSION_PATH),
         )
         identity = TrajectoryObjectIdentity(
             bucket=self._trajectories_bucket,

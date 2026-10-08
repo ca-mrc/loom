@@ -342,6 +342,8 @@ CODEX = HostedHarnessSpec(
     required_driver_capabilities=frozenset({"exec", "exec_streaming", "upload", "download"}),
     native_outputs=(
         NativeOutput("agent/codex/events.jsonl", "artifacts/codex/events.jsonl", "agent_native", True),
+        # Codex's own session log; the canonical ATIF is built from it.
+        NativeOutput("agent/codex/session.jsonl", "artifacts/codex/session.jsonl", "agent_native", False),
     ),
     setup=HarnessSetup(
         archive=PinnedArchive(
