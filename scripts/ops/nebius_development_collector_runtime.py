@@ -5,11 +5,17 @@ Secret before staging/start. A rendered Secret reference is not live authority.
 """
 from __future__ import annotations
 
+import base64
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+from scripts.ops.nebius_development_collector_cloud import (
+    DevelopmentCollectorCloudScope,
+    collector_public_key,
+)
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_pool_runtime import _RetainedPoolCollectorSettings
@@ -26,6 +32,25 @@ class DevelopmentCollectorRuntime:
     cronjob: dict[str, Any]
     authority: tuple[dict[str, Any], ...]
     credential_secret_name: str
+
+
+def prepare_collector_material(request: DevelopmentDatabaseRuntime, *, scope: DevelopmentCollectorCloudScope,
+                               credential: bytes) -> dict[str, Any]:
+    """Project one private observer Secret, not an assertion of IAM readiness.
+
+    The protected parent must qualify_collector_cloud before staging and probe
+    the actual pool with this credential before starting the observer. No
+    operator, storage, registry or database material is accepted here.
+    """
+    try:
+        runtime = prepare_collector_runtime(request)
+        collector_public_key(scope=scope, config=request.foundation.inputs.config, credential=credential)
+        metadata = copy.deepcopy(runtime.configuration['metadata'])
+        metadata['name'] = runtime.credential_secret_name
+        return {'apiVersion': 'v1', 'kind': 'Secret', 'type': 'Opaque', 'immutable': True,
+            'metadata': metadata, 'data': {'credentials.json': base64.b64encode(credential).decode()}}
+    except Exception:
+        raise ValueError('development collector material unqualified') from None
 
 
 def prepare_collector_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentCollectorRuntime:
