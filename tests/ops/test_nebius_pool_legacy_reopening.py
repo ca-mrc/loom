@@ -48,7 +48,12 @@ class ReopeningAPI(RestartAPI):
         elif self.runtime_drift == 'workload':
             self.startup.documents[_key(self.request.manager)]['spec']['replicas'] = 0
 
-    def release_recovery_guard(self, participant):
+    def release_recovery_guard(self, participant, *, record_intent):
+        from scripts.ops.nebius_pool_legacy_reopening import observe_legacy_reopening
+
+        self.qualify_reopening_runtimes()
+        observe_legacy_reopening(self.request, self, state=self.state, anchor=self.anchor)
+        record_intent()
         record = json.loads((self.state / 'legacy-reopening.json').read_bytes())
         assert record['guards'][participant] == 'intent'
         assert self.guards[participant] == 'fenced' and self.mode == 'fenced' and self.machine_phase == 'revoked'

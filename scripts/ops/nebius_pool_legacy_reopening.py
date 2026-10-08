@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,7 +19,7 @@ class PoolLegacyReopeningAPI(PoolLegacyRestartAPI, Protocol):
     def participant_recovery_drained(self, participant: str) -> bool: ...
     def qualify_legacy_runtimes(self) -> None: ...
     def qualify_reopening_runtimes(self) -> None: ...
-    def release_recovery_guard(self, participant: str) -> None: ...
+    def release_recovery_guard(self, participant: str, *, record_intent: Callable[[], None]) -> None: ...
 
 
 def _reopening_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
@@ -148,16 +149,17 @@ def reopen_pool_legacy(*, request: PoolCutoverRequest, api: PoolLegacyReopeningA
                 if pending is not None:
                     return result(pending)
                 if record['guards'][key] == 'prepared':
-                    api.qualify_reopening_runtimes()
-                    pending = qualify()
-                    if pending is not None:
-                        return result(pending)
-                    record['guards'][key] = 'intent'
-                    save()
+                    def record_intent(participant: str = key) -> None:
+                        if record['guards'][participant] != 'prepared':
+                            raise ValueError
+                        record['guards'][participant] = 'intent'
+                        save()
                     try:
-                        api.release_recovery_guard(key)
+                        api.release_recovery_guard(key, record_intent=record_intent)
                     except Exception:
-                        pass  # Only exact observation can settle this dispatch.
+                        if record['guards'][key] != 'intent':
+                            raise
+                        # Only exact observation can settle an intended dispatch.
                 if observe()[key] != 'open':
                     return result('pending_legacy_guard_release')
                 record['guards'][key] = 'released'

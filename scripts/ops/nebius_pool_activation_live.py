@@ -587,12 +587,12 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
         except Exception:
             raise ValueError('pool_legacy_reopening_runtimes_unqualified') from None
 
-    def release_recovery_guard(self, participant: str) -> None:
+    def release_recovery_guard(self, participant: str, *, record_intent: Callable[[], None] | None = None) -> None:
         """Only the anchored reopening parent may dispatch this fixed release."""
         try:
             self._scope()
             _, record = _reopening_record(self.request, state=self.state, anchor=self.anchor)
-            if (record is None or record['guards'].get(participant) != 'intent'
+            if (record_intent is None or record is None or record['guards'].get(participant) != 'prepared'
                     or self.guard_state(participant) != 'fenced'):
                 raise ValueError
             target = self._guard(participant)
@@ -600,10 +600,15 @@ class HTTPSPoolActivationAPI(HTTPSPoolStartupAPI):
             if (_reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != record
                     or self.guard_state(participant) != 'fenced'):
                 raise ValueError
+            record_intent()
+            expected = copy.deepcopy(record)
+            expected['guards'][participant] = 'intent'
+            if _reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != expected:
+                raise ValueError
             if self.parent.guards.release_recovery_guard(target) != 'open':
                 raise ValueError
             self.verify_retained()
-            if (_reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != record
+            if (_reopening_record(self.request, state=self.state, anchor=self.anchor)[1] != expected
                     or self.guard_state(participant) != 'open'):
                 raise ValueError
         except Exception:
