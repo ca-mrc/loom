@@ -494,7 +494,8 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
     foundation, pool = handoff[2], completed_pool[3].server
     original = pool.handle
     state = SimpleNamespace(request=request, store=store, foundation=foundation, pool=pool,
-        calls=[], complete=False, pod=None, report=None, on_log=None)
+        calls=[], complete=False, pod=None, report=None, on_log=None,
+        job_name='loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f')
     kinds = {'secrets': 'Secret', 'configmaps': 'ConfigMap', 'serviceaccounts': 'ServiceAccount',
         'services': 'Service', 'networkpolicies': 'NetworkPolicy', 'statefulsets': 'StatefulSet',
         'deployments': 'Deployment', 'jobs': 'Job', 'persistentvolumeclaims': 'PersistentVolumeClaim',
@@ -506,7 +507,7 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
         name = path.rsplit('/', 1)[-1]
         if method == 'POST':
             document = json.loads(message.content)
-            assert document['metadata']['name'] == 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f'
+            assert document['metadata']['name'] == state.job_name
             assert document['kind'] in {'Secret', 'ConfigMap', 'Job'}
             if message.url.params.get('dryRun') == 'All':
                 return httpx.Response(201, json=store.default_resource(document))
@@ -526,7 +527,10 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
                         'name': job['metadata']['name'], 'uid': job['metadata']['uid']}]},
                     'spec': copy.deepcopy(job['spec']['template']['spec']), 'status': {'phase': 'Succeeded',
                         'containerStatuses': [{'name': job['spec']['template']['spec']['containers'][0]['name'],
-                            'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}]}}
+                            'restartCount': 0, 'state': {'terminated': {'exitCode': 0}}}],
+                        'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
+                            'state': {'terminated': {'exitCode': 0}}}
+                            for row in job['spec']['template']['spec'].get('initContainers', [])]}}
             if name == 'pods':
                 return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {}, 'items': [state.pod]})
             if name == 'log':
@@ -538,7 +542,7 @@ def runtime_database_live(completed_pool, handoff, monkeypatch):
                 return httpx.Response(200, json=report)
             assert name == state.pod['metadata']['name']
             return httpx.Response(200, json=state.pod)
-        if name.startswith('loom-dev-runtime-'):
+        if name == state.job_name:
             collection = path.split('/')[-2]
             namespace = path.split('/namespaces/', 1)[1].split('/', 1)[0]
             value = store.resources.get(':'.join((kinds[collection], namespace, name)))
@@ -873,6 +877,80 @@ def test_catalog_proof_binds_exact_job_request_and_operation(completed_pool, tmp
     journal.write_text(json.dumps(saved))
     with pytest.raises(ValueError, match='development catalog receipt unqualified'):
         catalog.validate_catalog_runtime_proof(request, state, proof)
+
+
+def runtime_catalog_https(live):
+    from scripts.ops import nebius_development_catalog_runtime as catalog
+
+    name = 'scripts.ops.nebius_development_catalog_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development catalog HTTPS adapter is missing')
+    live.job_name = 'loom-dev-catalog-aecc7407b7b84c388d1fbca5dca9840f'
+    config, _ = catalog.prepare_catalog_runtime(live.request).documents
+    from loom.pipeline.keys import canonical_digest
+
+    raw = json.loads(config['data']['catalog.json'])
+    live.report = {'operation_id': str(live.request.operation_id),
+        'target_id': raw['topology']['targets'][0]['target_id'], 'catalog_sha256': canonical_digest(raw)}
+    live.catalog_checks = 0
+    live.catalog_allowed = True
+
+    def qualify(request):
+        assert request == live.request
+        live.catalog_checks += 1
+        if not live.catalog_allowed:
+            raise ValueError('runtime phase not qualified')
+        # Child transport qualification is composed with the existing real
+        # history/live reader. The new closed CP's transition and phase ordering
+        # are the connected runtime parent's responsibility, not this fixture.
+        with runtime_database_https(live) as original:
+            original.verify_identity(original.binding)
+
+    return importlib.import_module(name).HTTPSDevelopmentCatalogAPI(request=live.request,
+        api_server=live.request.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), qualify_runtime=qualify)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_catalog_https_verifies_fixed_job_initializer_and_receipt(runtime_database_live, tmp_path):
+    live, state = runtime_database_live, tmp_path / 'catalog'
+    with runtime_catalog_https(live) as api:
+        catalog_runtime_stage(live.request, api, state)
+        assert api.catalog_report(state) is None
+        live.complete = True
+        proof = api.catalog_report(state)
+        assert proof['catalog'] == live.report
+        assert live.pod['status']['initContainerStatuses'][0]['name'] == 'prepare-admin-secret'
+        assert api.catalog_report(state) == proof
+        assert len(live.store.creates) == 2
+        assert live.catalog_checks > 2
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_catalog_https_requires_parent_qualification_and_rejects_extra_authority(runtime_database_live, tmp_path):
+    live, state = runtime_database_live, tmp_path / 'catalog'
+    with runtime_catalog_https(live) as api:
+        live.catalog_allowed = False
+        with pytest.raises(ValueError, match='development catalog stage unqualified'):
+            catalog_runtime_stage(live.request, api, state)
+        assert not live.store.creates
+        live.catalog_allowed = True
+        foreign = copy.deepcopy(live.request.database[1])
+        with pytest.raises(ValueError, match='resource outside fixed development runtime'):
+            api.create_resource(foreign)
+        assert not live.store.creates
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_catalog_https_late_prerequisite_loss_cannot_report_completion(runtime_database_live, tmp_path):
+    live, state = runtime_database_live, tmp_path / 'catalog'
+    with runtime_catalog_https(live) as api:
+        catalog_runtime_stage(live.request, api, state)
+        live.complete = True
+        live.on_log = lambda: setattr(live, 'catalog_allowed', False)
+        with pytest.raises(ValueError, match='development catalog execution unqualified'):
+            api.catalog_report(state)
+        assert len(live.store.creates) == 2
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
