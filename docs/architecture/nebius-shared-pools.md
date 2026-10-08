@@ -672,6 +672,16 @@ references. If source intake was not installed, source credential delivery is
 still a prerequisite. The prepared Deployment remains stopped; preparation does
 not grant build access, open admission or replace live identity checks.
 
+Fresh runtime database setup has a separate fixed command: it creates only the
+missing actuator login and batch-submission token, without migrations or changes
+to service/control-plane/gateway passwords. A single transaction binds its
+operation, database identity and token digest to the role. Replay authenticates
+the retained password and checks the exact current grants and token; it never
+rotates credentials or repairs drift. Delegable/default grants are rejected.
+This is a runtime-installation primitive, not a protected delivery entry or live
+readiness evidence; its caller must qualify the dev database and retain material
+before delivering the fixed Job.
+
 `development_pool_installed_closed` means only that this stopped installation is
 retained and qualified. Catalog-bound manager/participant successors, build
 isolation and read grants, a qualified observer and sole physical-writer authority
