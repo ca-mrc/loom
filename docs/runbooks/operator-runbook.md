@@ -209,6 +209,80 @@ Trial exposes `output_unavailable` for diagnosis.
 Control Plane process (default eight). Change it through the deployment
 configuration and normal rollout path; do not run ad hoc copier processes.
 
+#### Pending Oracle archive blocks an idle rollout
+
+A repaired storage client cannot always be installed by ordinary rollout: a
+pending archive itself counts as active execution. The supported exception is
+`scripts/ops/nebius_archive_recovery.py`, which launches one isolated archival
+Job from a successful, immutable `dev` publication. It does not install that
+candidate as the platform or release the rollout guard. Keep any independently
+owned automatic-rollout pause unchanged.
+
+This operation admits only a successful, finalized, revoked and deleted Oracle
+attempt with zero Gateway calls, no separate verifier, committed source and the
+specific `multipart object readback identity mismatch` error. Its source is
+bounded to 1,024 files and 512 MiB. It claims only a pending lease; an active or
+expired running claim is ineligible. Its audit records the previous scheduled
+retry time and retry count; choosing the repaired worker may advance the normal
+backoff, but never resets counters or executes the task again.
+
+1. Use the operator source at the exact published candidate and the existing
+   `loom-rollout` context. Inspect the owning team and lease without writes:
+
+   ```bash
+   uv run --no-sync python scripts/ops/nebius_archive_recovery.py \
+     --kubeconfig "$RECOVERY_KUBECONFIG" --namespace "$RECOVERY_NAMESPACE" \
+     --inspect-team-id "$RECOVERY_TEAM" --inspect-lease-id "$RECOVERY_LEASE" \
+     --evidence-dir "$RECOVERY_EVIDENCE/inspection"
+   ```
+
+2. Review `installed-projection.json`. Its `binding` contains the exact source,
+   Trial, lease, Artifact, schema, configuration and installed events/ATIF hashes.
+   Form the request from those fields plus `cluster_id`, `namespace`,
+   `installed_candidate`, `installed_image_ref`, `candidate_sha` and `image_ref`.
+   Bind the installed identity to fresh ConfigMap, Deployment and Pod readback;
+   bind the recovery image to the successful candidate publication. Review
+   installed-to-candidate Oracle projection changes as well as the byte hashes.
+   Keep the request and all evidence in a private operator directory.
+3. Run preparation with `--request`, `--publication-run-id`, `--kubeconfig` and
+   `--evidence-dir`. It authenticates publication through GitHub, requires a clean
+   checkout at that candidate, checks ancestry/schema and installed Pod image
+   digests, and writes `reviewed-job.json`. Reuse the exact arguments with
+   `--apply` to create that Job once. Submission intent is fsynced before create.
+   An uncertain response permits only readback; a missing Job after an attempted
+   creation never authorizes another launch. Preserve the evidence directory.
+4. Inspect the exact Job UID and private report. `submitted` is not completion.
+   The Job must report `committed`; independently verify canonical metadata,
+   object sizes/hashes/versions, unchanged runtime result/reward and attempt,
+   normal API/CLI downloads, and retained-source deadline. Do not delete earlier
+   object versions or shorten source retention. Only then reassess ordinary
+   idle rollout and issue acceptance.
+
+The candidate repeats the installed Oracle projection before destination writes
+and rechecks bound inputs under the normal canonical commit locks. All receipts
+must name immutable versions before acknowledgement. This projection equality
+matters because some existing readers still fetch the latest key: an obsolete
+worker may write another version, but its bytes must be identical, and its old
+claim cannot commit, retry or fail the new owner. This is not a general recovery
+path for other harnesses or changed projection semantics.
+
+The recovery owns a 3,600-second claim. Its process has a 1,500-second soft limit,
+1,700-second hard watchdog and 1,800-second Job deadline, with no Pod restart or
+Job retry. The Job projects only the database CA from the database Secret and
+uses a matching filesystem group to read it; no admin credential volume is
+mounted. Cancellation leaves the claim in place while transport work stops.
+A one-use Artifact audit prevents duplicate Pods from claiming again. Caught
+integrity or transport failures park only the archive as `unavailable`, record a
+bounded audit code, and leave all Trial outcome and source-retention fields
+unchanged. They do not requeue the faulty installed worker. An unavailable
+archive no longer blocks ordinary rollout; an idle rollout check is not evidence
+of recovery success. The operator never changes the independent auto-rollout
+setting. Cancellation or hard termination leaves the running claim until expiry,
+after which ordinary workers may reclaim it; this is not an indefinite outcome
+freeze. An unsuccessful operation remains incomplete; inspect its report and durable state
+before proposing any further action. No scheduler, migration, accounting sweep
+or source-cleanup loop runs in this Job.
+
 Canonical success requires all of the following together:
 
 - `materialization_state=committed` and both canonical SHA-256 fields present;
