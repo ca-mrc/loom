@@ -69,7 +69,7 @@ from tests.ops.test_nebius_development_pool_install import (
     pool_entry as pool_entry,
 )
 from tests.ops.test_nebius_development_pool_install import (
-    pool_inputs as pool_inputs,
+    pool_inputs as original_pool_inputs,  # noqa: F401
 )
 from tests.ops.test_nebius_development_pool_install import (
     provider_checks as provider_checks,
@@ -127,6 +127,18 @@ def manager_entry(request):
         for name in ('ca_pem', 'secret_store_master_keys'):
             if mode != 'foundation-wrong-' + name:
                 Path(payload['application_files'][name]).write_text(getattr(manager.application_material, name))
+        if mode.startswith('foundation-runtime'):
+            from scripts.ops.nebius_development_management_foundation import (
+                RetainedDevelopmentReference,
+                load_retained_foundation,
+            )
+
+            inputs = load_retained_foundation(RetainedDevelopmentReference.model_validate(reference)).inputs
+            payload.update(candidate=copy.deepcopy(inputs.candidate), profile=copy.deepcopy(inputs.profile))
+            payload['deployment']['installation']['keyring'] = copy.deepcopy(inputs.keyring)
+            payload['deployment']['installation']['registry_prefix'] = inputs.candidate['registry_prefix']
+            operation.update(candidate=inputs.candidate['candidate_sha'], source_sha=inputs.candidate['candidate_sha'])
+            (Path(path).parent / 'development-management-source.json').write_text(inputs.settings.preflight.source.model_dump_json())
         save_inputs(operation, payload, path)
         api = DevelopmentAPI(manager.binding)
         api.shared_uid = payload['shared_namespace_uid']
@@ -136,6 +148,35 @@ def manager_entry(request):
 
         return source_inputs(original)
     return original
+
+
+@pytest.fixture
+def pool_inputs(request, retained):
+    reference, value, tokens = request.getfixturevalue('original_pool_inputs')
+    mode = request.node.callspec.params.get('manager_entry')
+    if isinstance(mode, str) and mode.startswith('foundation-runtime'):
+        manager = retained[3]
+        config = manager.deployment.installation.foundation.platform_config
+        value['profiles']['image_admission_keyring'] = manager.deployment.installation.keyring
+        participant, = value['participants']
+        for target in participant['targets']:
+            if 'trial' in target['workload_kinds']:
+                target['target_id'] = config['target_id']
+        for profile in value['profiles']['execution']:
+            profile['runtime']['target_id'] = config['target_id']
+        for profile in value['profiles']['task_images']:
+            profile['target']['target_id'] = config['target_id']
+        if mode == 'foundation-runtime-bad-keyring':
+            value['profiles']['image_admission_keyring'] = {'schema_version': 1, 'keys': []}
+        elif mode == 'foundation-runtime-bad-target':
+            for target in participant['targets']:
+                if 'trial' in target['workload_kinds']:
+                    target['target_id'] = 'unrelated-target'
+            for profile in value['profiles']['execution']:
+                profile['runtime']['target_id'] = 'unrelated-target'
+            for profile in value['profiles']['task_images']:
+                profile['target']['target_id'] = 'unrelated-target'
+    return reference, value, tokens
 
 
 @pytest.fixture
@@ -585,6 +626,61 @@ def test_runtime_database_https_private_inputs_cannot_shadow_retained_evidence(r
         with pytest.raises(ValueError, match='development runtime database prerequisites unqualified'):
             api.verify_identity(api.binding)
     assert not live.store.creates
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_shared_runtime_wires_real_predecessors_without_changing_artifact_provenance(completed_pool):
+    name = 'scripts.ops.nebius_development_shared_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh shared development runtime preparation is missing')
+    database = database_runtime(completed_pool)
+    before_calls = len(completed_pool[3].server.calls)
+    value = importlib.import_module(name).prepare_shared_runtime(database)
+    service, controller = value.targets['service'], value.targets['control_plane']
+    original = value.original
+    for key, target, component in [('service', service, 'service'), ('control_plane', controller, 'control_plane')]:
+        assert target['metadata']['uid'] == original[key]['metadata']['uid']
+        assert target['metadata']['namespace'] == 'loom-dev'
+        assert target['spec']['replicas'] == 0
+        assert target['spec']['strategy'] == {'type': 'Recreate'}
+        assert target['spec']['template']['spec']['containers'][0]['image'] == database.manager.publication.bundle.candidate['images'][component]['image_ref']
+        old = {row['name']: row for row in original[key]['spec']['template']['spec']['volumes']}
+        current = {row['name']: row for row in target['spec']['template']['spec']['volumes']}
+        assert all(current[key] == row for key, row in old.items())
+    api_env = {row['name']: row for row in service['spec']['template']['spec']['containers'][0]['env']}
+    cp_env = {row['name']: row for row in controller['spec']['template']['spec']['containers'][0]['env']}
+    assert api_env['LOOM_SVC_SERVICE_MODE']['value'] == 'application'
+    assert api_env['LOOM_SVC_BATCH_RUNNER_CP_TOKEN']['valueFrom']['secretKeyRef'] == {
+        'name': 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f', 'key': 'batch-runner-token'}
+    original_profile = database.manager.retained.request.retained.inputs.profile
+    profile = json.loads(api_env['LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON']['value'])
+    assert profile['candidate_sha'] == original_profile['candidate_sha']
+    assert profile['candidate_sha'] != database.manager.publication.source.source_sha
+    assert profile['runtime_image_ref'] == original_profile['runtime_image_ref']
+    assert profile['image_admission'] == original_profile['image_admission']
+    source = json.loads(api_env['LOOM_SVC_POOL_SUBMISSION_SOURCE_JSON']['value'])
+    assert source['kind'] == 'environment'
+    assert source['data_environment_id'] == str(database.manager.deployment.installation.applications.shared.data_environment_id)
+    pool = json.loads(cp_env['LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON']['value'])
+    assert pool['environment'] == 'development'
+    assert pool['logical_pool_id'] == 'nebius-cpu'
+    assert pool['management_origin'] == 'https://manage.example.com'
+    assert pool['bearer_token_file'] == '/var/run/loom-pool-token/token'
+    assert cp_env['LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENABLED']['value'] == 'true'
+    assert cp_env['LOOM_CP_SERVICE_EXECUTION_MATERIALIZER_ENABLED']['value'] == 'true'
+    assert len(completed_pool[3].server.calls) == before_calls
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-keyring', 'foundation-runtime-bad-target'], indirect=True)
+def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(completed_pool):
+    name = 'scripts.ops.nebius_development_shared_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh shared development runtime preparation is missing')
+    database = database_runtime(completed_pool)
+    before_calls = len(completed_pool[3].server.calls)
+    with pytest.raises(ValueError, match='development shared runtime unqualified'):
+        importlib.import_module(name).prepare_shared_runtime(database)
+    assert len(completed_pool[3].server.calls) == before_calls
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
