@@ -78,7 +78,7 @@ async def test_dev_runtime_network_allows_required_peers_and_denies_cross_scope(
     request = database_runtime(completed_pool)
     policies = network_runtime(request)
     spec = request.manager.retained.request.registration.spec
-    ex, build, shared = 'loom-nebius-dev-execution', 'loom-nebius-dev-build', 'loom-dev'
+    ex, build, shared = 'loom-nebius-dev-execution', 'loom-nebius-dev-execution-build', 'loom-dev'
     tag = 'docker.io/library/loom-dev-runtime-network:' + uuid4().hex
     cluster = None
     try:

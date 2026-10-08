@@ -168,6 +168,12 @@ def pool_inputs(request, retained):
             profile['runtime']['service_account_name'] = 'loom-execution-attempt'
         for profile in value['profiles']['task_images']:
             profile['target']['target_id'] = config['target_id']
+        if mode == 'foundation-runtime-build':
+            labels = {'loom.nebius/node-os': 'linux', 'loom.nebius/node-arch': 'amd64'}
+            value['node_selector'].update(labels)
+            for kind, key in (('execution', 'runtime'), ('task_images', 'target'), ('application_images', 'target')):
+                for profile in value['profiles'].get(kind, []):
+                    profile[key]['node_selector'].update(labels)
         if mode == 'foundation-runtime-bad-keyring':
             value['profiles']['image_admission_keyring'] = {'schema_version': 1, 'keys': []}
         elif mode == 'foundation-runtime-bad-broker':
@@ -1046,7 +1052,7 @@ def build_policy(request):
     return value.prepare_build_policy(request)
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_build_policy_is_bound_to_retained_namespace_without_psa_change(completed_pool):
     request = database_runtime(completed_pool)

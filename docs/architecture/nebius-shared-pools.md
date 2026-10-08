@@ -550,6 +550,24 @@ plane access. Existing shared-internal, personal API and public ingress policies
 remain intact; build and foreign namespaces receive no new access. These fixed
 documents do not change staging, activate workers or qualify live networking.
 
+Build admission is derived from the same closed catalog, scoped to the exclusive
+development build namespace. The fail-closed Pod policy accepts actual pooled
+task/application Jobs, including their absolute-deadline wrappers. Only the
+credential-free rootless build phase may use SETUID/SETGID and unconfined
+seccomp/AppArmor; trusted prepare/publish retain pinned images, commands and
+separate credential mounts. Admission fixes resource requests/limits, observed
+RuntimeClass overhead, node placement, service account and ordinary scheduling
+priority. It also covers ephemeral-container and resource-resize updates and
+prevents termination messages from reading credential mounts.
+
+This policy complements the protected pool gateway; it is not request admission,
+claim-content validation, a PID quota or permission to operate the pool. Trusted
+ConfigMap writers, bounded reservation deadlines, exec/bind RBAC, immutable live
+RuntimeClass identity and the sole-writer transition remain installer/runtime
+prerequisites. Merely rendering the policy does not relax Pod Security: the
+protected parent must prove native enforcement before its journaled namespace
+label change, and must qualify required materials/networking before startup.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
