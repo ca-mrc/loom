@@ -129,8 +129,7 @@ def qualify_cutover_image_admission(request: PoolCutoverRequest) -> None:
             sort_keys=True, separators=(",", ":")))
         for profile in request.profiles.values():
             verify_execution_image_admission(profile.image_admission, keyring=keyring,
-                required_image_refs=[value for value in (profile.task_image_ref,
-                    profile.runtime_image_ref, profile.agent_image_ref) if value is not None])
+                required_image_refs=profile.published_image_refs())
     except Exception:
         raise ValueError("pool_participant_runtime_unqualified") from None
 

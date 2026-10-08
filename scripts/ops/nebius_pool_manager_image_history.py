@@ -42,6 +42,7 @@ from loom.execution_image_admission import (
     verify_execution_image_admission,
 )
 from loom.nebius_platform_render import digest
+from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 from loom_service.environment_management.candidates import ProtectedPublication
 
 STEPS = ('isolate', 'stop', 'template', 'start')
@@ -161,8 +162,7 @@ def _entry(request: PoolCutoverRequest, binding: ManagerImageRepairBinding, *, s
         raise ValueError
     verify_execution_image_admission(ExecutionImageAdmissionBundleV1.model_validate(binding.profile['image_admission']),
         keyring=ImageAdmissionKeyring.from_json(json.dumps(delivery.before.installation.keyring)),
-        required_image_refs=[binding.profile[key] for key in ('task_image_ref', 'runtime_image_ref', 'agent_image_ref')
-            if binding.profile.get(key) is not None])
+        required_image_refs=ServiceExecutionRuntimeProfileV1.model_validate(binding.profile).published_image_refs())
     closed, targets = closed_startup_documents(request, state_dir=state, anchor_dir=anchor)
     _, startup = _startup_record(request, state=state, anchor=anchor, closed=closed, targets=targets)
     activation_identity, activation = _activation_record(request, state=state, anchor=anchor)
