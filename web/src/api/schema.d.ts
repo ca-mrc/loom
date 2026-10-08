@@ -4715,12 +4715,16 @@ export interface components {
         MonitorSummaryServiceExecutionTargetsItem: {
             /** Blockers */
             blockers: string[];
+            /** Capacity Owner Target Id */
+            capacity_owner_target_id?: string;
             /** Command Backlog */
             command_backlog: number;
             /** Desired State */
             desired_state: string;
             /** Environment */
             environment: string;
+            /** Execution Class Id */
+            execution_class_id?: string;
             /** Health Status */
             health_status: string;
             observation: components["schemas"]["MonitorSummaryServiceExecutionTargetsItemObservationVariant0"] | null;
