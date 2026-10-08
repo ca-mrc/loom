@@ -60,13 +60,13 @@ def test_shared_public_phase_is_last_additive_dev_only_and_replayable(installati
     }], 'ports': [{'protocol': 'TCP', 'port': 8080}, {'protocol': 'TCP', 'port': 8090}]}]
     assert api.store.creates[-2:] == ['NetworkPolicy:loom-development-public', 'Ingress:loom-development']
     parent = json.loads((tmp_path / 'state/installation.json').read_text())
-    assert list(parent['phases'])[-1] == 'application-development-public'
+    assert parent['phases']['application-development-public']['status'] == 'complete'
     creates = list(api.store.creates)
     assert run(installation, tmp_path) == result
     assert api.store.creates == creates
 
 
-@pytest.mark.parametrize('host', ['example.com', 'deep.shared.example.com', 'staging.example.net'])
+@pytest.mark.parametrize('host', ['dev.example.com', 'deep.shared.dev.example.com', 'staging.example.net'])
 def test_uncovered_shared_hostname_rejected_before_bootstrap(installation, tmp_path, host):
     from scripts.ops.nebius_management_install import ManagementInstallError
 
@@ -105,3 +105,28 @@ def test_only_fixed_dev_resources_are_exposed_to_application_setup(installation)
     assert set(docs) == {'Ingress:loom-dev:loom-development', 'NetworkPolicy:loom-dev:loom-development-public'}
     with pytest.raises(ManagementStageError):
         _documents(_setup(replace(request, shared_public_route=False), binding), 'development-public')
+
+
+@pytest.mark.parametrize('change', ['extra-route', 'extra-peer', 'annotation'])
+def test_public_defaulting_cannot_expand_the_fixed_route(installation, tmp_path, change):
+    from scripts.ops.nebius_application_setup import stage_application_setup
+    from scripts.ops.nebius_development_management_install import _setup
+    from scripts.ops.nebius_management_material import ManagementBinding
+    from scripts.ops.nebius_management_stage import ManagementStageError
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    request = public_request(installation[0])
+    binding = ManagementBinding(request.binding.installation_id, request.binding.namespace,
+        request.shared_namespace_uid, request.binding.kube_system_uid)
+    api = PhaseAPI(binding)
+    def injected(doc):
+        if change == 'extra-route' and doc['kind'] == 'Ingress':
+            doc['spec']['rules'].append({'host': 'foreign.example.com', 'http': doc['spec']['rules'][0]['http']})
+        elif change == 'extra-peer' and doc['kind'] == 'NetworkPolicy':
+            doc['spec']['ingress'][0]['from'].append({'namespaceSelector': {}})
+        elif change == 'annotation':
+            doc['metadata']['annotations']['foreign.example/controller-override'] = 'true'
+    api.default_change = injected
+    with pytest.raises(ManagementStageError):
+        stage_application_setup(request=_setup(request, binding), phase='development-public', api=api, state_dir=tmp_path / 'public')
+    assert not api.creates

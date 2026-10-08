@@ -162,6 +162,66 @@ def own_route(request):
         repo_root=Path(__file__).resolve().parents[2]).files['70-public.yaml'][0]
 
 
+def test_shared_route_is_qualified_without_controller_or_secret_writes(route, monkeypatch):
+    from scripts.ops import nebius_development_management_route as module
+    from scripts.ops.nebius_development_public import render_development_public
+    from tests.ops.test_nebius_development_public import public_request
+
+    api, request, _, calls, dns_names, tls_names, ingresses = route
+    request = public_request(request)
+    host = request.deployment.installation.foundation.platform_config['public_host']
+    api.preflight(request)
+    assert (host, '8.8.8.8') in dns_names
+    assert (host, '8.8.8.8', None) in tls_names
+    ingresses.extend([own_route(request), render_development_public(request.deployment)[1]])
+    probes = []
+    monkeypatch.setattr(module, 'probe_shared_development', lambda **kwargs: probes.append(kwargs))
+    api.verify_public(request, shared_candidate='b' * 40)
+    assert probes == [{'address': '8.8.8.8', 'port': 443, 'hostname': host, 'candidate': 'b' * 40}]
+    assert not any('/secrets/' in path for path in calls)
+
+
+@pytest.mark.parametrize('conflict', ['exact', 'wildcard', 'passthrough', 'wrong-backend'])
+def test_shared_hostname_conflicts_fail_before_public_connections(route, conflict):
+    from scripts.ops.nebius_development_public import render_development_public
+    from scripts.ops.nebius_management_install import ManagementInstallError
+    from tests.ops.test_nebius_development_public import public_request
+
+    from loom.nebius_platform_render import digest
+
+    api, request, resources, _, dns_names, tls_names, ingresses = route
+    request = public_request(request)
+    host = request.deployment.installation.foundation.platform_config['public_host']
+    if conflict == 'passthrough':
+        data = resources['config']['data']
+        data['routes.yaml'] = json.dumps({'tcp': {'routers': {'dev': {'rule': 'HostSNI(`' + host + '`)'}}}})
+        api.settings = api.settings.model_copy(update={'config_data_digest': digest(data)})
+    elif conflict == 'wrong-backend':
+        row = render_development_public(request.deployment)[1]
+        row['spec']['rules'][0]['http']['paths'][0]['backend']['service']['name'] = 'foreign'
+        ingresses.append(row)
+    else:
+        ingresses.append({'apiVersion': 'networking.k8s.io/v1', 'kind': 'Ingress',
+            'metadata': {'name': 'foreign', 'namespace': 'foreign'},
+            'spec': {'rules': [{'host': host if conflict == 'exact' else '*.' + host.partition('.')[2]}]}})
+    with pytest.raises(ManagementInstallError):
+        api.preflight(request)
+    assert not dns_names and not tls_names
+
+
+def test_shared_final_proof_requires_ingress_and_retained_foundation_candidate(route):
+    from scripts.ops.nebius_management_install import ManagementInstallError
+    from tests.ops.test_nebius_development_public import public_request
+
+    api, request, _, _, _, _, ingresses = route
+    request = public_request(request)
+    ingresses.append(own_route(request))
+    with pytest.raises(ManagementInstallError):
+        api.verify_public(request, shared_candidate='b' * 40)
+    with pytest.raises(ManagementInstallError):
+        api.verify_public(request)
+
+
 @pytest.mark.parametrize('change', ['namespace_uid', 'service_uid', 'controller_uid', 'config', 'class', 'selector', 'not_ready', 'address'])
 def test_route_drift_blocks_before_dns_or_public_connection(route, change):
     from scripts.ops.nebius_management_install import ManagementInstallError
