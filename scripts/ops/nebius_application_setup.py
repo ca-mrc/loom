@@ -44,6 +44,7 @@ _PATHS = {
     'ClusterRoleBinding': ('rbac.authorization.k8s.io/v1', 'clusterrolebindings'),
     'Role': ('rbac.authorization.k8s.io/v1', 'roles'), 'RoleBinding': ('rbac.authorization.k8s.io/v1', 'rolebindings'),
     'NetworkPolicy': ('networking.k8s.io/v1', 'networkpolicies'),
+    'Ingress': ('networking.k8s.io/v1', 'ingresses'),
     'ConfigMap': ('v1', 'configmaps'), 'Job': ('batch/v1', 'jobs'), 'Secret': ('v1', 'secrets'),
     'ServiceAccount': ('v1', 'serviceaccounts'),
 }
@@ -69,6 +70,7 @@ class ApplicationSetupRequest:
     shared_namespace_uid: str
     repo_root: Path
     material: ApplicationSetupMaterial | None = None
+    development_public_route: bool = False
 
 
 def _material_documents(request: ApplicationSetupRequest, phases: dict[str, list[dict[str, Any]]]
@@ -120,6 +122,10 @@ def _documents(request: ApplicationSetupRequest, phase: str) -> dict[str, dict[s
             raise ValueError
         phases = render_application_setup(deployment, candidate=request.candidate, profile=request.profile,
                                           repo_root=request.repo_root)
+        if phase == 'development-public' and request.development_public_route is True:
+            from scripts.ops.nebius_development_public import render_development_public
+
+            phases[phase] = render_development_public(deployment)
         if phase == 'material':
             phases[phase] = _material_documents(request, phases)
         return {_key(doc): doc for doc in phases[phase]}
@@ -191,9 +197,16 @@ def _setup_defaulted(api: ManagementStageAPI, document: dict[str, Any]) -> dict[
 def stage_application_setup(*, request: ApplicationSetupRequest, phase: str,
                             api: ManagementStageAPI, state_dir: Path) -> dict[str, Any]:
     documents = _documents(request, phase)
+    def default_document(api: ManagementStageAPI, document: dict[str, Any]) -> dict[str, Any]:
+        if phase != 'development-public':
+            return _setup_defaulted(api, document)
+        observed = _snapshot(api.default_resource(document))
+        if observed != document:
+            raise ManagementStageError('development public defaulting changed fixed route')
+        return observed
     return _stage_fixed_documents(documents=documents, revision=_revision(request, documents),
         phase='application-' + phase, binding=request.binding, api=api, state_dir=state_dir,
-        default_document=_setup_defaulted)
+        default_document=default_document)
 
 
 def application_setup_ready(*, request: ApplicationSetupRequest, phase: str,

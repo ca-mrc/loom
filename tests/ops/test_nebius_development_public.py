@@ -8,9 +8,13 @@ import pytest
 from tests.ops.test_nebius_development_management_install import (
     application_management_inputs as application_management_inputs,
 )
-from tests.ops.test_nebius_development_management_install import application_material as application_material
+from tests.ops.test_nebius_development_management_install import (
+    application_material as application_material,
+)
 from tests.ops.test_nebius_development_management_install import installation as installation
-from tests.ops.test_nebius_development_management_install import management_inputs as management_inputs
+from tests.ops.test_nebius_development_management_install import (
+    management_inputs as management_inputs,
+)
 from tests.ops.test_nebius_development_management_install import material as material
 from tests.ops.test_nebius_development_management_install import platform_inputs as platform_inputs
 from tests.ops.test_nebius_development_management_install import run, to_admission

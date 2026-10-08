@@ -61,3 +61,38 @@ def probe_legacy(*, address: str, port: int, hostname: str, environment: str, ca
                         or (path.endswith("config.json") and (
                             value.get("environment") != environment or value.get("apiRouteBase") != "https://" + hostname + "/api"))):
                     raise ProbeError("legacy HTTPS health, candidate or environment differs")
+
+
+def probe_shared_development(*, address: str, port: int, hostname: str, candidate: str) -> None:
+    """Read-only routing/auth boundary proof, not login or execution acceptance."""
+    if not re.fullmatch(r'[0-9a-f]{40}', candidate):
+        raise ProbeError('invalid shared development candidate')
+    probes: list[tuple[str, str | None]] = [
+        (path, None) for path in ('/api/v1/health', '/api/v1/version', '/loom-frontend-config.json')]
+    probes += [('/api/v1/health/ready', token) for token in (None, 'loom-dev-invalid-probe-token')]
+    try:
+        for path, token in probes:
+            with _connect(address, port, hostname) as stream:
+                headers = f'Authorization: Bearer {token}\r\n' if token else ''
+                stream.sendall((f'GET {path} HTTP/1.1\r\nHost: {hostname}\r\nAccept-Encoding: identity\r\n'
+                    f'{headers}Connection: close\r\n\r\n').encode('ascii'))
+                with http.client.HTTPResponse(stream) as response:
+                    response.begin()
+                    raw = response.read(65537)
+                    if len(raw) > 65536 or response.getheader('Content-Encoding', 'identity').lower() != 'identity':
+                        raise ValueError()
+                    if path.endswith('/ready'):
+                        if response.status not in {401, 403}:
+                            raise ValueError()
+                        continue
+                    if response.status != 200:
+                        raise ValueError()
+                    value = json.loads(raw)
+                    if (not isinstance(value, dict)
+                            or (path.endswith('/health') and value.get('status') != 'ok')
+                            or (path.endswith('/version') and value.get('buildRevision') != candidate)
+                            or (path.endswith('config.json') and (value.get('environment') != 'development'
+                                or value.get('apiRouteBase') != 'https://' + hostname + '/api'))):
+                        raise ValueError()
+    except Exception:
+        raise ProbeError('shared development public route or authentication unqualified') from None

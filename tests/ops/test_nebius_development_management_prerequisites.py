@@ -96,6 +96,33 @@ def test_capacity_without_an_eligible_platform_node_fails(capacity_checks):
         api.platform_capacity(request, render_installation(request))
 
 
+def test_shared_public_proof_uses_the_live_qualified_foundation_source(capacity_checks, route, monkeypatch):
+    from scripts.ops import nebius_development_management_prerequisites as module
+    from tests.ops.test_nebius_development_public import public_request
+
+    api, request, _, _ = capacity_checks
+    request = public_request(request)
+    api.settings = SimpleNamespace(route=route[0].settings)
+    source = 'b' * 40
+    assert request.candidate['candidate_sha'] != source
+    events = []
+    def retained(selected):
+        assert selected == request
+        events.append('foundation')
+        return SimpleNamespace(inputs=SimpleNamespace(candidate={'candidate_sha': source}))
+    @contextmanager
+    def transport(**kwargs):
+        assert kwargs['api_server'] == api.api_server
+        def verify(selected, *, shared_candidate):
+            assert selected == request
+            events.append(('public', shared_candidate))
+        yield SimpleNamespace(verify_public=verify)
+    monkeypatch.setattr(api, 'foundation', retained)
+    monkeypatch.setattr(module, 'HTTPSDevelopmentManagementRoute', transport)
+    api._route(request, installed=True)
+    assert events == ['foundation', ('public', source)]
+
+
 def test_other_pending_claims_still_charge_provider_headroom(capacity_checks):
     from scripts.ops.nebius_development_management_install import render_installation
 
