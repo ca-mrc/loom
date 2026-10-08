@@ -8,29 +8,35 @@ from typing import Any
 
 from kubernetes.utils.quantity import parse_quantity
 from scripts.ops import nebius_certificates as private_state
+from scripts.ops.nebius_development_management_retained import RetainedManagementState
 from scripts.ops.nebius_development_pool_registration import DevelopmentPoolRegistrationRequest
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
 from scripts.ops.nebius_management_material import _documents as material_documents
-from scripts.ops.nebius_pool_registration import HTTPSPoolRegistrationAPI
+from scripts.ops.nebius_management_stage import HTTPSManagementStageAPI
+from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
+from scripts.ops.nebius_pool_registration import HTTPSPoolRegistrationAPI, registration_documents
 
 from loom_service.environment_management.candidates import _json
 
 
-class HTTPSDevelopmentPoolRegistrationAPI(HTTPSPoolRegistrationAPI):
-    """All writes remain restricted to the existing registration ConfigMap/Job.
+class HTTPSRetainedDevelopmentManagementAPI(HTTPSManagementStageAPI):
+    """Read-only original manager qualification, before execution namespaces exist.
 
     Namespace-local Secret and database snapshots prevent redirecting the fixed
     registration command into staging or another metadata database. No arbitrary
     query, manifest, cloud identity, runtime role or execution token is accepted.
     """
 
-    def __init__(self, *, request: DevelopmentPoolRegistrationRequest, api_server: str,
-                 ssl_context: ssl.SSLContext, token: str | None = None):
-        self.development_request = request
-        retained = request.retained
+    def __init__(self, *, retained: RetainedManagementState, api_server: str,
+                 ssl_context: ssl.SSLContext, token: str | None = None,
+                 private_files: dict[Path, bytes] | None = None):
+        self.retained = retained
+        self.private_files = dict(private_files or {})
+        self.binding = retained.binding
+        self.documents: dict[str, dict[str, Any]] = {}
         config = retained.inputs.deployment.installation.foundation.platform_config
-        if (request.registration.binding.namespace != 'loom-nebius-management-dev'
+        if (retained.binding.namespace != 'loom-nebius-management-dev'
                 or api_server.rstrip('/') != config['kubernetes_api_server'].rstrip('/')):
             raise ValueError('development pool registration connection differs')
         state = Path(retained.operation['state_dir'])
@@ -87,21 +93,16 @@ class HTTPSDevelopmentPoolRegistrationAPI(HTTPSPoolRegistrationAPI):
             plural = 'secrets' if kind == 'Secret' else 'configmaps'
             self.prerequisites['/api/v1/namespaces/' + retained.binding.namespace + '/' + plural + '/' + name] = originals[(kind, name)]
         self.storage = _json(retained.files[state / 'storage/stage.json'])
-        super().__init__(request=request.registration, api_server=api_server, ssl_context=ssl_context, token=token)
+        ManagementKubernetesTransport.__init__(self, api_server=api_server, ssl_context=ssl_context, token=token)
 
     def _private_inputs(self) -> None:
         if any(private_state._private_read(path, limit=4 * 1024**2) != raw
-               for path, raw in self.development_request.retained.files.items()):
+               for path, raw in (*self.retained.files.items(), *self.private_files.items())):
             raise ValueError('development pool registration retained files changed')
 
     def _request(self, method: str, path: str, *, document: dict[str, Any] | None = None) -> dict[str, Any] | None:
         self._private_inputs()
         return super()._request(method, path, document=document)
-
-    def qualify(self, request: DevelopmentPoolRegistrationRequest) -> None:
-        if request != self.development_request:
-            raise ValueError('development pool registration request differs')
-        self.verify_identity(request.registration.binding)
 
     def _verify_storage(self, binding: ManagementBinding) -> None:
         retained = self.storage
@@ -138,16 +139,44 @@ class HTTPSDevelopmentPoolRegistrationAPI(HTTPSPoolRegistrationAPI):
                 if actual is None or _uid(actual) != _uid(expected) or _snapshot(actual) != _snapshot(expected):
                     raise ValueError()
             self._verify_storage(binding)
-            retained = self.development_request.retained
+            retained = self.retained
             identities = {'loom-dev': str(retained.inputs.shared_namespace_uid)}
-            for row in self.request.spec.participants:
-                for namespace in (row.execution_namespace, row.build_namespace):
-                    identities[namespace.name] = str(namespace.uid)
             for name, uid in identities.items():
                 actual = self._request('GET', '/api/v1/namespaces/' + name)
                 if (actual is None or actual.get('kind') != 'Namespace' or _uid(actual) != uid
                         or actual['metadata']['name'] != name or actual['metadata'].get('deletionTimestamp')
                         or actual['metadata'].get('ownerReferences')):
                     raise ValueError()
+        except Exception:
+            raise ValueError('development pool registration database or namespace differs') from None
+
+
+class HTTPSDevelopmentPoolRegistrationAPI(HTTPSRetainedDevelopmentManagementAPI, HTTPSPoolRegistrationAPI):
+    """All writes remain restricted to the existing registration ConfigMap/Job."""
+
+    def __init__(self, *, request: DevelopmentPoolRegistrationRequest, api_server: str,
+                 ssl_context: ssl.SSLContext, token: str | None = None,
+                 private_files: dict[Path, bytes] | None = None):
+        super().__init__(retained=request.retained, api_server=api_server, ssl_context=ssl_context,
+            token=token, private_files=private_files)
+        self.development_request = request
+        self.request = request.registration
+        self.documents = registration_documents(request.registration)
+
+    def qualify(self, request: DevelopmentPoolRegistrationRequest) -> None:
+        if request != self.development_request:
+            raise ValueError('development pool registration request differs')
+        self.verify_identity(request.registration.binding)
+
+    def verify_identity(self, binding: ManagementBinding) -> None:
+        super().verify_identity(binding)
+        try:
+            for row in self.request.spec.participants:
+                for namespace in (row.execution_namespace, row.build_namespace):
+                    actual = self._request('GET', '/api/v1/namespaces/' + namespace.name)
+                    if (actual is None or actual.get('kind') != 'Namespace' or _uid(actual) != str(namespace.uid)
+                            or actual['metadata']['name'] != namespace.name or actual['metadata'].get('deletionTimestamp')
+                            or actual['metadata'].get('ownerReferences')):
+                        raise ValueError()
         except Exception:
             raise ValueError('development pool registration database or namespace differs') from None
