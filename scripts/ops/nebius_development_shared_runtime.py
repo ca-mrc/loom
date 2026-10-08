@@ -59,6 +59,7 @@ def prepare_shared_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentSh
         if (participant.environment_class != 'development'
                 or str(participant.environment_id) != request.foundation.binding.bootstrap.installation_id
                 or execution.runtime.target_id != config['target_id']
+                or execution.runtime.credential_broker_url != 'http://loom-llm-gateway.loom-dev.svc.cluster.local:9100/internal/service-execution'
                 or (profile.candidate_sha, profile.execution_class_id, profile.runtime_image_ref, profile.runtime_binary_sha256)
                     != (execution.candidate_sha, execution.execution_class_id, execution.runtime_image_ref, execution.runtime_binary_sha256)
                 or profile.candidate_sha != candidate['candidate_sha']
