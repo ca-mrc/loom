@@ -1044,7 +1044,6 @@ def operator_platform(tmp_path):
 
 async def operate_single(r, platform, payload=None, *, readback=False):
     from loom_control_plane.large_object_version_recovery import operate_single_object
-
     from loom_control_plane.object_version_recovery import SingleObjectRecoveryRequest
 
     return await operate_single_object(
@@ -1102,6 +1101,12 @@ async def test_operator_refuses_held_rollout_without_changing_owner(recovery, op
 
     r = recovery
     async with r.sessions.begin() as session:
+        lease = await session.get(ServiceExecutionLease, r.lease_id)
+        lease.revoked_at = datetime.now(UTC)
+        lease.cleanup_state = "complete"
+        lease.cleanup_requested_at = lease.revoked_at
+        lease.cleanup_deadline_at = lease.revoked_at + timedelta(minutes=5)
+        await session.flush()
         result = await acquire(session, owner="foreign-rollout", candidate="d" * 40)
         assert result["status"] == "acquired"
     before = await snapshot(r)
@@ -1163,8 +1168,9 @@ async def test_operator_serializes_and_keeps_locks_until_reader_exits(
 
 
 async def test_operator_lost_lock_connection_cannot_commit(recovery, operator_platform, monkeypatch):
-    from loom_control_plane.large_object_version_recovery import LOCK_KEY
     from sqlalchemy.exc import SQLAlchemyError
+
+    from loom_control_plane.large_object_version_recovery import LOCK_KEY
 
     r = recovery
     preview = await operate_single(r, operator_platform)
@@ -1193,4 +1199,78 @@ async def test_operator_lost_lock_connection_cannot_commit(recovery, operator_pl
         release.set()
         results = await asyncio.gather(task, return_exceptions=True)
     assert isinstance(results[0], SQLAlchemyError)
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("large_payload_bytes", [129 * 1024 * 1024])
+@pytest.mark.parametrize("corrupt_earlier_copy", [False, True])
+async def test_operator_verifies_every_complete_large_copy(
+    recovery, operator_platform, large_payload_bytes, corrupt_earlier_copy,
+):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    obj, body = r.objects[0], r.bodies[0]
+    earlier = r.versions[0]
+    if corrupt_earlier_copy:
+        body.seek(-3, 2)
+        body.write(b"y")  # Same size; the differing byte is near EOF.
+        body.seek(0)
+        earlier = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=body)["VersionId"]
+        r.s3.delete_object(Bucket=r.bucket, Key=obj.object_key, VersionId=r.versions[0])
+        body.seek(-3, 2)
+        body.write(b"x")
+    body.seek(0)
+    latest = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=body)["VersionId"]
+    payload = single_object_payload(r)
+    payload["objects"][0].update(version_id=latest, equivalent_version_ids=[earlier, latest])
+    before = await snapshot(r)
+    if corrupt_earlier_copy:
+        with pytest.raises(RecoveryConflictError, match="stored_content_conflict"):
+            await operate_single(r, operator_platform, payload)
+        assert await snapshot(r) == before
+        return
+    preview = await operate_single(r, operator_platform, payload)
+    assert preview["plan"]["objects"][0]["size_bytes"] == large_payload_bytes
+    assert preview["plan"]["objects"][0]["equivalent_version_ids"] == sorted([earlier, latest])
+    assert await snapshot(r) == before
+    applied = await operate_single(r, operator_platform, {**payload, "apply": True, "plan_sha256": preview["plan_sha256"]})
+    assert applied["status"] == "applied"
+    after = await snapshot(r)
+    assert after[2] == [latest, None, None, None] and after[4] == before[4]
+    assert len(r.s3.list_object_versions(Bucket=r.bucket, Prefix=obj.object_key)["Versions"]) == 2
+
+
+async def test_operator_readback_of_absent_audit_cannot_recover(recovery, operator_platform, monkeypatch):
+    from loom_control_plane.object_version_recovery import ObjectVersionRecovery
+
+    r = recovery
+    before = await snapshot(r)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("readback must never invoke recovery")
+
+    monkeypatch.setattr(ObjectVersionRecovery, "recover", forbidden)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": "sha256:" + "f" * 64}
+    assert await operate_single(r, operator_platform, payload, readback=True) == {
+        "status": "not_committed", "operation_id": payload["operation_id"]}
+    assert await snapshot(r) == before
+
+
+async def test_operator_rechecks_platform_after_admission(recovery, operator_platform, monkeypatch):
+    from loom_control_plane import large_object_version_recovery as module
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    original = module.admission_open
+
+    async def changed_while_connecting(session):
+        result = await original(session)
+        (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+        return result
+
+    monkeypatch.setattr(module, "admission_open", changed_while_connecting)
+    with pytest.raises(RecoveryConflictError, match="platform_binding_changed"):
+        await operate_single(r, operator_platform)
     assert await snapshot(r) == before

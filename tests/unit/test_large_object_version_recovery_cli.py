@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -122,3 +124,23 @@ def test_cli_emits_only_closed_error_codes(platform, monkeypatch, capsys, error)
     assert "secret" not in output.out + output.err and "Traceback" not in output.out + output.err
     assert json.loads(output.out) == {"status": "blocked", "reason": (
         "operator_team_conflict" if isinstance(error, RecoveryConflictError) else "recovery_incomplete")}
+
+
+def test_dedicated_process_hard_deadline_terminates_stuck_reader(platform):
+    script = '''
+import asyncio
+import sys
+from loom_control_plane import large_object_version_recovery as target
+target.HARD_TIMEOUT = 1
+target.ControlPlaneSettings = lambda: None
+async def stuck(*args, **kwargs):
+    await asyncio.to_thread(__import__('time').sleep, 60)
+target.run_recovery = stuck
+raise SystemExit(target.main(sys.argv[1:]))
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", script, "--platform", str(platform), "--request-json", request().model_dump_json()],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 124
+    assert result.stdout == result.stderr == ""
