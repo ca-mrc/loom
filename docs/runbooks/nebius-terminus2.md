@@ -108,6 +108,10 @@ publication. Reports classify resolved images even when some scans fail; a missi
 ready profile is not a qualified catalog. Preserve the exact source image list and
 failed evidence when investigating, rather than rebuilding an official image or
 weakening the admission policy.
+Vulnerability and SBOM reports each have a 64 MiB read budget, covering observed
+canonical reports of 29-41 MB while keeping report parsing bounded. A larger
+report remains an explicit preparation failure; increasing this data budget
+does not change the CRITICAL vulnerability policy.
 
 Native Harbor supports `environment.extra_docker_compose`. For each paired Trial,
 pass the corresponding `image-*/harbor-image.yaml` overlay listed in
