@@ -64,6 +64,18 @@ async def qualify_collector_cloud(*, sdk: Any, scope: DevelopmentCollectorCloudS
     is accepted. The parent still probes the actual pool with this credential
     and qualifies live material around startup; this is no activation receipt.
     """
+    try:
+        scope = DevelopmentCollectorCloudScope.model_validate(scope.model_dump())
+        return await _qualify_runtime_key(sdk=sdk, scope=scope, config=config, credential=credential,
+            permit={'resource_id': scope.tenant_id, 'role': 'viewer'}, clients=clients, now=now)
+    except Exception:
+        raise ValueError('development collector cloud unqualified') from None
+
+
+async def _qualify_runtime_key(*, sdk: Any, scope: DevelopmentCollectorCloudScope,
+        config: dict[str, Any], credential: bytes, permit: dict[str, str],
+        clients: dict[str, Any] | None, now: datetime | None) -> dict[str, str]:
+    """Shared read-only IAM mechanics; protected callers fix the required permit."""
     from nebius.api.nebius.iam import v1
 
     try:
@@ -89,7 +101,7 @@ async def qualify_collector_cloud(*, sdk: Any, scope: DevelopmentCollectorCloudS
             permits = await _pages(api['permits'].list, v1.ListAccessPermitRequest, parent_id=scope.group_id)
             _require(len(permits) == 1)
             _resource(permits[0], permits[0]['metadata']['id'], scope.group_id)
-            _require(permits[0]['spec'] == {'resource_id': scope.tenant_id, 'role': 'viewer'})
+            _require(permits[0]['spec'] == permit)
             key = await _read(api['public_keys'].get, v1.GetAuthPublicKeyRequest(id=scope.key_id))
             _resource(key, scope.key_id, scope.project_id)
             _require(key['spec']['account'] == {'service_account': {'id': scope.account_id}}
