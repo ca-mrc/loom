@@ -666,6 +666,11 @@ runtime transitions without replaying installation or rerendering historical
 delivery. Retired operator credential files do not invalidate this history.
 Reading it is not live qualification or authority to start a workload; a successor
 must independently compare the retained identities with the installed resources.
+The manager preparation derives its build settings from this same catalog and
+keeps the original database, cloud, shared-data and existing source Secret
+references. If source intake was not installed, source credential delivery is
+still a prerequisite. The prepared Deployment remains stopped; preparation does
+not grant build access, open admission or replace live identity checks.
 
 `development_pool_installed_closed` means only that this stopped installation is
 retained and qualified. Catalog-bound manager/participant successors, build
