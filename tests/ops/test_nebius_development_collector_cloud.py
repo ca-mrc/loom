@@ -30,6 +30,7 @@ def collector_cloud(request):
     cloud.config = {'namespace': 'loom-dev', 'environment': 'development', 'project_id': 'project-children',
         'quota_parent_id': 'tenant-test', 'region': 'eu-north1'}
     cloud.rows['group-manager'][1]['metadata']['parent_id'] = 'tenant-test'
+    cloud.clients['groups'] = cloud.clients['accounts']
     cloud.permits['group-manager'][0]['spec'] = {'resource_id': 'tenant-test', 'role': 'viewer'}
     cloud.credential = cloud.material['loom-management-cloud']['credentials.json'].encode()
     return cloud
