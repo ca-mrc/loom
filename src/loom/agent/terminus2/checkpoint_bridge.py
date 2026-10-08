@@ -74,7 +74,7 @@ class HarborCheckpointBridge:
         self._seq += 1
         return seq
 
-    async def emit_provenance(self) -> None:
+    async def emit_provenance(self, *, effective_options: dict[str, Any] | None = None) -> None:
         if self._provenance_emitted:
             return
         self._provenance_emitted = True
@@ -92,6 +92,7 @@ class HarborCheckpointBridge:
                     "terminus-json-plain.txt", "",
                 ),
                 template_hashes=harbor_template_hashes(),
+                effective_options=effective_options or {},
             ),
         )
 

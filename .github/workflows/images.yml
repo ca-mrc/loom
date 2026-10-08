@@ -430,6 +430,28 @@ jobs:
           build_args+=("$BUILD_CONTEXT")
           "${build_args[@]}"
 
+      - name: Compare real Harbor and Loom agent behavior offline
+        if: matrix.image == 'harbor-runtime'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/harbor_upstream.py pins
+          docker load --input /tmp/harbor-runtime-amd64.docker.tar
+          image=$(docker image inspect --format '{{index .RepoTags 0}}' \
+            "$(python3 - <<'PY'
+          import json, tarfile
+          with tarfile.open('/tmp/harbor-runtime-amd64.docker.tar') as archive:
+              print(json.load(archive.extractfile('manifest.json'))[0]['RepoTags'][0])
+          PY
+          )")
+          for probe in terminus_conformance_probe.py terminus_continuation_probe.py; do
+            docker run --rm --network none --cap-drop ALL \
+              --security-opt no-new-privileges --memory 1g --cpus 1 \
+              -e LITELLM_LOCAL_MODEL_COST_MAP=True \
+              -v "$PWD/tests/support/$probe:/probe.py:ro" \
+              --entrypoint python "$image" -I -B /probe.py
+          done
+
       - name: Generate controlled Trivy policy
         run: |
           python3 scripts/write_trivy_release_policy.py \
