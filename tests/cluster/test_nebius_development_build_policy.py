@@ -148,5 +148,28 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
         invalid['metadata']['namespace'] = 'unrelated-builds'
         core.create_namespaced_pod('unrelated-builds', invalid, dry_run='All')
         assert core.list_namespaced_pod(namespace).items == []
+        # One deliberately unschedulable fixture Pod exercises update-only API
+        # routes. No build runs: this disposable node has no matching group label.
+        existing = core.create_namespaced_pod(namespace, pods[0])
+        assert not existing.spec.node_name
+        ephemeral = {'spec': {'ephemeralContainers': [{'name': 'debug', 'image': pods[0]['spec']['containers'][0]['image'],
+            'command': ['sh'], 'securityContext': {'privileged': True}}]}}
+        with pytest.raises(ApiException) as denied:
+            core.patch_namespaced_pod_ephemeralcontainers('build-probe', namespace, ephemeral, dry_run='All')
+        assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
+        with pytest.raises(ApiException) as denied:
+            core.patch_namespaced_pod('build-probe', namespace, {'spec': {'containers': [{
+                'name': 'publish', 'image': 'registry.example/foreign@sha256:' + 'f' * 64}]}}, dry_run='All')
+        assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
+        with pytest.raises(ApiException) as denied:
+            # The pinned client predates the resize convenience method; use the
+            # same authenticated client and actual Kubernetes subresource route.
+            core.api_client.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize', 'PATCH',
+                path_params={'namespace': namespace, 'name': 'build-probe'}, query_params=[('dryRun', 'All')],
+                header_params={'Content-Type': 'application/strategic-merge-patch+json'},
+                body={'spec': {'containers': [{'name': 'publish', 'resources': {
+                    'requests': {'cpu': '2'}, 'limits': {'cpu': '2'}}}]}},
+                auth_settings=['BearerToken'], _return_http_data_only=True)
+        assert denied.value.status == 403 and policies[0]['metadata']['name'] in denied.value.body
     finally:
         cluster.stop()
