@@ -409,6 +409,33 @@ def test_runtime_database_stage_refuses_caller_modified_job_before_writes(comple
     assert not api.creates and not state.exists()
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
+def test_runtime_database_proof_binds_job_operation_role_and_token(completed_pool, tmp_path):
+    from scripts.ops import nebius_development_runtime_setup as setup
+
+    if not hasattr(setup, 'validate_database_runtime_proof'):
+        pytest.fail('fixed development runtime database receipt validation is missing')
+    request = database_runtime(completed_pool)
+    api, state = runtime_database_api(request), tmp_path / 'runtime-database'
+    runtime_database_stage(request, api, state)
+    job, = [row for row in api.resources.values() if row['kind'] == 'Job']
+    proof = {'job_uid': job['metadata']['uid'], 'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b',
+        'database': {'status': 'development_runtime_database_installed',
+            'operation_id': 'aecc7407-b7b8-4c38-8d1f-bca5dca9840f', 'role': 'loom_actuator',
+            'role_oid': 17000, 'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}}
+    assert setup.validate_database_runtime_proof(request, state, proof) is None
+    for field, value in [('status', 'pending'), ('operation_id', '27d6a159-4df3-4bbf-8722-897b2b3c619b'),
+            ('role', 'postgres'), ('role_oid', True), ('role_oid', 0), ('role_oid', 2**32),
+            ('token_sha256', '0' * 64), ('extra', 'not-allowed')]:
+        changed = copy.deepcopy(proof)
+        changed['database'][field] = value
+        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
+            setup.validate_database_runtime_proof(request, state, changed)
+    for field, value in [('job_uid', proof['pod_uid']), ('pod_uid', str(UUID(int=0))), ('extra', True)]:
+        with pytest.raises(ValueError, match='development runtime database receipt unqualified'):
+            setup.validate_database_runtime_proof(request, state, {**proof, field: value})
+
+
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
 def test_missing_or_changed_completion_cannot_become_successor_authority(completed_pool, damage):
     loader = module()
