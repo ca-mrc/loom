@@ -659,6 +659,14 @@ One original-installation anchor and phase journal prevent changed inputs, lost
 state or uncertain creates from starting another installation. Earlier material
 is rechecked after later resource creation before reporting completion.
 
+A read-only completed-pool reader binds the original private input and source
+record to its anchored parent, phase checksums, actual namespace UIDs and exact
+closed-registration receipt. It exposes recorded resource snapshots for later
+runtime transitions without replaying installation or rerendering historical
+delivery. Retired operator credential files do not invalidate this history.
+Reading it is not live qualification or authority to start a workload; a successor
+must independently compare the retained identities with the installed resources.
+
 `development_pool_installed_closed` means only that this stopped installation is
 retained and qualified. Catalog-bound manager/participant successors, build
 isolation and read grants, a qualified observer and sole physical-writer authority
