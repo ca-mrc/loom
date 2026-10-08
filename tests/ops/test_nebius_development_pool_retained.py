@@ -649,6 +649,96 @@ def test_runtime_parent_refuses_lost_or_rewritten_evidence_before_further_writes
     assert api.store.creates == before and api.transition.patches == patches
 
 
+def runtime_resources_api(request, phase, qualifier):
+    name = 'scripts.ops.nebius_development_runtime_live'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('phase-bound development runtime HTTPS resources are missing')
+    return importlib.import_module(name).HTTPSDevelopmentRuntimeResources(
+        request=request, phase=phase, api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), token='operator-test', qualify_runtime=qualifier)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_https_fixed_phases_use_real_journal_and_never_emit_staging_or_writer_grants(completed_pool, publisher_cloud, tmp_path):
+    from scripts.ops.nebius_ingress_stage import _key
+    from scripts.ops.nebius_management_stage import _stage_fixed_documents
+    from loom.nebius_platform_render import digest
+    from tests.ops.test_nebius_management_stage import PhaseAPI
+
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan = runtime.prepare_runtime_install(request)
+    binding = request.database.manager.retained.request.retained.binding
+    store, calls, qualifications = PhaseAPI(binding), [], []
+    store.key = _key
+    def qualify(value, phase, writing):
+        assert value == request
+        qualifications.append((phase, writing))
+    def handle(message):
+        calls.append(message)
+        if message.method == 'GET':
+            return httpx.Response(404)
+        document = json.loads(message.content)
+        assert message.method == 'POST'
+        assert 'staging' not in message.url.path
+        assert all(set(rule['verbs']) <= {'get', 'list', 'watch'} for rule in document.get('rules', []))
+        if message.url.query == b'dryRun=All':
+            return httpx.Response(201, json=store.default_resource(document))
+        store.create_resource(document)
+        return httpx.Response(201, json=store.get_resource(document))
+    for phase in ('authority', 'isolation'):
+        documents = plan.fixed[phase]
+        paths = {}
+        with runtime_resources_api(request, phase, qualify) as api:
+            def transport(message):
+                if message.method == 'GET' and message.url.path in paths:
+                    value = store.get_resource(paths[message.url.path])
+                    return httpx.Response(200, json=value) if value else httpx.Response(404)
+                if message.method == 'POST':
+                    document = json.loads(message.content)
+                    paths[message.url.path + '/' + document['metadata']['name']] = document
+                return handle(message)
+            api.client.close()
+            api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(transport))
+            args = dict(documents=documents, revision=digest(documents), phase='development-runtime-' + phase,
+                binding=binding, api=api, state_dir=tmp_path / phase)
+            _stage_fixed_documents(**args)
+            before = list(store.creates)
+            _stage_fixed_documents(**args)
+            assert store.creates == before
+    assert store.creates and qualifications and any(writing for _, writing in qualifications)
+    assert any('/apis/rbac.authorization.k8s.io/v1/clusterroles' == call.url.path for call in calls)
+    assert any('/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies' == call.url.path for call in calls)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['other-phase', 'foreign-namespace', 'write-verb', 'missing-marker'])
+def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, publisher_cloud, damage):
+    from scripts.ops.nebius_management_stage import _MARKER
+
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan, calls = runtime.prepare_runtime_install(request), []
+    document = copy.deepcopy(next(row for row in plan.fixed['authority'].values() if row['kind'] == 'Role'))
+    if damage == 'other-phase':
+        document = copy.deepcopy(next(iter(plan.fixed['material'].values())))
+    elif damage == 'foreign-namespace':
+        document['metadata']['namespace'] = 'loom-staging'
+    elif damage == 'write-verb':
+        document['rules'][0]['verbs'].append('create')
+    if damage != 'missing-marker':
+        document['metadata'].setdefault('annotations', {})[_MARKER] = str(uuid4())
+    with runtime_resources_api(request, 'authority', lambda *_: None) as api:
+        api.client.close()
+        def transport(message):
+            calls.append(message)
+            return httpx.Response(201, json=document)
+        api.client = httpx.Client(base_url=api.api_server, transport=httpx.MockTransport(transport))
+        with pytest.raises(ValueError, match='outside fixed development runtime phase'):
+            api.create_resource(document)
+    assert not calls
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
