@@ -17,6 +17,7 @@ COPY src/loom/__init__.py src/loom/execution_contract.py src/loom/execution_arch
     src/loom/task_image_materialization.py src/loom/task_image_build_plan.py \
     src/loom/nebius_rollout_guard.py src/loom/nebius_kubernetes.py src/loom/startup_retry.py src/loom/terminal_result_semantics.py src/loom/resource_usage_store.py ./src/loom/
 COPY src/loom/agent_runtime.py src/loom/request_params.py src/loom/service_execution_materialization.py \
+    src/loom/prebuilt_task_images.py \
     src/loom/verifier_runtime.py src/loom/hosted_harness.py src/loom/task_sandbox_planner.py \
     src/loom/task_bundle_registration.py src/loom/task_bundle_source.py \
     src/loom/task_bundle_source_journal.py src/loom/task_bundle_source_storage.py \

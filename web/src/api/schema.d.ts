@@ -1064,6 +1064,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/harbor-baselines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Baseline */
+        post: operations["create_baseline_api_v1_harbor_baselines_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/harbor-baselines/{baseline_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Baseline */
+        get: operations["get_baseline_api_v1_harbor_baselines__baseline_id__get"];
+        put?: never;
+        post?: never;
+        /** Revoke Baseline */
+        delete: operations["revoke_baseline_api_v1_harbor_baselines__baseline_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/harbor-baselines/{baseline_id}/calls": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Baseline Calls
+         * @description Return bounded call evidence without prompts, responses or credentials.
+         */
+        get: operations["get_baseline_calls_api_v1_harbor_baselines__baseline_id__calls_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/health": {
         parameters: {
             query?: never;
@@ -1917,6 +1972,30 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-connections/{connection_id}/models/{model_id}/metadata": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Cached Model Metadata
+         * @description Declare a verified capability without changing discovery or entitlement.
+         *
+         *     The specification URL is retained as operator evidence, never fetched or
+         *     interpreted as paid preflight success. Existing discovery and hide state
+         *     are preserved; this cannot insert a model that has not been cached.
+         */
+        patch: operations["update_cached_model_metadata_api_v1_provider_connections__connection_id__models__model_id__metadata_patch"];
         trace?: never;
     };
     "/api/v1/provider-connections/{connection_id}/models/{model_id}/preflight": {
@@ -3769,6 +3848,30 @@ export interface components {
             provider: string;
         } & {
             [key: string]: unknown;
+        };
+        /** CreateHarborBaseline */
+        CreateHarborBaseline: {
+            /** Budget Usd */
+            budget_usd?: number | string | null;
+            /** Label */
+            label: string;
+            /** Max Calls */
+            max_calls: number;
+            /** Max Output Tokens */
+            max_output_tokens: number;
+            /** Max Total Tokens */
+            max_total_tokens: number;
+            /** Model */
+            model: string;
+            /**
+             * Provider Connection Id
+             * Format: uuid
+             */
+            provider_connection_id: string;
+            /** Team Id */
+            team_id?: string | null;
+            /** Ttl Seconds */
+            ttl_seconds: number;
         };
         /** DatasetCompatibilityV1 */
         DatasetCompatibilityV1: {
@@ -6328,6 +6431,13 @@ export interface components {
             family?: string | null;
             /** Model Id */
             model_id: string;
+        };
+        /** ProviderModelMetadataUpdate */
+        ProviderModelMetadataUpdate: {
+            /** Context Length */
+            context_length: number;
+            /** Specification Url */
+            specification_url: string;
         };
         /**
          * ProviderModelRefreshResponse
@@ -11074,6 +11184,146 @@ export interface operations {
             };
         };
     };
+    create_baseline_api_v1_harbor_baselines_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateHarborBaseline"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_baseline_api_v1_harbor_baselines__baseline_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                baseline_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_baseline_api_v1_harbor_baselines__baseline_id__delete: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                baseline_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_baseline_calls_api_v1_harbor_baselines__baseline_id__calls_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                baseline_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_api_v1_health_get: {
         parameters: {
             query?: never;
@@ -13142,6 +13392,45 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderModelCacheEntry"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_cached_model_metadata_api_v1_provider_connections__connection_id__models__model_id__metadata_patch: {
+        parameters: {
+            query?: never;
+            header?: {
+                "x-loom-admin-actor"?: string | null;
+                authorization?: string | null;
+            };
+            path: {
+                connection_id: string;
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProviderModelMetadataUpdate"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
