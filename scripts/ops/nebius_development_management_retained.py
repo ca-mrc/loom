@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_application_setup import ApplicationSetupMaterial
 from scripts.ops.nebius_development_management_entry import DevelopmentManagementPrivateInputs
-from scripts.ops.nebius_development_management_install import _PHASES, _history
+from scripts.ops.nebius_development_management_install import _history, installation_phases
 from scripts.ops.nebius_development_management_operation import validate_operation
 from scripts.ops.nebius_development_management_tls import (
     ManagementTLSMaterial,
@@ -114,13 +114,14 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
             raise ValueError()
         _uuid(started['operation_id'])
         record = read(state / 'installation.json')
-        if (set(record.get('phases', {})) != set(_PHASES)
+        phases = installation_phases(inputs.shared_public_route)
+        if (set(record.get('phases', {})) != set(phases)
                 or any(item.get('status') != 'complete' for item in record['phases'].values())):
             raise ValueError()
-        for phase in _PHASES:
+        for phase in phases:
             for name in _journal_names(phase):
                 read(state / phase / name)
-        _history(record, started, state)
+        _history(record, started, state, shared_public_route=inputs.shared_public_route)
         bootstrap = _json(files[state / 'bootstrap/bootstrap.json'])
         if (bootstrap['schema'] != 'loom.nebius-management-bootstrap.v1'
                 or bootstrap['binding'] != asdict(inputs.binding) or bootstrap['stage'] != 'bootstrapped'):
@@ -203,7 +204,8 @@ def load_retained_management(reference: RetainedManagementReference) -> Retained
         original = {'binding': asdict(inputs.binding), 'deployment': inputs.deployment.model_dump(mode='json'),
             'candidate': inputs.candidate, 'profile': inputs.profile, 'material': material,
             'application_material': asdict(application_material), 'shared_namespace_uid': str(inputs.shared_namespace_uid),
-            'tls_material': asdict(tls_material), 'qualification_digest': qualification}
+            'tls_material': asdict(tls_material), 'qualification_digest': qualification,
+            **({'shared_public_route': True} if inputs.shared_public_route else {})}
         if digest(original) != reference.installation_input_digest or any(
                 private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files.items()):
             raise ValueError()

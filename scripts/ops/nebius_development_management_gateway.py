@@ -43,6 +43,7 @@ SOURCES += tuple("scripts/ops/" + name + ".py" for name in (
     "nebius_development_management_prerequisites",
     "nebius_development_management_route",
     "nebius_development_management_tls",
+    "nebius_development_public",
     "nebius_application_setup",
     "nebius_application_cloud_scope"))
 LIMITS = {**dict.fromkeys(SOURCES, 262144), "uv": 80 * 1024**2,
@@ -190,4 +191,3 @@ def authorized_main(expected_sha256: str) -> int:
     except Exception:
         print("protected development operation incomplete; preserve private recovery state", file=sys.stderr)
         return 1
-

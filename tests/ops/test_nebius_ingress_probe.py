@@ -30,7 +30,8 @@ def endpoint(tmp_path, monkeypatch):
     client_context = ssl.create_default_context(cadata=roots[0].public_bytes(serialization.Encoding.PEM).decode())
     monkeypatch.setattr(ssl, "create_default_context", lambda: client_context)
     state = {"status": 200, "environment": "development", "apiRouteBase": "https://legacy.example.test/api",
-             "health": {"status": "ok"}, "version": {"buildRevision": "a" * 40, "buildTime": None}}
+             "health": {"status": "ok"}, "version": {"buildRevision": "a" * 40, "buildTime": None},
+             "ready_status": 401}
     paths = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -45,8 +46,18 @@ def endpoint(tmp_path, monkeypatch):
             paths.append((self.path, self.headers["Host"]))
             payload = json.dumps(state["health"] if self.path == "/api/v1/health" else
                                  state["version"] if self.path == "/api/v1/version" else state).encode()
-            self.send_response(state["status"])
+            status = state['ready_status'] if self.path == '/api/v1/health/ready' else state['status']
+            content_type = 'application/json'
+            if self.path == '/':
+                status = state.get('root_status', 200)
+                payload = state.get('root_body', '<!doctype html><html><body><div id="root"></div></body></html>').encode()
+                content_type = state.get('root_type', 'text/html; charset=utf-8')
+            if self.path == '/api/v1/health/ready' and self.headers.get('Authorization'):
+                status = state.get('invalid_token_status', status)
+            self.send_response(status)
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Encoding', state.get('encoding', 'identity'))
             self.end_headers()
             self.wfile.write(payload)
 
@@ -121,3 +132,30 @@ def test_certificate_fingerprint_does_not_replace_system_trust(endpoint, monkeyp
     monkeypatch.setattr(ssl, "create_default_context", lambda: untrusted)
     with pytest.raises(module().ProbeError):
         module().probe_management(**address, hostname="management.example.test", fingerprint=fingerprint)
+
+
+def test_shared_development_probe_checks_both_routes_and_auth_boundary(endpoint):
+    address, _, paths, _ = endpoint
+    module().probe_shared_development(**address, hostname='legacy.example.test', candidate='a' * 40)
+    assert paths == [('/', 'legacy.example.test'), ('/api/v1/health', 'legacy.example.test'), ('/api/v1/version', 'legacy.example.test'),
+        ('/loom-frontend-config.json', 'legacy.example.test'), ('/api/v1/health/ready', 'legacy.example.test'),
+        ('/api/v1/health/ready', 'legacy.example.test')]
+
+
+@pytest.mark.parametrize('key,value', [('version', {'buildRevision': 'b' * 40}), ('status', 302),
+    ('environment', 'staging'), ('apiRouteBase', 'https://staging.example.test/api'),
+    ('ready_status', 200), ('ready_status', 500), ('invalid_token_status', 200), ('encoding', 'gzip')])
+def test_shared_development_probe_rejects_wrong_route_source_or_auth(endpoint, key, value):
+    address, state, _, _ = endpoint
+    state[key] = value
+    with pytest.raises(module().ProbeError):
+        module().probe_shared_development(**address, hostname='legacy.example.test', candidate='a' * 40)
+
+
+@pytest.mark.parametrize('key,value', [('root_status', 404), ('root_status', 302), ('root_status', 500),
+    ('root_type', 'application/json'), ('root_body', '{}'), ('root_body', '<html>proxy error</html>')])
+def test_shared_development_probe_cannot_accept_broken_frontend_root(endpoint, key, value):
+    address, state, _, _ = endpoint
+    state[key] = value
+    with pytest.raises(module().ProbeError):
+        module().probe_shared_development(**address, hostname='legacy.example.test', candidate='a' * 40)

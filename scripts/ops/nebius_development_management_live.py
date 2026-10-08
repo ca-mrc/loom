@@ -96,7 +96,8 @@ class HTTPSDevelopmentManagementAPI(HTTPSManagementInstallationAPI):
 
     def application_resources(self, request: ApplicationSetupRequest, phase: str) -> HTTPSApplicationSetupAPI:
         self._binding(request.binding)
-        if request != _setup(self.development_request, request.binding) or phase not in _APPLICATION_PHASES:
+        phases = _APPLICATION_PHASES + (('development-public',) if self.development_request.shared_public_route else ())
+        if request != _setup(self.development_request, request.binding) or phase not in phases:
             raise ManagementInstallError('resource outside development application setup')
         return HTTPSApplicationSetupAPI(request=request, phase=phase, api_server=self.api_server,
             ssl_context=self.ssl_context, token=self.token)

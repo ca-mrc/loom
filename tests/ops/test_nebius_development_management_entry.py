@@ -103,6 +103,20 @@ def test_private_entry_loads_exact_source_material_and_pinned_issuer_generation(
     assert set(request.material) == {'loom-management-publications', 'loom-platform-storage'}
 
 
+@pytest.mark.parametrize('selection', ['true', 'false', 0, 1, None])
+def test_public_selection_requires_an_explicit_boolean(manager_entry, selection):
+    from scripts.ops.nebius_development_management_entry import load_inputs
+
+    operation, payload, _, api = manager_entry
+    payload['shared_public_route'] = selection
+    raw = json.dumps(payload)
+    Path(operation['inputs_path']).write_text(raw)
+    operation['inputs_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
+    with pytest.raises(ValueError, match='private inputs'):
+        load_inputs(operation)
+    assert api.store is None
+
+
 @pytest.mark.parametrize('change', ['hash', 'source', 'namespace', 'alias', 'certificate-host', 'certificate-generation', 'public', 'symlink', 'source-upload'])
 def test_invalid_entry_inputs_cannot_open_connection_or_create_state(manager_entry, change, monkeypatch, capsys):
     from scripts.ops import nebius_development_management_entry as module

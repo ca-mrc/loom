@@ -20,7 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from scripts.ops import nebius_certificates as certificates
 from scripts.ops.nebius_development_management_foundation import HTTPSRetainedDevelopmentFoundation
 from scripts.ops.nebius_development_management_install import DevelopmentManagementRequest
-from scripts.ops.nebius_ingress_probe import _connect, probe_management
+from scripts.ops.nebius_development_public import render_development_public
+from scripts.ops.nebius_ingress_probe import _connect, probe_management, probe_shared_development
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_management_install import ManagementInstallError
 from scripts.ops.nebius_management_prerequisites import inventory_resources
@@ -92,12 +93,19 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
             expected=expected, installed=installed)
 
     def _observe_bound(self, *, deployment: ManagementDeployment, kube_system_uid: str,
-                       expected: dict[str, Any], installed: bool) -> str:
+                       expected: dict[str, Any], installed: bool, shared_public: bool = False) -> str:
         foundation = deployment.installation.foundation
         namespace, host = foundation.ingress_namespace, deployment.public_host
+        route_namespace, route_name = deployment.namespace, 'loom-management'
+        if shared_public:
+            wanted = render_development_public(deployment)[1]
+            if expected != wanted:
+                raise ValueError()
+            route_namespace, route_name = 'loom-dev', 'loom-development'
+            host = foundation.platform_config['public_host']
         if (deployment.namespace != 'loom-nebius-management-dev'
-                or expected['metadata'].get('namespace') != deployment.namespace
-                or expected['metadata'].get('name') != 'loom-management'
+                or expected['metadata'].get('namespace') != route_namespace
+                or expected['metadata'].get('name') != route_name
                 or foundation.platform_config['kubernetes_api_server'].rstrip('/') != self.api_server.rstrip('/')):
             raise ValueError()
         self._resource('/api/v1/namespaces/kube-system', kind='Namespace', name='kube-system',
@@ -148,9 +156,11 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
             raise ValueError()
         found = False
         for row in inventory_resources(self._request, 'networking.k8s.io/v1', 'ingresses', 'Ingress'):
-            own = (row['metadata'].get('namespace'), row['metadata'].get('name')) == (deployment.namespace, 'loom-management')
+            own = (row['metadata'].get('namespace'), row['metadata'].get('name')) == (route_namespace, route_name)
             if own:
                 if row.get('spec') != expected['spec'] or row['metadata'].get('labels') != expected['metadata']['labels']:
+                    raise ValueError()
+                if row['metadata'].get('deletionTimestamp') or row['metadata'].get('ownerReferences'):
                     raise ValueError()
                 if 'uid' in expected['metadata'] and (_uid(row) != _uid(expected) or _snapshot(row) != _snapshot(expected)):
                     raise ValueError()
@@ -178,9 +188,17 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
         except Exception:
             raise ManagementInstallError('development management retained route unqualified') from None
 
-    def _qualify(self, request: DevelopmentManagementRequest, *, installed: bool) -> None:
+    def _qualify(self, request: DevelopmentManagementRequest, *, installed: bool, shared_candidate: str | None = None) -> None:
         try:
             address = self._observe(request, installed=installed)
+            shared = None
+            if request.shared_public_route:
+                shared = render_development_public(request.deployment)[1]
+                if self._observe_bound(deployment=request.deployment, kube_system_uid=request.binding.kube_system_uid,
+                        expected=shared, installed=installed, shared_public=True) != address:
+                    raise ValueError()
+                if installed and (shared_candidate is None or re.fullmatch(r'[0-9a-f]{40}', shared_candidate) is None):
+                    raise ValueError()
             host, zone = request.deployment.public_host, request.deployment.installation.foundation.public_dns_zone
             if len(zone) > 250 or request.tls_material.public_host != host:
                 raise ValueError()
@@ -192,6 +210,16 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
             qualify_tls_address(wildcard_probe, address)
             if installed:
                 qualify_tls_address(host, address, report['fingerprint_sha256'])
+            if shared is not None:
+                shared_host = request.deployment.installation.foundation.platform_config['public_host']
+                qualify_dns_address(shared_host, address)
+                qualify_tls_address(shared_host, address)
+                if installed:
+                    assert shared_candidate is not None
+                    probe_shared_development(address=address, port=443, hostname=shared_host, candidate=shared_candidate)
+                if self._observe_bound(deployment=request.deployment, kube_system_uid=request.binding.kube_system_uid,
+                        expected=shared, installed=installed, shared_public=True) != address:
+                    raise ValueError()
             if self._observe(request, installed=installed) != address:
                 raise ValueError()
         except Exception:
@@ -200,5 +228,5 @@ class HTTPSDevelopmentManagementRoute(ManagementKubernetesTransport):
     def preflight(self, request: DevelopmentManagementRequest) -> None:
         self._qualify(request, installed=False)
 
-    def verify_public(self, request: DevelopmentManagementRequest) -> None:
-        self._qualify(request, installed=True)
+    def verify_public(self, request: DevelopmentManagementRequest, *, shared_candidate: str | None = None) -> None:
+        self._qualify(request, installed=True, shared_candidate=shared_candidate)

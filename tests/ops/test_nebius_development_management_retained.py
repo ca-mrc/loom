@@ -33,12 +33,22 @@ def module():
     return importlib.import_module('scripts.ops.nebius_development_management_retained')
 
 
-@pytest.fixture
-def retained(manager_entry):
+@pytest.fixture(params=[False, True], ids=['private-only', 'shared-public'])
+def retained(manager_entry, request):
     from scripts.ops.nebius_development_management_entry import load_inputs
     from scripts.ops.nebius_development_management_install import install_development_management
 
     operation, payload, path, api = manager_entry
+    if request.param:
+        from tests.ops.test_nebius_development_public import public_request
+
+        _, private, _ = load_inputs(operation)
+        payload['deployment'] = public_request(private).deployment.model_dump(mode='json')
+        payload['shared_public_route'] = True
+        raw = json.dumps(payload)
+        Path(operation['inputs_path']).write_text(raw)
+        operation['inputs_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
+        Path(path).write_text(json.dumps(operation))
     _, request, _ = load_inputs(operation)
     state, anchor = Path(operation['state_dir']), Path(operation['anchor_dir'])
     for _ in range(8):

@@ -324,12 +324,37 @@ partial tooling or ambiguous resource writes require reconciliation, not deletio
 and a blind retry. `development_management_preflight_qualified` permits no readiness
 claim; `pending` names the unfinished phase; `blocked` exposes only a closed stage.
 `development_management_installed` records the completed manager installation,
-not shared-dev public access, active source builds, task execution or multi-owner
-acceptance. Initial manager inputs must leave both source upload and image-build
+not active source builds, task execution or multi-owner acceptance. Shared-dev
+public access is opt-in as described below. Initial manager inputs must leave both source upload and image-build
 runtime unconfigured; their credentials and shared-pool admission belong to the
 later activation. Unsupported initial selections are rejected before bootstrap.
 Manager-only certificate renewal has the separate path below. Its installed proof
 remains required before operational acceptance.
+
+For a **fresh** independent manager, set `shared_public_route: true` in the private
+input document to expose the shared dev web/API as its final installation phase.
+The foundation's protected `public_host` must be a single-label child of
+`public_dns_zone`, covered by the existing shared ingress default certificate.
+That same configured hostname is reserved against personal application claims.
+The installer creates only `loom-development-public` NetworkPolicy and
+`loom-development` Ingress in `loom-dev`: `/api` routes to `loom-service:8090`,
+and `/` to `loom-web:8080`. Only the configured ingress namespace **and** controller
+Pod label are admitted. No shared controller, default certificate, staging route,
+foundation workload or execution setting changes.
+
+Preflight checks normal DNS, trusted TLS and competing HTTP/TCP routes before
+writes. Final proof checks the retained foundation candidate (which may differ
+from the manager candidate), the browser HTML shell at `/`, the frontend's
+development identity/API origin, health and rejection of unauthenticated/invalid-token requests. It does not log
+in as an ordinary owner or prove task execution. The shared application remains
+an execution-closed bootstrap until the separately qualified pool activation.
+
+Omission or `false` preserves private-only installation and its historical input
+fingerprint. Do not toggle this option to modify an already-started installation:
+it is bound into the parent identity and retained phase list. Public resource
+loss or an unknown create outcome requires reconciliation, not blind recreation.
+Both private-only and opted-in histories remain usable by manager-only TLS renewal;
+renewal does not modify the shared dev route or wildcard certificate.
 
 #### Renew the independent dev manager certificate
 

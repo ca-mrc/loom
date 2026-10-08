@@ -250,7 +250,13 @@ class HTTPSDevelopmentManagementPrerequisites(ManagementKubernetesTransport):
         with HTTPSDevelopmentManagementRoute(settings=self.settings.route, api_server=self.api_server,
                 ssl_context=self.ssl_context, token=self.token) as api:
             if installed:
-                api.verify_public(request)
+                if request.shared_public_route:
+                    # The foundation can precede the manager candidate. Prove
+                    # its retained source, never the manager's newer image SHA.
+                    retained = self.foundation(request)
+                    api.verify_public(request, shared_candidate=retained.inputs.candidate['candidate_sha'])
+                else:
+                    api.verify_public(request)
             else:
                 api.preflight(request)
 

@@ -31,6 +31,7 @@ from scripts.ops.nebius_development_management_tls import (
     management_tls_secret_name,
 )
 from scripts.ops.nebius_development_management_tls import _documents as tls_documents
+from scripts.ops.nebius_development_public import render_development_public
 from scripts.ops.nebius_management_bootstrap import (
     BootstrapAPI,
     bootstrap_management,
@@ -75,14 +76,22 @@ _PHASES = {
 }
 
 
+def installation_phases(shared_public_route: bool) -> dict[str, str | None]:
+    """Old histories remain private-only; opt-in is pinned in the parent digest."""
+    return {**_PHASES, **({'application-development-public': None} if shared_public_route else {})}
+
+
 @dataclass(frozen=True, repr=False)
 class DevelopmentManagementRequest(ManagementInstallRequest):
     application_material: ApplicationSetupMaterial
     shared_namespace_uid: str
     tls_material: ManagementTLSMaterial
     qualification_digest: str | None = None
+    shared_public_route: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.shared_public_route) is not bool:
+            raise ManagementInstallError('development public route selection invalid')
         # The private entry must bind settings/files that do not appear in the
         # renderer. None is reserved for isolated component use, not deployment.
         if self.qualification_digest is not None and (
@@ -118,7 +127,7 @@ class DevelopmentManagementAPI(Protocol):
 
 def _setup(request: DevelopmentManagementRequest, binding: ManagementBinding) -> ApplicationSetupRequest:
     return ApplicationSetupRequest(request.deployment, request.candidate, request.profile, binding,
-        request.shared_namespace_uid, _ROOT, request.application_material)
+        request.shared_namespace_uid, _ROOT, request.application_material, request.shared_public_route)
 
 
 def render_installation(request: DevelopmentManagementRequest) -> RenderedManagement:
@@ -155,6 +164,8 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
     for phase in _APPLICATION_PHASES:
         if phase != 'material':
             files['application-' + phase + '.yaml'] = setup[phase]
+    if request.shared_public_route:
+        files['application-development-public.yaml'] = render_development_public(deployment)
     stateful = next(doc for doc in files['20-database.yaml'] if doc['kind'] == 'StatefulSet')
     for claim in stateful['spec']['volumeClaimTemplates']:
         claim['metadata'].setdefault('labels', {})['loom.nebius/management-installation'] = binding.installation_id
@@ -168,14 +179,15 @@ def render_installation(request: DevelopmentManagementRequest) -> RenderedManage
     return replace(rendered, files=files, platform_envelope=_envelope(files))
 
 
-def _history(record: dict[str, Any], identity: dict[str, Any], state: Path) -> None:
+def _history(record: dict[str, Any], identity: dict[str, Any], state: Path, *, shared_public_route: bool = False) -> None:
     if (not isinstance(record, dict) or set(record) != {*identity, 'phases'}
             or any(record[key] != value for key, value in identity.items()) or not isinstance(record['phases'], dict)):
         raise ManagementInstallError('development management recovery identity differs')
     phases = record['phases']
-    if set(phases) != set(list(_PHASES)[:len(phases)]):
+    expected = installation_phases(shared_public_route)
+    if set(phases) != set(list(expected)[:len(phases)]):
         raise ManagementInstallError('development management recovery order differs')
-    for index, phase in enumerate(list(_PHASES)[:len(phases)]):
+    for index, phase in enumerate(list(expected)[:len(phases)]):
         item = phases[phase]
         if (set(item) != {'status', 'receipt', 'journals'} or item['status'] not in {'started', 'complete'}
                 or (item['status'] == 'started' and
@@ -193,11 +205,13 @@ def _final_readback(request: DevelopmentManagementRequest, api: DevelopmentManag
                     binding: ManagementBinding, rendered: RenderedManagement, state: Path,
                     record: dict[str, Any]) -> str | None:
     """All journals are complete: fixed replay can only verify, never create."""
-    if (set(record['phases']) != set(_PHASES)
+    phases = installation_phases(request.shared_public_route)
+    if (set(record['phases']) != set(phases)
             or any(item['status'] != 'complete' for item in record['phases'].values())):
         raise ManagementInstallError('development management final recovery evidence incomplete')
-    _history(record, {key: value for key, value in record.items() if key != 'phases'}, state)
-    for phase, filename in _PHASES.items():
+    _history(record, {key: value for key, value in record.items() if key != 'phases'}, state,
+        shared_public_route=request.shared_public_route)
+    for phase, filename in phases.items():
         ready, phase_state = True, state / phase
         if phase == 'bootstrap':
             with api.bootstrap_api() as bootstrap_api:
@@ -247,7 +261,8 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
             'candidate': request.candidate, 'profile': request.profile, 'material': request.material,
             'application_material': asdict(request.application_material), 'shared_namespace_uid': request.shared_namespace_uid,
             'tls_material': asdict(request.tls_material),
-            'qualification_digest': request.qualification_digest})
+            'qualification_digest': request.qualification_digest,
+            **({'shared_public_route': True} if request.shared_public_route else {})})
         identity: dict[str, Any] = {'schema': 'loom.nebius-development-management-install.v1', 'input_digest': fingerprint,
                     'state_dir': str(state), 'binding': asdict(request.binding)}
         with private_state._locked_state(anchor):
@@ -264,7 +279,7 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
                         or not journal.is_file() or journal.is_symlink() or state.is_symlink()):
                     raise ManagementInstallError('development management recovery evidence missing or changed')
                 record = json.loads(private_state._private_read(journal, limit=1024 * 1024))
-                _history(record, started, state)
+                _history(record, started, state, shared_public_route=request.shared_public_route)
             else:
                 if state.exists() or state.is_symlink():
                     raise ManagementInstallError('untracked development management recovery state')
@@ -282,7 +297,7 @@ def install_development_management(*, request: DevelopmentManagementRequest, api
                 api.preflight(request, rendered)
                 binding: ManagementBinding | None = None
                 backup: dict[str, Any] | None = None
-                for phase, filename in _PHASES.items():
+                for phase, filename in installation_phases(request.shared_public_route).items():
                     stage = 'install_' + phase
                     if phase not in record['phases']:
                         record['phases'][phase] = {'status': 'started', 'receipt': None, 'journals': None}

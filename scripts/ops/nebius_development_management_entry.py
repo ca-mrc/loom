@@ -75,6 +75,7 @@ class DevelopmentManagementPrivateInputs(BaseModel):
     operator_cloud_credentials: Path
     material_files: dict[str, dict[str, Path]]
     application_files: dict[str, Path]
+    shared_public_route: bool = Field(default=False, strict=True, exclude_if=lambda value: value is False)
 
 
 def _certificate(selection: ManagementCertificateSelection, public_host: str) -> tuple[ManagementTLSMaterial, dict[Path, bytes]]:
@@ -131,6 +132,7 @@ def load_inputs(operation: dict[str, Any]) -> tuple[DevelopmentManagementPrivate
         if files[path] != raw or files[SOURCE_RECORD] != source_raw:
             raise ValueError()
         request = DevelopmentManagementRequest(binding=inputs.binding, deployment=inputs.deployment,
+            shared_public_route=inputs.shared_public_route,
             candidate=inputs.candidate, profile=inputs.profile, shared_namespace_uid=str(inputs.shared_namespace_uid),
             material={name: {key: files[item].decode() for key, item in selected.items()}
                 for name, selected in inputs.material_files.items()},
