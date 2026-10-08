@@ -12,10 +12,12 @@ from sqlalchemy import select
 
 from loom.auth import AuthContext, is_admin, verify_bearer_token
 from loom.db.schema import (
+    ServiceExecutionClass,
     ServiceExecutionCommand,
     ServiceExecutionEvent,
     ServiceExecutionLease,
     ServiceExecutionLeaseHistory,
+    ServiceExecutionTarget,
     Trial,
 )
 from loom.execution_contract import (
@@ -150,6 +152,38 @@ async def put_execution_catalog(
         "logical_pool_id": body.topology.logical_pool_id,
         "target_ids": [target.target_id for target in body.topology.targets],
     }
+
+
+@router.get("/admin/service-execution/catalog/{target_id}")
+async def get_execution_catalog(
+    target_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Read immutable catalog identity and actual lifecycle without activating it."""
+    await _admin(request, authorization)
+    async with request.app.state.session_factory() as session:
+        row = (await session.execute(
+            select(ServiceExecutionTarget, ServiceExecutionClass)
+            .join(ServiceExecutionClass, ServiceExecutionClass.id == ServiceExecutionTarget.execution_class_id)
+            .where(ServiceExecutionTarget.id == target_id)
+        )).one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        target, execution_class = row
+        return {
+            "execution_class": execution_class.spec_json,
+            "execution_class_sha256": execution_class.spec_sha256,
+            "class_enabled": execution_class.enabled,
+            "class_retired_at": execution_class.retired_at.isoformat() if execution_class.retired_at else None,
+            "target": target.spec_json,
+            "target_sha256": target.spec_sha256,
+            "desired_state": target.desired_state,
+            "observed_state": target.observed_state,
+            "health_status": target.health_status,
+            "health_observed_at": target.health_observed_at.isoformat() if target.health_observed_at else None,
+            "health_error_code": target.health_error_code,
+        }
 
 
 @router.post("/admin/service-execution/targets/{target_id}/health")
