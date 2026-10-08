@@ -119,12 +119,12 @@ describe("frontend runtime config", () => {
     expect(getFrontendConfig().apiRouteBase).toBe("https://yylx.world/dev/api");
   });
 
-  it("loads development config from a dedicated origin root", async () => {
+  it.each(["development", "staging"])("loads %s config from a dedicated origin root", async (environment) => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
-          environment: "development",
-          environmentLabel: "Personal development",
+          environment,
+          environmentLabel: environment === "staging" ? "Staging" : "Personal development",
           routePath: "",
           apiBase: "",
           apiRouteBase: "https://loom-service.dev.yylx.world/api",
@@ -141,10 +141,27 @@ describe("frontend runtime config", () => {
       expect.objectContaining({ cache: "no-store" }),
     );
     expect(config).toMatchObject({
-      environment: "development",
+      environment,
       routePath: "",
       apiRouteBase: "https://loom-service.dev.yylx.world/api",
     });
+  });
+
+  it.each(["/dev/monitor", "/prod/library", "/staging/library"])(
+    "rejects a root staging config on a legacy prefixed route: %s",
+    (path) => {
+      expect(() => resolveFrontendConfig(
+        { environment: "staging", environmentLabel: "Staging", routePath: "", apiBase: "" },
+        new URL(`https://loom.test${path}`),
+      )).toThrow(/routePath .* does not match current route/);
+    },
+  );
+
+  it("rejects a prefixed API base for root staging", () => {
+    expect(() => resolveFrontendConfig(
+      { environment: "staging", environmentLabel: "Staging", routePath: "", apiBase: "/dev" },
+      new URL("https://loom.test/library"),
+    )).toThrow(/apiBase .* must match routePath/);
   });
 
   it("loads the exact isolated rehearsal runtime config", async () => {

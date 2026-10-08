@@ -175,11 +175,20 @@ def test_renderer_rejects_cross_binding_and_inactive_inputs(platform_inputs, cha
     else:
         config = foundation.platform_config
         config["environment"] = change
-        # Normal FoundationBinding construction already rejects these classes;
-        # the renderer must also reject an unchecked/copy-mutated input.
+        # The personal renderer must reject non-development foundations even
+        # when an input bypasses normal validation through model_copy.
         foundation = foundation.model_copy(update={"platform_config_json": json.dumps(config)})
     with pytest.raises(ValueError):
         render_application(row, release, shared, foundation)
+
+
+def test_personal_application_rejects_valid_staging_foundation(platform_inputs):
+    from loom.nebius_application_render import render_application
+
+    row, release, shared, foundation = inputs(platform_inputs)
+    staging = foundation_from({**foundation.platform_config, "environment": "staging"})
+    with pytest.raises(ValueError, match="shared development foundation"):
+        render_application(row, release, shared, staging)
 
 
 def test_renderer_rejects_shared_foundation_hostname_collision(platform_inputs):

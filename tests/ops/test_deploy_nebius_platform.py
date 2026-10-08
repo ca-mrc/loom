@@ -181,6 +181,69 @@ def test_pool_cutover_between_preflight_and_idle_guard_cannot_restore_local_writ
     assert any(command[0] == "exec" and "release" in command for command in kube.commands)
 
 
+def test_completed_legacy_rollback_allows_ordinary_rollout(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    operation = "11111111-1111-4111-8111-111111111111"
+    uid = "22222222-2222-4222-8222-222222222222"
+    kube = FakeKubectl(config, files, database=True)
+    kube.objects["deployment", "loom-control-plane"] = {"metadata": {
+        "uid": uid, "annotations": {"loom.nebius/pool-retirement-operation": operation}},
+        "spec": {"replicas": 1}}
+    calls = []
+    def completion(selected):
+        calls.append(selected)
+        return {"operation_id": operation, "outcome": "legacy", "workloads": {
+            "Deployment:" + config["namespace"] + ":loom-control-plane": uid}}
+    monkeypatch.setattr(kube, "legacy_pool_completion", completion, raising=False)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    assert deploy.deploy(args, kube=kube)["status"] == "complete"
+    assert calls == [operation]
+
+
+@pytest.mark.parametrize("failure", ["incomplete", "global", "wrong-operation", "wrong-uid", "new-operation-after-guard",
+    "uid-after-guard", "global-after-guard", "locked"])
+def test_legacy_completion_does_not_bypass_runtime_or_guard_boundaries(rendered, monkeypatch, failure):
+    args, config, _, files = rendered
+    args.apply = True
+    operation = "11111111-1111-4111-8111-111111111111"
+    uid = "22222222-2222-4222-8222-222222222222"
+    other = "33333333-3333-4333-8333-333333333333"
+    class Interleaved(FakeKubectl):
+        def run(self, *command, timeout=90):
+            result = super().run(*command, timeout=timeout)
+            if guard_action(command) == "acquire":
+                current = self.objects["deployment", "loom-control-plane"]
+                if failure == "new-operation-after-guard":
+                    current["metadata"]["annotations"]["loom.nebius/pool-retirement-operation"] = other
+                elif failure == "uid-after-guard":
+                    current["metadata"]["uid"] = other
+                elif failure == "global-after-guard":
+                    current["spec"]["template"] = {"spec": {"containers": [{"env": [
+                        {"name": "LOOM_CP_SERVICE_EXECUTION_GLOBAL_POOL_JSON", "value": "global"}]}]}}
+            return result
+    kube = Interleaved(config, files, database=True)
+    kube.objects["deployment", "loom-control-plane"] = {"metadata": {"uid": uid,
+        "annotations": {"loom.nebius/pool-retirement-operation": operation}}, "spec": {"replicas": 1}}
+    calls = []
+    def proof(selected):
+        calls.append(selected)
+        if failure == "incomplete":
+            raise deploy.DeploymentError("legacy pool completion unavailable")
+        return {"operation_id": other if failure == "wrong-operation" else operation,
+            "outcome": "global" if failure == "global" else "legacy", "workloads": {
+                "Deployment:" + config["namespace"] + ":loom-control-plane": other if failure == "wrong-uid" else uid}}
+    monkeypatch.setattr(kube, "legacy_pool_completion", proof)
+    if failure == "locked":
+        kube.guard_identity = ("pool-recovery:" + operation, "a" * 40)
+        assert deploy.deploy(args, kube=kube)["status"] == "skipped_locked"
+    else:
+        with pytest.raises(deploy.DeploymentError, match="pool"):
+            deploy.deploy(args, kube=kube)
+    assert calls == [operation]
+    assert not any(command[0] in {"apply", "patch", "delete", "create"} for command in kube.commands)
+
+
 def test_standalone_deployer_rejects_managed_child(request, tmp_path):
     from tests.unit.test_nebius_environment_render import rendered
 
@@ -276,7 +339,7 @@ assert ((namespace, "loom-task-build-cache") in required) == ("cache_bucket" in 
 
 
 @pytest.fixture
-def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
+def rendered(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[argparse.Namespace, dict, dict, dict]:
     key = Ed25519PrivateKey.generate()
     signer = tmp_path / "signer.pem"
     signer.write_bytes(
@@ -329,6 +392,7 @@ def rendered(tmp_path: Path) -> tuple[argparse.Namespace, dict, dict, dict]:
     config = json.loads(
         (deploy.ROOT / "deploy/nebius/integration.platform.json.example").read_text()
     )
+    config["environment"] = getattr(request, "param", "development")
     for name in (
         "project_id",
         "quota_parent_id",
@@ -504,6 +568,42 @@ def _current_primary(kube, config, files, target_id):
     environment = {**config, "target_id": target_id}
     current["data"]["environment.json"] = json.dumps(environment)
     kube.objects["configmap", "loom-platform-config"] = current
+
+
+@pytest.mark.parametrize("rendered", ["development", "staging"], indirect=True)
+@pytest.mark.parametrize("retire", [False, True])
+@pytest.mark.parametrize("apply", [False, True])
+def test_environment_reclassification_rejected_before_any_cluster_write(rendered, monkeypatch, retire, apply):
+    args, config, _, files = rendered
+    args.apply = apply
+    args.retire_target = "previous-primary" if retire else None
+    kube = FakeKubectl(config, files, database=True)
+    previous = {**config, "environment": "staging" if config["environment"] == "development" else "development"}
+    _current_primary(kube, previous, files, args.retire_target or config["target_id"])
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="environment reclassification"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "exec", "create", "delete"} for command in kube.commands)
+
+
+def test_environment_reclassification_rechecked_after_guard_acquisition(rendered, monkeypatch):
+    args, config, _, files = rendered
+    args.apply = True
+    kube = FakeKubectl(config, files, database=True)
+    _current_primary(kube, config, files, config["target_id"])
+    original_guard = deploy.rollout_guard
+
+    def interleave(_kube, _ns, action, _owner, _candidate):
+        if action == "acquire":
+            _current_primary(kube, {**config, "environment": "staging"}, files, config["target_id"])
+        return original_guard(_kube, _ns, action, _owner, _candidate)
+
+    monkeypatch.setattr(deploy, "rollout_guard", interleave)
+    monkeypatch.setattr(deploy, "public_smoke", lambda *args: None)
+    with pytest.raises(deploy.DeploymentError, match="environment reclassification"):
+        deploy.deploy(args, kube=kube)
+    assert not any(command[0] in {"apply", "create", "delete"} for command in kube.commands)
+    assert kube.guard_identity is None
 
 
 @pytest.mark.parametrize("retire_target", [None, "foreign-target"])
@@ -835,14 +935,15 @@ def test_failed_upgrade_backup_prevents_all_apply(
     assert result["status"] == "failed"
 
 
+@pytest.mark.parametrize("rendered", ["development", "staging"], indirect=True)
 def test_fresh_apply_and_completed_jobs_are_idempotent(
     rendered: tuple, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     args, config, _, files = rendered
     args.apply = True
     kube = FakeKubectl(config, files)
-    smoke: list[str] = []
-    monkeypatch.setattr(deploy, "public_smoke", lambda origin, environment: smoke.append(origin))
+    smoke: list[tuple[str, str]] = []
+    monkeypatch.setattr(deploy, "public_smoke", lambda origin, environment: smoke.append((origin, environment)))
     assert deploy.deploy(args, kube=kube)["status"] == "complete"
     applies = [Path(command[2]).name for command in kube.commands if command[0] == "apply"]
     assert (
@@ -855,7 +956,7 @@ def test_fresh_apply_and_completed_jobs_are_idempotent(
     applies = [Path(command[2]).name for command in kube.commands if command[0] == "apply"]
     assert "30-migrate.yaml" not in applies and "50-configure.yaml" not in applies
     assert not any(command[0] == "delete" for command in kube.commands)
-    assert len(smoke) == 2
+    assert smoke == [("https://" + config["public_host"], config["environment"])] * 2
 
 
 def test_failed_candidate_job_requires_explicit_retry(

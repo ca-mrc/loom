@@ -13,6 +13,19 @@ access uses authenticated HTTPS; database and execution
 management stay private. The [native execution contract](nebius-service-execution.md)
 owns target placement, durable attempts, cancellation and fenced publication.
 
+Standalone platform inputs distinguish `development` and `staging`; they do not
+infer deployment class from the publication branch (`dev`), namespace name, or
+historical "integration" terminology. Environment is part of the immutable
+execution-target identity, not just a frontend label. Ordinary rollout cannot
+reclassify an installed platform. The existing Nebius staging installation's
+historical development label requires a separate controlled correction; see
+[platform operations](../runbooks/nebius-platform.md#correcting-a-historical-environment-classification).
+It is not a shared-development foundation for personal applications.
+Staging also selects seven-day ephemeral lifecycle authority and mandatory fresh
+storage-capacity admission. The standalone Nebius renderer does not qualify that
+evidence or retention/cleanup path; rendering and deployment smoke are not proof
+of staging task readiness.
+
 ### Personal application and shared development data boundary
 
 The [owner clarification in #1915](https://github.com/qianyi-sun/loom/issues/1915#issuecomment-5835681150)

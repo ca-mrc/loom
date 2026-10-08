@@ -145,6 +145,60 @@ async def test_stream_completion_recovers_only_its_own_readback_version(monkeypa
     assert not backend.active_uploads
 
 
+@pytest.mark.parametrize("metadata_key", ["Loom-Write-Id", "LOOM-WRITE-ID"])
+@pytest.mark.parametrize("version", ["version-owned", None], ids=["versioned", "unversioned"])
+async def test_stream_completion_accepts_case_insensitive_metadata_names(monkeypatch, metadata_key, version):
+    class CasedMetadataS3(VersionlessCompletionS3):
+        def head_object(self, **kwargs):
+            response = super().head_object(**kwargs)
+            # Nebius preserves the HTTP header's original casing in Metadata.
+            identity = response["Metadata"]["loom-write-id"]
+            response["Metadata"] = {metadata_key: identity}
+            return response
+
+    backend = CasedMetadataS3(head_version=version)
+    store = make_store(monkeypatch, backend)
+    result = await store.put_object_stream_with_metadata(
+        bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)),
+    )
+    assert result.uri == "s3://b/k" and result.version_id == version
+
+
+@pytest.mark.parametrize("same_value", [False, True], ids=["conflicting", "identical"])
+async def test_stream_completion_rejects_ambiguous_metadata_name_aliases(monkeypatch, same_value):
+    class AmbiguousMetadataS3(VersionlessCompletionS3):
+        def head_object(self, **kwargs):
+            response = super().head_object(**kwargs)
+            identity = response["Metadata"]["loom-write-id"]
+            response["Metadata"] = {
+                "loom-write-id": identity,
+                "Loom-Write-Id": identity if same_value else "another-writer",
+            }
+            return response
+
+    store = make_store(monkeypatch, AmbiguousMetadataS3())
+    with pytest.raises(ValueError, match="identity"):
+        await store.put_object_stream_with_metadata(
+            bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)),
+        )
+
+
+async def test_stream_completion_preserves_case_sensitive_identity_value(monkeypatch):
+    monkeypatch.setattr("loom.trajectory.storage.uuid4", lambda: SimpleNamespace(hex="a" * 32))
+
+    class ChangedIdentityS3(VersionlessCompletionS3):
+        def head_object(self, **kwargs):
+            response = super().head_object(**kwargs)
+            response["Metadata"] = {"Loom-Write-Id": "A" * 32}
+            return response
+
+    store = make_store(monkeypatch, ChangedIdentityS3())
+    with pytest.raises(ValueError, match="identity"):
+        await store.put_object_stream_with_metadata(
+            bucket="b", key="k", body=chunks(b"v" * (9 * 1024**2)),
+        )
+
+
 async def test_stream_completion_rejects_readback_from_competing_same_content_write(monkeypatch):
     backend = VersionlessCompletionS3(replace=True)
     store = make_store(monkeypatch, backend)
