@@ -891,6 +891,15 @@ terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom
 success or changes retry policy outside the fenced control-plane transition.
 
+Native failure evidence for the same lease generation and Job/Pod identity
+survives delayed nonterminal observations, including a Job deadline with no
+remaining Pod. Exact terminal duplicates can repair an older regressed active
+projection under refreshed lease and Trial locks. Repair preserves every event,
+ordinal, observation timestamp, committed output and the original late-output
+deadline; normal reconciliation performs finalization and cleanup. Revoked,
+superseded or closed leases cannot be reopened. Missing resources and transient
+scheduling failures alone do not establish a permanent native outcome.
+
 Execution start means the `execution` container's actual running/terminated
 start timestamp, not kubelet acknowledgement (`Pod.status.startTime`) or a
 task/verifier init-container start. Missing container evidence remains unknown.

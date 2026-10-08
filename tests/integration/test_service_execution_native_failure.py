@@ -27,7 +27,10 @@ from tests.integration.test_service_execution_leases import (
 
 
 @pytest.mark.parametrize("uploading", [False, True])
-async def test_native_start_failure_closes_output_then_releases_trial(postgres_url, uploading):
+@pytest.mark.parametrize("historical_regression", [False, True])
+async def test_native_start_failure_closes_output_then_releases_trial(
+    postgres_url, uploading, historical_regression,
+):
     engine = create_async_engine(postgres_url)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
@@ -60,10 +63,32 @@ async def test_native_start_failure_closes_output_then_releases_trial(postgres_u
             }
         )
         await actuator.reconcile_full_once(now=failed_at)
+        if historical_regression:
+            from loom_control_plane.service_execution import record_kubernetes_observation
+
+            async with sessions() as session, session.begin():
+                await record_kubernetes_observation(
+                    session, lease_id=lease.id, generation=1,
+                    payload=kubernetes.jobs[lease.job_name].model_copy(update={
+                        "normalized_state": NormalizedJobState.PENDING,
+                        "resource_version": "delayed-pending", "reason": None, "message": None,
+                    }).event_payload(),
+                    observed_at=failed_at + timedelta(seconds=6),
+                )
+                current = await session.get(ServiceExecutionLease, lease.id)
+                current.observed_state = "creating"
+                current.error_class = current.error_code = current.error_message = None
+            # Restart the real controller. Its ordinary full reconciliation must
+            # repair the exact duplicate and close once, without a special replay.
+            actuator = ExecutionActuator(
+                sessions=sessions, kubernetes=kubernetes,
+                target=ExecutionTargetRuntime(target_id=target.target_id, namespace=target.namespace_name),
+                controller_id="restarted-native-failure-test", command_lease_seconds=5,
+            )
         # Re-observation, even with a new resource version, must not reset grace.
         kubernetes.jobs[lease.job_name] = kubernetes.jobs[lease.job_name].model_copy(
             update={
-                "resource_version": "3",
+                "resource_version": "2" if historical_regression else "3",
             }
         )
         await actuator.reconcile_full_once(now=failed_at + timedelta(seconds=299))
@@ -113,8 +138,9 @@ async def test_native_start_failure_closes_output_then_releases_trial(postgres_u
 
 
 @pytest.mark.parametrize("window_expired", [False, True])
+@pytest.mark.parametrize("historical_regression", [False, True])
 async def test_output_commit_during_native_failure_grace_keeps_authority(
-    postgres_url, monkeypatch, window_expired
+    postgres_url, monkeypatch, window_expired, historical_regression,
 ):
     """Exercise real multipart prepare/upload/commit with failure before commit."""
     from loom_control_plane.service_execution import (
@@ -145,7 +171,7 @@ async def test_output_commit_during_native_failure_grace_keeps_authority(
                     self, lease=lease, session_id=session_id, upload_token=upload_token
                 )
             assert current.output_commit_state == "uploading"
-            await record_kubernetes_observation(
+            failure, _ = await record_kubernetes_observation(
                 session,
                 lease_id=lease.id,
                 generation=lease.generation,
@@ -160,6 +186,16 @@ async def test_output_commit_during_native_failure_grace_keeps_authority(
                     "message": "native Job terminated",
                 },
             )
+            if historical_regression:
+                current.observed_state = "creating"
+                current.error_class = current.error_code = current.error_message = None
+                await session.flush()
+                _, duplicate = await record_kubernetes_observation(
+                    session, lease_id=lease.id, generation=lease.generation,
+                    payload=failure.payload_json, observed_at=failed_at + timedelta(seconds=299),
+                )
+                assert duplicate and current.observed_state == "failed"
+                assert current.output_commit_state == "uploading"
             assert not await finalize_failed_service_execution(
                 session,
                 lease_id=lease.id,
@@ -277,7 +313,8 @@ async def test_native_failure_does_not_take_over_revoked_attempt(postgres_url, t
         await engine.dispose()
 
 
-async def test_job_only_backoff_preserves_exact_pod_eviction_reason(postgres_url):
+@pytest.mark.parametrize("historical_regression", [False, True])
+async def test_job_only_backoff_preserves_exact_pod_eviction_reason(postgres_url, historical_regression):
     from loom_control_plane.service_execution import record_kubernetes_observation
 
     engine = create_async_engine(postgres_url)
@@ -328,6 +365,23 @@ async def test_job_only_backoff_preserves_exact_pod_eviction_reason(postgres_url
                 },
             )
             assert (lease.error_code, lease.error_class) == ("oom_killed", "permanent")
+            if historical_regression:
+                lease.observed_state = "creating"
+                lease.error_code = lease.error_class = lease.error_message = None
+                await session.flush()
+            # Replaying the old eviction must use durable diagnostic precedence.
+            _, duplicate = await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=1, observed_at=now + timedelta(seconds=3),
+                payload={
+                    "job_uid": "exact-job", "resource_version": "0", "pod_uid": "exact-pod",
+                    "normalized_state": "evicted", "reason": "DeletionByTaintManager",
+                    "message": "taint manager eviction",
+                },
+            )
+            assert duplicate
+            assert (lease.observed_state, lease.error_code, lease.error_class) == (
+                "failed", "oom_killed", "permanent",
+            )
     finally:
         await engine.dispose()
 
@@ -457,5 +511,126 @@ async def test_exact_terminal_replay_repairs_projection_without_rewriting_histor
             current = await session.get(ServiceExecutionLease, lease.id)
             assert duplicate and current.desired_state == "delete_pending"
             assert current.finalized_at == finalized_at
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("boundary", ["cancel", "retry", "job_uid", "pod_uid", "trial_attempt", "trial_state"])
+async def test_terminal_replay_refreshes_authority_before_repair(postgres_url, boundary):
+    from loom_control_plane.service_execution import (
+        enqueue_execution_transition,
+        record_kubernetes_observation,
+    )
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    payload = {
+        "normalized_state": "deadline_exceeded", "job_uid": "exact-job", "pod_uid": "exact-pod",
+        "resource_version": "terminal", "reason": "DeadlineExceeded", "message": "deadline",
+    }
+    try:
+        async with sessions() as session, session.begin():
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=1, payload=payload, observed_at=now,
+            )
+            lease.observed_state = "creating"
+            lease.error_class = lease.error_code = lease.error_message = None
+        async with sessions() as replay:
+            cached = await replay.get(ServiceExecutionLease, lease.id)
+            assert cached.desired_state == "create"
+            async with sessions() as mutation, mutation.begin():
+                current = await mutation.get(ServiceExecutionLease, lease.id)
+                if boundary in {"cancel", "retry"}:
+                    await enqueue_execution_transition(
+                        mutation, lease_id=lease.id, expected_generation=1,
+                        desired_state=boundary, now=now + timedelta(seconds=1),
+                    )
+                elif boundary in {"trial_attempt", "trial_state"}:
+                    trial = await mutation.get(Trial, trial_id)
+                    if boundary == "trial_attempt":
+                        trial.attempt_count += 1
+                    else:
+                        trial.state = "failed"
+                else:
+                    setattr(current, boundary, "different-identity")
+            before = (await replay.execute(
+                select(ServiceExecutionLease.__table__).where(ServiceExecutionLease.id == lease.id)
+            )).one()
+            _, duplicate = await record_kubernetes_observation(
+                replay, lease_id=lease.id, generation=1, payload=payload,
+                observed_at=now + timedelta(minutes=6),
+            )
+            await replay.commit()
+            after = (await replay.execute(
+                select(ServiceExecutionLease.__table__).where(ServiceExecutionLease.id == lease.id)
+            )).one()
+            assert duplicate and after == before
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("transient", ["missing", "unschedulable", "image_pull_backoff"])
+async def test_transient_observation_can_recover_without_terminal_evidence(postgres_url, transient):
+    from loom_control_plane.service_execution import record_kubernetes_observation
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            for index, state in enumerate([transient, "running"]):
+                await record_kubernetes_observation(
+                    session, lease_id=lease.id, generation=1,
+                    payload={"job_uid": "exact-job", "resource_version": str(index),
+                             "normalized_state": state},
+                    observed_at=now + timedelta(seconds=index),
+                )
+            assert lease.observed_state == "running"
+            assert lease.error_class is lease.error_code is lease.error_message is None
+    finally:
+        await engine.dispose()
+
+
+async def test_repair_preserves_job_only_diagnosis_with_retained_pod_identity(postgres_url):
+    from loom_control_plane.service_execution import record_kubernetes_observation
+
+    engine = create_async_engine(postgres_url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    try:
+        async with sessions() as session, session.begin():
+            trial_id, target = await _seed_ready_trial(session, now=now)
+            lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
+            lease.pod_uid = "removed-pod"
+            deadline = {
+                "job_uid": "exact-job", "pod_uid": None, "resource_version": "deadline",
+                "normalized_state": "deadline_exceeded", "reason": "DeadlineExceeded",
+                "message": "deadline exceeded",
+            }
+            for index, payload in enumerate([
+                deadline,
+                {**deadline, "resource_version": "backoff", "normalized_state": "failed",
+                 "reason": "BackoffLimitExceeded", "message": "generic backoff"},
+            ]):
+                await record_kubernetes_observation(
+                    session, lease_id=lease.id, generation=1, payload=payload,
+                    observed_at=now + timedelta(seconds=index),
+                )
+            assert lease.error_code == "deadline_exceeded"
+            lease.observed_state = "creating"
+            lease.error_code = lease.error_class = lease.error_message = None
+            await session.flush()
+            await record_kubernetes_observation(
+                session, lease_id=lease.id, generation=1, payload=deadline,
+                observed_at=now + timedelta(seconds=3),
+            )
+            assert (lease.observed_state, lease.error_code, lease.error_message) == (
+                "failed", "deadline_exceeded", "deadline exceeded",
+            )
     finally:
         await engine.dispose()
