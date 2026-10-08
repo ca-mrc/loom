@@ -524,6 +524,16 @@ changes through a qualified protected transition, never by editing a retained
 cutover's inputs or manually patching its live workload.
 Do not hand-mount credentials or treat the renderer as installation authority.
 
+The internal independent-dev pool-registration stage can qualify a completed dev
+manager and register its shared-development participant in that manager's database
+with admission **closed**. It reuses retained installation history and the existing
+fixed registration Job, not legacy migration receipts. It is not exposed as a
+standalone operator command. A closed receipt does not authorize task/build
+submission or allow the initial installer to be replayed with changed settings.
+Protected runtime delivery must still bind the catalog, prove sole physical-pool
+authority and explicitly activate admission; do not invoke the legacy staging
+cutover or clear a task guard to substitute for those steps.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash

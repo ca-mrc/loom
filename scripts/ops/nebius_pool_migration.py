@@ -18,10 +18,13 @@ from uuid import UUID
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
 from scripts.ops.nebius_pool_projection import pure_projection
-from scripts.ops.nebius_pool_registration import PoolRegistrationRequest, registration_documents
+from scripts.ops.nebius_pool_registration import (
+    PoolRegistrationRequest,
+    registration_documents,
+    validate_registration_proof,
+)
 
 from loom.nebius_platform_render import digest
-from loom_service.pool_management.capacity import digest as installation_digest
 
 
 class PoolMigrationError(RuntimeError):
@@ -123,19 +126,7 @@ def _hash(path: Path) -> str:
 
 
 def _proof(request: PoolMigrationRequest, state: Path, proof: Any) -> None:
-    record = json.loads(private_state._private_read(state / "stage.json", limit=4 * 1024**2))
-    job, = (row for row in record["resources"].values() if row["desired"]["kind"] == "Job")
-    if (not isinstance(proof, dict) or set(proof) != {"job_uid", "pod_uid", "registration"}
-            or job["status"] != "created" or job["uid"] != proof["job_uid"]
-            or any(str(UUID(proof[key])) != proof[key] or not UUID(proof[key]).int for key in ("job_uid", "pod_uid"))):
-        raise ValueError
-    spec = request.registration.spec
-    expected = {"schema_version": "loom.pool-installation-receipt.v1", "operation_id": str(spec.operation_id),
-        "pool_id": str(spec.pool_id), "installation_sha256": installation_digest(spec.model_dump(mode="json")),
-        "mode": "closed", "participants": len(spec.participants), "machines": len(spec.machines)}
-    report = proof["registration"]
-    if (report != expected or type(report.get("participants")) is not int or type(report.get("machines")) is not int):
-        raise ValueError
+    validate_registration_proof(request.registration, state, proof)
 
 
 def close_and_register_pool(*, request: PoolMigrationRequest, api: PoolMigrationAPI,
