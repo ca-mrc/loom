@@ -42,6 +42,9 @@ from tests.ops.test_nebius_development_pool_retained import (
 from tests.ops.test_nebius_development_pool_retained import (
     original_platform_inputs as original_platform_inputs,
 )
+from tests.ops.test_nebius_development_pool_retained import (
+    original_pool_inputs as original_pool_inputs,
+)
 from tests.ops.test_nebius_development_pool_retained import platform_inputs as platform_inputs
 from tests.ops.test_nebius_development_pool_retained import pool_entry as pool_entry
 from tests.ops.test_nebius_development_pool_retained import pool_inputs as pool_inputs
