@@ -2,15 +2,26 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any
+from uuid import UUID
 
+from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_setup import DevelopmentDatabaseRuntime
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
+from scripts.ops.nebius_ingress_stage import _key
+from scripts.ops.nebius_management_stage import (
+    ManagementStageAPI,
+    _stage_fixed_documents,
+    _validate_record,
+)
 
 from loom.execution_contract import ExecutionTargetV1, ExecutionTopologyV1
 from loom.nebius_development_catalog import DevelopmentCatalogRequest
-from loom.nebius_platform_render import _mount_secret
+from loom.nebius_platform_render import _mount_secret, digest
+from loom.pipeline.keys import canonical_digest
+from loom_service.environment_management.candidates import _json
 
 
 @dataclass(frozen=True, repr=False)
@@ -64,3 +75,54 @@ def prepare_catalog_runtime(request: DevelopmentDatabaseRuntime) -> DevelopmentC
         return DevelopmentCatalogRuntime((document, job))
     except Exception:
         raise ValueError('development catalog runtime unqualified') from None
+
+
+def catalog_runtime_documents(request: DevelopmentDatabaseRuntime) -> dict[str, dict[str, Any]]:
+    """Revalidate the retained request; never accept caller-supplied Job authority."""
+    return {_key(document): document for document in prepare_catalog_runtime(request).documents}
+
+
+def stage_catalog_runtime(*, request: DevelopmentDatabaseRuntime, api: ManagementStageAPI,
+                          state_dir: Path) -> dict[str, Any]:
+    """Internal fixed child stage; the runtime parent owns the phase-start anchor.
+
+    Its phase-aware API must qualify the new closed CP, completed SQL setup and
+    retained identities before writes. A staged Job is not catalog completion.
+    """
+    try:
+        documents = catalog_runtime_documents(request)
+        return _stage_fixed_documents(documents=documents, revision=digest(documents),
+            phase='development-runtime-catalog', binding=request.manager.retained.request.retained.binding,
+            api=api, state_dir=state_dir)
+    except Exception:
+        raise ValueError('development catalog stage unqualified; preserve evidence') from None
+
+
+def validate_catalog_runtime_proof(request: DevelopmentDatabaseRuntime, state_dir: Path,
+                                   proof: Any) -> None:
+    """Bind the catalog receipt to the exact completed child stage and request.
+
+    The connected HTTPS reader must independently prove the live Job/sole Pod,
+    successful unrestarted execution, bounded log and unchanged prerequisites.
+    This structural check grants neither activation nor live-readback authority.
+    """
+    try:
+        documents = catalog_runtime_documents(request)
+        record = _json(private_state._private_read(state_dir / 'stage.json', limit=4 * 1024**2))
+        _validate_record(record, {'schema': 'loom.nebius-management-stage.v1',
+            'binding': asdict(request.manager.retained.request.retained.binding),
+            'revision': digest(documents), 'phase': 'development-runtime-catalog'}, documents)
+        job, = (item for item in record['resources'].values() if item['desired']['kind'] == 'Job')
+        if (not isinstance(proof, dict) or set(proof) != {'job_uid', 'pod_uid', 'catalog'}
+                or any(item['status'] != 'created' for item in record['resources'].values())
+                or any(str(UUID(proof[key])) != proof[key] or not UUID(proof[key]).int
+                    for key in ('job_uid', 'pod_uid')) or job['uid'] != proof['job_uid']):
+            raise ValueError
+        config, = (document for document in documents.values() if document['kind'] == 'ConfigMap')
+        raw = _json(config['data']['catalog.json'].encode())
+        catalog = DevelopmentCatalogRequest.model_validate(raw)
+        if proof['catalog'] != {'operation_id': str(request.operation_id),
+                'target_id': catalog.topology.targets[0].target_id, 'catalog_sha256': canonical_digest(raw)}:
+            raise ValueError
+    except Exception:
+        raise ValueError('development catalog receipt unqualified') from None
