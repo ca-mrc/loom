@@ -127,12 +127,19 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
             # Child CREATE/read and workload dry-run/default receipts are real.
             def default_workload(key, before, desired):
                 assert before == closed.documents[key]
-                current = parent.read_workload(key)
-                value = _snapshot(desired)
-                value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
-                response = parent.client.put(parent._workload_path(key) + '?dryRun=All', json=value)
-                response.raise_for_status()
-                return response.json()
+                for attempt in range(10):
+                    current = parent.read_workload(key)
+                    assert current['metadata']['uid'] == before['metadata']['uid']
+                    value = _snapshot(desired)
+                    value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
+                    response = parent.client.put(parent._workload_path(key) + '?dryRun=All', json=value)
+                    # Controller status writes can race this fixture's dry-run
+                    # defaulting too. The startup CAS under test is unchanged.
+                    if response.status_code == 409 and attempt < 9:
+                        time.sleep(0.05)
+                        continue
+                    response.raise_for_status()
+                    return response.json()
 
             def retain_defaulted_workload(key, before, desired):
                 value = default_workload(key, before, desired)
