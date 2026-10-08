@@ -1033,3 +1033,164 @@ async def test_single_operator_metadata_overflow_refuses_before_storage(
     with pytest.raises(RecoveryConflictError, match="byte_limit_exceeded"):
         await recover_single_object(r, payload)
     assert await snapshot(r) == before
+
+
+@pytest.fixture
+def operator_platform(tmp_path):
+    (tmp_path / "environment.json").write_text(json.dumps({"environment": "development", "namespace": "loom"}))
+    (tmp_path / "profile.json").write_text(json.dumps({"candidate_sha": "c" * 40}))
+    return tmp_path
+
+
+async def operate_single(r, platform, payload=None, *, readback=False):
+    from loom_control_plane.large_object_version_recovery import operate_single_object
+
+    from loom_control_plane.object_version_recovery import SingleObjectRecoveryRequest
+
+    return await operate_single_object(
+        SingleObjectRecoveryRequest.model_validate(payload or single_object_payload(r)),
+        sessions=r.sessions, client=r.s3, artifacts_bucket=r.bucket, trajectories_bucket=r.bucket,
+        platform=platform, readback=readback,
+    )
+
+
+async def test_operator_preview_apply_and_read_only_audit(recovery, operator_platform, monkeypatch):
+    from loom_control_plane.object_version_recovery import ObjectVersionRecovery
+
+    r = recovery
+    before = await snapshot(r)
+    preview = await operate_single(r, operator_platform)
+    assert preview["status"] == "preview" and await snapshot(r) == before
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    applied = await operate_single(r, operator_platform, payload)
+    assert applied["status"] == "applied"
+    after = await snapshot(r)
+
+    async def no_recovery(*args, **kwargs):
+        pytest.fail("readback must never invoke recovery")
+
+    monkeypatch.setattr(ObjectVersionRecovery, "recover", no_recovery)
+    monkeypatch.setattr(r.s3, "get_object", lambda **kwargs: pytest.fail("readback must not read storage"))
+    (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+    result = await operate_single(r, operator_platform, payload, readback=True)
+    assert result == {**applied, "status": "committed"}
+    assert await snapshot(r) == after
+
+
+@pytest.mark.parametrize("damage", ["candidate", "database_schema", "namespace"])
+async def test_operator_refuses_platform_drift_before_storage(recovery, operator_platform, monkeypatch, damage):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    if damage == "candidate":
+        (operator_platform / "profile.json").write_text(json.dumps({"candidate_sha": "d" * 40}))
+    elif damage == "namespace":
+        (operator_platform / "environment.json").write_text(json.dumps({"environment": "development", "namespace": "foreign"}))
+    else:
+        async with r.sessions.begin() as session:
+            await session.execute(text("UPDATE alembic_version SET version_num = '0001'"))
+    monkeypatch.setattr(r.s3, "get_object", lambda **kwargs: pytest.fail("must refuse before reads"))
+    with pytest.raises(RecoveryConflictError, match=r"schema_binding_changed|platform_binding_changed"):
+        await operate_single(r, operator_platform)
+    assert await snapshot(r) == before
+
+
+async def test_operator_refuses_held_rollout_without_changing_owner(recovery, operator_platform):
+    from loom.nebius_rollout_guard import acquire, observe
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    async with r.sessions.begin() as session:
+        result = await acquire(session, owner="foreign-rollout", candidate="d" * 40)
+        assert result["status"] == "acquired"
+    before = await snapshot(r)
+    with pytest.raises(RecoveryConflictError, match="rollout_guard_held"):
+        await operate_single(r, operator_platform)
+    async with r.sessions() as session:
+        assert await observe(session, owner="foreign-rollout", candidate="d" * 40) == {"status": "held"}
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_operator_serializes_and_keeps_locks_until_reader_exits(
+    recovery, operator_platform, monkeypatch, cancel,
+):
+    from loom.nebius_rollout_guard import acquire
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    preview = await operate_single(r, operator_platform)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    before = await snapshot(r)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    original = r.s3.get_object
+
+    def delayed(**kwargs):
+        started.set()
+        try:
+            assert release.wait(30)
+            return original(**kwargs)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(r.s3, "get_object", delayed)
+    task = asyncio.create_task(operate_single(r, operator_platform, payload))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # Repeated cancellation must not drop the lock either.
+            await asyncio.sleep(0)
+        assert not task.done()
+        with pytest.raises(RecoveryConflictError, match="large_recovery_busy"):
+            await operate_single(r, operator_platform)
+        async with r.sessions.begin() as session:
+            assert await acquire(session, owner="cannot-interrupt", candidate="d" * 40) == {
+                "status": "skipped_busy", "reason": "admission_in_progress"}
+        assert await snapshot(r) == before
+    finally:
+        release.set()
+        results = await asyncio.gather(task, return_exceptions=True)
+    assert finished.is_set()
+    if cancel:
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert await snapshot(r) == before
+        assert (await operate_single(r, operator_platform))["status"] == "preview"
+    else:
+        assert results[0]["status"] == "applied"
+
+
+async def test_operator_lost_lock_connection_cannot_commit(recovery, operator_platform, monkeypatch):
+    from loom_control_plane.large_object_version_recovery import LOCK_KEY
+    from sqlalchemy.exc import SQLAlchemyError
+
+    r = recovery
+    preview = await operate_single(r, operator_platform)
+    payload = {**single_object_payload(r), "apply": True, "plan_sha256": preview["plan_sha256"]}
+    before = await snapshot(r)
+    started, release = threading.Event(), threading.Event()
+    original = r.s3.get_object
+
+    def delayed(**kwargs):
+        started.set()
+        assert release.wait(30)
+        return original(**kwargs)
+
+    monkeypatch.setattr(r.s3, "get_object", delayed)
+    task = asyncio.create_task(operate_single(r, operator_platform, payload))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        async with r.sessions() as session:
+            pids = list(await session.scalars(text(
+                "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = :high "
+                "AND objid = :low AND granted"
+            ), {"high": LOCK_KEY >> 32, "low": LOCK_KEY & 0xFFFFFFFF}))
+            assert len(pids) == 1
+            assert await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": pids[0]})
+    finally:
+        release.set()
+        results = await asyncio.gather(task, return_exceptions=True)
+    assert isinstance(results[0], SQLAlchemyError)
+    assert await snapshot(r) == before
