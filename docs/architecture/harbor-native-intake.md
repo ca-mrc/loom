@@ -15,6 +15,12 @@ Harbor Hub packages; HF row datasets continue using their existing adapters.
 Hub intake also records the fetched dataset metadata version and per-task
 package digest supplied by the existing package client.
 
+The pinned Hub client exports task directories directly under its output root.
+Loom materialization moves those unchanged directories under `tasks/`, matching
+the adapter source layout. Dataset-level files remain at the root beside the
+resolved package metadata; they are not treated as executable task bundles.
+Refresh any cache created with the older flat layout before preparing a benchmark.
+
 The official TB4 descriptor is
 [`config/harbor-sources/terminal-bench-4.0.0.json`](../../config/harbor-sources/terminal-bench-4.0.0.json).
 It identifies commit `452bf305c6daa62fc59061d22133a7cbc7c1572e`, release
