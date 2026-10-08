@@ -3194,8 +3194,12 @@ The closed restart runtime barrier consumes only a completed, anchored restart,
 then probes the actual retained manager and every participant's controller,
 service and active actuator. It checks their backend and legacy settings, plus
 actuator telemetry availability, with recovery closure and exact workload/journal readbacks
-before and after. Dormant roots and the stopped gateway are not started or probed
-as active legacy consumers. Guard reopening uses a separate parent phase.
+before and after. Runtime init-container comparison normalizes Kubernetes resource
+quantity spellings (for example, `67108864` and `64Mi`) before strict list/template
+equality. Different resource amounts, container identities, commands, environment,
+security settings, or extra fields still fail; this is not a runtime-health waiver.
+Dormant roots and the stopped gateway are not started or probed as active legacy
+consumers. Guard reopening uses a separate parent phase.
 
 The internal legacy-reopening child anchors the completed restart and records an
 ordered `prepared`/`intent`/`released` phase for every participant. Only a saved

@@ -32,6 +32,7 @@ from scripts.ops.nebius_management_gateway import (
     validate_telemetry_report,
 )
 from scripts.ops.nebius_management_prerequisites import inventory_resources
+from scripts.ops.nebius_management_stage import _canonical_quantities
 from scripts.ops.nebius_management_switch import _matches, _stable
 from scripts.ops.nebius_pool_guard_activation import pool_guard_activation_sql
 from scripts.ops.nebius_pool_legacy_settings import (
@@ -307,6 +308,13 @@ def _runtime_pod_spec(actual: dict[str, Any], expected: dict[str, Any]) -> dict[
     if not value["volumes"] and "volumes" not in expected:
         del value["volumes"]
     return value
+
+
+def _runtime_init_containers(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Compare exact init templates after normalizing resource spellings only."""
+    normalized = _canonical_quantities({'kind': 'Deployment', 'spec': {'template': {
+        'spec': {'initContainers': spec.get('initContainers', [])}}}})
+    return normalized['spec']['template']['spec']['initContainers']
 
 
 def _backlog_cursor(value: str | None) -> str:
@@ -659,7 +667,7 @@ class KubectlPoolGuardAPI:
         actual = _runtime_pod_spec(pod["spec"], expected)
         if (not _matches_backup_template(replica["spec"]["template"]["spec"], expected)
                 or not _matches_backup_template(actual, expected)
-                or actual.get("initContainers", []) != expected.get("initContainers", [])
+                or _runtime_init_containers(actual) != _runtime_init_containers(expected)
                 or actual.get("securityContext", {}) != expected.get("securityContext", {})
                 or actual.get("ephemeralContainers", []) != expected.get("ephemeralContainers", [])
                 or actual.get("serviceAccountName", "default") != expected.get("serviceAccountName", "default")

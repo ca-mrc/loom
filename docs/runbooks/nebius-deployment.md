@@ -2161,6 +2161,15 @@ the complete ancestry and fresh live authority and drain before creating its
 journal. Incomplete templates and unknown intents resume template restoration;
 the standalone template-completion check is unchanged.
 
+Legacy reopening qualifies the restored runtimes inside the actual release
+adapter while that participant is still `prepared`. Only after that fresh proof
+and unchanged journal/fence readback does its callback persist `intent`, followed
+by the fixed parent guard release. A failed or interrupted runtime proof can thus
+resume from `prepared`. New journals retain their all-closed runtime proof and
+completion retains its final proof. Once intent is recorded, including failures
+in the parent guard's database read before SQL, recovery remains observation-only
+and never reissues an uncertain release.
+
 ## Refresh the retained application manager
 
 After the one-time application-runtime upgrade has completed, use protected
