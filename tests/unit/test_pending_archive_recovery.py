@@ -178,3 +178,10 @@ def test_process_watchdog_precedes_recovery_and_failure_output_is_redacted(monke
     assert module.main() == 1
     assert events == ['handler', module.HARD_TIMEOUT, 'platform', 'recovery', 0]
     assert json.loads(capsys.readouterr().out) == {'status':'blocked', 'reason':'recovery_incomplete'}
+
+
+def test_request_accepts_nebius_provider_cluster_identity():
+    request, *_ = qualified()
+    values = request.model_dump(mode='json')
+    values['cluster_id'] = 'mk8scluster-test123'
+    assert ArchiveRecoveryRequest.model_validate(values).cluster_id == values['cluster_id']
