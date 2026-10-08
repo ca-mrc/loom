@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 from uuid import UUID
 
 import psycopg
@@ -156,3 +157,38 @@ def test_replay_fails_closed_on_drift_without_repair(database, drift):
             assert db.execute("SELECT has_table_privilege('loom_actuator','nebius_pool_execution_outbox','INSERT')").fetchone() == (False,)
         else:
             assert db.execute("SELECT revoked_at IS NOT NULL FROM tokens WHERE type='worker'").fetchone() == (True,)
+
+
+@pytest.mark.parametrize('grant', [
+    'GRANT SELECT ON tasks TO loom_actuator WITH GRANT OPTION',
+    'GRANT UPDATE (registered_at) ON tasks TO loom_actuator WITH GRANT OPTION',
+    'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO loom_actuator',
+])
+def test_replay_rejects_delegation_and_future_table_authority(database, grant):
+    module = runtime()
+    install(module, database)
+    with psycopg.connect(database) as db:
+        db.execute(grant)
+    with pytest.raises(module.DevelopmentRuntimeDatabaseError):
+        install(module, database)
+
+
+def test_fixed_job_command_emits_only_receipt_and_refuses_staging(database, monkeypatch, tmp_path, capsys):
+    module = runtime()
+    config = {'namespace': 'loom-dev', 'operation_id': str(OPERATION), 'schema_revision': '0174'}
+    path = tmp_path / 'runtime.json'
+    path.write_text(json.dumps(config))
+    monkeypatch.setenv('LOOM_DEVELOPMENT_RUNTIME_CONFIG', str(path))
+    monkeypatch.setenv('LOOM_DB_URL', database)
+    monkeypatch.setenv('LOOM_DB_ACTUATOR_PASSWORD', PASSWORD)
+    monkeypatch.setenv('LOOM_BATCH_RUNNER_TOKEN', TOKEN)
+    monkeypatch.setattr(module, 'database_url', lambda value, namespace: value if namespace == 'loom-dev' else None)
+    assert module.main() == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt['status'] == 'development_runtime_database_installed'
+    assert receipt['operation_id'] == str(OPERATION)
+    assert PASSWORD not in repr(receipt) and TOKEN not in repr(receipt)
+    config['namespace'] = 'loom-nebius-platform'
+    path.write_text(json.dumps(config))
+    assert module.main() == 1
+    assert json.loads(capsys.readouterr().out) == {'status': 'development_runtime_database_unqualified'}
