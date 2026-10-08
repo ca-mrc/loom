@@ -121,3 +121,34 @@ def test_catalog_rejects_other_environment_before_http(catalog_request, damage):
     with pytest.raises(ValueError, match='development catalog unqualified'):
         install(request, server)
     assert not server.calls
+
+
+@pytest.mark.parametrize('damage', [None, 'oversize', 'foreign'])
+def test_catalog_command_uses_fixed_transport_and_scrubs_failure(catalog_request, tmp_path, monkeypatch, capsys, damage):
+    setup = module()
+    if not hasattr(setup, 'main'):
+        pytest.fail('fixed development catalog CLI is missing')
+    config, admin = tmp_path / 'catalog.json', tmp_path / 'admin.toml'
+    body = copy.deepcopy(catalog_request)
+    if damage == 'foreign':
+        body['topology']['targets'][0]['environment'] = 'staging'
+    config.write_text('x' * (1024**2 + 1) if damage == 'oversize' else json.dumps(body))
+    admin.write_text('[admin]\ntoken = "loom_admin_' + 'e' * 64 + '"\n')
+    monkeypatch.setenv('LOOM_DEVELOPMENT_RUNTIME_CATALOG_CONFIG', str(config))
+    monkeypatch.setattr(setup, '_ADMIN_SECRET', admin)
+    server = CatalogServer(catalog_request)
+    original_client = httpx.Client
+    def client(**kwargs):
+        assert kwargs['trust_env'] is False and kwargs['follow_redirects'] is False
+        return original_client(transport=httpx.MockTransport(server.handle), **kwargs)
+    monkeypatch.setattr(setup.httpx, 'Client', client)
+    assert setup.main() == (0 if damage is None else 1)
+    output = capsys.readouterr()
+    assert 'loom_admin_' not in output.out + output.err
+    result = json.loads(output.out)
+    if damage is None:
+        assert result['operation_id'] == catalog_request['operation_id']
+        assert result['catalog_sha256'] == canonical_digest(catalog_request)
+    else:
+        assert result == {'status': 'development_catalog_unqualified'}
+        assert not server.calls
