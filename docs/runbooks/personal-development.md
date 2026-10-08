@@ -75,7 +75,7 @@ printed personal context to talk to your personal API.
 
 ## Run one small task and retain its result
 
-Start with one teammate and one known small task approved for hosted development.
+Each teammate starts with one known small task approved for hosted development.
 Use an existing team-visible TaskSet, its exact task ID and a compatible deployed
 agent supplied by the team. Select an existing authorized provider connection and
 visible model from the personal API; the following reads do not create or alter
@@ -178,10 +178,17 @@ not an application or user limit. For each teammate:
 - Confirm that each owner can control only their own application. Shared result
   access follows team permissions; application ownership does not widen it.
 
-Then expand to four concurrent personal versions and onboard a fifth teammate.
-Verify existing applications/results remain usable and onboarding creates no
-additional shared business buckets, policies or per-owner database/worker pools.
-Capacity is subject to the shared platform's quota and admission policy. A local
+The initial capacity target is about five concurrent teammates, with room to grow;
+five is a planning target, not a user limit. Expand to four concurrent personal
+versions and onboard a fifth teammate, completing the same build, deploy, login,
+task and result checks for all five. Verify existing applications/results remain
+usable and onboarding creates no additional shared business buckets, policies or
+per-owner database/worker pools.
+
+As the team grows, plan capacity for personal frontend/API workloads, image builds
+and shared task execution separately. Build and task concurrency limits are
+separate from the number of active personal applications. Growth remains subject
+to the shared platform's measured capacity, quota and admission policy. A local
 regression or configured capability report does not establish installed acceptance.
 
 ## Update, suspend, resume and destroy
