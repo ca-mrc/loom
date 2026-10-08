@@ -50,6 +50,8 @@ def _path(document: dict[str, Any]) -> str:
 class HTTPSDevelopmentRuntimeDatabaseAPI(HTTPSRetainedDevelopmentManagementAPI):
     """Only two fixed immutable Secrets and the fixed SQL ConfigMap/Job may POST."""
 
+    phase = 'development-runtime-database'
+
     def __init__(self, *, request: DevelopmentDatabaseRuntime, api_server: str,
                  ssl_context: ssl.SSLContext, token: str | None = None,
                  private_files: dict[Path, bytes] | None = None):
@@ -107,7 +109,7 @@ class HTTPSDevelopmentRuntimeDatabaseAPI(HTTPSRetainedDevelopmentManagementAPI):
         self.verify_identity(self.binding)
         record = _json(private_state._private_read(state_dir / 'stage.json', limit=4 * 1024**2))
         _validate_record(record, {'schema': 'loom.nebius-management-stage.v1', 'binding': asdict(self.binding),
-            'revision': digest(self.documents), 'phase': 'development-runtime-database'}, self.documents)
+            'revision': digest(self.documents), 'phase': self.phase}, self.documents)
         result = {}
         for key, item in record['resources'].items():
             actual = self.get_resource(item['desired'])
