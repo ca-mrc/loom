@@ -986,3 +986,54 @@ def test_missing_or_changed_completion_cannot_become_successor_authority(complet
         loader.load_retained_pool(selector)
     assert len(connected.server.calls) == before
     assert not any(token in str(caught.value) for token in connected.intent.tokens.values())
+
+
+def network_runtime(request):
+    name = 'scripts.ops.nebius_development_network_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh development runtime network delivery is missing')
+    return importlib.import_module(name).prepare_network_runtime(request)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_network_scopes_database_and_gateway_without_control_or_build_access(completed_pool):
+    request = database_runtime(completed_pool)
+    documents = network_runtime(request)
+    policies = {row['metadata']['name']: row for row in documents}
+    assert set(policies) == {'loom-execution-attempt-default-deny', 'loom-execution-attempt-egress',
+        'development-runtime-postgres', 'development-runtime-gateway'}
+    assert all(row['kind'] == 'NetworkPolicy' for row in documents)
+    spec = request.manager.retained.request.registration.spec
+    for name, app, port, selector in (
+        ('postgres', 'loom-postgres', 5432, {'app.kubernetes.io/name': 'loom-execution-actuator'}),
+        ('gateway', 'loom-llm-gateway', 9100, {'app.kubernetes.io/component': 'execution-unit'}),
+    ):
+        row = policies['development-runtime-' + name]
+        assert row['metadata']['namespace'] == 'loom-dev'
+        assert row['spec'] == {'podSelector': {'matchLabels': {'app': app}}, 'policyTypes': ['Ingress'],
+            'ingress': [{'from': [{'namespaceSelector': {'matchLabels': {
+                'kubernetes.io/metadata.name': 'loom-nebius-dev-execution',
+                'loom.nebius/management-installation': str(spec.installation_id),
+                'loom.nebius/pool': str(spec.pool_id)}}, 'podSelector': {'matchLabels': selector}}],
+                'ports': [{'protocol': 'TCP', 'port': port}]}]}
+    deny = policies['loom-execution-attempt-default-deny']
+    assert deny['spec']['ingress'] == deny['spec']['egress'] == []
+    assert deny['metadata']['namespace'] == 'loom-nebius-dev-execution'
+    egress = policies['loom-execution-attempt-egress']
+    assert egress['metadata']['namespace'] == 'loom-nebius-dev-execution'
+    assert egress['spec']['podSelector'] == {'matchLabels': {'app.kubernetes.io/component': 'execution-unit'}}
+    dns, gateway = egress['spec']['egress']
+    assert dns['to'][0]['namespaceSelector']['matchLabels'] == {'kubernetes.io/metadata.name': 'kube-system'}
+    assert dns['ports'] == [{'protocol': 'UDP', 'port': 53}, {'protocol': 'TCP', 'port': 53}]
+    assert gateway == {'to': [{'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'loom-dev'}},
+        'podSelector': {'matchLabels': {'app': 'loom-llm-gateway'}}}], 'ports': [{'protocol': 'TCP', 'port': 9100}]}
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_network_refuses_changed_foundation_without_emitting_policy(completed_pool):
+    request = database_runtime(completed_pool)
+    request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
+    with pytest.raises(ValueError, match='development runtime network unqualified'):
+        network_runtime(request)
