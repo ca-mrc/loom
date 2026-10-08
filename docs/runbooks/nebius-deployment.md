@@ -2401,6 +2401,28 @@ delete the guard, manually edit credential state, disable the schema fence, or
 stamp Alembic to make the retry pass. Primary-target replacement and database
 restore require their separate procedures.
 
+After a completed rollback to legacy worker pools, ordinary platform upgrades
+reuse the existing terminal pool completion. Historical
+`loom.nebius/pool-retirement-operation` annotations stay on the recovered
+workloads; do not remove them manually. The deployment gateway must expose the
+fixed read-only `loom-nebius-legacy-pool-completion-v1 OPERATION_UUID` command.
+Install it once from reviewed merged source on the operator host with
+`python3 scripts/ops/install_nebius_legacy_pool_completion.py --source-sha COMMIT`.
+This preserves the previous gateway wrapper and its existing grants, installs
+only the completion reader, and makes no Kubernetes or recovery-state changes.
+
+The reader returns only operation identity, legacy outcome and workload UIDs
+from the existing anchored completion. Missing, incomplete, global or mismatched
+completion cannot authorize an ordinary upgrade. The deployer reads each
+immutable completion once per invocation; after acquiring its normal idle guard
+it rereads the live workload identities and global-pool settings against that
+same evidence. A new operation or actual global-pool wiring still blocks the
+standalone renderer. Backup, migration checks and public readiness remain required.
+Completion is historical evidence, so later ordinary releases may change images
+without rewriting the original rollback receipt. A later manager refresh must
+account for that newer platform deployment; the old full-template baseline alone
+is no longer a current runtime proof.
+
 Every attempt leaves a separate sanitized JSON phase record, including the candidate version, target
 and failed phase. Evidence excludes kubeconfig material,
 API endpoint details and secret values. A failed attempt is not automatically
