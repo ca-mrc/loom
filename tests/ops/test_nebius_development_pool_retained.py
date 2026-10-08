@@ -740,6 +740,101 @@ def test_runtime_https_rejects_unbound_writes_before_transport(completed_pool, p
     assert not calls
 
 
+def runtime_workloads_api(request, qualifier, readiness):
+    name = 'scripts.ops.nebius_development_runtime_live'
+    module = importlib.import_module(name)
+    if not hasattr(module, 'HTTPSDevelopmentRuntimeWorkloads'):
+        pytest.fail('phase-bound development runtime workload HTTPS is missing')
+    return module.HTTPSDevelopmentRuntimeWorkloads(request=request, phase='stop',
+        api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(), token='operator-test',
+        qualify_runtime=qualifier, observe_ready=readiness)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_workload_https_binds_uid_version_and_spec_before_patch(completed_pool, publisher_cloud):
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan, calls, qualifications = runtime.prepare_runtime_install(request), [], []
+    key = 'Deployment:loom-dev:loom-control-plane'
+    before = copy.deepcopy(plan.originals[key])
+    before['metadata']['resourceVersion'] = '71'
+    current = copy.deepcopy(before)
+    desired = plan.stopped[key]
+    def qualify(value, phase, writing):
+        assert value == request and phase == 'stop'
+        qualifications.append(writing)
+    def ready(value, phase, original, expected, actual):
+        assert value == request and phase == 'stop'
+        assert original == plan.originals[key] and expected == desired
+        assert actual == current
+        return True
+    def transport(message):
+        calls.append(message)
+        assert message.url.path == '/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane'
+        if message.method == 'GET':
+            return httpx.Response(200, json=current)
+        assert message.method == 'PATCH'
+        assert message.headers['content-type'] == 'application/json-patch+json'
+        changes = json.loads(message.content)
+        assert changes[:3] == [
+            {'op': 'test', 'path': '/metadata/uid', 'value': before['metadata']['uid']},
+            {'op': 'test', 'path': '/metadata/resourceVersion', 'value': '71'},
+            {'op': 'test', 'path': '/spec', 'value': before['spec']}]
+        update = copy.deepcopy(current)
+        for change in changes[3:]:
+            assert change['op'] in {'add', 'replace'}
+            if change['path'] == '/spec':
+                update['spec'] = change['value']
+            elif change['path'].startswith('/metadata/'):
+                update['metadata'][change['path'].split('/')[-1]] = change['value']
+            else:
+                pytest.fail('unexpected workload mutation')
+        if not message.url.query:
+            current.update(update)
+            current['metadata']['resourceVersion'] = '72'
+        return httpx.Response(200, json=update)
+    with runtime_workloads_api(request, qualify, ready) as api:
+        api.client.close()
+        api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
+        assert api.read_workload(key) == before
+        assert api.preview_workload(key, before, desired)['spec']['replicas'] == 0
+        assert current['spec']['replicas'] == 1
+        assert api.patch_workload(key, before, desired) is True
+        assert api.workload_ready(key, desired) is True
+        assert current['spec']['replicas'] == 0
+    assert len([row for row in calls if row.method == 'PATCH']) == 2
+    assert True in qualifications
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['target', 'uid', 'spec', 'foreign-key'])
+def test_runtime_workload_https_refuses_unbound_transition_before_io(completed_pool, publisher_cloud, damage):
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan, calls = runtime.prepare_runtime_install(request), []
+    key = 'Deployment:loom-dev:loom-control-plane'
+    before, desired = copy.deepcopy(plan.originals[key]), copy.deepcopy(plan.stopped[key])
+    before['metadata']['resourceVersion'] = '71'
+    if damage == 'target':
+        desired['spec']['replicas'] = 1
+    elif damage == 'uid':
+        before['metadata']['uid'] = str(uuid4())
+    elif damage == 'spec':
+        before['spec']['replicas'] = 5
+    else:
+        key = 'Deployment:loom-staging:loom-control-plane'
+    with runtime_workloads_api(request, lambda *_: None, lambda *_: True) as api:
+        api.client.close()
+        def transport(message):
+            calls.append(message)
+            return httpx.Response(200, json=before)
+        api.client = type(completed_pool[3].api.client)(base_url=api.api_server, transport=httpx.MockTransport(transport))
+        with pytest.raises(ValueError, match='development runtime workload update unconfirmed'):
+            api.patch_workload(key, before, desired)
+    assert not calls
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
