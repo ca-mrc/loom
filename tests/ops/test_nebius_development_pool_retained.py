@@ -9,23 +9,59 @@ from pathlib import Path
 import pytest
 from tests.ops.test_nebius_development_pool_install import (
     application_management_inputs as application_management_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     application_material as application_material,
+)
+from tests.ops.test_nebius_development_pool_install import (
     build_inputs as build_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     capacity_checks as capacity_checks,
+)
+from tests.ops.test_nebius_development_pool_install import (
     cloud as cloud,
+)
+from tests.ops.test_nebius_development_pool_install import (
     connected as connected,
+)
+from tests.ops.test_nebius_development_pool_install import (
     installation as installation,
+)
+from tests.ops.test_nebius_development_pool_install import (
     inventory as inventory,
+)
+from tests.ops.test_nebius_development_pool_install import (
     management_inputs as management_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     manager_entry as manager_entry,
+)
+from tests.ops.test_nebius_development_pool_install import (
     material as material,
+)
+from tests.ops.test_nebius_development_pool_install import (
     original_platform_inputs as original_platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     platform_inputs as platform_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     pool_entry as pool_entry,
+)
+from tests.ops.test_nebius_development_pool_install import (
     pool_inputs as pool_inputs,
+)
+from tests.ops.test_nebius_development_pool_install import (
     provider_checks as provider_checks,
+)
+from tests.ops.test_nebius_development_pool_install import (
     retained as retained,
+)
+from tests.ops.test_nebius_development_pool_install import (
     route as route,
+)
+from tests.ops.test_nebius_development_pool_install import (
     tls_material as tls_material,
 )
 
