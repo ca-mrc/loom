@@ -1,10 +1,12 @@
 """Runtime successors consume closed pool evidence without replaying installation."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib
 import json
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from tests.ops.test_nebius_development_pool_install import (
@@ -98,6 +100,32 @@ def reference(loader, completed_pool):
         operation_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
 
+def publication_inputs(completed_pool):
+    from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
+
+    from loom_service.environment_management.candidates import ProtectedPublication
+    from loom_service.environment_management.manager import CandidateBundle
+
+    inputs = completed_pool[3].server.request.retained.inputs
+    candidate, profile = copy.deepcopy(inputs.candidate), copy.deepcopy(inputs.profile)
+    candidate.update(candidate_sha='e' * 40, source_archive_sha256='sha256:' + '5' * 64, run_id=12345)
+    candidate['images']['service']['image_ref'] = candidate['images']['service']['image_ref'].split('@')[0] + '@sha256:' + '6' * 64
+    profile.update(candidate_sha=candidate['candidate_sha'], task_image_ref=candidate['images']['service']['image_ref'])
+    source = PreparedDevelopmentSource(source_sha=candidate['candidate_sha'], source_archive_sha256=candidate['source_archive_sha256'])
+    selected = ProtectedPublication(candidate_id=UUID('47f27bd6-bfd9-4ae8-a585-82916a848c85'),
+        source_sha=source.source_sha, run_id=12345, run_attempt=1, artifact_id=23456,
+        artifact_sha256='sha256:' + '7' * 64, pull_request=2399)
+    return source, selected, CandidateBundle(selected.candidate_id, candidate, profile)
+
+
+def runtime_publication(completed_pool):
+    from scripts.ops import nebius_development_runtime_render as runtime
+
+    if not hasattr(runtime, 'DevelopmentRuntimePublication'):
+        pytest.fail('source-bound development runtime publication is missing')
+    return runtime.DevelopmentRuntimePublication(*publication_inputs(completed_pool))
+
+
 def test_completed_pool_load_is_readonly_and_keeps_actual_identities(completed_pool, monkeypatch):
     from scripts.ops import nebius_development_pool_install, nebius_development_pool_intent
 
@@ -135,7 +163,8 @@ def test_manager_runtime_consumes_closed_catalog_and_retains_source_identity(com
     name = 'scripts.ops.nebius_development_runtime_render'
     if importlib.util.find_spec(name) is None:
         pytest.fail('retained development manager runtime preparation is missing')
-    prepared = importlib.import_module(name).prepare_manager_runtime(reference(module(), completed_pool))
+    publication = runtime_publication(completed_pool)
+    prepared = importlib.import_module(name).prepare_manager_runtime(reference(module(), completed_pool), publication=publication)
     retained = prepared.retained
     spec = retained.request.registration.spec
     before = retained.request.retained.inputs.deployment
@@ -143,6 +172,8 @@ def test_manager_runtime_consumes_closed_catalog_and_retains_source_identity(com
     builder, = [row for row in spec.machines if row.workload_scope == 'application_builder']
     assert prepared.deployment.application_builder_machine_id == builder.machine_id
     assert prepared.delivery.deployment['spec']['replicas'] == 0
+    assert prepared.delivery.deployment['spec']['template']['spec']['containers'][0]['image'] == publication.bundle.candidate['images']['service']['image_ref']
+    assert prepared.original['spec']['template']['spec']['containers'][0]['image'] != publication.bundle.candidate['images']['service']['image_ref']
     assert prepared.original['metadata']['uid'] == completed_pool[3].server.store.resources['Deployment:loom-service']['metadata']['uid']
     old_volumes = {row['name']: row for row in prepared.original['spec']['template']['spec']['volumes']}
     volumes = {row['name']: row for row in prepared.delivery.deployment['spec']['template']['spec']['volumes']}
@@ -160,6 +191,29 @@ def test_manager_runtime_consumes_closed_catalog_and_retains_source_identity(com
     else:
         assert prepared.requires_source_material is True
     assert prepared.deployment.installation.applications.shared == before.installation.applications.shared
+
+
+@pytest.mark.parametrize('damage', ['source', 'archive', 'profile', 'selection', 'run'])
+def test_runtime_rejects_mixed_source_publication_before_delivery(completed_pool, damage):
+    from dataclasses import replace
+
+    from scripts.ops import nebius_development_runtime_render as runtime
+
+    target = runtime_publication(completed_pool)
+    if damage == 'source':
+        target = replace(target, source=target.source.model_copy(update={'source_sha': 'f' * 40}))
+    elif damage == 'archive':
+        target.bundle.candidate['source_archive_sha256'] = 'sha256:' + 'f' * 64
+    elif damage == 'profile':
+        target.bundle.profile['candidate_sha'] = 'f' * 40
+    elif damage == 'selection':
+        target = replace(target, publication=target.publication.model_copy(update={'candidate_id': UUID('47f27bd6-bfd9-4ae8-a585-82916a848c86')}))
+    else:
+        target.bundle.candidate['run_id'] += 1
+    calls = len(completed_pool[3].server.calls)
+    with pytest.raises(ValueError, match='development manager runtime unqualified'):
+        runtime.prepare_manager_runtime(reference(module(), completed_pool), publication=target)
+    assert len(completed_pool[3].server.calls) == calls
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
