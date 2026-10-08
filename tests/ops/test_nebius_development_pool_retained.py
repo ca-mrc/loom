@@ -523,6 +523,9 @@ class RuntimeParentAPI:
     def qualify(self, *, plan, state_dir, record):
         assert plan == self.plan
         assert record['input_digest'] == plan.input_digest
+        journal = state_dir / 'installation.json'
+        if journal.exists():
+            assert record == json.loads(journal.read_bytes())
 
     def resources(self, phase):
         self.visits.append(phase)
