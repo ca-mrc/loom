@@ -164,10 +164,13 @@ def pool_inputs(request, retained):
                 target['target_id'] = config['target_id']
         for profile in value['profiles']['execution']:
             profile['runtime']['target_id'] = config['target_id']
+            profile['runtime']['credential_broker_url'] = 'http://loom-llm-gateway.loom-dev.svc.cluster.local:9100/internal/service-execution'
         for profile in value['profiles']['task_images']:
             profile['target']['target_id'] = config['target_id']
         if mode == 'foundation-runtime-bad-keyring':
             value['profiles']['image_admission_keyring'] = {'schema_version': 1, 'keys': []}
+        elif mode == 'foundation-runtime-bad-broker':
+            value['profiles']['execution'][0]['runtime']['credential_broker_url'] = 'http://loom-llm-gateway.loom-staging.svc.cluster.local:9100/internal/service-execution'
         elif mode == 'foundation-runtime-bad-target':
             for target in participant['targets']:
                 if 'trial' in target['workload_kinds']:
@@ -671,7 +674,7 @@ def test_shared_runtime_wires_real_predecessors_without_changing_artifact_proven
     assert len(completed_pool[3].server.calls) == before_calls
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-keyring', 'foundation-runtime-bad-target'], indirect=True)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-keyring', 'foundation-runtime-bad-target', 'foundation-runtime-bad-broker'], indirect=True)
 def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(completed_pool):
     name = 'scripts.ops.nebius_development_shared_runtime'
     if importlib.util.find_spec(name) is None:
@@ -680,6 +683,45 @@ def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(comple
     before_calls = len(completed_pool[3].server.calls)
     with pytest.raises(ValueError, match='development shared runtime unqualified'):
         importlib.import_module(name).prepare_shared_runtime(database)
+    assert len(completed_pool[3].server.calls) == before_calls
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool):
+    name = 'scripts.ops.nebius_development_actuator_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fresh development actuator preparation is missing')
+    database = database_runtime(completed_pool)
+    before_calls = len(completed_pool[3].server.calls)
+    value = importlib.import_module(name).prepare_actuator_runtime(database)
+    spec = database.manager.retained.request.registration.spec
+    participant, = spec.participants
+    deployment = value.deployment
+    assert 'uid' not in deployment['metadata']
+    assert deployment['metadata']['namespace'] == participant.execution_namespace.name
+    assert deployment['spec']['replicas'] == 0
+    assert deployment['spec']['strategy'] == {'type': 'Recreate'}
+    pod = deployment['spec']['template']['spec']
+    container, = pod['containers']
+    assert container['image'] == database.manager.publication.bundle.candidate['images']['execution_actuator']['image_ref']
+    settings = {row['name']: row for row in container['env']}
+    assert settings['LOOM_EXECUTION_ACTUATOR_DB_URL']['valueFrom']['secretKeyRef'] == {
+        'name': 'loom-dev-runtime-aecc7407b7b84c388d1fbca5dca9840f', 'key': 'actuator-url'}
+    assert settings['LOOM_EXECUTION_ACTUATOR_CREDENTIAL_BROKER_URL']['value'] == 'http://loom-llm-gateway.loom-dev.svc.cluster.local:9100/internal/service-execution'
+    assert json.loads(settings['LOOM_EXECUTION_ACTUATOR_GLOBAL_POOL']['value'])['participant'] == participant.model_dump(mode='json')
+    build, = spec.profiles.task_images
+    assert json.loads(settings['LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER']['value']) == build.settings.model_dump(mode='json')
+    assert json.loads(settings['LOOM_EXECUTION_ACTUATOR_NODE_SELECTOR']['value']) == spec.profiles.execution[0].runtime.node_selector
+    assert pod['nodeSelector'] == {'loom.nebius/node-role': 'system', 'loom.nebius/platform': 'integration'}
+    assert pod['securityContext']['runAsUser'] == 65532
+    assert all(row['image'] == database.manager.publication.bundle.candidate['images']['service']['image_ref'] for row in pod['initContainers'])
+    namespaces = {doc['metadata']['namespace'] for doc in value.authority if doc['kind'] == 'Role'}
+    assert namespaces == {participant.execution_namespace.name, participant.build_namespace.name}
+    rules = [rule for doc in value.authority for rule in doc.get('rules', [])]
+    assert rules and all(set(rule['verbs']) <= {'get', 'list'} for rule in rules)
+    assert {'apiGroups': [''], 'resources': ['nodes', 'nodes/stats'], 'verbs': ['get']} in rules
+    assert not any('nodes/proxy' in rule['resources'] for rule in rules)
+    assert all(doc.get('metadata', {}).get('namespace') != 'loom-staging' for doc in value.authority)
     assert len(completed_pool[3].server.calls) == before_calls
 
 
