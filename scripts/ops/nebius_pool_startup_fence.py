@@ -13,7 +13,7 @@ from uuid import UUID
 from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_switch import _matches, _stable
-from scripts.ops.nebius_pool_activation_stage import activation_record
+from scripts.ops.nebius_pool_activation_stage import _activation_record, activation_record
 from scripts.ops.nebius_pool_cutover import PoolCutoverRequest
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_startup import (
@@ -168,7 +168,11 @@ def fenced_startup_options(request: PoolCutoverRequest, *, state: Path, anchor: 
     """Extend only the anchored recovery projection; initial startup stays strict."""
     if not startup_fence_exists(request, state=state, anchor=anchor):
         return choices
-    _, record = _fence_record(request, state=state, anchor=anchor, closed=closed, targets=targets, startup=startup)
+    # The sole caller just read closed/startup in this local projection.
+    # Cancellation and fence records themselves must still be read now.
+    _, cancellation = _activation_record(request, state=state, anchor=anchor)
+    _, record = _read_fence_record(request, state=state, anchor=anchor, closed=closed,
+        targets=targets, startup=startup, cancellation=cancellation)
     if record is None:
         raise ValueError
     result = dict(choices)

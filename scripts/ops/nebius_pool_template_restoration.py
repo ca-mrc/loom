@@ -20,7 +20,7 @@ from scripts.ops.nebius_pool_gateway_retirement import (
 from scripts.ops.nebius_pool_machine_retirement import _read_machine_record
 from scripts.ops.nebius_pool_migration import _hash
 from scripts.ops.nebius_pool_retirement import retirement_documents
-from scripts.ops.nebius_pool_shutdown import _shutdown_record
+from scripts.ops.nebius_pool_shutdown import ShutdownRecord, _shutdown_record
 from scripts.ops.nebius_pool_startup_fence import observe_recovery_workloads
 
 from loom.nebius_platform_render import digest
@@ -52,10 +52,15 @@ def template_restoration_exists(request: PoolCutoverRequest, *, state: Path, anc
 
 def _template_record(request: PoolCutoverRequest, *, state: Path, anchor: Path
                      ) -> tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]:
-    # Read this shared ancestry once within the local record load. Each reader
-    # still reads its own current journal, anchor and parent hash from disk.
-    closed, _, stopped, _, shutdown = _shutdown_record(request, state=state, anchor=anchor)
-    _, _, machine = _read_machine_record(request, state=state, anchor=anchor, targets=stopped, shutdown=shutdown)
+    shutdown = _shutdown_record(request, state=state, anchor=anchor)
+    return _read_template_record(request, state=state, anchor=anchor, shutdown=shutdown)
+
+
+def _read_template_record(request: PoolCutoverRequest, *, state: Path, anchor: Path, shutdown: ShutdownRecord
+                          ) -> tuple[Documents, Documents, Documents, dict[str, Any], dict[str, Any] | None]:
+    # Each current journal, anchor and parent hash is still freshly read here.
+    closed, _, stopped, _, shutdown_record = shutdown
+    _, _, machine = _read_machine_record(request, state=state, anchor=anchor, targets=stopped, shutdown=shutdown_record)
     _, _, _, gateway = _read_gateway_record(request, state=state, anchor=anchor, machine=machine)
     if gateway is None or any(row['phase'] != 'restricted' for row in gateway['roles'].values()):
         raise ValueError('pool_template_restoration_gateway_retirement_required')
@@ -107,6 +112,12 @@ def restored_template_options(request: PoolCutoverRequest, *, state: Path, ancho
     if not template_restoration_exists(request, state=state, anchor=anchor):
         return choices
     _, before, targets, _, record = _template_record(request, state=state, anchor=anchor)
+    return _restored_template_options(choices=choices, before=before, targets=targets, record=record)
+
+
+def _restored_template_options(*, choices: dict[str, tuple[dict[str, Any], ...]],
+                               before: Documents, targets: Documents, record: dict[str, Any] | None
+                               ) -> dict[str, tuple[dict[str, Any], ...]]:
     if record is None or set(choices) != set(before):
         raise ValueError
     if any(len(choices[key]) != 1 or _stable(choices[key][0]) != value for key, value in before.items()):

@@ -2152,6 +2152,9 @@ is still read from disk and checked against its parent hash and expected phase.
 This reuse ends when that record read returns; subsequent observations and
 dispatches reread the evidence. It does not cache mutable journals or live
 authority, and does not remove any ledger, process-drain, fence or CAS checks.
+Successor drain builds its template projection and shutdown record together for
+each observation. The observation after the workload and process reads starts
+again from disk; it never reuses the evidence read before those HTTP requests.
 
 ## Refresh the retained application manager
 
