@@ -28,12 +28,17 @@ from loom.nebius_application_contract import (
     ApplicationStatusV1,
 )
 from loom.nebius_application_evidence import ApplicationOperationEvidenceV1
+from loom.nebius_application_versions import (
+    ApplicationReleaseCompatibilityV1,
+    ApplicationVersionsV1,
+)
 from loom_service.application_management.build_registry import ApplicationBuildRegistry
 from loom_service.application_management.login import ApplicationLogin
 from loom_service.application_management.manager import ApplicationManager
 from loom_service.application_management.operation_evidence import read_operation_evidence
 from loom_service.application_management.service_runtime import ApplicationServiceRuntime
 from loom_service.application_management.source_upload import ApplicationSourceUploader
+from loom_service.application_management.versions import read_application_versions
 from loom_service.environment_management.registry import ManagementError, owner_identity
 from loom_service.routes.environments import ManagementPrincipal
 
@@ -165,6 +170,24 @@ async def list_applications(request: Request, principal: ManagementPrincipal) ->
 @router.get("/applications/{application_id}")
 async def application_status(request: Request, application_id: UUID, principal: ManagementPrincipal) -> ApplicationStatusV1:
     return await manager(request).registry.status(application_id, principal=principal)
+
+
+@router.get("/applications/{application_id}/versions")
+async def application_versions(request: Request, response: Response, application_id: UUID,
+                               principal: ManagementPrincipal) -> ApplicationVersionsV1:
+    service = manager(request)
+    result = await read_application_versions(service.registry.session_factory, application_id, principal=principal,
+                                             shared_schema_revision=service.shared.schema_revision)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.get("/application-releases/{release_id}/compatibility")
+async def application_release_compatibility(request: Request, response: Response, release_id: UUID,
+                                            principal: ManagementPrincipal) -> ApplicationReleaseCompatibilityV1:
+    result = await manager(request).check_release(principal, release_id)
+    response.headers["Cache-Control"] = "no-store"
+    return result
 
 
 @router.post("/applications/{application_id}/login")

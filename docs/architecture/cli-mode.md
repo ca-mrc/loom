@@ -82,6 +82,26 @@ application versions select frontend/API images; they do not replace shared
 controllers or select a task's execution image. See the
 [application contract](nebius-primary-platform.md#personal-application-control).
 
+The [personal development workflow](../runbooks/personal-development.md) walks
+through source capture, building, deployment, login, tasks and retained teardown.
+`loom dev app check-release RELEASE_ID` checks a qualified release against the
+manager's configured shared schema before deployment (exit 0 for a match, 1 for
+a mismatch or request failure). It does not probe live database state or grant
+migration authority. Schema-changing experiments use a disposable local database.
+
+`loom dev app versions APPLICATION_ID` reports source and frontend/API image
+digests for the requested release and the last completed deployment. Pending
+updates can show different versions; suspended/destroyed applications retain
+history. These are owner-scoped journal observations, not live Pod readiness.
+Both commands support `--json`; the existing `status` response stays unchanged.
+
+Trial detail and `loom eval trial show TRIAL_ID` expose `execution_provenance`
+for the current attempt. It reports frozen task, agent and runtime image digests
+with `planned`, `execution_started`, or `runtime_reported` evidence; absent or
+unqualified evidence is `unavailable`. A runtime report must match that attempt's
+lease, generation and committed output. These fields do not infer execution from
+the personal API version or claim independent container imageID observation.
+
 ## Watching hosted trials
 
 `loom eval trial show TRIAL_ID --timeline` displays the public progress stage,

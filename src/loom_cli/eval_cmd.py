@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shlex
 import sys
 import time
@@ -424,6 +425,29 @@ def _print_execution_selection(evidence: Any) -> None:
         print("  effective: (not compiled yet)")
 
 
+def _print_execution_provenance(evidence: Any) -> None:
+    """Show only attempt-bound service evidence, including its limits."""
+    labels = {
+        "planned": "frozen plan; execution not observed",
+        "execution_started": "frozen plan; execution start observed",
+        "runtime_reported": "frozen plan; committed runtime report matched",
+    }
+    if (not isinstance(evidence, dict) or not isinstance(evidence.get("state"), str)
+            or evidence["state"] not in labels):
+        print("execution_images: (unavailable)")
+        return
+    print(f"execution_images: {labels[evidence['state']]}")
+    attempt, generation = evidence.get("attempt"), evidence.get("resource_generation")
+    if type(attempt) is int and attempt > 0 and type(generation) is int and generation > 0:
+        print(f"  attempt={attempt} resource_generation={generation}")
+    for field in ("task_image_digest", "agent_image_digest", "runtime_image_digest",
+                  "runtime_binary_sha256", "candidate_sha", "runtime_contract_sha256"):
+        value = evidence.get(field)
+        pattern = r"[0-9a-f]{40}" if field == "candidate_sha" else r"sha256:[0-9a-f]{64}"
+        if isinstance(value, str) and re.fullmatch(pattern, value):
+            print(f"  {field}: {value}")
+
+
 def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> None:
     print(f"id:               {item.get('id') or item.get('trial_id')}")
     print(f"task_id:          {item.get('task_id', '(unknown)')}")
@@ -433,6 +457,7 @@ def _print_trial_summary(item: dict[str, Any], *, timeline: bool = False) -> Non
     if isinstance(materialization, dict):
         _print_network_policy(materialization.get("network_policy"))
     _print_execution_selection(item.get("execution_selection"))
+    _print_execution_provenance(item.get("execution_provenance"))
     if item.get("agent_name") is not None:
         print(f"agent:            {item['agent_name']}")
     if item.get("model") is not None:

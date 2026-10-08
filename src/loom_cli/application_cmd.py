@@ -16,6 +16,7 @@ from loom.nebius_application_contract import (
     ApplicationOperationRequestV1,
 )
 from loom_cli.application_client import ApplicationClient
+from loom_cli.application_versions import print_application_versions, print_release_compatibility
 from loom_cli.contexts import current_context
 from loom_cli.server_client import HttpStatusError, NotLoggedInError
 
@@ -64,6 +65,20 @@ def _run(args: argparse.Namespace) -> int:
                     print("Task execution: not checked")
                     print("Reports management configuration and worker health only. "
                           "Storage access, pool admission, and deployed applications are not checked.")
+            elif command == "versions":
+                assert identity is not None
+                versions = client.versions(identity)
+                if args.json:
+                    print(versions.model_dump_json())
+                else:
+                    print_application_versions(versions)
+            elif command == "check-release":
+                compatibility = client.check_release(UUID(args.release_id))
+                if args.json:
+                    print(compatibility.model_dump_json())
+                else:
+                    print_release_compatibility(compatibility)
+                return 0 if compatibility.compatibility == "compatible" else 1
             elif request is not None:
                 _retry_hint(["create", request.slug, "--release", str(request.release_id)], key)
                 print(client.create(request, idempotency_key=key).model_dump_json())
@@ -117,7 +132,7 @@ def _run(args: argparse.Namespace) -> int:
     except (NotLoggedInError, HttpStatusError) as exc:
         print(str(exc), file=sys.stderr)
     except httpx.RequestError as exc:
-        hint = ("Run this read-only command again." if args.application_command in {"evidence", "capabilities"}
+        hint = ("Run this read-only command again." if args.application_command in {"evidence", "capabilities", "versions", "check-release"}
                 else "Reuse the printed retry command.")
         print(f"Management request failed ({type(exc).__name__}); no automatic retry. {hint}", file=sys.stderr)
     except OSError:
@@ -134,6 +149,12 @@ def add_application_subparser(commands: argparse._SubParsersAction) -> None:  # 
     sub = parser.add_subparsers(dest="application_command", required=True)
     capabilities = sub.add_parser("capabilities", help="Read management configuration and worker health; not execution readiness")
     capabilities.add_argument("--json", action="store_true", help="Print the typed capability report as JSON")
+    versions = sub.add_parser("versions", help="Read requested and last completed frontend/API versions")
+    versions.add_argument("application_id")
+    versions.add_argument("--json", action="store_true", help="Print the typed version report as JSON")
+    compatibility = sub.add_parser("check-release", help="Check a release against the configured shared schema before deployment")
+    compatibility.add_argument("release_id")
+    compatibility.add_argument("--json", action="store_true", help="Print the typed compatibility report as JSON")
     create = sub.add_parser("create", help="Create a personal application from a qualified release")
     create.add_argument("slug")
     create.add_argument("--release", required=True, help="Qualified application release UUID")
