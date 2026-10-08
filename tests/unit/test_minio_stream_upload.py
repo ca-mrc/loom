@@ -184,11 +184,12 @@ async def test_stream_completion_rejects_ambiguous_metadata_name_aliases(monkeyp
 
 
 async def test_stream_completion_preserves_case_sensitive_identity_value(monkeypatch):
+    monkeypatch.setattr("loom.trajectory.storage.uuid4", lambda: SimpleNamespace(hex="a" * 32))
+
     class ChangedIdentityS3(VersionlessCompletionS3):
         def head_object(self, **kwargs):
             response = super().head_object(**kwargs)
-            identity = response["Metadata"]["loom-write-id"]
-            response["Metadata"] = {"Loom-Write-Id": identity + "foreign"}
+            response["Metadata"] = {"Loom-Write-Id": "A" * 32}
             return response
 
     store = make_store(monkeypatch, ChangedIdentityS3())
