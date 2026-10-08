@@ -89,6 +89,26 @@ def prepare(pool_inputs):
     return module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
 
 
+def test_intent_accepts_distinct_task_bundle_and_application_source_buckets(pool_inputs, retained):
+    reference, catalog, tokens = pool_inputs
+    config = retained[3].deployment.installation.foundation.platform_config
+    assert config['buckets']['artifacts'] != config['buckets']['source']
+    for profile in catalog['profiles']['task_images']:
+        profile['settings']['source_bucket'] = config['buckets']['artifacts']
+    intent = module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
+    assert intent.catalog['profiles']['task_images'][0]['settings']['source_bucket'] == config['buckets']['artifacts']
+    assert intent.catalog['profiles']['application_images'][0]['settings']['source_bucket'] == config['buckets']['source']
+
+
+def test_intent_rejects_task_profile_bound_to_application_source_bucket(pool_inputs, retained):
+    reference, catalog, tokens = pool_inputs
+    config = retained[3].deployment.installation.foundation.platform_config
+    for profile in catalog['profiles']['task_images']:
+        profile['settings']['source_bucket'] = config['buckets']['source']
+    with pytest.raises(ValueError, match='development pool intent unqualified'):
+        module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
+
+
 def test_complete_intent_binds_only_observed_namespace_uids(pool_inputs):
     intent = prepare(pool_inputs)
     row, = pool_inputs[1]['participants']
