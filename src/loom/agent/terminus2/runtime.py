@@ -607,7 +607,19 @@ class LoomTerminus2Runtime:
             cp_client=self.cp_client,
         )
         _require_attempt_mutation_active(trajectory, self._attempt_deadline)
-        await bridge.emit_provenance()
+        # These compatibility overrides are observable behavior, independent
+        # of Harbor's source revision. Reuse the exact constructor options in
+        # provenance so a version upgrade cannot silently claim default parity.
+        harbor_options: dict[str, Any] = {
+            "max_turns": None if self.continue_until_timeout else self.max_turns,
+            "record_terminal_session": True,
+            "enable_summarize": False,
+        }
+        await bridge.emit_provenance(effective_options={
+            **harbor_options,
+            "continue_until_timeout": self.continue_until_timeout,
+            "multi_model": self.multi_model is not None and self.multi_model.enabled,
+        })
 
         harbor_env = LoomHarborEnvironment.create(
             driver=env,
@@ -620,12 +632,10 @@ class LoomTerminus2Runtime:
         agent = terminus2_cls(
             logs_dir=logs_root,
             model_name=_harbor_model_name(self.model),
-            max_turns=None if self.continue_until_timeout else self.max_turns,
             api_base=api_base,
             session_id=str(self.trial_id),
-            record_terminal_session=True,
-            enable_summarize=False,
             llm_kwargs={**sanitize_request_extras(self.request_params), "api_key": step_token},
+            **harbor_options,
         )
         if self.continue_until_timeout:
             assert self._attempt_deadline is not None

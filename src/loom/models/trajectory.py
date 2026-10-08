@@ -377,6 +377,7 @@ class Terminus2RuntimeProvenanceEvent(_EventBase):
     template_hashes: dict[str, str]
     terminal_image_digest: str | None = None
     benchmark_provenance: dict[str, str] | None = None
+    effective_options: dict[str, Any] = Field(default_factory=dict)
 
 
 class Terminus2UserPromptEvent(_EventBase):
