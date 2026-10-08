@@ -1037,3 +1037,34 @@ def test_runtime_network_refuses_changed_foundation_without_emitting_policy(comp
     request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
     with pytest.raises(ValueError, match='development runtime network unqualified'):
         network_runtime(request)
+
+
+def build_policy(request):
+    value = importlib.import_module('scripts.ops.nebius_development_build_policy')
+    if not hasattr(value, 'prepare_build_policy'):
+        pytest.fail('closed development build admission request binding is missing')
+    return value.prepare_build_policy(request)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_build_policy_is_bound_to_retained_namespace_without_psa_change(completed_pool):
+    request = database_runtime(completed_pool)
+    policies = build_policy(request)
+    policy, binding = policies
+    assert policy['kind'] == 'ValidatingAdmissionPolicy' and policy['spec']['failurePolicy'] == 'Fail'
+    assert binding['kind'] == 'ValidatingAdmissionPolicyBinding'
+    assert binding['spec']['validationActions'] == ['Deny']
+    assert binding['spec']['matchResources'] == {'namespaceSelector': {
+        'matchLabels': {'kubernetes.io/metadata.name': 'loom-nebius-dev-execution-build'}}}
+    assert policy['metadata']['labels']['loom.nebius/development-runtime-operation'] == str(request.operation_id)
+    assert all('namespace' not in row['metadata'] for row in policies)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_build_policy_rejects_changed_retained_foundation(completed_pool):
+    request = database_runtime(completed_pool)
+    request.foundation.inputs.config['namespace'] = 'loom-nebius-staging'
+    with pytest.raises(ValueError, match='development build policy unqualified'):
+        build_policy(request)
