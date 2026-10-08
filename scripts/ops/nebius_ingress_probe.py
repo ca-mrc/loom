@@ -68,7 +68,7 @@ def probe_shared_development(*, address: str, port: int, hostname: str, candidat
     if not re.fullmatch(r'[0-9a-f]{40}', candidate):
         raise ProbeError('invalid shared development candidate')
     probes: list[tuple[str, str | None]] = [
-        (path, None) for path in ('/api/v1/health', '/api/v1/version', '/loom-frontend-config.json')]
+        (path, None) for path in ('/', '/api/v1/health', '/api/v1/version', '/loom-frontend-config.json')]
     probes += [('/api/v1/health/ready', token) for token in (None, 'loom-dev-invalid-probe-token')]
     try:
         for path, token in probes:
@@ -87,6 +87,11 @@ def probe_shared_development(*, address: str, port: int, hostname: str, candidat
                         continue
                     if response.status != 200:
                         raise ValueError()
+                    if path == '/':
+                        if (response.getheader('Content-Type', '').split(';')[0].strip().lower() != 'text/html'
+                                or b'<!doctype html>' not in raw.lower() or b'id="root"' not in raw):
+                            raise ValueError()
+                        continue
                     value = json.loads(raw)
                     if (not isinstance(value, dict)
                             or (path.endswith('/health') and value.get('status') != 'ok')

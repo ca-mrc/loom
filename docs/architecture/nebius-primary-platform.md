@@ -1612,8 +1612,8 @@ foundation's configured hostname must be one label under the child zone and is
 reserved against personal applications. Both namespace and controller Pod labels
 select the allowed ingress peer; only the shared web/API ports are exposed.
 The foundation's retained workload snapshots, database and disabled schedulers
-remain unchanged. DNS/TLS, route conflicts, actual foundation source and public
-authentication rejection are checked; ordinary-user login and execution are
+remain unchanged. DNS/TLS, route conflicts, browser HTML shell, actual foundation
+source and public authentication rejection are checked; ordinary-user login and execution are
 separate acceptance gates. The default private-only path and its input identity
 remain unchanged. The option is frozen before installation, not a replay-time
 upgrade switch; manager-only TLS renewal accepts either original phase history.

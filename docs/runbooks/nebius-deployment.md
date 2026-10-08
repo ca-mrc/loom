@@ -344,8 +344,8 @@ foundation workload or execution setting changes.
 
 Preflight checks normal DNS, trusted TLS and competing HTTP/TCP routes before
 writes. Final proof checks the retained foundation candidate (which may differ
-from the manager candidate), the frontend's development identity/API origin,
-health and rejection of unauthenticated/invalid-token requests. It does not log
+from the manager candidate), the browser HTML shell at `/`, the frontend's
+development identity/API origin, health and rejection of unauthenticated/invalid-token requests. It does not log
 in as an ordinary owner or prove task execution. The shared application remains
 an execution-closed bootstrap until the separately qualified pool activation.
 
