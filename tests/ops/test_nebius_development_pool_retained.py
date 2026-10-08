@@ -171,6 +171,8 @@ def pool_inputs(request, retained):
             value['profiles']['image_admission_keyring'] = {'schema_version': 1, 'keys': []}
         elif mode == 'foundation-runtime-bad-broker':
             value['profiles']['execution'][0]['runtime']['credential_broker_url'] = 'http://loom-llm-gateway.loom-staging.svc.cluster.local:9100/internal/service-execution'
+        elif mode == 'foundation-runtime-bad-account':
+            value['profiles']['execution'][0]['runtime']['service_account_name'] = 'default'
         elif mode == 'foundation-runtime-bad-target':
             for target in participant['targets']:
                 if 'trial' in target['workload_kinds']:
@@ -687,7 +689,7 @@ def test_shared_runtime_rejects_incompatible_closed_catalog_before_writes(comple
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
-def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool):
+def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool, monkeypatch):
     name = 'scripts.ops.nebius_development_actuator_runtime'
     if importlib.util.find_spec(name) is None:
         pytest.fail('fresh development actuator preparation is missing')
@@ -722,7 +724,23 @@ def test_fresh_actuator_uses_catalog_and_only_read_authority(completed_pool):
     assert {'apiGroups': [''], 'resources': ['nodes', 'nodes/stats'], 'verbs': ['get']} in rules
     assert not any('nodes/proxy' in rule['resources'] for rule in rules)
     assert all(doc.get('metadata', {}).get('namespace') != 'loom-staging' for doc in value.authority)
+    from loom_execution_actuator.config import ExecutionActuatorSettings
+    for row in container['env']:
+        if 'value' in row:
+            monkeypatch.setenv(row['name'], row['value'])
+    parsed = ExecutionActuatorSettings(db_url='postgresql+psycopg://loom_actuator:test@db/loom', controller_id='dev-actuator-test')
+    assert parsed.global_pool.participant == participant
+    assert parsed.task_image_builder == build.settings
+    assert parsed.service_account_name == 'loom-execution-attempt'
     assert len(completed_pool[3].server.calls) == before_calls
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-bad-account'], indirect=True)
+def test_fresh_actuator_rejects_foreign_task_service_account(completed_pool):
+    from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
+    database = database_runtime(completed_pool)
+    with pytest.raises(ValueError, match='development actuator runtime unqualified'):
+        prepare_actuator_runtime(database)
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
