@@ -500,6 +500,138 @@ def test_runtime_parent_rejects_shared_cloud_authority_or_changed_predecessor(co
         runtime.prepare_runtime_install(request)
 
 
+class RuntimeParentAPI:
+    def __init__(self, request, plan):
+        from scripts.ops.nebius_ingress_stage import _key
+        from tests.ops.test_nebius_development_runtime_transition import RuntimeAPI
+        from tests.ops.test_nebius_management_stage import PhaseAPI
+
+        self.request, self.plan = request, plan
+        self.store = PhaseAPI(request.database.manager.retained.request.retained.binding)
+        self.store.key = _key
+        self.store.resources.update(copy.deepcopy(plan.originals))
+        for row in self.store.resources.values():
+            row['metadata']['resourceVersion'] = '1'
+        self.transition = RuntimeAPI({})
+        self.transition.rows = self.store.resources
+        self.transition.ready = True
+        self.database_complete = False
+        self.catalog_complete = False
+        self.visits = []
+        self.inspections = 0
+
+    def qualify(self, *, plan, state_dir, record):
+        assert plan == self.plan
+        assert record['input_digest'] == plan.input_digest
+
+    def resources(self, phase):
+        self.visits.append(phase)
+        return self.store
+
+    def workloads(self, phase):
+        self.visits.append(phase)
+        return self.transition
+
+    def report(self, phase, state):
+        if not getattr(self, phase + '_complete'):
+            return None
+        document = next(row for row in self.plan.fixed[phase].values() if row['kind'] == 'Job')
+        key = self.store.key(document)
+        if phase == 'database':
+            payload = {'status': 'development_runtime_database_installed',
+                'operation_id': str(self.request.database.operation_id), 'role': 'loom_actuator',
+                'role_oid': 17000, 'token_sha256': hashlib.sha256(('loom_br_' + 'r' * 64).encode()).hexdigest()}
+        else:
+            from loom.pipeline.keys import canonical_digest
+
+            config = next(row for row in self.plan.fixed[phase].values() if row['kind'] == 'ConfigMap')
+            raw = json.loads(config['data']['catalog.json'])
+            payload = {'operation_id': str(self.request.database.operation_id),
+                'target_id': raw['topology']['targets'][0]['target_id'], 'catalog_sha256': canonical_digest(raw)}
+        return {'job_uid': self.store.resources[key]['metadata']['uid'],
+            'pod_uid': '27d6a159-4df3-4bbf-8722-897b2b3c619b', phase: payload}
+
+    def inspect_runtime(self, *, plan, state_dir, record):
+        self.qualify(plan=plan, state_dir=state_dir, record=record)
+        self.inspections += 1
+
+
+def parent_install_fixture(completed_pool, publisher_cloud):
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    if not hasattr(runtime, 'install_development_runtime'):
+        pytest.fail('connected anchored development runtime parent is missing')
+    plan = runtime.prepare_runtime_install(request)
+    api = RuntimeParentAPI(request, plan)
+    manager = request.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'runtime-installation'
+    anchor = Path(manager.operation['anchor_dir']) / 'runtime-installation.json'
+    return runtime, request, api, state, anchor
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_parent_orders_sql_catalog_start_and_replays_read_only(completed_pool, publisher_cloud):
+    runtime, request, api, state, anchor = parent_install_fixture(completed_pool, publisher_cloud)
+    def run(execute=True):
+        return runtime.install_development_runtime(request=request, api=api, execute=execute)
+    assert run(False)['status'] == 'development_runtime_preflight_qualified'
+    assert not state.exists() and not anchor.exists() and not api.store.creates
+    assert run()['status'] == 'pending_database'
+    assert len(api.store.creates) == 4 and not api.transition.patches
+    assert anchor.is_file()
+    api.database_complete = True
+    assert run()['status'] == 'pending_catalog'
+    assert api.store.resources['Deployment:loom-dev:loom-service']['spec']['replicas'] == 0
+    assert api.store.resources['Deployment:loom-dev:loom-control-plane']['spec']['replicas'] == 1
+    assert api.store.resources['Deployment:loom-nebius-management-dev:loom-service']['spec']['replicas'] == 1
+    assert all(row['spec'].get('replicas', 0) == 0 and row['spec'].get('suspend', True)
+        for key, row in api.store.resources.items() if key in api.plan.fixed['workloads'])
+    api.catalog_complete = True
+    result = run()
+    assert result['status'] == 'development_runtime_installed_closed'
+    assert result['admission_open'] is False and result['writer_migration_complete'] is False
+    assert api.store.resources['Deployment:loom-dev:loom-service']['spec']['replicas'] == 1
+    saved = json.loads((state / 'installation.json').read_bytes())
+    assert all(row['status'] == 'complete' for row in saved['phases'].values())
+    for key in api.plan.fixed['workloads']:
+        spec = api.store.resources[key]['spec']
+        assert spec.get('replicas', 1) == 1 and spec.get('suspend', False) is False
+    before = (list(api.store.creates), list(api.transition.patches), list(api.visits))
+    assert run() == result
+    assert (api.store.creates, api.transition.patches, api.visits) == before
+    assert api.inspections >= 1
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['lost-child', 'lost-parent', 'changed-child', 'phase-jump'])
+def test_runtime_parent_refuses_lost_or_rewritten_evidence_before_further_writes(completed_pool, publisher_cloud, damage):
+    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    def run():
+        return runtime.install_development_runtime(request=request, api=api, execute=True)
+    assert run()['status'] == 'pending_database'
+    before = list(api.store.creates)
+    if damage == 'lost-child':
+        (state / 'database/stage.json').unlink()
+    elif damage == 'lost-parent':
+        (state / 'installation.json').unlink()
+    elif damage == 'changed-child':
+        api.database_complete = True
+        assert run()['status'] == 'pending_catalog'
+        before = list(api.store.creates)
+        path = state / 'database/stage.json'
+        path.write_bytes(path.read_bytes() + b' ')
+    else:
+        path = state / 'installation.json'
+        record = json.loads(path.read_bytes())
+        record['phases']['start']['status'] = 'started'
+        path.write_text(json.dumps(record))
+    patches = list(api.transition.patches)
+    with pytest.raises(ValueError, match='development runtime installation unqualified'):
+        run()
+    assert api.store.creates == before and api.transition.patches == patches
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
 def test_runtime_database_delivery_keeps_old_data_identity_and_separates_credentials(completed_pool):
     from sqlalchemy.engine import make_url
