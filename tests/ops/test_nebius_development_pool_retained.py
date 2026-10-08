@@ -35,7 +35,7 @@ from tests.ops.test_nebius_development_pool_install import (
     management_inputs as management_inputs,
 )
 from tests.ops.test_nebius_development_pool_install import (
-    manager_entry as manager_entry,
+    manager_entry as original_manager_entry,  # noqa: F401
 )
 from tests.ops.test_nebius_development_pool_install import (
     material as material,
@@ -71,6 +71,16 @@ def module():
     if importlib.util.find_spec(name) is None:
         pytest.fail('read-only completed development pool loader is missing')
     return importlib.import_module(name)
+
+
+@pytest.fixture
+def manager_entry(request):
+    original = request.getfixturevalue('original_manager_entry')
+    if getattr(request, 'param', False):
+        from tests.ops.test_nebius_development_source_intake import source_inputs
+
+        return source_inputs(original)
+    return original
 
 
 @pytest.fixture
@@ -118,6 +128,38 @@ def test_retired_operator_files_do_not_invalidate_completed_pool(completed_pool)
         Path(inputs['operator_connection'][name]).unlink()
     value = loader.load_retained_pool(reference(loader, completed_pool))
     assert value.request.registration.spec.pool_id == connected.server.request.registration.spec.pool_id
+
+
+@pytest.mark.parametrize('manager_entry', [False, True], indirect=True, ids=['new-source', 'retained-source'])
+def test_manager_runtime_consumes_closed_catalog_and_retains_source_identity(completed_pool):
+    name = 'scripts.ops.nebius_development_runtime_render'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('retained development manager runtime preparation is missing')
+    prepared = importlib.import_module(name).prepare_manager_runtime(reference(module(), completed_pool))
+    retained = prepared.retained
+    spec = retained.request.registration.spec
+    before = retained.request.retained.inputs.deployment
+    assert prepared.deployment.pool_catalog_operation_id == spec.operation_id
+    builder, = [row for row in spec.machines if row.workload_scope == 'application_builder']
+    assert prepared.deployment.application_builder_machine_id == builder.machine_id
+    assert prepared.delivery.deployment['spec']['replicas'] == 0
+    assert prepared.original['metadata']['uid'] == completed_pool[3].server.store.resources['Deployment:loom-service']['metadata']['uid']
+    old_volumes = {row['name']: row for row in prepared.original['spec']['template']['spec']['volumes']}
+    volumes = {row['name']: row for row in prepared.delivery.deployment['spec']['template']['spec']['volumes']}
+    for name in ('management-cloud', 'application-shared', 'db-ca'):
+        assert volumes[name] == old_volumes[name]
+    assert 'pool-profiles' in volumes
+    configuration, = [row for row in prepared.delivery.configuration if row['kind'] == 'ConfigMap']
+    config = json.loads(configuration['data']['installation.json'])
+    assert config['applications']['runtime']['build']['binding']['pool_id'] == str(spec.pool_id)
+    source = volumes['application-source-credentials']['secret']['secretName']
+    assert source == prepared.delivery.source_secret_name
+    if before.installation.applications.runtime.source_upload is not None:
+        assert source == old_volumes['application-source-credentials']['secret']['secretName']
+        assert prepared.requires_source_material is False
+    else:
+        assert prepared.requires_source_material is True
+    assert prepared.deployment.installation.applications.shared == before.installation.applications.shared
 
 
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
