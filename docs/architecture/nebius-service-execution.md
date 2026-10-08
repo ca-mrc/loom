@@ -726,6 +726,24 @@ automatic archive retry and removes the archive from rollout activity accounting
 it does not establish canonical acceptance. Cancellation retains claim ownership
 until its TTL, after which ordinary materializer recovery rules apply.
 
+The isolated Job requires literal `LOOM_ENV` and `LOOM_NAMESPACE` from the
+installed Control Plane. It verifies the existing Trial lifecycle authority,
+including owner, environment, namespace and retention, before claiming or copying
+and again at commit. It cannot substitute a default namespace or create a missing
+Trial authority during qualification.
+
+Migration `0175` permits one distinct, audited storage requeue for a bounded
+Oracle recovery parked with `recovery_incomplete`. The original recovery request,
+claim and failure remain historical evidence. The retry request binds that exact
+request digest and failed claim to the current candidate/schema. Qualification
+requires unchanged source and Oracle projection, a materializing Trial with one
+successful execution, completed execution cleanup and no canonical acknowledgement.
+It changes only archive state, next retry time, recovery timestamp and update time;
+the database rejects broader terminal reopening. The ordinary worker repeats
+source, lifecycle and projection qualification before copying and under commit
+locks, and requires immutable versions for every published object. A failed retry
+preserves the original Trial outcome and never admits another storage requeue.
+
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
 Control Plane replicas mutually exclusive without imposing a serial transfer

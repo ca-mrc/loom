@@ -30,6 +30,7 @@ from scripts.ops.nebius_idle_rollout import (  # noqa: E402
     select_publication,
 )
 
+from loom.data_lifecycle_registry import RuntimeLifecycleScope  # noqa: E402
 from loom.nebius_platform_render import digest  # noqa: E402
 from loom_control_plane.pending_archive_recovery import (  # noqa: E402
     JOB_TIMEOUT,
@@ -56,13 +57,19 @@ def recovery_job(request: ArchiveRecoveryRequest, control_plane: dict[str, Any])
     env = {row["name"]: row for row in containers[0]["env"]}
     if len(env) != len(containers[0]["env"]) or not _ENV_REQUIRED <= env.keys():
         raise ValueError("installed_connection_configuration_missing")
+    lifecycle_names = {"LOOM_ENV", "LOOM_NAMESPACE"}
+    if any(set(env.get(name, {})) != {"name", "value"} for name in lifecycle_names):
+        raise ValueError("installed_lifecycle_scope_unqualified")
+    scope = RuntimeLifecycleScope(environment=env["LOOM_ENV"]["value"], namespace=env["LOOM_NAMESPACE"]["value"])
+    if scope.namespace != request.namespace:
+        raise ValueError("installed_lifecycle_scope_changed")
     ca_volume = {"name": "db-ca", "secret": {"secretName": "loom-platform-db", "defaultMode": 0o440,
                  "items": [{"key": "ca.crt", "path": "ca.crt"}]}}
     ca_mount = {"name": "db-ca", "mountPath": "/var/run/loom-db", "readOnly": True}
     if ([row for row in original.get("volumes", []) if row["name"] == "db-ca"] != [ca_volume]
             or [row for row in containers[0].get("volumeMounts", []) if row["name"] == "db-ca"] != [ca_mount]):
         raise ValueError("installed_database_ca_unqualified")
-    selected = [copy.deepcopy(env[key]) for key in sorted(_ENV_REQUIRED | ({"LOOM_CP_DB_URL_POOL"} & env.keys()))]
+    selected = [copy.deepcopy(env[key]) for key in sorted(_ENV_REQUIRED | lifecycle_names | ({"LOOM_CP_DB_URL_POOL"} & env.keys()))]
     selected += [{"name": "LOOM_CP_STEP_JWT_SIGNING_KEY", "value": "archival-only-no-runtime-token-authority"}]
     name = "loom-archive-" + str(request.lease_id)[:8] + "-" + request.digest[7:19]
     labels = {"app": "loom-archive-recovery", "loom.nebius/archive-recovery": request.digest[7:23]}
