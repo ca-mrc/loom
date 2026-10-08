@@ -2520,6 +2520,19 @@ This supports exact catalog readback after the idempotent catalog POST, includin
 recovery from an uncertain response. Reading a catalog does not enable a target,
 refresh its health, create capacity policy, or establish global-pool readiness.
 
+Fresh development runtime setup uses this API through a fixed, restricted catalog
+Job, separately from its SQL setup Job. The catalog Job carries only the retained
+development administrator credential, not SQL or Kubernetes credentials. Its
+ConfigMap and Job are regenerated from the retained installation and qualified
+executable publication before create-only staging. An uncertain create is resolved
+only by exact recorded readback, not a second create. Completion requires the
+recorded Job's sole successful, unrestarted Pod (including its credential-copy
+initializer), exact workload identity, bounded matching receipt and unchanged
+prerequisites. The internal catalog transport requires the runtime parent's
+phase-aware qualification after the closed control plane is replaced; original
+workload equality is not a valid successor check. These delivery components do
+not themselves start workers, grant Job-write permission or open admission.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
