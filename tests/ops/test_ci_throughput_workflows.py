@@ -1109,8 +1109,9 @@ def test_python_test_shards_are_complete_and_non_overlapping(lane: str, output: 
         assert any(auth in shard and schema in shard for shard in shards)
         assert complete.index(auth) < complete.index(schema)
     if lane == "integration-docker":
-        guest_rows = [row for row in matrix if row["guest_payload"]]
-        assert len(guest_rows) == 1
+        consumers = component_ownership.guest_payload_consumers(complete, repo_root=REPO_ROOT)
+        assert "tests/integration/test_codex_native_docker.py" in consumers
+        assert [row["guest_payload"] for row in matrix] == [bool(shard & consumers) for shard in shards]
         assert "matrix.guest_payload" in next(step["if"] for step in jobs[lane]["steps"]
                   if step.get("name") == "Build and extract the admitted software-guest payload")
 

@@ -1461,6 +1461,22 @@ GUEST_PAYLOAD_TESTS = frozenset({
     "tests/integration/test_guest_sandbox_runtime.py",
     "tests/integration/test_guest_emulated_auth.py",
 })
+_TEST_MODULE_IMPORT = re.compile(r"^\s*(?:from|import)\s+(tests(?:\.\w+)+)", re.MULTILINE)
+
+
+def guest_payload_consumers(paths: tuple[str, ...], *, repo_root: Path) -> frozenset[str]:
+    """Return guest payload owners plus test modules that import them, transitively."""
+
+    imports = {}
+    for path in paths:
+        source = (repo_root / path).read_text(encoding="utf-8")
+        imports[path] = {name.replace(".", "/") + ".py" for name in _TEST_MODULE_IMPORT.findall(source)}
+    consumers = set(GUEST_PAYLOAD_TESTS)
+    while True:
+        added = {path for path, modules in imports.items() if path not in consumers and modules & consumers}
+        if not added:
+            return frozenset(consumers)
+        consumers |= added
 
 
 def test_shard_matrix(
@@ -1477,6 +1493,7 @@ def test_shard_matrix(
     selected_set = set(select_test_scope(manifest, selected, scope=test_scope))
     policy = manifest.test_shard_policy(lane)
     count = policy.shard_count if policy is not None else 1
+    guest_consumers = guest_payload_consumers(paths, repo_root=repo_root)
     matrix = []
     for index in range(count):
         shard = set(shard_paths(
@@ -1487,7 +1504,7 @@ def test_shard_matrix(
         )) & selected_set
         if shard:
             matrix.append({"shard": f"{index + 1}-of-{count}", "shard_index": index,
-                           "shard_count": count, "guest_payload": bool(shard & GUEST_PAYLOAD_TESTS)})
+                           "shard_count": count, "guest_payload": bool(shard & guest_consumers)})
     return tuple(matrix)
 
 
