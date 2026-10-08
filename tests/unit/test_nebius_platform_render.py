@@ -325,6 +325,34 @@ def test_independent_namespace_routing_storage_and_no_secret_material(
     assert (output / "README.md").read_text() == "Operator notes"
 
 
+@pytest.mark.parametrize("environment,label", [
+    ("development", "Nebius integration"),
+    ("staging", "Staging"),
+])
+def test_standalone_environment_reaches_catalog_processes_and_frontend(
+    platform_inputs: tuple, environment: str, label: str,
+) -> None:
+    config, candidate, profile = platform_inputs
+    config["environment"] = environment
+    files = build_platform(config, candidate, profile, {}, repo_root=ROOT)
+    cm = next(row for row in files["10-config-network.yaml"] if row["kind"] == "ConfigMap")
+    assert json.loads(cm["data"]["environment.json"])["environment"] == environment
+    targets = json.loads(cm["data"]["catalog.json"])["topology"]["targets"]
+    assert targets and all(target["environment"] == environment for target in targets)
+    processes = {
+        row["metadata"]["name"]: {
+            env["name"]: env.get("value")
+            for env in row["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        for row in files["40-services.yaml"] if row["kind"] == "Deployment"
+    }
+    for component in ("loom-service", "loom-control-plane", "loom-llm-gateway"):
+        assert processes[component]["LOOM_ENV"] == environment
+    assert processes["loom-control-plane"]["LOOM_CP_SERVICE_EXECUTION_SCHEDULER_ENVIRONMENT"] == environment
+    assert processes["loom-web"]["LOOM_FRONTEND_ENVIRONMENT"] == environment
+    assert processes["loom-web"]["LOOM_FRONTEND_ENVIRONMENT_LABEL"] == label
+
+
 def test_config_only_change_creates_new_jobs_and_rollout(platform_inputs: tuple) -> None:
     config, candidate, profile = platform_inputs
     first = build_platform(config, candidate, profile, {}, repo_root=ROOT)
@@ -404,7 +432,8 @@ def test_runtime_configuration_changes_restart_consumers(
     [
         ("namespace", "loom-staging"),
         ("environment", "production"),
-        ("environment", "staging"),
+        ("environment", "dev"),
+        ("environment", None),
         ("storage_endpoint", "https://storage.example.com"),
         ("postgres_image", "postgres:latest"),
         ("unknown_token", "secret"),

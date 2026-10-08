@@ -1,13 +1,58 @@
-# Independent Nebius integration platform
+# Standalone Nebius platform
 
-This lane targets `dev`. CI and candidate publication use GitHub
-hosted runners; the platform needs no ARC controller or Nebius CI runner pool. It creates an independent platform in
-`loom-nebius-platform` and execution in `loom-nebius-platform-execution`.
-It never attaches to canonical staging or invokes its rollout broker. Existing
-infrastructure and data remain separate until the migration acceptance decision.
-This renderer accepts only `environment=development`, with the public UI at
-the dedicated origin's root. Staging/production route and promotion semantics
-are outside this integration lane and are explicitly rejected.
+This lane publishes from `dev`; that Git branch does not determine the deployed
+environment class. CI and candidate publication use GitHub-hosted runners; the
+platform needs no ARC controller or Nebius CI runner pool. The existing Nebius
+installation at `https://nebius.yylx.world`, in `loom-nebius-platform` with execution
+in `loom-nebius-platform-execution`, serves **staging**. Its historical input says
+`environment: development`; the old "integration" name is not evidence of a
+separate development environment or permission to attach personal APIs to it.
+
+Standalone rendering accepts explicit `environment=development` or `staging`,
+with the public UI at the dedicated origin's root. Staging inputs select staging
+process identity, scheduler/catalog environment and frontend identity (`Staging`).
+Existing development inputs retain their output, including the historical
+`Nebius integration` display label, so retained renders are not silently rewritten.
+Production is still rejected by this standalone renderer; production promotion
+and separately qualified inputs remain separate requirements.
+
+**Staging rendering is not qualified for task activation.** `LOOM_ENV=staging`
+also enables mandatory storage-lifecycle capacity admission and seven-day
+ephemeral lifecycle authority, whereas development authority is pinned. Batch
+submission requires fresh `staging_lifecycle_capacity` evidence for the exact
+namespace. The standalone Nebius deployment does not install or refresh that
+evidence; a new database has none and batch submission fails closed with
+`staging_capacity_evidence_missing`. Deployment liveness/config smoke does not
+exercise this path. Storage-admission evidence and retention/cleanup behavior
+must be qualified before activating staging tasks; do not disable the check or
+fabricate evidence to make a label change work.
+
+## Correcting a historical environment classification
+
+`environment` is not a cosmetic label. It selects process identity and scheduling,
+and forms part of each immutable execution-target spec. Changing it for an
+installed target cannot be performed by editing the ConfigMap, changing only the
+frontend, or supplying `--retire-target`. Ordinary rollout rejects that change
+before cluster writes and rechecks it after acquiring the rollout guard.
+
+A live correction needs a separately qualified migration covering existing
+tasks/targets, scheduler configuration, data and credential consumers, management
+bindings, storage-capacity admission, retention/cleanup, and rollback. This
+runbook does not provide or authorize that migration.
+Do not rename namespaces, replace databases or relabel historical records as a
+shortcut. The source capability alone does not change the installed staging label.
+
+Personal applications must bind to a genuinely development-owned foundation,
+never to staging's database, credentials or runtime just because its historical
+input says `development`. A correctly classified staging foundation is rejected
+by the personal-application contract. A label check cannot establish the ownership
+of a historically misclassified installation; operators must verify that boundary.
+
+The protected `nebius-rollout` integration target still selects the existing
+staging installation. Do not repoint it for personal development. When automatic
+rollout is enabled, merging to `dev` can publish and roll out a new staging
+candidate; a source-only change must not be merged during a no-staging-change
+window without coordination with the staging operator.
 
 ## Development and release branch
 
@@ -116,6 +161,11 @@ workflow-source checks and is the publication entry point.
 
 Copy `deploy/nebius/integration.platform.json.example` to a protected operator
 directory and fill its non-secret values from the reviewed Terraform outputs.
+The example retains `environment: development` for compatibility; it is not the
+authoritative staging configuration. Select `staging` explicitly for a **new**
+staging render, for offline planning only until storage-lifecycle qualification
+is complete. Do not use this edit to reclassify the existing installation;
+see [Correcting a historical environment classification](#correcting-a-historical-environment-classification).
 Set `quota_parent_id` from the Terraform input `tenant_id`, while `project_id`
 identifies the project containing the platform resources. This deployment reads
 the tenant's allocated quota limits. Using the project ID instead returns

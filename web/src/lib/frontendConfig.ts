@@ -212,7 +212,7 @@ export function resolveFrontendConfig(
   const canonicalRoutePaths: Record<FrontendEnvironment, RegExp> = {
     local: /^$/u,
     development: /^(?:|\/dev)$/u,
-    staging: /^\/staging(?:\/rehearsal\/[0-9a-f]{24})?$/u,
+    staging: /^(?:|\/staging(?:\/rehearsal\/[0-9a-f]{24})?)$/u,
     production: /^\/prod$/u,
   };
   if (!canonicalRoutePaths[environment].test(routePath)) {

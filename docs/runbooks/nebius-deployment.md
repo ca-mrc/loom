@@ -20,8 +20,12 @@ and Production Environment approval. Run
 `scripts/ops/verify_production_release_gate.sh` from the promoted `main` checkout
 with the approved candidate, image selector and release-gate run before applying
 manifests. Checked-in examples are not production deployment authorization.
-`nebius-rollout` automates the independent integration environment only; it does
-not turn a `main` merge into an automatic production rollout.
+`nebius-rollout`'s historical integration target selects the existing Nebius
+staging installation, not a personal/shared development foundation. Its historical
+`development` classification and the controlled-migration boundary are explained
+in [platform operations](nebius-platform.md#correcting-a-historical-environment-classification).
+It does not turn a `main` merge into an automatic production rollout. When
+automatic rollout is enabled, a `dev` merge can publish and update staging.
 
 Before applying production, protect each of the seven approved image digests
 with the release manifest's unused SemVer `prod_tag` in the same Nebius image
