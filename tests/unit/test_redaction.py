@@ -19,6 +19,7 @@ def test_redact_text_covers_staging_secret_shapes() -> None:
         "Authorization: Bearer loom_api_abcdefghijklmnopqrstuvwxyz012345 "
         "Cookie: loom_session=loom_session_secret123; loom_csrf=loom_csrf_abc "
         "invite=loom_invite_invitationsecret "
+        "external=loom_baseline_dedicatedsecret "
         "provider=sk-live-super-secret "
         "hf=hf_abcdefghijklmnopqrstuvwxyz1234567890 "
         "signed=https://minio.internal:9000/artifacts/team/trial/out.txt?"
@@ -35,6 +36,7 @@ def test_redact_text_covers_staging_secret_shapes() -> None:
         "loom_session_secret123",
         "loom_csrf_abc",
         "loom_invite_invitationsecret",
+        "loom_baseline_dedicatedsecret",
         "sk-live-super-secret",
         "hf_abcdefghijklmnopqrstuvwxyz1234567890",
         "X-Amz-Signature=abcdef",
