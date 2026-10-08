@@ -38,7 +38,8 @@ def validate_runtime_transition(record: dict[str, Any], *, originals: dict[str, 
     for key, desired in targets.items():
         item = record['resources'][key]
         if (set(item) != {'status', 'expected'} or item['status'] not in {'prepared', 'intent', 'applied'}
-                or _qualified_defaulted(desired, item['expected']) != item['expected']):
+                or (item['expected'] is None and item['status'] != 'prepared')
+                or (item['expected'] is not None and _qualified_defaulted(desired, item['expected']) != item['expected'])):
             raise ValueError
 
 
@@ -71,17 +72,12 @@ subsequent phase intentionally changed their live workload specifications.
             if path.exists() or path.is_symlink():
                 record = _json(private_state._private_read(path, limit=4 * 1024**2))
             else:
-                items = {}
                 for key, original in originals.items():
                     api.qualify()
                     actual = api.read_workload(key)
                     if not _matches(actual, original, _uid(original)):
                         raise ValueError
-                    preview = api.preview_workload(key, actual, targets[key])
-                    if preview is None:
-                        return False
-                    items[key] = {'status': 'prepared', 'expected': _qualified_defaulted(targets[key], preview)}
-                record = {**identity, 'resources': items}
+                record = {**identity, 'resources': {key: {'status': 'prepared', 'expected': None} for key in originals}}
                 private_state._atomic_json(path, record)
             validate_runtime_transition(record, originals=originals, targets=targets,
                 input_digest=input_digest, phase=phase)
@@ -92,6 +88,20 @@ subsequent phase intentionally changed their live workload specifications.
                 expected = original if item['status'] == 'prepared' else item['expected']
                 if not _matches(api.read_workload(key), expected, _uid(original)):
                     raise ValueError
+            # A definitively rejected dry-run remains a resumable known wait.
+            # Freeze every successful preview before the first actual PATCH.
+            for key, original in originals.items():
+                item = record['resources'][key]
+                if item['expected'] is None:
+                    api.qualify()
+                    actual = api.read_workload(key)
+                    if not _matches(actual, original, _uid(original)):
+                        raise ValueError
+                    preview = api.preview_workload(key, actual, targets[key])
+                    if preview is None:
+                        return False
+                    item['expected'] = _qualified_defaulted(targets[key], preview)
+                    private_state._atomic_json(path, record)
             for key, original in originals.items():
                 api.qualify()
                 item = record['resources'][key]
