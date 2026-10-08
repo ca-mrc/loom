@@ -1302,6 +1302,12 @@ class ServiceExecutionMaterializer:
             preserve_trial_outcome=_legacy_verifier_reward_projection(runtime_result),
         )
 
+    async def _qualify_commit(
+        self, session: AsyncSession, lease: ServiceExecutionLease, trial: Trial,
+        artifact: Artifact, result: MaterializationResult,
+    ) -> None:
+        """Optional operator qualification under the ordinary commit locks."""
+
     async def _commit(self, claim: MaterializationClaim, result: MaterializationResult) -> bool:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
@@ -1320,6 +1326,7 @@ class ServiceExecutionMaterializer:
                 or trial.state not in {"materializing", "succeeded", "failed", "cancelled"}
             ):
                 raise MaterializationIntegrityError("canonical_projection_identity_drift")
+            await self._qualify_commit(session, lease, trial, artifact, result)
             existing = list(
                 (
                     await session.execute(
@@ -1881,8 +1888,21 @@ class ServiceExecutionMaterializer:
         )
         if claim is None:
             return False
+        await self.materialize_claim(claim)
+        return True
+
+    async def materialize_claim(self, claim: MaterializationClaim, *, require_versions: bool = False) -> None:
+        """Publish an already-owned claim through the ordinary validation/fence.
+
+        A return is work completion, not canonical success; callers must read
+        persisted state. The bounded recovery requires immutable version receipts.
+        """
         try:
             result = await self._load_and_materialize(claim)
+            if require_versions and (result.events_version_id in {None, "", "null"} or result.atif_version_id in {None, "", "null"} or any(
+                item.version_id in {None, "", "null"} for item in (*result.files, *result.source_evidence)
+            )):
+                raise ValueError("recovery_requires_immutable_versions")
             await self._commit(claim, result)
         except MaterializationIntegrityError as exc:
             await self._unavailable(claim, exc)
@@ -1892,7 +1912,6 @@ class ServiceExecutionMaterializer:
             _raise_if_cancellation_requested(exc)
             logger.warning("service execution materialization retry: %s", exc)
             await self._retry(claim, exc)
-        return True
 
 
 async def run_service_execution_materializer_loop(

@@ -172,14 +172,16 @@ def secret_requirements(
 
 
 class Kubectl:
-    def __init__(self, kubeconfig: Path):
+    def __init__(self, kubeconfig: Path, *, context: str | None = None):
         self.kubeconfig = kubeconfig
+        self.context = context
 
     def run(self, *args: str, timeout: int = 90, preserve_output: bool = False) -> str:
         command = [
                 "kubectl",
                 "--kubeconfig",
                 str(self.kubeconfig),
+                *(["--context", self.context] if self.context else []),
                 *([] if args[0] in {"wait", "rollout"} else ["--request-timeout=30s"]),
                 *args,
             ]
@@ -187,7 +189,7 @@ class Kubectl:
         if target := os.environ.get("LOOM_DEPLOY_SSH_TARGET"):
             if not re.fullmatch(r"[a-zA-Z0-9_.-]+@[a-zA-Z0-9_.-]+", target):
                 raise DeploymentError("invalid deployment SSH target")
-            if args[0] == "apply" and args[1] == "-f":
+            if args[0] in {"apply", "create"} and args[1] == "-f":
                 stdin = Path(args[2]).read_text()
                 command[command.index("-f") + 1] = "-"
             command = [
