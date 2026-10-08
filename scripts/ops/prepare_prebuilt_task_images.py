@@ -39,7 +39,7 @@ from loom.execution_image_admission import (
 from loom.prebuilt_task_images import validate_prebuilt_image_pins
 from loom.service_execution_materialization import ServiceExecutionRuntimeProfileV1
 
-MAX_IMAGE_REPORT_BYTES = 64 * 1024**2
+MAX_IMAGE_REPORT_BYTES = 128 * 1024**2
 
 
 def _read_image_report(path: Path, *, label: str) -> bytes:
@@ -47,7 +47,7 @@ def _read_image_report(path: Path, *, label: str) -> bytes:
     with path.open("rb") as handle:
         payload = handle.read(MAX_IMAGE_REPORT_BYTES + 1)
     if len(payload) > MAX_IMAGE_REPORT_BYTES:
-        raise ValueError(f"{label} evidence exceeds the 64 MiB report budget")
+        raise ValueError(f"{label} evidence exceeds the 128 MiB report budget")
     return payload
 
 

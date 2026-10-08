@@ -108,8 +108,8 @@ publication. Reports classify resolved images even when some scans fail; a missi
 ready profile is not a qualified catalog. Preserve the exact source image list and
 failed evidence when investigating, rather than rebuilding an official image or
 weakening the admission policy.
-Vulnerability and SBOM reports each have a 64 MiB read budget, covering observed
-canonical reports of 29-41 MB while keeping report parsing bounded. A larger
+Vulnerability and SBOM reports each have a 128 MiB read budget, covering observed
+canonical reports up to 86 MB while keeping report parsing bounded. A larger
 report remains an explicit preparation failure; increasing this data budget
 does not change the CRITICAL vulnerability policy.
 
