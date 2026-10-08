@@ -88,7 +88,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
             for damage in ('host-network', 'host-pid', 'process-sharing', 'token', 'host-volume', 'credential-mount',
                     'extra-container', 'extra-init', 'trusted-command', 'trusted-image', 'trusted-env',
                     'builder-root', 'builder-capability', 'trusted-escalation', 'env-from', 'hook',
-                    'node-name', 'node-group', 'account', 'resources', 'projected-token', 'claim-secret'):
+                    'node-name', 'node-group', 'account', 'resources', 'projected-token', 'claim-secret',
+                    'termination-secret'):
                 changed = copy.deepcopy(pod)
                 spec = changed['spec']
                 prepare, build = spec['initContainers']
@@ -118,7 +119,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 elif damage == 'env-from':
                     build['envFrom'] = [{'secretRef': {'name': 'source-reader'}}]
                 elif damage == 'hook':
-                    prepare['lifecycle'] = {'postStart': {'exec': {'command': ['sh', '-c', 'echo unsafe']}}}
+                    spec['containers'][0]['lifecycle'] = {'postStart': {'exec': {'command': ['sh', '-c', 'echo unsafe']}}}
                 elif damage == 'node-name':
                     spec['nodeName'] = 'bypass-scheduler'
                 elif damage == 'node-group':
@@ -130,6 +131,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                 elif damage == 'projected-token':
                     spec['volumes'].append({'name': 'token', 'projected': {'sources': [
                         {'serviceAccountToken': {'path': 'token'}}]}})
+                elif damage == 'termination-secret':
+                    prepare['terminationMessagePath'] = '/var/run/loom-task-build/source/secret-key'
                 else:
                     next(v for v in spec['volumes'] if v['name'] == 'source')['secret']['secretName'] = 'foreign-secret'
                 with pytest.raises(ApiException) as denied:
