@@ -61,11 +61,15 @@ def pool_inputs(retained, build_inputs):
     value = spec.model_dump(mode='json')
     config = retained[3].deployment.installation.foundation.platform_config
     candidate, profile = retained[3].candidate, retained[3].profile
+    native_labels = {'loom.nebius/node-os': 'linux', 'loom.nebius/node-arch': 'amd64'}
+    value['node_selector'].update(native_labels)
     for execution in value['profiles']['execution']:
+        execution['runtime']['node_selector'].update(native_labels)
         execution.update(candidate_sha=candidate['candidate_sha'],
             runtime_image_ref=candidate['images']['execution_runtime']['image_ref'],
             runtime_binary_sha256=profile['runtime_binary_sha256'])
     for build in value['profiles']['task_images']:
+        build['target']['node_selector'].update(native_labels)
         build['settings'].update(service_image=candidate['images']['service']['image_ref'],
             storage_endpoint=config['storage_endpoint'], storage_region=config['region'],
             source_bucket=config['buckets']['artifacts'], registry_repository=build_inputs[0].registry_repository)
@@ -89,6 +93,29 @@ def pool_inputs(retained, build_inputs):
 def prepare(pool_inputs):
     reference, catalog, tokens = pool_inputs
     return module().prepare_intent(reference=reference, catalog=catalog, tokens=tokens)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'architecture', 'os', 'reserved'])
+def test_intent_rejects_native_build_selectors_that_cannot_render(pool_inputs, damage):
+    _, catalog, _ = pool_inputs
+    selectors = [catalog['node_selector'],
+        *[row['runtime']['node_selector'] for row in catalog['profiles']['execution']],
+        *[row['target']['node_selector'] for kind in ('task_images', 'application_images')
+            for row in catalog['profiles'][kind]]]
+    # Keep physical registration internally consistent: the defect is that the
+    # native build renderer must transform or reject this immutable selector.
+    for selector in selectors:
+        if damage == 'missing':
+            selector.pop('loom.nebius/node-os')
+            selector.pop('loom.nebius/node-arch')
+        elif damage == 'architecture':
+            selector['loom.nebius/node-arch'] = 'arm64'
+        elif damage == 'os':
+            selector['loom.nebius/node-os'] = 'windows'
+        else:
+            selector['kubernetes.io/arch'] = 'amd64'
+    with pytest.raises(ValueError, match='development pool intent unqualified'):
+        prepare(pool_inputs)
 
 
 def test_intent_accepts_distinct_task_bundle_and_application_source_buckets(pool_inputs, retained):
