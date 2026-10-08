@@ -13,7 +13,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,6 +43,7 @@ from loom.pipeline.keys import canonical_digest, canonical_document
 
 ACTION = "object_version_recovery"
 MAX_BYTES = 256 * 1024 * 1024
+SINGLE_OBJECT_MAX_BYTES = 4 * 1024**3
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 VERIFICATION_SECONDS = 90
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
@@ -120,6 +121,35 @@ class RecoveryRequest(BaseModel):
         result = self.model_dump(mode="json", exclude={"apply", "plan_sha256"}, exclude_none=True)
         result["objects"] = sorted(result["objects"], key=lambda item: item["registry_id"])
         return result
+
+
+class SingleObjectRecoveryRequest(RecoveryRequest):
+    """Installed operator scope; the ordinary HTTP model rejects these fields."""
+
+    mode: Literal["single_large_object_v1"]
+    team_id: UUID
+    candidate_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
+    schema_head: str = Field(pattern=r"^[0-9]{4}$")
+
+    @field_validator("team_id", mode="before")
+    @classmethod
+    def parse_team_uuid(cls, value: object) -> object:
+        return UUID(value) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_operator_scope(self) -> SingleObjectRecoveryRequest:
+        if self.team_id.int == 0:
+            raise ValueError("a concrete team ID is required")
+        if len(self.objects) != 1:
+            raise ValueError("single-object recovery requires exactly one object")
+        if len(self.objects[0].equivalent_version_ids or [self.objects[0].version_id]) > 2:
+            raise ValueError("single-object recovery permits at most two complete copies")
+        return self
+
+
+def verification_byte_limit(request: object) -> int:
+    """Only the validated operator type selects the fixed larger policy."""
+    return SINGLE_OBJECT_MAX_BYTES if isinstance(request, SingleObjectRecoveryRequest) else MAX_BYTES
 
 
 def metadata_digest(value: Any) -> str:
