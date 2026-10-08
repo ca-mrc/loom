@@ -2609,6 +2609,27 @@ final readback cannot qualify. Staging alone proves neither database registratio
 the parent migration must qualify candidate publication, namespace ownership,
 successful runtime execution and the no-dual-writer barrier before opening intake.
 
+The independent development registration parent instead consumes a completed
+`RetainedManagementReference`. It derives the original published service image,
+management namespace and database identity from that installation, without a
+legacy upgrade predecessor. Its connected HTTPS adapter compares the original
+database Secret, Service, StatefulSet and manager Deployment, their mounted
+configuration/Secret identities, the retained PVC/PV/CSI disk binding, and namespace
+UIDs before registration and completion. The participant's shared data-environment
+ID and physical node group must match that original dev installation.
+Only the fixed registration ConfigMap and Job
+can be created; the transaction uses the manager's existing database.
+
+One anchored parent operation per manager retains the actual closed-registration
+receipt. Changed inputs, lost journals, replaced resources and uncertain creates
+cannot start another registration. TLS-only renewal does not change this database
+identity. This fresh composition accepts the one shared-development participant;
+it does not attach staging/production, create a physical worker pool, deliver
+machine-token Secrets or grant Job-write roles. It is an internal protected stage,
+not a deployed CLI or a replacement for runtime delivery, sole-writer qualification
+and admission activation. Its completion explicitly reports admission closed and
+writer migration incomplete.
+
 The migration's initial closure stage binds every qualified data participant and
 its retained control-plane Deployment/namespace identity. Environment classes do
 not imply a fixed number of installed databases. The protected preflight must
