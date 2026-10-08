@@ -2584,6 +2584,26 @@ The fixed projection includes tokenless build service accounts and the existing
 DNS/public HTTP(S)-only native egress policy, but no namespace PSA changes,
 legacy actuator write grants, workload start or per-environment capacity quota.
 
+The connected runtime parent freezes the entire inventory and original workload
+UIDs before its first write. An independent marker binds the operation and input
+digest to private phase journals. SQL setup must finish before material, read-only
+authority, isolation and stopped workloads are installed. The original development
+manager/API/control plane are stopped and drained before their replacement
+templates are applied. The closed manager and control plane then start; the fixed
+disabled-catalog Job must prove completion before the shared API, read-only
+actuator and collector start. No phase grants the gateway write authority, opens
+pool admission or mutates staging.
+
+Each workload transition retains server-defaulted targets and original UIDs;
+the transport must use resourceVersion/UID compare-and-swap. Unknown write
+outcomes are only read back. Completed phases retain checksums and Job receipts,
+and are inspected instead of replayed after later startup intentionally changes
+their live specifications. Missing or altered recovery history fails closed.
+This parent and its component tests are not a protected installation entrypoint:
+phase-aware HTTPS qualification, provider/material access, publication binding
+and installed multi-owner acceptance must still be connected and verified before
+the environment can be called operational.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission

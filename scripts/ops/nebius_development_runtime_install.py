@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Protocol
 
+from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
 from scripts.ops.nebius_development_build_cloud import (
     DevelopmentRegistryCloudScope,
@@ -19,7 +22,10 @@ from scripts.ops.nebius_development_build_cloud import (
 )
 from scripts.ops.nebius_development_build_policy import prepare_build_policy
 from scripts.ops.nebius_development_build_runtime import prepare_build_runtime
-from scripts.ops.nebius_development_catalog_runtime import catalog_runtime_documents
+from scripts.ops.nebius_development_catalog_runtime import (
+    catalog_runtime_documents,
+    validate_catalog_runtime_proof,
+)
 from scripts.ops.nebius_development_collector_cloud import (
     DevelopmentCollectorCloudScope,
     collector_public_key,
@@ -32,11 +38,28 @@ from scripts.ops.nebius_development_network_runtime import prepare_network_runti
 from scripts.ops.nebius_development_runtime_setup import (
     DevelopmentDatabaseRuntime,
     database_runtime_documents,
+    validate_database_runtime_proof,
+)
+from scripts.ops.nebius_development_runtime_transition import (
+    DevelopmentRuntimeWorkloadAPI,
+    advance_runtime_workloads,
+    validate_runtime_transition,
 )
 from scripts.ops.nebius_development_shared_runtime import prepare_shared_runtime
 from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
+from scripts.ops.nebius_management_stage import (
+    ManagementStageAPI,
+    _defaulted,
+    _stage_fixed_documents,
+    _validate_record,
+)
+from scripts.ops.nebius_management_supplied import _defaulted as _secret_defaulted
 
 from loom.nebius_platform_render import _obj, digest
+from loom_service.environment_management.candidates import _json
+
+_PHASES = ('database', 'material', 'authority', 'isolation', 'workloads',
+    'stop', 'replace', 'control', 'catalog', 'start')
 
 
 @dataclass(frozen=True, repr=False)
@@ -149,3 +172,201 @@ def prepare_runtime_install(request: DevelopmentRuntimeInstallRequest) -> Develo
         return DevelopmentRuntimePlan(fixed, originals, stopped, targets, checksum)
     except Exception:
         raise ValueError('development runtime installation intent unqualified') from None
+
+
+class DevelopmentRuntimeInstallAPI(Protocol):
+    """Only the protected, phase-aware adapter may satisfy this live boundary.
+
+Qualification preserves private pins, namespace/storage/publication identity,
+closed admission and disabled writer grants; it checks cloud material before
+startup. Every child transport independently repeats that qualification before
+writes. Inspection is GET-only and validates current successors, fixed receipts,
+live process/database bindings and exact SQL/catalog Job proofs.
+"""
+    def qualify(self, *, plan: DevelopmentRuntimePlan, state_dir: Path, record: dict[str, Any]) -> None: ...
+    def resources(self, phase: str) -> ManagementStageAPI: ...
+    def workloads(self, phase: str) -> DevelopmentRuntimeWorkloadAPI: ...
+    def report(self, phase: str, state: Path) -> dict[str, Any] | None: ...
+    def inspect_runtime(self, *, plan: DevelopmentRuntimePlan, state_dir: Path, record: dict[str, Any]) -> None: ...
+
+
+def _read(path: Path) -> dict[str, Any]:
+    if path != path.resolve():
+        raise ValueError
+    result = _json(private_state._private_read(path, limit=4 * 1024**2))
+    if not isinstance(result, dict):
+        raise ValueError
+    return dict(result)
+
+
+def _child_path(state: Path, phase: str) -> Path:
+    return state / phase / ('transition.json' if phase in {'stop', 'replace', 'control', 'start'} else 'stage.json')
+
+
+def _hash(path: Path) -> str:
+    return hashlib.sha256(private_state._private_read(path, limit=4 * 1024**2)).hexdigest()
+
+
+def runtime_transition_inputs(plan: DevelopmentRuntimePlan, state: Path,
+                              phase: str) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Regenerate fixed transition pairs from prior validated parent receipts."""
+    if phase == 'stop':
+        return copy.deepcopy(plan.originals), copy.deepcopy(plan.stopped)
+
+    def previous(previous_phase: str) -> dict[str, dict[str, Any]]:
+        items = _read(_child_path(state, previous_phase))['resources']
+        result = {}
+        for key, item in items.items():
+            row = copy.deepcopy(item['expected'])
+            row['metadata']['uid'] = _uid(plan.originals[key])
+            result[key] = row
+        return result
+
+    if phase == 'replace':
+        return previous('stop'), copy.deepcopy(plan.targets)
+    before = previous('replace')
+    if phase == 'control':
+        before.pop('Deployment:loom-dev:loom-service')
+    elif phase == 'start':
+        before = {'Deployment:loom-dev:loom-service': before['Deployment:loom-dev:loom-service']}
+        for key, item in _read(_child_path(state, 'workloads'))['resources'].items():
+            before[key] = copy.deepcopy(item['observed'])
+            before[key]['metadata']['uid'] = item['uid']
+    else:
+        raise ValueError
+    targets = {key: _snapshot(row) for key, row in before.items()}
+    for row in targets.values():
+        if row['kind'] == 'CronJob':
+            row['spec']['suspend'] = False
+        else:
+            row['spec']['replicas'] = 1
+    return before, targets
+
+
+def install_development_runtime(*, request: DevelopmentRuntimeInstallRequest,
+                                api: DevelopmentRuntimeInstallAPI, execute: bool) -> dict[str, Any]:
+    """Connected closed-runtime installation, not pool admission or migration.
+
+The retained manager owns an independent phase-start anchor. Missing/changed
+history is never adopted. Finished phases are inspected without replaying writes
+or requiring superseded original workloads to remain installed forever.
+"""
+    try:
+        if type(execute) is not bool:
+            raise ValueError
+        request = copy.deepcopy(request)
+        plan = prepare_runtime_install(request)
+        manager = request.database.manager.retained.request.retained
+        state = Path(manager.operation['state_dir']).parent / 'runtime-installation'
+        anchor = Path(manager.operation['anchor_dir'])
+        marker, journal = anchor / 'runtime-installation.json', state / 'installation.json'
+        if state != state.resolve() or anchor != anchor.resolve() or not anchor.is_dir():
+            raise ValueError
+        identity = {'schema': 'loom.nebius-development-runtime-install.v1',
+            'operation_id': str(request.database.operation_id), 'state_dir': str(state), 'input_digest': plan.input_digest}
+        base = {'operation_id': identity['operation_id'], 'installation_id': manager.binding.installation_id,
+            'namespace': manager.binding.namespace, 'admission_open': False, 'writer_migration_complete': False}
+
+        def validate_child(phase: str, item: dict[str, Any]) -> None:
+            child = _read(_child_path(state, phase))
+            if phase in plan.fixed:
+                _validate_record(child, {'schema': 'loom.nebius-management-stage.v1',
+                    'binding': asdict(manager.binding), 'revision': digest(plan.fixed[phase]),
+                    'phase': 'development-runtime-' + phase}, plan.fixed[phase])
+                complete = all(row['status'] == 'created' for row in child['resources'].values())
+            else:
+                before, targets = runtime_transition_inputs(plan, state, phase)
+                validate_runtime_transition(child, originals=before, targets=targets,
+                    input_digest=plan.input_digest, phase=phase)
+                complete = all(row['status'] == 'applied' for row in child['resources'].values())
+            if item['status'] == 'complete':
+                if not complete:
+                    raise ValueError
+                if phase in {'database', 'catalog'}:
+                    validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
+                    validator(request.database, state / phase, item['proof'])
+            elif item['proof'] is not None:
+                raise ValueError
+
+        def read_record() -> dict[str, Any]:
+            if marker.exists() or marker.is_symlink():
+                if _read(marker) != identity:
+                    raise ValueError
+                record = _read(journal)
+                if (set(record) != {*identity, 'phases'} or any(record[key] != value for key, value in identity.items())
+                        or set(record['phases']) != set(_PHASES)):
+                    raise ValueError
+                unfinished = False
+                for phase in _PHASES:
+                    item = record['phases'][phase]
+                    if (set(item) != {'status', 'sha256', 'proof'} or item['status'] not in {'prepared', 'started', 'complete'}
+                            or (unfinished and item['status'] != 'prepared')
+                            or (item['status'] == 'complete') != (item['sha256'] is not None)
+                            or (phase not in {'database', 'catalog'} and item['proof'] is not None)):
+                        raise ValueError
+                    path = _child_path(state, phase)
+                    if item['status'] == 'prepared':
+                        if path.parent.exists() or path.parent.is_symlink() or item['proof'] is not None:
+                            raise ValueError
+                    else:
+                        if item['status'] == 'complete' and _hash(path) != item['sha256']:
+                            raise ValueError
+                        validate_child(phase, item)
+                    unfinished |= item['status'] != 'complete'
+                return record
+            if state.exists() or state.is_symlink():
+                raise ValueError
+            return {**identity, 'phases': {phase: {'status': 'prepared', 'sha256': None, 'proof': None} for phase in _PHASES}}
+
+        def qualify(record: dict[str, Any]) -> None:
+            api.qualify(plan=plan, state_dir=state, record=copy.deepcopy(record))
+
+        record = read_record()
+        qualify(record)
+        if not execute:
+            return {**base, 'status': 'development_runtime_preflight_qualified'}
+        with private_state._locked_state(anchor / 'runtime-installation-lock'):
+            record = read_record()
+            qualify(record)
+            if not marker.exists():
+                private_state._atomic_json(marker, identity)
+                private_state._private_directory(state)
+                private_state._atomic_json(journal, record)
+            for phase in _PHASES:
+                item = record['phases'][phase]
+                qualify(record)
+                if item['status'] == 'complete':
+                    continue
+                if item['status'] == 'prepared':
+                    item['status'] = 'started'
+                    private_state._atomic_json(journal, record)
+                proof = None
+                if phase in plan.fixed:
+                    def default(child_api: ManagementStageAPI, desired: dict[str, Any]) -> dict[str, Any]:
+                        return (_secret_defaulted if desired['kind'] == 'Secret' else _defaulted)(child_api, desired)
+                    _stage_fixed_documents(documents=plan.fixed[phase], revision=digest(plan.fixed[phase]),
+                        phase='development-runtime-' + phase, binding=manager.binding, api=api.resources(phase),
+                        state_dir=state / phase, default_document=default)
+                    if phase in {'database', 'catalog'}:
+                        proof = api.report(phase, state / phase)
+                        if proof is None:
+                            qualify(record)
+                            return {**base, 'status': 'pending_' + phase}
+                        validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
+                        validator(request.database, state / phase, proof)
+                else:
+                    before, targets = runtime_transition_inputs(plan, state, phase)
+                    if not advance_runtime_workloads(originals=before, targets=targets, input_digest=plan.input_digest,
+                            phase=phase, api=api.workloads(phase), state_dir=state / phase):
+                        qualify(record)
+                        return {**base, 'status': 'pending_' + phase}
+                qualify(record)
+                item.update(status='complete', sha256=_hash(_child_path(state, phase)), proof=proof)
+                private_state._atomic_json(journal, record)
+                validate_child(phase, item)
+            record = read_record()
+            api.inspect_runtime(plan=plan, state_dir=state, record=copy.deepcopy(record))
+            qualify(record)
+            return {**base, 'status': 'development_runtime_installed_closed'}
+    except Exception:
+        raise ValueError('development runtime installation unqualified; preserve retained evidence') from None

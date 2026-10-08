@@ -607,6 +607,20 @@ def test_runtime_parent_orders_sql_catalog_start_and_replays_read_only(completed
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_parent_resumes_definitively_rejected_preview_without_lost_evidence(completed_pool, publisher_cloud):
+    runtime, request, api, _, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    api.database_complete = True
+    api.transition.preview_rejected = True
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_stop'
+    assert not api.transition.patches
+    api.transition.preview_rejected = False
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_catalog'
+    api.catalog_complete = True
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'development_runtime_installed_closed'
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
 @pytest.mark.parametrize('damage', ['lost-child', 'lost-parent', 'changed-child', 'phase-jump'])
 def test_runtime_parent_refuses_lost_or_rewritten_evidence_before_further_writes(completed_pool, publisher_cloud, damage):
     runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
