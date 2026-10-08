@@ -760,7 +760,7 @@ def test_image_entry_rejects_unqualified_source_schema_or_parent(private_image_r
     operation, payload, proof, _ = private_image_repair
     if damage.startswith("schema_"):
         content = json.loads(proof.read_bytes())
-        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0175"
+        content["source_sha" if damage == "schema_source" else "revision"] = "a" * 40 if damage == "schema_source" else "0174"
         private_state._atomic_json(proof, content)
     elif damage == "candidate":
         payload["binding"]["candidate"]["candidate_sha"] = "f" * 40
