@@ -557,8 +557,12 @@ and private `tokens` keyed by machine UUID. The catalog follows
 `loom.pool-installation.v1` but omits `uid` in both participant namespace bindings:
 only actual namespace-create receipts may supply those values. It must include
 trial/task-image target capabilities and dedicated application-image-build profiles;
-published runtime binary/image identities and the original shared source/schema
-must match. Credentials must already be issued and unexpired before initial
+published runtime binary/image identities and the original shared storage/schema
+must match. Task-image profiles read ordinary TaskSet bundles from
+`buckets.artifacts`; application-image profiles read personal application archives
+from `buckets.source`. These are distinct intake paths even though both use the
+shared build pool. Do not point task-image profiles at the application-source
+bucket. Credentials must already be issued and unexpired before initial
 namespace/registration writes. Registration also checks validity using database
 time; completed registration evidence remains readable after credential expiry.
 

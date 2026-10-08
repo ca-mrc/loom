@@ -68,10 +68,12 @@ def pool_inputs(retained, build_inputs):
     for build in value['profiles']['task_images']:
         build['settings'].update(service_image=candidate['images']['service']['image_ref'],
             storage_endpoint=config['storage_endpoint'], storage_region=config['region'],
-            source_bucket=config['buckets']['source'], registry_repository=build_inputs[0].registry_repository)
+            source_bucket=config['buckets']['artifacts'], registry_repository=build_inputs[0].registry_repository)
     recipe = build_inputs[0].recipe.model_copy(update={
         'schema_revision': retained[3].deployment.installation.applications.shared.schema_revision})
     value, _, _ = add_application_builder(value, recipe)
+    for build in value['profiles']['application_images']:
+        build['settings']['source_bucket'] = config['buckets']['source']
     value['node_selector'] = copy.deepcopy(value['profiles']['application_images'][0]['target']['node_selector'])
     for participant in value['participants']:
         for field in ('execution_namespace', 'build_namespace'):
