@@ -62,6 +62,7 @@ from loom.models.task import TaskConfig, normalize_steps
 from loom.models.trial import TrialConfig
 from loom.mutable_paths import validate_task_workdir
 from loom.pipeline.keys import canonical_digest
+from loom.prebuilt_task_images import resolve_prebuilt_task_image, validate_prebuilt_image_pins
 from loom.sandbox_identity import resolve_sandbox_identity
 from loom.task_image_materialization import TaskImageExecutionGrantV1, resolve_prepared_task
 from loom.task_sandbox_planner import (
@@ -198,6 +199,7 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
     runtime_image_ref: str
     runtime_binary_sha256: str = Field(pattern=_SHA256.pattern)
     image_admission: ExecutionImageAdmissionBundleV1
+    prebuilt_image_pins: dict[str, str] = Field(default_factory=dict)
     run_as_user: int = Field(default=65532, gt=0)
     run_as_group: int = Field(default=65532, gt=0)
     fs_group: int = Field(default=65532, gt=0)
@@ -212,6 +214,12 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
         if self.guest_runtime is None:
             return frozenset()
         return ALL_GUEST_EXECUTION_CAPABILITIES if self.supports_emulated_pkcs11 else GUEST_EXECUTION_CAPABILITIES
+
+    def published_image_refs(self) -> tuple[str, ...]:
+        """Exact publisher-owned subjects, including explicit upstream task pins."""
+        return tuple(sorted({self.task_image_ref, self.runtime_image_ref,
+            *([self.agent_image_ref] if self.agent_image_ref is not None else []),
+            *self.prebuilt_image_pins.values()}))
 
     @model_serializer(mode="wrap")
     def _omit_empty_requests(self, handler: Any) -> dict[str, Any]:
@@ -228,7 +236,17 @@ class ServiceExecutionRuntimeProfileV1(_Strict):
             payload.pop("service_lifecycle_ready", None)
         if not self.supports_task_identity:
             payload.pop("supports_task_identity", None)
+        if not self.prebuilt_image_pins:
+            payload.pop("prebuilt_image_pins", None)
         return payload
+
+    @model_validator(mode="after")
+    def admitted_prebuilt_pins(self) -> ServiceExecutionRuntimeProfileV1:
+        validate_prebuilt_image_pins(self.prebuilt_image_pins)
+        admitted = {item.statement.image_ref for item in self.image_admission.admissions}
+        if not set(self.prebuilt_image_pins.values()) <= admitted:
+            raise ValueError("prebuilt image pins require existing image admission coverage")
+        return self
 
     @model_validator(mode="after")
     def consistent_execution_class(self) -> ServiceExecutionRuntimeProfileV1:
@@ -632,6 +650,9 @@ def compile_service_execution_plan(
             or source_provenance != task_image_grant.task_source_provenance):
             raise ValueError("prepared task image does not match the frozen task")
         task = resolve_prepared_task(task, task_image_grant)
+    source_task_image = task.environment.docker_image
+    if is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     task = normalize_steps(task)
     if (task.environment.service_lifecycle is not None or task.environment.sidecars) and not profile.service_lifecycle_ready:
         raise ValueError("service_lifecycle runtime is not ready")
@@ -674,6 +695,8 @@ def compile_service_execution_plan(
         {
             "schema_version": "loom.automatic-service-execution-command.v1",
             "task_revision_sha256": task_revision_sha256,
+            **({"prebuilt_task_image": {"source": source_task_image, "resolved": task.environment.docker_image}}
+               if source_task_image != task.environment.docker_image else {}),
             "agent": trial.agent_name,
             **({"agent_version": trial.agent_version, "agent_image_ref": selected_agent_image}
                if trial.agent_version is not None else {}),
@@ -901,6 +924,8 @@ def runtime_profile_rejections(
     Every applicable reason is returned, in a fixed order whose first element
     is the most specific one; callers that surface a single error use it.
     """
+    if is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     reasons: list[str] = []
     try:
         effective_network_policy = resolve_effective_network_policy(
@@ -967,6 +992,8 @@ def execution_selection_rejections(
     """Every reason the selected harness, network policy, verification and
     isolation cannot run together for this task on this deployment (#2314)."""
 
+    if profile is not None and is_workspace_harness(trial.agent_name):
+        task = resolve_prebuilt_task_image(task, profile.prebuilt_image_pins)
     reasons = list(automatic_service_execution_rejections(
         task, trial, source_provenance=source_provenance,
         allow_task_image_preparation=allow_task_image_preparation,

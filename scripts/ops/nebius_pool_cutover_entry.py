@@ -597,7 +597,7 @@ async def qualify_pool_publication(context: PoolCutoverContext, http: httpx.Asyn
             raise ValueError
         runtime = ServiceExecutionRuntimeProfileV1.model_validate(selected.profile)
         fields = ("candidate_sha", "task_image_ref", "runtime_image_ref", "agent_image_ref",
-            "runtime_binary_sha256", "image_admission")
+            "runtime_binary_sha256", "image_admission", "prebuilt_image_pins")
         for profile in context.request.profiles.values():
             if any(getattr(profile, field) != getattr(runtime, field) for field in fields):
                 raise ValueError

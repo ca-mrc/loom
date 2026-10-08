@@ -213,7 +213,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
         execution_profile, = (row for row in spec.profiles.execution if row.profile_id == execution_target.profile_id)
         runtime_profile = ServiceExecutionRuntimeProfileV1.model_validate(runtime_profile.model_dump())
         previous_profile = ServiceExecutionRuntimeProfileV1.model_validate_json(api_env["LOOM_SVC_SERVICE_EXECUTION_RUNTIME_PROFILE_JSON"]["value"])
-        publication_fields = {"candidate_sha", "task_image_ref", "agent_image_ref", "runtime_image_ref", "runtime_binary_sha256", "image_admission"}
+        publication_fields = {"candidate_sha", "task_image_ref", "agent_image_ref", "runtime_image_ref", "runtime_binary_sha256", "image_admission", "prebuilt_image_pins"}
         if ({key: value for key, value in previous_profile.model_dump().items() if key not in publication_fields}
                 != {key: value for key, value in runtime_profile.model_dump().items() if key not in publication_fields}
                 or (runtime_profile.candidate_sha, runtime_profile.execution_class_id, runtime_profile.runtime_image_ref, runtime_profile.runtime_binary_sha256)
@@ -228,7 +228,7 @@ def wire_participant(*, request: PoolMigrationRequest, participant_id: UUID, man
             raise ValueError
         keyring_json = json.dumps(spec.profiles.image_admission_keyring, sort_keys=True, separators=(",", ":"))
         verify_execution_image_admission(runtime_profile.image_admission, keyring=ImageAdmissionKeyring.from_json(keyring_json),
-            required_image_refs=[value for value in (runtime_profile.task_image_ref, runtime_profile.runtime_image_ref, runtime_profile.agent_image_ref) if value is not None])
+            required_image_refs=runtime_profile.published_image_refs())
         build_target = participant.target(target_id, "task_image_build")
         profile, = (row for row in spec.profiles.task_images if row.profile_id == build_target.profile_id)
         existing = NativeTaskImageSettings.model_validate_json(worker_env["LOOM_EXECUTION_ACTUATOR_TASK_IMAGE_BUILDER"]["value"])

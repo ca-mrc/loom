@@ -319,6 +319,27 @@ def create_candidate(
     return result, profile
 
 
+def prepare_prebuilt_profile(profile: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    """Optional reviewed upstream images enter the original protected artifact."""
+    images = getattr(args, "prebuilt_images_json", None)
+    if images is None:
+        return profile
+    if (images.resolve() != ROOT / "deploy/catalog/tb21-r6-prebuilt-images.json"
+            or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or getattr(args, "mode", "platform") != "platform"):
+        raise ValueError("prebuilt task qualification requires explicit protected TB2.1 publication")
+    from scripts.ops.prepare_prebuilt_task_images import prepare
+
+    with tempfile.TemporaryDirectory(prefix="loom-prebuilt-profile-") as temporary:
+        original = Path(temporary) / "runtime-profile.json"
+        write_json(original, profile)
+        output = args.output.parent / "nebius-prebuilt-task-images"
+        prepare(argparse.Namespace(profile=original, images_json=images,
+            output=output, crane=args.prebuilt_crane, signing_key=args.signing_key,
+            signing_key_id=args.signing_key_id, trusted_keyring=args.trusted_keyring))
+        return read_json(output / "runtime-profile.json")
+
+
 def sanitize_diagnostic(text: str) -> str:
     """Bound and redact subprocess evidence before publishing it."""
     text = text[-16_384:]
@@ -712,6 +733,7 @@ def build(args: argparse.Namespace) -> None:
                 guest_max_artifact_bytes=getattr(args, "guest_max_artifact_bytes", None),
                 node_share_resources=True,
             )
+            profile = prepare_prebuilt_profile(profile, args)
             write_json(args.output / "candidate.json", manifest)
             write_json(args.output / "runtime-profile.json", profile)
             release = _runtime_release_payload({
@@ -736,6 +758,8 @@ def main() -> int:
     builder = commands.add_parser("build")
     builder.add_argument("--mode", choices=("platform", "harness-only"), default="platform")
     builder.add_argument("--agent-version")
+    builder.add_argument("--prebuilt-images-json", type=Path)
+    builder.add_argument("--prebuilt-crane", type=Path, default=Path("crane"))
     builder.add_argument("--registry-prefix", required=True)
     builder.add_argument("--upload-timeout-seconds", type=int, default=900,
                          help="Total per-image upload budget, including one transient-network retry (default: 900)")
