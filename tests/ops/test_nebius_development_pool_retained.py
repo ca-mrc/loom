@@ -178,6 +178,8 @@ def pool_inputs(request, retained):
                 for profile in value['profiles'].get(kind, []):
                     profile[key]['node_selector'].update(labels)
         if mode.startswith('foundation-runtime-build-material'):
+            for identity in value['quota_identities'].values():
+                identity[0] = config['quota_parent_id']
             for kind, purpose in (('task_images', 'task'), ('application_images', 'application')):
                 for profile in value['profiles'][kind]:
                     profile['settings'].update(source_secret_name='loom-build-' + purpose + '-source',
@@ -416,6 +418,86 @@ def test_build_material_refuses_unbound_input_without_emitting_documents(complet
         publisher_cloud.scope['registry_fqdn'] = 'cr.eu-north1.nebius.cloud/foreign'
     with pytest.raises(ValueError, match='development build runtime unqualified'):
         build_material(request, publisher_cloud, **changes)
+
+
+def runtime_install_request(completed_pool, publisher_cloud):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from scripts.ops.nebius_development_build_cloud import DevelopmentRegistryCloudScope
+    from scripts.ops.nebius_development_collector_cloud import DevelopmentCollectorCloudScope
+
+    name = 'scripts.ops.nebius_development_runtime_install'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('connected development runtime installation is missing')
+    runtime = importlib.import_module(name)
+    request = database_runtime(completed_pool)
+    project = request.foundation.inputs.config['project_id']
+    registry = DevelopmentRegistryCloudScope.model_validate({**publisher_cloud.scope, 'project_id': project})
+    observer = DevelopmentCollectorCloudScope(tenant_id='tenant-test', region='eu-north1', project_id=project,
+        account_id='serviceaccount-observer', group_id='group-observer', key_id='authpublickey-observer')
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption()).decode()
+    credential = json.dumps({'subject-credentials': {'alg': 'RS256', 'private-key': private,
+        'kid': observer.key_id, 'iss': observer.account_id, 'sub': observer.account_id}}).encode()
+    return runtime, runtime.DevelopmentRuntimeInstallRequest(database=request, collector_scope=observer,
+        collector_credential=credential, registry_scope=registry, registry_credential=publisher_cloud.credential)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_parent_freezes_complete_fixed_inventory_before_writes(completed_pool, publisher_cloud):
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    plan = runtime.prepare_runtime_install(request)
+    assert set(plan.fixed) == {'database', 'material', 'authority', 'isolation', 'workloads', 'catalog'}
+    keys = [key for rows in plan.fixed.values() for key in rows]
+    assert len(keys) == len(set(keys))
+    assert set(plan.originals) == set(plan.stopped) == set(plan.targets) == {
+        'Deployment:loom-nebius-management-dev:loom-service', 'Deployment:loom-dev:loom-service',
+        'Deployment:loom-dev:loom-control-plane'}
+    assert all(row['metadata']['uid'] for row in plan.originals.values())
+    assert all(row['spec']['replicas'] == 0 for rows in (plan.stopped, plan.targets) for row in rows.values())
+    assert {row['kind'] for row in plan.fixed['workloads'].values()} == {'Deployment', 'CronJob'}
+    for row in plan.fixed['workloads'].values():
+        assert row['spec'].get('replicas', 0) == 0 and row['spec'].get('suspend', True) is True
+    assert {row['kind'] for row in plan.fixed['isolation'].values()} == {
+        'NetworkPolicy', 'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}
+    for row in plan.fixed['authority'].values():
+        for rule in row.get('rules', []):
+            assert set(rule['verbs']) <= {'get', 'list', 'watch'}
+    source = request.database.manager.delivery.source_secret_name
+    document = plan.fixed['material']['Secret:loom-nebius-management-dev:' + source]
+    assert set(document['data']) == {'credentials.json'}
+    material = json.loads(base64.b64decode(document['data']['credentials.json'], validate=True))
+    assert set(material) == {'access-key', 'secret-key'}
+    retained = request.database.foundation.phases['supplied']['resources']['Secret:loom-platform-storage']['desired']['data']
+    assert material['access-key'] == base64.b64decode(retained['source-access-key']).decode()
+    assert runtime.prepare_runtime_install(request) == plan
+    assert len(plan.input_digest) == 71 and plan.input_digest.startswith('sha256:')
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('damage', ['shared-account', 'shared-key', 'shared-group', 'shared-private-key', 'changed-database'])
+def test_runtime_parent_rejects_shared_cloud_authority_or_changed_predecessor(completed_pool, publisher_cloud, damage):
+    from dataclasses import replace
+
+    runtime, request = runtime_install_request(completed_pool, publisher_cloud)
+    if damage == 'changed-database':
+        request.database.database[0]['data']['setup.json'] = '{}'
+    elif damage == 'shared-private-key':
+        credential = json.loads(request.collector_credential)
+        credential['subject-credentials']['private-key'] = json.loads(request.registry_credential)['subject-credentials']['private-key']
+        request = replace(request, collector_credential=json.dumps(credential).encode())
+    else:
+        field = {'shared-account': 'account_id', 'shared-key': 'key_id', 'shared-group': 'group_id'}[damage]
+        scope = request.collector_scope.model_copy(update={field: getattr(request.registry_scope, field)})
+        credential = json.loads(request.collector_credential)
+        subject = credential['subject-credentials']
+        subject.update(sub=scope.account_id, iss=scope.account_id, kid=scope.key_id)
+        request = replace(request, collector_scope=scope, collector_credential=json.dumps(credential).encode())
+    with pytest.raises(ValueError, match='development runtime installation intent unqualified'):
+        runtime.prepare_runtime_install(request)
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation'], indirect=True)
