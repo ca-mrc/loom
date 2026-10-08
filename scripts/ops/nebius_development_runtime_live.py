@@ -7,6 +7,7 @@ does not itself qualify startup, grant writer authority or open pool admission.
 from __future__ import annotations
 
 import copy
+import json
 import ssl
 from collections.abc import Callable
 from pathlib import Path
@@ -17,10 +18,12 @@ from scripts.ops import nebius_certificates as private_state
 from scripts.ops.nebius_development_runtime_install import (
     DevelopmentRuntimeInstallRequest,
     prepare_runtime_install,
+    runtime_transition_inputs,
 )
-from scripts.ops.nebius_ingress_stage import _key
+from scripts.ops.nebius_ingress_stage import _key, _snapshot, _uid
 from scripts.ops.nebius_management_material import ManagementBinding
-from scripts.ops.nebius_management_stage import _MARKER
+from scripts.ops.nebius_management_stage import _MARKER, _qualified_defaulted
+from scripts.ops.nebius_management_switch import _matches
 from scripts.ops.nebius_management_transport import ManagementKubernetesTransport
 
 _PATHS = {
@@ -122,3 +125,108 @@ class HTTPSDevelopmentRuntimeResources(ManagementKubernetesTransport):
 
     def get_database_volume(self) -> dict[str, Any] | None:
         raise ValueError('database storage outside fixed development runtime phase')
+
+
+class HTTPSDevelopmentRuntimeWorkloads(ManagementKubernetesTransport):
+    """CAS only the parent's regenerated phase targets; ambiguous writes raise."""
+
+    def __init__(self, *, request: DevelopmentRuntimeInstallRequest, phase: str, api_server: str,
+                 ssl_context: ssl.SSLContext, qualify_runtime: Callable[[DevelopmentRuntimeInstallRequest, str, bool], None],
+                 observe_ready: Callable[[DevelopmentRuntimeInstallRequest, str, dict[str, Any], dict[str, Any], dict[str, Any]], bool],
+                 token: str | None = None, private_files: dict[Path, bytes] | None = None):
+        plan = prepare_runtime_install(request)
+        if (phase not in {'stop', 'replace', 'control', 'start'} or not callable(qualify_runtime)
+                or not callable(observe_ready)
+                or api_server.rstrip('/') != request.database.foundation.inputs.config['kubernetes_api_server'].rstrip('/')):
+            raise ValueError('development runtime workload connection differs')
+        self.request, self.phase = copy.deepcopy(request), phase
+        state = Path(request.database.manager.retained.request.retained.operation['state_dir']).parent / 'runtime-installation'
+        self.originals, self.targets = runtime_transition_inputs(plan, state, phase)
+        self.private_files = dict(private_files or {})
+        self.qualify_runtime, self.observe_ready = qualify_runtime, observe_ready
+        super().__init__(api_server=api_server, ssl_context=ssl_context, token=token)
+
+    def _private_inputs(self) -> None:
+        database = self.request.database
+        files = (*database.manager.retained.files.items(), *database.foundation.files.items(), *self.private_files.items())
+        if any(private_state._private_read(path, limit=4 * 1024**2) != raw for path, raw in files):
+            raise ValueError('development runtime private inputs changed')
+
+    def _qualify(self, *, writing: bool) -> None:
+        self._private_inputs()
+        self.qualify_runtime(copy.deepcopy(self.request), self.phase, writing)
+        self._private_inputs()
+
+    def qualify(self) -> None:
+        self._qualify(writing=False)
+
+    def _path(self, key: str) -> str:
+        original = self.originals[key]
+        return runtime_resource_path(original) + '/' + str(original['metadata']['name'])
+
+    def read_workload(self, key: str) -> dict[str, Any]:
+        path = self._path(key)
+        self.qualify()
+        actual = self._request('GET', path)
+        if actual is None or _key(actual) != key or _uid(actual) != _uid(self.originals[key]):
+            raise ValueError('development runtime workload identity differs')
+        _snapshot(actual)
+        return actual
+
+    def _patch(self, key: str, before: dict[str, Any], desired: dict[str, Any], *, preview: bool) -> dict[str, Any] | None:
+        try:
+            original = self.originals[key]
+            if desired != self.targets[key] or not _matches(before, original, _uid(original)):
+                raise ValueError
+            version = before['metadata']['resourceVersion']
+            if not isinstance(version, str) or not 0 < len(version) <= 128:
+                raise ValueError
+            patches = [{'op': 'test', 'path': '/metadata/uid', 'value': _uid(original)},
+                {'op': 'test', 'path': '/metadata/resourceVersion', 'value': version},
+                {'op': 'test', 'path': '/spec', 'value': before['spec']}]
+            for field in ('labels', 'annotations'):
+                if field in desired['metadata']:
+                    patches.append({'op': 'add', 'path': '/metadata/' + field, 'value': desired['metadata'][field]})
+                elif field in before['metadata']:
+                    patches.append({'op': 'remove', 'path': '/metadata/' + field})
+            patches.append({'op': 'replace', 'path': '/spec', 'value': desired['spec']})
+            self._qualify(writing=True)
+            with self.client.stream('PATCH', self._path(key) + ('?dryRun=All' if preview else ''),
+                    json=patches, headers={'Content-Type': 'application/json-patch+json'}) as response:
+                if (response.status_code not in {200, 409, 422}
+                        or response.headers.get('content-encoding', 'identity').lower() != 'identity'):
+                    raise ValueError
+                content = bytearray()
+                for chunk in response.iter_bytes(chunk_size=16384):
+                    if len(content) + len(chunk) > 4 * 1024**2:
+                        raise ValueError
+                    content.extend(chunk)
+                value = json.loads(content)
+                if not isinstance(value, dict):
+                    raise ValueError
+                if response.status_code in {409, 422}:
+                    if (value.get('apiVersion') != 'v1' or value.get('kind') != 'Status' or value.get('status') != 'Failure'
+                            or value.get('code') != response.status_code
+                            or value.get('reason') != {409: 'Conflict', 422: 'Invalid'}[response.status_code]):
+                        raise ValueError
+                    return None
+                if _uid(value) != _uid(original):
+                    raise ValueError
+                _qualified_defaulted(desired, value)
+                return value
+        except Exception:
+            raise ValueError('development runtime workload update unconfirmed') from None
+
+    def preview_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> dict[str, Any] | None:
+        return self._patch(key, before, desired, preview=True)
+
+    def patch_workload(self, key: str, before: dict[str, Any], desired: dict[str, Any]) -> bool:
+        return self._patch(key, before, desired, preview=False) is not None
+
+    def workload_ready(self, key: str, expected: dict[str, Any]) -> bool:
+        _qualified_defaulted(self.targets[key], expected)
+        actual = self.read_workload(key)
+        if not _matches(actual, expected, _uid(self.originals[key])):
+            raise ValueError('development runtime workload readiness differs')
+        return self.observe_ready(copy.deepcopy(self.request), self.phase, copy.deepcopy(self.originals[key]),
+            copy.deepcopy(expected), actual)
