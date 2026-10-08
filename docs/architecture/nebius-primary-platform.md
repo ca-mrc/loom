@@ -2513,6 +2513,13 @@ These settings
 do not register participants, install profiles, grant Kubernetes authority or
 perform the protected writer migration.
 
+The admin-only `GET /admin/service-execution/catalog/{target_id}` reads the stored
+execution class and target definitions, their recorded digests, and current
+desired/observed health from one database query. Missing targets return 404.
+This supports exact catalog readback after the idempotent catalog POST, including
+recovery from an uncertain response. Reading a catalog does not enable a target,
+refresh its health, create capacity policy, or establish global-pool readiness.
+
 Management startup loads `pool_profiles_file`, a bounded installer-owned
 `loom.pool-profiles.v1` JSON catalog. It contains separate execution and native
 build entries keyed by the registered profile UUID, plus public image-admission
