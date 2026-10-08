@@ -774,10 +774,16 @@ def test_catalog_job_binds_original_target_and_new_code_without_database_authori
     assert container['command'] == ['python', '-m', 'loom.nebius_development_catalog']
     assert container['env'] == [{'name': 'LOOM_DEVELOPMENT_RUNTIME_CATALOG_CONFIG', 'value': '/var/run/loom-runtime-catalog/catalog.json'}]
     volumes = {row['name']: row for row in pod['volumes']}
-    assert set(volumes) == {'runtime-catalog', 'admin'}
-    assert volumes['admin']['secret']['secretName'] == 'loom-admin-secret'
+    assert set(volumes) == {'runtime-catalog', 'admin-source', 'admin-owned'}
+    assert volumes['admin-source']['secret']['secretName'] == 'loom-admin-secret'
+    assert volumes['admin-source']['secret']['items'] == [{'key': 'secrets.toml', 'path': 'secrets.toml'}]
+    assert volumes['admin-owned']['emptyDir']['medium'] == 'Memory'
     assert volumes['runtime-catalog']['configMap']['name'] == config['metadata']['name']
-    assert not pod.get('initContainers')
+    initializer, = pod['initContainers']
+    assert initializer['name'] == 'prepare-admin-secret'
+    assert initializer['image'] == container['image']
+    assert initializer['securityContext']['allowPrivilegeEscalation'] is False
+    assert pod['securityContext']['runAsUser'] == 1000
     assert all(row['readOnly'] is True for row in container['volumeMounts'])
     assert len(completed_pool[3].server.calls) == before_calls
 
