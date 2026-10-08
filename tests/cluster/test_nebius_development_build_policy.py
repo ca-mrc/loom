@@ -53,6 +53,9 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
     try:
         _, core, _ = _load_client(cluster)
         admission = client.AdmissionregistrationV1Api(core.api_client)
+        client.SchedulingV1Api(core.api_client).create_priority_class({'apiVersion': 'scheduling.k8s.io/v1',
+            'kind': 'PriorityClass', 'metadata': {'name': 'unapproved-build-priority'}, 'value': 1000000,
+            'globalDefault': False, 'preemptionPolicy': 'PreemptLowerPriority'})
         for ns in (namespace, 'unrelated-builds'):
             core.create_namespace({'metadata': {'name': ns,
                 'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
@@ -89,7 +92,7 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                     'extra-container', 'extra-init', 'trusted-command', 'trusted-image', 'trusted-env',
                     'builder-root', 'builder-capability', 'trusted-escalation', 'env-from', 'hook',
                     'node-name', 'node-group', 'account', 'resources', 'projected-token', 'claim-secret',
-                    'termination-secret'):
+                    'termination-secret', 'priority'):
                 changed = copy.deepcopy(pod)
                 spec = changed['spec']
                 prepare, build = spec['initContainers']
@@ -133,6 +136,8 @@ def test_pooled_build_policy_compiles_and_constrains_both_native_workloads(build
                         {'serviceAccountToken': {'path': 'token'}}]}})
                 elif damage == 'termination-secret':
                     prepare['terminationMessagePath'] = '/var/run/loom-task-build/source/secret-key'
+                elif damage == 'priority':
+                    spec['priorityClassName'] = 'unapproved-build-priority'
                 else:
                     next(v for v in spec['volumes'] if v['name'] == 'source')['secret']['secretName'] = 'foreign-secret'
                 with pytest.raises(ApiException) as denied:
