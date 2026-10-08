@@ -722,7 +722,7 @@ def add_equivalent_versions(r, count=2, index=0):
     return versions
 
 
-@pytest.mark.parametrize("count", [2, 5, 8])
+@pytest.mark.parametrize("count", [2, 5, 8, 18, 32])
 async def test_equivalent_versions_adopt_latest_with_complete_audit_and_replay(recovery, count):
     r = recovery
     versions = add_equivalent_versions(r, count)
@@ -763,10 +763,11 @@ async def test_identical_versions_still_require_explicit_inventory(recovery):
     assert await snapshot(r) == before
 
 
+@pytest.mark.parametrize("count", [2, 18])
 @pytest.mark.parametrize("fault", ["corrupt_older_copy", "nonlatest", "missing", "extra", "delete_marker"])
-async def test_equivalent_inventory_rejects_conflicts_before_any_repair(recovery, fault):
+async def test_equivalent_inventory_rejects_conflicts_before_any_repair(recovery, fault, count):
     r = recovery
-    versions = add_equivalent_versions(r)
+    versions = add_equivalent_versions(r, count)
     obj = r.objects[0]
     if fault == "corrupt_older_copy":
         bad = r.s3.put_object(Bucket=r.bucket, Key=obj.object_key, Body=b"x" * len(r.bodies[0]))["VersionId"]
@@ -836,7 +837,7 @@ async def test_all_equivalent_copies_count_toward_verification_budget(recovery, 
 @pytest.mark.parametrize("invalid", [[], ["latest"], ["latest"] * 2,
     ["latest", "null"], ["latest", " null "], ["latest", ""], ["latest", 1],
     ["latest", "x" * 1025], ["latest", "bad\nversion"], ["a", "b"],
-    ["latest", *[str(i) for i in range(8)]]])
+    ["latest", *[str(i) for i in range(32)]]])
 async def test_equivalent_version_request_requires_complete_bounded_concrete_set(recovery, invalid):
     r = recovery
     r.payload["objects"][0].update(version_id="latest", equivalent_version_ids=invalid)
@@ -1273,4 +1274,20 @@ async def test_operator_rechecks_platform_after_admission(recovery, operator_pla
     monkeypatch.setattr(module, "admission_open", changed_while_connecting)
     with pytest.raises(RecoveryConflictError, match="platform_binding_changed"):
         await operate_single(r, operator_platform)
+    assert await snapshot(r) == before
+
+
+async def test_aggregate_version_copy_overflow_is_rejected_before_state_loading(recovery):
+    r = recovery
+    # A single-version object counts too. Fake registry IDs would reach the
+    # database's owner/not-found refusal if request validation let this through.
+    r.payload['objects'] = [
+        {'registry_id': str(uuid4()), 'version_id': 'v0',
+         'equivalent_version_ids': [f'v{v}' for v in range(32)]}
+        for _ in range(8)
+    ] + [{'registry_id': str(uuid4()), 'version_id': 'v0'}]
+    before = await snapshot(r)
+    response = await r.client.post(URL, headers=HEADERS, json=r.payload)
+    assert response.status_code == 422, response.text
+    assert 'version copy limit' in response.text
     assert await snapshot(r) == before
