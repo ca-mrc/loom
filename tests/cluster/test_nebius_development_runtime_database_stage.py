@@ -152,3 +152,64 @@ def test_runtime_database_exact_resources_use_native_defaults_and_replay(complet
         assert len(receipt['resource_uids']) == 4
     finally:
         cluster.stop()
+
+
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True, ids=['private-only'])
+def test_stopped_actuator_effective_permissions_on_native_api(completed_pool):
+    from kubernetes import client
+    from scripts.ops.nebius_development_actuator_runtime import prepare_actuator_runtime
+    from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_management_stage import _qualified_defaulted
+
+    prepared = database_runtime(completed_pool)
+    runtime = prepare_actuator_runtime(prepared)
+    participant, = prepared.manager.retained.request.registration.spec.participants
+    execution, build = participant.execution_namespace.name, participant.build_namespace.name
+    cluster = _start_k3s(ephemeral_storage_floor='1Gi')
+    try:
+        _, core, _ = _load_client(cluster)
+        rbac = client.RbacAuthorizationV1Api(core.api_client)
+        apps = client.AppsV1Api(core.api_client)
+        authorization = client.AuthorizationV1Api(core.api_client)
+        for namespace in (execution, build, 'loom-staging'):
+            core.create_namespace({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
+                'name': namespace, 'labels': {'pod-security.kubernetes.io/enforce': 'restricted'}}})
+            core.create_namespaced_resource_quota(namespace, {'apiVersion': 'v1', 'kind': 'ResourceQuota',
+                'metadata': {'name': 'no-fixture-execution'}, 'spec': {'hard': {'pods': '0'}}})
+        methods = {'ServiceAccount': core.create_namespaced_service_account,
+            'Role': rbac.create_namespaced_role, 'RoleBinding': rbac.create_namespaced_role_binding,
+            'ClusterRole': rbac.create_cluster_role, 'ClusterRoleBinding': rbac.create_cluster_role_binding}
+        for document in runtime.authority:
+            namespace = document['metadata'].get('namespace')
+            if namespace:
+                methods[document['kind']](namespace, document)
+            else:
+                methods[document['kind']](document)
+        deployment = apps.create_namespaced_deployment(execution, runtime.deployment)
+        actual = core.api_client.sanitize_for_serialization(deployment)
+        _qualified_defaulted(runtime.deployment, _snapshot(actual))
+        assert deployment.spec.replicas == 0
+        assert core.list_namespaced_pod(execution).items == []
+        identity = 'system:serviceaccount:' + execution + ':loom-execution-actuator'
+        for namespace, group, resource, subresource, verb, name, allowed in (
+            (execution, 'batch', 'jobs', None, 'get', 'example', True),
+            (build, 'batch', 'jobs', None, 'get', 'example', True),
+            (build, '', 'pods', 'log', 'get', 'example', True),
+            (None, '', 'namespaces', None, 'get', execution, True),
+            (None, '', 'nodes', 'stats', 'get', 'example', True),
+            (None, '', 'nodes', 'proxy', 'get', 'example', False),
+            (execution, 'batch', 'jobs', None, 'create', 'example', False),
+            (build, 'batch', 'jobs', None, 'delete', 'example', False),
+            (execution, '', 'secrets', None, 'get', 'example', False),
+            ('loom-staging', 'batch', 'jobs', None, 'get', 'example', False),
+            (None, '', 'namespaces', None, 'get', 'loom-staging', False),
+        ):
+            review = authorization.create_subject_access_review({'apiVersion': 'authorization.k8s.io/v1',
+                'kind': 'SubjectAccessReview', 'spec': {'user': identity, 'resourceAttributes': {
+                    'namespace': namespace, 'group': group, 'resource': resource,
+                    'subresource': subresource, 'verb': verb, 'name': name}}})
+            assert review.status.allowed is allowed, (namespace, resource, subresource, verb)
+    finally:
+        cluster.stop()
