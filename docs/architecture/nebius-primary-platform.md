@@ -1618,6 +1618,16 @@ not per-owner data volumes. A manager completion receipt still does not establis
 source-build/task admission or multi-owner acceptance. See the
 [delivery runbook](../runbooks/nebius-deployment.md#independent-development-manager-delivery).
 
+The fresh installer can opt into the existing owner-scoped source-upload runtime
+without enabling builds or tasks. Its `source_files` pair must match the
+live-qualified retained dev foundation's source-storage identity. Only those two
+keys are delivered in the revision-named immutable source Secret, before manager
+startup. The configured concurrency's bounded ephemeral spool is included in
+platform capacity accounting. No per-owner bucket, policy or PVC is introduced.
+The option and credential bytes are frozen in installation identity; omitted
+inputs retain historical hashes, and TLS renewal reconstructs source-enabled
+history from retained evidence rather than reopening old credential files.
+
 For a fresh independent manager, protected `shared_public_route: true` adds a final
 shared-dev public phase. It creates only a fixed NetworkPolicy and Ingress in
 `loom-dev`, using the existing shared ingress default wildcard certificate. The

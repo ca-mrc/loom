@@ -216,6 +216,12 @@ class HTTPSDevelopmentManagementPrerequisites(ManagementKubernetesTransport):
                     raise ValueError()
                 storage = retained.phases['supplied']['resources']['Secret:loom-platform-storage']['desired']['data']
                 material = {key: base64.b64decode(value, validate=True).decode() for key, value in storage.items()}
+                # The foundation reader has already matched this retained Secret
+                # to the live dev object. Reuse its source-only identity; accepting
+                # arbitrary supplied keys would bypass the provider scope proof.
+                if request.source_material is not None and request.source_material != {
+                        key: material['source-' + key] for key in ('access-key', 'secret-key')}:
+                    raise ValueError()
                 before = private_state._private_read(self.operator_cloud_credentials, limit=1024**2)
                 sdk = SDK(credentials_file_name=str(self.operator_cloud_credentials),
                     user_agent_prefix='loom-development-management-installer/1.0')
