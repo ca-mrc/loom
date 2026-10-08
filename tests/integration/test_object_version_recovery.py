@@ -49,6 +49,19 @@ def digest(value):
     ).hexdigest()
 
 
+def _body_properties(body):
+    if isinstance(body, bytes):
+        return len(body), digest_bytes(body)
+    position = body.tell()
+    body.seek(0)
+    size, checksum = 0, hashlib.sha256()
+    while chunk := body.read(1024 * 1024):
+        size += len(chunk)
+        checksum.update(chunk)
+    body.seek(position)
+    return size, "sha256:" + checksum.hexdigest()
+
+
 @pytest.fixture
 async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, shared_minio, request):
     cfg = shared_minio.get_config()
@@ -86,14 +99,31 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
         lease = await _reserve(session, trial_id=trial_id, target=target, now=now)
         trial = await session.get(Trial, trial_id)
         result_body = b'{"reward":0}'
-        result_sha = digest_bytes(result_body)
+        params = getattr(request.node, "callspec", SimpleNamespace(params={})).params
+        if payload_size := params.get("large_payload_bytes"):
+            # Real oversized JSON, generated and uploaded with bounded memory.
+            result_body = (tmp_path / "large-result.json").open("w+b")
+            request.addfinalizer(result_body.close)
+            prefix_body, suffix_body = b'{"reward":0,"padding":"', b'"}'
+            result_body.write(prefix_body)
+            left = payload_size - len(prefix_body) - len(suffix_body)
+            chunk = b"x" * (1024 * 1024)
+            while left:
+                count = min(left, len(chunk))
+                result_body.write(chunk[:count])
+                left -= count
+            result_body.write(suffix_body)
+            result_body.seek(0)
+        result_size, result_sha = _body_properties(result_body)
+        # Metadata-only overflow cases must refuse before reading storage.
+        result_size = params.get("registered_payload_bytes", result_size)
         stored_files = [{"file_index": 0, "relative_path": "result.json", "role": "semantic_document",
                          "archive_format": "none", "media_type": "application/json",
-                         "size_bytes": len(result_body), "sha256": result_sha}]
+                         "size_bytes": result_size, "sha256": result_sha}]
         artifact_manifest = {"schema_version": "loom.artifact-manifest.v1", "artifact_id": str(artifact_id),
             "artifact_name": "trial_bundle", "artifact_type": "loom.trial-artifact-bundle.v1",
-            "content_sha256": result_sha, "stored_size_bytes": len(result_body),
-            "unpacked_size_bytes": len(result_body), "file_count": 1, "stored_files": stored_files,
+            "content_sha256": result_sha, "stored_size_bytes": result_size,
+            "unpacked_size_bytes": result_size, "file_count": 1, "stored_files": stored_files,
             "lineage_artifact_ids": [], "lineage_digests": []}
         producer = {"commit_kind": "service_execution_output", "team_id": str(trial.team_id),
             "service_execution_lease_id": str(lease.id), "service_execution_generation": 1,
@@ -108,7 +138,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
                            "artifact_type": "loom.trial-artifact-bundle.v1",
                            "manifest_sha256": canonical_digest(artifact_manifest),
                            "content_sha256": result_sha, "stored_files": stored_files}],
-            "total_bytes": len(result_body), "input_lineage_artifact_ids": [], "input_lineage_digests": [],
+            "total_bytes": result_size, "input_lineage_artifact_ids": [], "input_lineage_digests": [],
             "request_digest": "sha256:" + "e" * 64}
         source_fault = getattr(request.node, "callspec", SimpleNamespace(params={})).params.get("source_fault")
         if source_fault == "manifest":
@@ -121,15 +151,16 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             producer["candidate_sha"] = "b" * 40
         prefix = f"trials/{trial.team_id}/{trial_id}/attempts/1/bundles/{artifact_id}/"
         trajectory_prefix = f"{trial.team_id}/{trial_id}/attempts/1/"
-        for key, body in [(prefix + "files/result.json", result_body),
+        for body_index, (key, body) in enumerate([(prefix + "files/result.json", result_body),
                           (prefix + "source/_manifest.json", canonical_document(root_manifest)),
                           (trajectory_prefix + "events.jsonl", b'{"seq":1}\n'),
-                          (trajectory_prefix + "atif.json", b'{"steps":[]}')]:
-            version = s3.put_object(Bucket=bucket, Key=key, Body=body)["VersionId"]
+                          (trajectory_prefix + "atif.json", b'{"steps":[]}')]):
+            body_size, body_sha = _body_properties(body)
+            version = s3.put_object(Bucket=bucket, Key=key, Body=body, ContentLength=body_size)["VersionId"]
             objects.append(DataLifecycleObject(id=uuid4(), authority_id=authority_id,
                 environment="development", namespace="loom", bucket=bucket, object_key=key,
-                version_id=None, content_sha256=hashlib.sha256(body).hexdigest(),
-                size_bytes=len(body), created_at=now))
+                version_id=None, content_sha256=body_sha.removeprefix("sha256:"),
+                size_bytes=result_size if body_index == 0 else body_size, created_at=now))
             versions.append(version)
             bodies.append(body)
         file_rows = [{"relative_path": name, "media_type": "application/json",
@@ -174,9 +205,9 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             service_execution_task_revision_sha256=producer["task_revision_sha256"],
             service_execution_command_identity_sha256=producer["command_identity_sha256"],
             idempotency_key=str(upload_id), request_digest="sha256:" + "e" * 64,
-            prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=1024,
+            prefix=f"source/{upload_id}/", state="committed", expected_total_max_bytes=max(1024, result_size),
             expires_at=now + timedelta(days=1), committed_at=now, canonical_manifest_json=root_manifest,
-            actual_total_bytes=len(result_body),
+            actual_total_bytes=result_size,
             manifest_sha256=lease.output_manifest_sha256,
             committed_marker_sha256=lease.output_marker_sha256))
         session.add(DataLifecycleAuthority(id=authority_id, environment="development",
@@ -187,7 +218,7 @@ async def recovery(monkeypatch, tmp_path, isolated_migration_postgres_url, share
             artifact_type="loom.trial-artifact-bundle.v1", name="trial_bundle",
             control_producer_kind="service_execution", control_producer_id=lease.id,
             artifact_upload_session_id=upload_id, manifest_sha256=canonical_digest(artifact_manifest),
-            stored_size_bytes=len(result_body), unpacked_size_bytes=len(result_body), file_count=1,
+            stored_size_bytes=result_size, unpacked_size_bytes=result_size, file_count=1,
             content_hash=result_sha, storage=storage,
             artifact_metadata={"materialization_state": "committed"},
             lifecycle_authority_id=authority_id, created_at=now))
@@ -921,3 +952,84 @@ async def test_equivalent_inventory_is_bound_to_preview_and_audit(recovery):
     assert response.status_code == 409, response.text
     assert "operation_id_conflict" in response.text
     assert await snapshot(r) == after
+
+
+def single_object_payload(r):
+    from loom.db.schema_startup import service_schema_head
+
+    payload = copy.deepcopy(r.payload)
+    payload.update(mode="single_large_object_v1", team_id=r.index["team_id"],
+                   candidate_sha="c" * 40, schema_head=service_schema_head())
+    payload["objects"] = payload["objects"][:1]
+    return payload
+
+
+async def recover_single_object(r, payload):
+    from loom_control_plane.object_version_recovery import SingleObjectRecoveryRequest
+
+    return await r.app.state.object_version_recovery.recover(
+        SingleObjectRecoveryRequest.model_validate(payload), sessions=r.sessions, client=r.s3,
+        actor="operator:single_large_object_v1", artifacts_bucket=r.bucket, trajectories_bucket=r.bucket,
+    )
+
+
+@pytest.mark.parametrize("large_payload_bytes", [257 * 1024 * 1024])
+async def test_single_operator_recovers_real_large_payload_without_widening_http(recovery, large_payload_bytes):
+    r = recovery
+    before = await snapshot(r)
+    ordinary = {**r.payload, "objects": r.payload["objects"][:1]}
+    response = await r.client.post(URL, headers=HEADERS, json=ordinary)
+    assert response.status_code == 409 and response.json()["detail"] == "byte_limit_exceeded"
+    payload = single_object_payload(r)
+    response = await r.client.post(URL, headers=HEADERS, json=payload)
+    assert response.status_code == 422
+    assert await snapshot(r) == before
+
+    preview = await recover_single_object(r, payload)
+    assert preview["status"] == "preview"
+    assert preview["plan"]["objects"][0]["size_bytes"] == large_payload_bytes
+    assert preview["plan"]["request"]["mode"] == "single_large_object_v1"
+    assert await snapshot(r) == before
+    result = await recover_single_object(r, {**payload, "apply": True, "plan_sha256": preview["plan_sha256"]})
+    assert result["status"] == "applied"
+    after = await snapshot(r)
+    assert after[2] == [r.versions[0], None, None, None]
+    assert after[0]["files"][0]["version_id"] == r.versions[0]
+    assert after[1]["artifacts"][0]["version_id"] == r.versions[0]
+    assert after[0]["source_evidence"] == before[0]["source_evidence"]
+    assert after[4] == before[4]
+    assert len(after[3]) == 1
+    assert after[3][0][1]["plan"]["request"] == preview["plan"]["request"]
+
+
+async def test_single_operator_refuses_another_team_before_verification(recovery):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    before = await snapshot(r)
+    payload = {**single_object_payload(r), "team_id": str(uuid4())}
+    with pytest.raises(RecoveryConflictError, match="operator_team_conflict"):
+        await recover_single_object(r, payload)
+    assert await snapshot(r) == before
+
+
+@pytest.mark.parametrize("registered_payload_bytes,copies", [(4 * 1024**3 + 1, 1), (2 * 1024**3 + 1, 2)])
+async def test_single_operator_metadata_overflow_refuses_before_storage(
+    recovery, registered_payload_bytes, copies, monkeypatch,
+):
+    from loom_control_plane.object_version_recovery import RecoveryConflictError
+
+    r = recovery
+    payload = single_object_payload(r)
+    if copies == 2:
+        latest = r.s3.put_object(Bucket=r.bucket, Key=r.objects[0].object_key, Body=r.bodies[0])["VersionId"]
+        payload["objects"][0].update(version_id=latest, equivalent_version_ids=[r.versions[0], latest])
+    before = await snapshot(r)
+
+    def unexpected_read(**kwargs):
+        pytest.fail("over-budget metadata must refuse before S3 verification")
+
+    monkeypatch.setattr(r.s3, "get_object", unexpected_read)
+    with pytest.raises(RecoveryConflictError, match="byte_limit_exceeded"):
+        await recover_single_object(r, payload)
+    assert await snapshot(r) == before
