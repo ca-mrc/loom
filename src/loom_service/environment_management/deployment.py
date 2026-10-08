@@ -63,6 +63,11 @@ class ManagementDeployment(BaseModel):
     # historical input digests and is not permission to discover a live catalog.
     pool_catalog_operation_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
     application_builder_machine_id: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
+    # An independently installed manager need not share the controller's default
+    # certificate. Omission retains historical input hashes and default routing.
+    public_tls_secret_name: str | None = Field(default=None,
+        pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$", max_length=63,
+        exclude_if=lambda value: value is None)
 
     _public_host = field_validator("public_host")(_hostname)
 
@@ -296,6 +301,8 @@ def render_management(
             "path": "/", "pathType": "Prefix", "backend": {"service": {"name": "loom-service", "port": {"number": 8090}}},
         }]}}],
     }
+    if deployment.public_tls_secret_name is not None:
+        ingress["spec"]["tls"][0]["secretName"] = deployment.public_tls_secret_name
     files["70-public.yaml"] = [ingress]
     # Include rollout, migration, backup scratch and credential preparation in
     # the fixed overhead. This envelope is not an automatic platform resize.

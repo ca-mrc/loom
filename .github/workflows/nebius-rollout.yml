@@ -12,7 +12,7 @@ on:
       operation:
         description: Idle rollout, inventory, certificates, ingress, or protected management installation
         type: choice
-        options: [rollout, recover, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install]
+        options: [rollout, recover, inspect, certificate, ingress, ingress-rollback, ingress-dns, management-preflight, management-install, management-diagnostic-preflight, management-diagnostic-install, management-recovery-preflight, management-recovery-install, management-refresh-preflight, management-refresh-install, management-pool-preflight, management-pool-install, management-pool-rollback, management-pool-repair-preflight, management-pool-repair-install, management-pool-repair-rollback, development-preflight, development-install, development-management-preflight, development-management-install, development-management-renewal-preflight, development-management-renewal-renew]
         default: rollout
       recovery_run_id:
         description: With recover only, terminal failed rollout whose immutable candidate and guard are resumed
@@ -655,6 +655,194 @@ jobs:
         with:
           name: nebius-development-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nebius-development/development-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  development-management:
+    if: >-
+      github.repository == 'qianyi-sun/loom' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'development-management-preflight' || inputs.operation == 'development-management-install')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select exact integrated development management authority source
+        id: tooling
+        env:
+          DEVELOPMENT_MANAGEMENT_OPERATION: ${{ inputs.operation }}
+          NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON: ${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          if os.environ['DEVELOPMENT_MANAGEMENT_OPERATION'] not in {'development-management-preflight', 'development-management-install'}:
+              raise SystemExit('Fixed development operation required')
+          value = json.loads(os.environ['NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON'])
+          sha = value['source_sha']
+          if (value['schema'] != 'loom.nebius-development-management-operation.v1' or value['namespace'] != 'loom-nebius-management-dev' or
+              not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha) or value['candidate'] != sha):
+              raise SystemExit('Exact development source and namespace required')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/dev'], check=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('sha=' + sha + '\n')
+          PY
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ steps.tooling.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Prepare locked development management tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --no-default-groups --extra cluster --group nebius-certificates
+          uv export --locked --no-default-groups --extra cluster --group nebius-certificates --no-emit-workspace \
+            --format requirements-txt --no-header --quiet --output-file "$RUNNER_TEMP/development-management-requirements.txt"
+      - name: Run fixed development management operation
+        env:
+          DEVELOPMENT_MANAGEMENT_OPERATION: ${{ inputs.operation }}
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON: ${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          case "$DEVELOPMENT_MANAGEMENT_OPERATION" in
+            development-management-preflight) operation=preflight ;;
+            development-management-install) operation=install ;;
+            *) exit 1 ;;
+          esac
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-development-management-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-development-management-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python -m scripts.ops.nebius_development_management_rollout \
+            --operation "$operation" --requirements "$RUNNER_TEMP/development-management-requirements.txt" \
+            --evidence-dir "$RUNNER_TEMP/nebius-development-management"
+      - name: Preserve bounded development management evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-development-management-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-development-management/development-management-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  development-management-renewal:
+    if: >-
+      github.repository == 'qianyi-sun/loom' &&
+      github.ref == 'refs/heads/dev' &&
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.operation == 'development-management-renewal-preflight' || inputs.operation == 'development-management-renewal-renew')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    environment:
+      name: nebius-integration
+      deployment: false
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select exact integrated development management renewal authority source
+        id: tooling
+        env:
+          DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION: ${{ inputs.operation }}
+          NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON: ${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          if os.environ['DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION'] not in {'development-management-renewal-preflight', 'development-management-renewal-renew'}:
+              raise SystemExit('Fixed development operation required')
+          value = json.loads(os.environ['NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON'])
+          sha = value['source_sha']
+          if (value['schema'] != 'loom.nebius-development-management-renewal-operation.v1' or value['namespace'] != 'loom-nebius-management-dev' or
+              not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{40}', sha)):
+              raise SystemExit('Exact development source and namespace required')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', sha, 'refs/remotes/origin/dev'], check=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+              stream.write('sha=' + sha + '\n')
+          PY
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ steps.tooling.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.11.26"
+          checksum: 6426a73c3837e6e2483ee344cbc00f36394d179afcba6183cb77437e67db4af0
+          enable-cache: true
+          save-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Prepare locked development management renewal tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --locked --no-default-groups --extra cluster --group nebius-certificates
+          uv export --locked --no-default-groups --extra cluster --group nebius-certificates --no-emit-workspace \
+            --format requirements-txt --no-header --quiet --output-file "$RUNNER_TEMP/development-management-renewal-requirements.txt"
+      - name: Run fixed development management renewal operation
+        env:
+          DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION: ${{ inputs.operation }}
+          DEPLOY_SSH_KEY: ${{ secrets.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ vars.NEBIUS_DEPLOY_SSH_KNOWN_HOSTS }}
+          LOOM_DEPLOY_SSH_TARGET: ${{ vars.NEBIUS_DEPLOY_SSH_TARGET }}
+          NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON: ${{ vars.NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          case "$DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION" in
+            development-management-renewal-preflight) operation=preflight ;;
+            development-management-renewal-renew) operation=renew ;;
+            *) exit 1 ;;
+          esac
+          export LOOM_DEPLOY_SSH_KEY_FILE="$RUNNER_TEMP/nebius-development-management-renewal-key"
+          export LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE="$RUNNER_TEMP/nebius-development-management-renewal-known-hosts"
+          trap 'rm -f -- "$LOOM_DEPLOY_SSH_KEY_FILE" "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"' EXIT
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test -n "$LOOM_DEPLOY_SSH_TARGET"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$LOOM_DEPLOY_SSH_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$LOOM_DEPLOY_SSH_KNOWN_HOSTS_FILE"
+          unset DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS
+          uv run --no-sync python -m scripts.ops.nebius_development_management_renewal_rollout \
+            --operation "$operation" --requirements "$RUNNER_TEMP/development-management-renewal-requirements.txt" \
+            --evidence-dir "$RUNNER_TEMP/nebius-development-management-renewal"
+      - name: Preserve bounded development management renewal evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nebius-development-management-renewal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nebius-development-management-renewal/development-management-renewal-result.json
           if-no-files-found: ignore
           retention-days: 30
 

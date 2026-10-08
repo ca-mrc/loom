@@ -264,6 +264,136 @@ means the private phase has not finished; `blocked` reports only a closed failur
 stage. Only `development_private_installed` records private completion, and it
 does **not** qualify management/HTTPS, shared-pool execution or concurrent owners.
 
+##### Independent development-manager delivery
+
+After the private `loom-dev` foundation is installed, use the separate
+`development-management-preflight` and `development-management-install` actions
+in `nebius-rollout`, dispatched from `dev`. They consume
+`NEBIUS_DEVELOPMENT_MANAGEMENT_OPERATION_JSON` and
+`NEBIUS_DEVELOPMENT_MANAGEMENT_SSH_KEY` in the protected `nebius-integration`
+environment. Neither action falls back to the foundation or legacy management
+key, operation or history. The common operation queue is retained; these actions
+do not change staging or activate shared execution/build admission.
+
+The fixed operation targets `loom-nebius-management-dev` and binds an installation
+UUID, exact integrated `source_sha == candidate`, private input hash, and paths
+under the operator's `.loom/nebius-development-management/<installation-id>`
+directory. Inputs are `inputs.json`, mutable journals are under `state`, and the
+separately retained anchor is
+`.loom/nebius-development-management-anchors/<installation-id>`. Keep these paths
+separate from both the foundation and the old manager.
+
+Deliver `loom.nebius-development-management-private-inputs.v1` through the approved
+operator route. It selects the completed foundation's retained operation and live
+identity, application-only management configuration, dedicated cloud/material
+files, explicit management hostname and exact-host certificate. The certificate
+selection pins its issuer configuration, installation UUID and immutable
+generation; it does not follow a floating selected-generation file. The entry
+checks retained issuer history and freezes the private file identities into the
+installation journal. No staging database, manager state or default TLS key is
+an input. Policy headroom must cover the manager's separate recovery bucket; its
+database needs at least 10 GiB. Personal applications add no data PVCs or business
+buckets.
+
+The retained foundation reference pins the original operation path/hash and
+installation input digest. Fresh foundation installations also preserve the
+qualification digest in their independent anchor and installation journal; the
+manager verifies the original request fingerprint using this durable evidence,
+without reopening retired foundation operator or storage-credential files. Older
+foundation records need an explicitly preserved `qualification_digest`; missing
+evidence fails closed. Replay never rewrites the older record format.
+
+Prepare the bundle from the exact clean integrated checkout with the same locked
+dependency export and pinned uv toolchain described above, using
+`python -m scripts.ops.nebius_development_management_rollout --operation preflight
+--requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Through the approved operator route, run
+`scripts.ops.install_nebius_development_management_entrypoint` with `--bundle`,
+`--bundle-sha256` and a dedicated `--public-key`. Review its preview before
+`--apply`. It preserves other grants, rejects a key with different authority, and
+creates only private tooling/anchor parents plus the exact-bundle forced command;
+it does not install any cluster resource. Inputs, keys and reports remain outside
+the checkout. Never reuse staging's protected installer to grant this authority.
+
+The bundle qualifies its real imports before accepting an operation. Private
+preflight verifies the foundation, publication, cloud/storage capacity and shared
+ingress/DNS route. Installation composes the database, migration, constrained
+application access, shared SQL setup, recovery backup, service, immutable local
+TLS Secret and public authentication proof. Replay rechecks retained identities;
+partial tooling or ambiguous resource writes require reconciliation, not deletion
+and a blind retry. `development_management_preflight_qualified` permits no readiness
+claim; `pending` names the unfinished phase; `blocked` exposes only a closed stage.
+`development_management_installed` records the completed manager installation,
+not shared-dev public access, active source builds, task execution or multi-owner
+acceptance. Initial manager inputs must leave both source upload and image-build
+runtime unconfigured; their credentials and shared-pool admission belong to the
+later activation. Unsupported initial selections are rejected before bootstrap.
+Manager-only certificate renewal has the separate path below. Its installed proof
+remains required before operational acceptance.
+
+#### Renew the independent dev manager certificate
+
+Do not edit initial installation inputs or replay the initial installer to renew
+an expired leaf. Issue a new exact-host generation using the retained management
+issuer, then select it explicitly in a new renewal operation. The issuer UUID and
+configuration path must match the initial manager; a floating `selected.json` is
+never consumed. Renewal changes only the manager Ingress's TLS Secret reference,
+not the shared controller, default certificate, application configuration or
+staging. Existing certificate Secrets and installation history are preserved.
+
+Use `loom.nebius-development-management-renewal-operation.v1` with `source_sha`,
+`installation_id`, `operation_id`, `namespace`, `inputs_path` and `inputs_sha256`.
+The namespace is fixed to `loom-nebius-management-dev`. Each non-nil operation UUID
+has its own private input file at
+`.loom/nebius-development-management-renewal/<installation-id>/<operation-id>/inputs.json`.
+The `loom.nebius-development-management-renewal-inputs.v1` document contains:
+
+- `retained`: original manager operation path/hash and installation input digest,
+  from the protected initial-install records. New installations persist their
+  qualification digest in both the independent anchor and installation journal;
+  renewal reconstructs and checks the enclosing input fingerprint from these.
+  Older records without that field need an explicitly preserved
+  `qualification_digest`; absent that evidence they fail closed. Do not retire
+  original credential files for such an older installation before preserving its
+  qualified input digest through the approved operator route;
+- `certificate`: original issuer configuration path/UUID and exact new generation;
+- `operator_connection`: explicit Kubernetes HTTPS endpoint, CA and credential files;
+- `route`: freshly qualified shared-ingress UIDs and configuration digests, using
+  the same route-settings shape as the initial installer. Legitimate shared
+  certificate/controller updates need fresh pins, not controller rollback.
+
+The initial manager source and its journals remain frozen. Renewal tooling uses
+its own exact clean integrated source revision and rechecks the retained route's
+UID/specification without requiring the original leaf to remain unexpired.
+Prepare its digest-bound bundle with
+`python -m scripts.ops.nebius_development_management_renewal_rollout --operation
+preflight --requirements REQUIREMENTS --prepare-bundle BUNDLE --evidence-dir EVIDENCE`.
+Through the approved operator route, preview then apply
+`scripts.ops.install_nebius_development_management_renewal_entrypoint` with
+`--bundle`, `--bundle-sha256`, and a dedicated `--public-key`. Existing grants are
+preserved; an existing key with different authority cannot be reused.
+
+Set `NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_OPERATION_JSON` and the dedicated
+`NEBIUS_DEVELOPMENT_MANAGEMENT_RENEWAL_SSH_KEY` in protected `nebius-integration`.
+Dispatch `development-management-renewal-preflight`, then
+`development-management-renewal-renew`, through `nebius-rollout` from `dev`.
+Both share the existing serialized rollout queue. Preflight is read-only;
+renewal delivers an immutable generation Secret and uses UID/resourceVersion
+tests to replace only `/spec/tls/0/secretName` on `loom-management`.
+
+`development_management_tls_renewed` means final Ingress/Secret readback and
+normal-trust HTTPS verification of the exact new leaf succeeded. `pending/public`
+can resume the same operation without repeating the update. `rejected` is a
+definite API rejection: requalify current state before preparing a new operation.
+An unknown write blocks newer operations and can resolve only by exact readback;
+do not delete journals or replay writes to force progress. Renewal journals live
+under the original manager's `tls-renewal` directory and use its original anchor
+lock, serializing initial install and all successors. Missing history is a failure.
+
+The operator remains responsible for renewal before expiry and for the DNS issuer
+credential's own expiry. This path provides explicit issuance-to-delivery operation,
+not a scheduled renewal service or proof that builds/tasks are ready.
+
 #### Owner commands
 
 Use the verified management HTTPS origin and an ordinary owner **user session**

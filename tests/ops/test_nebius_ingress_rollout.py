@@ -397,6 +397,8 @@ def test_workflow_exposes_only_fixed_protected_ingress_operations_and_dedicated_
         "management-pool-preflight", "management-pool-install", "management-pool-rollback",
         "management-pool-repair-preflight", "management-pool-repair-install", "management-pool-repair-rollback",
         "development-preflight", "development-install",
+        "development-management-preflight", "development-management-install",
+        "development-management-renewal-preflight", "development-management-renewal-renew",
     ]
     job = workflow["jobs"]["ingress"]
     assert job["environment"] == {"name": "nebius-integration", "deployment": "false"}

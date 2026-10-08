@@ -1558,6 +1558,53 @@ described below. The management host is outside the child DNS zone and cannot
 replace the existing standalone host. The installation UUID labels its objects;
 labels alone are not permission to adopt existing objects.
 
+An independent manager may set `public_tls_secret_name` to an explicitly delivered
+namespace-local TLS Secret. Omission preserves the existing default-certificate
+route and serialized input identity. The renderer neither creates the Secret nor
+changes the shared ingress controller. The private certificate issuer has a
+separate exact-host management schema and entry point: it cannot request the
+shared wildcard, and the legacy two-subject entry point rejects that schema.
+Certificate issuance alone does not establish delivery, renewal activation or
+public readiness; those require the protected installer and live HTTPS proof.
+The fresh independent dev-manager composer requires a matching exact-host
+certificate and stages its immutable generation Secret before the public Ingress.
+The certificate, key and generation-derived Secret reference join the retained
+installation input identity. Lost create replies use exact readback, not another
+write; missing/replaced Secrets cannot be adopted on replay. This initial-delivery
+stage does not rotate certificates or patch the shared controller. The connected
+protected entry pins the issuer installation and immutable generation, not a
+floating certificate selection. A separate protected manager-only renewal entry
+qualifies the original retained installation, stages a new immutable generation,
+then uses a journalled UID/resourceVersion JSON Patch to change only the retained
+Ingress's certificate reference. It does not replay the initial renderer, require
+an unexpired predecessor, or mutate the shared controller/default certificate.
+One original-install lock serializes successors. Uncertain writes are resolved by
+exact readback, never repeated; newer generations cannot overtake unfinished work.
+Final route/Secret reads and normal-trust HTTPS must identify the new leaf. This
+source-level renewal path still requires installed proof before operational
+readiness; scheduled issuance/delivery is not provided.
+
+Fresh development management has a separate fixed operation and gateway, bound
+to `loom-nebius-management-dev`, its own private installation/anchor paths and a
+dedicated exact-bundle SSH grant. Protected manual preflight/installation actions
+in `nebius-rollout` select only this authority; neither can invoke the legacy
+manager or foundation commands. Source publication requires the exact clean
+integrated revision, hash-locked dependencies and deterministic first-party
+wheels. The remote release qualifies actual imports and verifies retained bundle
+bytes on replay. Private configuration, source and material files join the
+existing installer identity; they are not copied into publication artifacts.
+
+This application-only installer qualifies the completed private dev foundation
+from retained source/input evidence and current resource identities rather than
+rerendering its old source. It composes the existing database, application access,
+shared SQL setup, backup and public authentication stages without starting a
+legacy full-stack provisioner. Cloud identity, storage and system capacity checks
+precede writes; actual manager PVC/PV/controller/node/provider disk identity is
+verified before migrations. Personal capacity reserves only API/web resources,
+not per-owner data volumes. A manager completion receipt still does not establish
+source-build/task admission or multi-owner acceptance. See the
+[delivery runbook](../runbooks/nebius-deployment.md#independent-development-manager-delivery).
+
 Only one management Service Deployment, PostgreSQL StatefulSet/PVC, migration Job,
 backup CronJob and shared Ingress are emitted. No Control Plane, Gateway, actuator,
 execution namespace, cloud resource, public LoadBalancer or Secret is emitted.

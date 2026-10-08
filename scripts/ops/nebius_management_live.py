@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from scripts.ops import nebius_certificates as private_state
@@ -78,6 +78,8 @@ def backup_client(request: ManagementInstallRequest) -> Iterator[Any]:
 
 
 class HTTPSManagementInstallationAPI:
+    _public_runtime: Literal['legacy', 'applications'] = 'legacy'
+
     def __init__(self, *, request: ManagementInstallRequest, api_server: str, ssl_context: ssl.SSLContext,
                  runtime_ca_pem: str | None, checks: ManagementPrerequisites, token: str | None = None):
         self.request, self.rendered, self.checks = request, render_installation(request), checks
@@ -209,7 +211,7 @@ class HTTPSManagementInstallationAPI:
                                        "material_sha256": record["material_sha256"]}):
                 raise ValueError()
             token = tomllib.loads(record["material"]["loom-admin-secret"]["secrets.toml"])["admin"]["token"]
-            with ManagementPublicProbe(host=self.request.deployment.public_host) as probe:
+            with ManagementPublicProbe(host=self.request.deployment.public_host, runtime=self._public_runtime) as probe:
                 probe.verify(admin_token=token)
         except ManagementInstallError:
             raise

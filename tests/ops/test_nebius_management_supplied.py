@@ -89,3 +89,28 @@ def test_supplied_material_rejects_non_fixed_or_incomplete_secrets(inputs, mater
         run(inputs, material, tmp_path / "state")
     assert "private-unqualified-input" not in str(error.value)
     assert not inputs[2].creates
+
+
+def test_application_only_material_needs_no_legacy_cloud_key(inputs, material, tmp_path):
+    from scripts.ops.nebius_management_supplied import deliver_supplied_material
+
+    del material['loom-management-cloud']
+    args = dict(binding=inputs[1], material=material, api=inputs[2],
+                state_dir=tmp_path / 'state', application_only=True)
+    receipt = deliver_supplied_material(**args)
+    assert set(receipt['secret_uids']) == {'loom-management-publications', 'loom-platform-storage'}
+    assert deliver_supplied_material(**args) == receipt
+    assert len(inputs[2].creates) == 2
+
+
+@pytest.mark.parametrize('application_only', [False, True])
+def test_supplied_material_cannot_cross_manager_modes(inputs, material, tmp_path, application_only):
+    from scripts.ops.nebius_management_stage import ManagementStageError
+    from scripts.ops.nebius_management_supplied import deliver_supplied_material
+
+    if not application_only:
+        del material['loom-management-cloud']
+    with pytest.raises(ManagementStageError, match='supplied'):
+        deliver_supplied_material(binding=inputs[1], material=material, api=inputs[2],
+                                  state_dir=tmp_path / 'state', application_only=application_only)
+    assert not inputs[2].creates
