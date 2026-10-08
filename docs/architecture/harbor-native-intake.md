@@ -139,3 +139,9 @@ Issue #2282 remains open for reusable runtime materialization/collection,
 H100 admission/placement and actual capacity observation, representative native
 oracle equivalence, run/export readback and separately authorized bounded live
 acceptance. The import census is not deployed or executable benchmark acceptance.
+
+When a task selects a prebuilt image with no explicit build or Compose
+definition, findings in its unused default Dockerfile remain source warnings.
+They cannot establish a failure of an image that Loom does not build. Explicit
+build recipes and verifier Dockerfiles retain their blocking checks; immutable
+image and architecture admission still qualify the actual execution image.

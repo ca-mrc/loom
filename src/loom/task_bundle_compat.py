@@ -65,9 +65,10 @@ def collect_task_dir_compatibility_issues(
 ) -> list[TaskBundleCompatibilityIssue]:
     """Return structured compatibility issues for every Dockerfile in a task."""
 
+    config = task_config if task_config is not None else _load_task_toml(task_dir)
     effective_target_arches = _target_arches_for_task_dir(
         task_dir,
-        task_config=task_config,
+        task_config=config,
         target_arches=target_arches,
     )
     issues: list[TaskBundleCompatibilityIssue] = []
@@ -78,15 +79,45 @@ def collect_task_dir_compatibility_issues(
             text = dockerfile.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             text = dockerfile.read_text()
-        issues.extend(
-            collect_dockerfile_compatibility_issues(
-                text,
-                path=dockerfile.relative_to(task_dir),
-                task_dir=task_dir,
-                target_arches=effective_target_arches,
-            ),
+        relative = dockerfile.relative_to(task_dir)
+        found = collect_dockerfile_compatibility_issues(
+            text, path=relative, task_dir=task_dir, target_arches=effective_target_arches,
         )
+        if _unused_prebuilt_dockerfile(task_dir, relative, config):
+            # The image admission boundary validates the actual prebuilt image.
+            # Keep source diagnostics, but an unused build recipe cannot block
+            # execution of a task that does not build that recipe.
+            found = [issue.model_copy(update={
+                "severity": CompatibilitySeverity.WARNING,
+                "evidence": {**issue.evidence, "build_usage": "unused_prebuilt_recipe"},
+            }) for issue in found]
+        issues.extend(found)
     return issues
+
+
+def _unused_prebuilt_dockerfile(
+    task_dir: Path, relative: Path, config: Mapping[str, Any],
+) -> bool:
+    environment = config.get("environment")
+    if not isinstance(environment, Mapping) or not environment.get("docker_image"):
+        return False
+    if relative.as_posix() not in {"Dockerfile", "environment/Dockerfile"}:
+        return False
+    # An explicit build or Compose definition may still consume this file.
+    def declares_build(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            if value.get("dockerfile") or value.get("compose_files"):
+                return True
+            return any(declares_build(item) for item in value.values())
+        if isinstance(value, (tuple, list)):
+            return any(declares_build(item) for item in value)
+        return False
+
+    if declares_build(config):
+        return False
+    return not any((task_dir / "environment" / name).exists() for name in (
+        "compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml",
+    ))
 
 
 def validate_task_dir_compatibility(task_dir: Path) -> None:
