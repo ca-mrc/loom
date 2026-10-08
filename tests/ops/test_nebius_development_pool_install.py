@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import ssl
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -104,7 +105,7 @@ def test_complete_intent_binds_only_observed_namespace_uids(pool_inputs):
 
 
 @pytest.mark.parametrize('damage', ['missing-builder', 'publication', 'runtime-binary', 'service-image',
-    'schema', 'source', 'physical-group', 'supplied-uid', 'token', 'extra-token', 'missing-task-profile'])
+    'schema', 'source', 'physical-group', 'supplied-uid', 'token', 'extra-token', 'missing-task-profile', 'missing-trial'])
 def test_incomplete_or_foreign_catalog_is_rejected_before_namespace_creation(pool_inputs, damage):
     reference, value, tokens = pool_inputs
     participant, = value['participants']
@@ -132,6 +133,9 @@ def test_incomplete_or_foreign_catalog_is_rejected_before_namespace_creation(poo
         tokens[next(iter(tokens))] = 'changed-private-token'
     elif damage == 'extra-token':
         tokens[uuid4()] = 'extra-private-token'
+    elif damage == 'missing-trial':
+        for target in participant['targets']:
+            target['workload_kinds'] = ['verifier' if kind == 'trial' else kind for kind in target['workload_kinds']]
     else:
         value['profiles']['task_images'] = []
     with pytest.raises(ValueError, match='development pool intent') as caught:
@@ -296,6 +300,48 @@ def test_connected_preflight_is_get_only_without_namespace_or_state_creation(con
     assert all(message.method == 'GET' for message in connected.server.calls)
     root = Path(connected.server.request.retained.operation['state_dir']).parent
     assert not (root / 'pool-installation').exists()
+
+
+def shift_install_clock(monkeypatch, days):
+    installer = importlib.import_module('scripts.ops.nebius_development_pool_install')
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.now(tz) + timedelta(days=days)
+
+    monkeypatch.setattr(installer, 'datetime', Clock, raising=False)
+
+
+@pytest.mark.parametrize('days', [-1, 60], ids=['not-yet-issued', 'expired'])
+@pytest.mark.parametrize('execute', [False, True], ids=['preflight', 'install'])
+def test_noncurrent_credentials_cannot_begin_namespace_or_registration_writes(connected, monkeypatch, days, execute):
+    shift_install_clock(monkeypatch, days)
+    with pytest.raises(ValueError, match='development pool installation'):
+        install(connected, execute=execute)
+    assert not connected.server.created and not connected.server.store.creates
+    root = Path(connected.server.request.retained.operation['state_dir']).parent
+    assert not (root / 'pool-installation').exists()
+
+
+def test_credentials_expiring_during_namespaces_cannot_begin_registration(connected, monkeypatch):
+    connected.server.after_create = lambda: shift_install_clock(monkeypatch, 60)
+    with pytest.raises(ValueError, match='development pool installation'):
+        install(connected)
+    assert connected.server.created
+    assert not connected.server.store.creates
+
+
+def test_completed_registration_receipt_and_installation_replay_survive_expiry(connected, monkeypatch):
+    assert install(connected)['status'] == 'pending_registration'
+    connected.server.complete = True
+    shift_install_clock(monkeypatch, 60)
+    assert install(connected)['status'] == 'development_pool_installed_closed'
+    created = list(connected.server.created)
+    assert install(connected, execute=False)['status'] == 'development_pool_preflight_qualified'
+    assert install(connected)['status'] == 'development_pool_installed_closed'
+    assert connected.server.created == created
+    assert len(connected.server.store.creates) == 2
 
 
 def test_connected_install_waits_for_commit_then_delivers_only_disabled_runtime(connected):
