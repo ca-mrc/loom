@@ -744,6 +744,44 @@ def test_fresh_actuator_rejects_foreign_task_service_account(completed_pool):
         prepare_actuator_runtime(database)
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime'], indirect=True)
+def test_catalog_job_binds_original_target_and_new_code_without_database_authority(completed_pool):
+    name = 'scripts.ops.nebius_development_catalog_runtime'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('fixed development catalog Job preparation is missing')
+    database = database_runtime(completed_pool)
+    before_calls = len(completed_pool[3].server.calls)
+    value = importlib.import_module(name).prepare_catalog_runtime(database)
+    config, job = value.documents
+    request = json.loads(config['data']['catalog.json'])
+    execution, = database.manager.retained.request.registration.spec.profiles.execution
+    assert request['execution_class'] == execution.execution_class.model_dump(mode='json')
+    assert request['operation_id'] == str(database.operation_id)
+    target, = request['topology']['targets']
+    assert target['target_id'] == database.foundation.inputs.config['target_id']
+    assert target['cluster_scope_id'] == database.foundation.inputs.config['cluster_scope_id']
+    assert target['namespace_name'] == 'loom-nebius-dev-execution'
+    assert target['environment'] == 'development'
+    assert target['service_account_name'] == 'loom-execution-attempt'
+    assert config['immutable'] is True
+    assert config['metadata']['namespace'] == job['metadata']['namespace'] == 'loom-dev'
+    assert job['spec']['backoffLimit'] == 0
+    pod = job['spec']['template']['spec']
+    assert pod['automountServiceAccountToken'] is False
+    assert pod['restartPolicy'] == 'Never'
+    container, = pod['containers']
+    assert container['image'] == database.manager.publication.bundle.candidate['images']['service']['image_ref']
+    assert container['command'] == ['python', '-m', 'loom.nebius_development_catalog']
+    assert container['env'] == [{'name': 'LOOM_DEVELOPMENT_RUNTIME_CATALOG_CONFIG', 'value': '/var/run/loom-runtime-catalog/catalog.json'}]
+    volumes = {row['name']: row for row in pod['volumes']}
+    assert set(volumes) == {'runtime-catalog', 'admin'}
+    assert volumes['admin']['secret']['secretName'] == 'loom-admin-secret'
+    assert volumes['runtime-catalog']['configMap']['name'] == config['metadata']['name']
+    assert not pod.get('initContainers')
+    assert all(row['readOnly'] is True for row in container['volumeMounts'])
+    assert len(completed_pool[3].server.calls) == before_calls
+
+
 @pytest.mark.parametrize('damage', ['anchor', 'parent', 'phase', 'incomplete', 'inputs', 'receipt'])
 def test_missing_or_changed_completion_cannot_become_successor_authority(completed_pool, damage):
     loader = module()
