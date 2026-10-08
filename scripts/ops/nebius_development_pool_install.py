@@ -6,6 +6,7 @@ workload update. Original manager and foundation remain unchanged and usable.
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -21,6 +22,7 @@ from scripts.ops.nebius_development_pool_registration import DevelopmentPoolRegi
 
 from loom.nebius_platform_render import digest
 from loom_service.environment_management.candidates import _json
+from loom_service.pool_management.installation import PoolMachineInstallation
 
 _PHASES = ('namespaces', 'registration', 'material', 'configuration', 'workload')
 
@@ -89,11 +91,23 @@ def install_development_pool(*, intent: DevelopmentPoolIntent, api: DevelopmentP
                 raise ValueError()
             return {**identity, 'phases': {phase: {'status': 'prepared', 'sha256': None} for phase in _PHASES}}
 
+        def qualify_initial_credentials(record: dict[str, Any]) -> None:
+            # Eligibility for new writes, not historical evidence validity. A
+            # started registration may already have committed before expiry;
+            # its existing Job/receipt must remain readable on replay. The SQL
+            # transaction independently checks credentials using database time.
+            if record['phases']['registration']['status'] == 'prepared':
+                now = datetime.now(UTC)
+                machines = [PoolMachineInstallation.model_validate(row) for row in intent.catalog['machines']]
+                if any(not row.issued_at <= now < row.expires_at for row in machines):
+                    raise ValueError()
+
         api.qualify(intent)
         if not execute:
-            read_record()
+            record = read_record()
             api.inspect_namespaces(state / 'namespaces')
             api.qualify(intent)
+            qualify_initial_credentials(record)
             return {**base, 'status': 'development_pool_preflight_qualified'}
         # Registration owns the original anchor's lock; use a distinct fixed lock
         # directory while retaining the parent marker in that original anchor.
@@ -101,6 +115,7 @@ def install_development_pool(*, intent: DevelopmentPoolIntent, api: DevelopmentP
             record = read_record()
             api.inspect_namespaces(state / 'namespaces')
             api.qualify(intent)
+            qualify_initial_credentials(record)
             if not marker.exists():
                 private_state._atomic_json(marker, identity)
                 private_state._private_directory(state)
@@ -108,6 +123,7 @@ def install_development_pool(*, intent: DevelopmentPoolIntent, api: DevelopmentP
             request = None
             for phase in _PHASES:
                 api.qualify(intent)
+                qualify_initial_credentials(record)
                 item = record['phases'][phase]
                 if item['status'] == 'prepared':
                     item['status'] = 'started'

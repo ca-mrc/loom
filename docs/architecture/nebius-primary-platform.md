@@ -2634,7 +2634,10 @@ The protected independent-dev **pool installer** composes that internal stage
 without legacy cutover history. Its private intent contains a complete task and
 application-build catalog, but no operator-supplied execution namespace UIDs.
 Before writes it checks the original publication/runtime digest, shared source and
-schema bindings, dedicated builder support and all machine-token hashes. It then
+schema bindings, trial/task-image target capabilities, dedicated builder support
+and all machine-token hashes. Initial namespace/registration writes require
+currently issued, unexpired credentials; replay of a retained registration receipt
+does not reinterpret credential expiry as missing installation history. It then
 creates only the two fixed dev execution/build namespaces and binds their actual
 UIDs into the frozen registration. Both namespaces remain restricted at this stage.
 

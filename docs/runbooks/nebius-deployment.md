@@ -556,8 +556,11 @@ contains `retained` original-management history, `operator_connection`, `catalog
 and private `tokens` keyed by machine UUID. The catalog follows
 `loom.pool-installation.v1` but omits `uid` in both participant namespace bindings:
 only actual namespace-create receipts may supply those values. It must include
-trial/task-image and dedicated application-image-build profiles; published runtime
-binary/image identities and the original shared source/schema must match.
+trial/task-image target capabilities and dedicated application-image-build profiles;
+published runtime binary/image identities and the original shared source/schema
+must match. Credentials must already be issued and unexpired before initial
+namespace/registration writes. Registration also checks validity using database
+time; completed registration evidence remains readable after credential expiry.
 
 Preflight performs GET-only qualification and creates no installation state.
 Install may report `pending_registration`; repeat the same protected operation

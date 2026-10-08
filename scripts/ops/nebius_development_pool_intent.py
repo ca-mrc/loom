@@ -66,7 +66,9 @@ def prepare_intent(*, reference: RetainedManagementReference, catalog: dict[str,
         spec, before = request.registration.spec, request.retained.inputs.deployment
         config, candidate = before.installation.foundation.platform_config, request.registration.candidate
         derive_application_build_deployment(before, spec)
-        if not spec.profiles.execution or not spec.profiles.task_images:
+        participant, = spec.participants
+        capabilities = {kind for target in participant.targets for kind in target.workload_kinds}
+        if not {'trial', 'task_image_build'} <= capabilities:
             raise ValueError()
         for execution in spec.profiles.execution:
             if (execution.candidate_sha != candidate['candidate_sha']
