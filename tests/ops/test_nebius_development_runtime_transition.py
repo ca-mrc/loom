@@ -15,6 +15,7 @@ class RuntimeAPI:
         self.patches = []
         self.ready = False
         self.failure = None
+        self.preview_rejected = False
         self.default_change = None
 
     def qualify(self):
@@ -25,6 +26,8 @@ class RuntimeAPI:
 
     def preview_workload(self, key, before, desired):
         assert before == self.rows[key]
+        if self.preview_rejected:
+            return None
         value = copy.deepcopy(desired)
         value['metadata']['uid'] = before['metadata']['uid']
         if self.default_change:
@@ -91,6 +94,17 @@ def test_transition_waits_for_drain_and_resumes_without_repatch(transition):
     assert all(row['status'] == 'applied' for row in saved['resources'].values())
     assert {key: row['metadata']['uid'] for key, row in api.rows.items()} == {
         key: row['metadata']['uid'] for key, row in originals.items()}
+
+
+def test_transition_persists_known_preview_wait_before_returning_pending(transition):
+    _, _, api, state = transition
+    api.preview_rejected = True
+    assert run(transition) is False
+    assert (state / 'transition.json').is_file()
+    assert not api.patches
+    api.preview_rejected, api.ready = False, True
+    assert run(transition) is True
+    assert len(api.patches) == 2
 
 
 @pytest.mark.parametrize('failure', ['before', 'after', 'rejected'])
