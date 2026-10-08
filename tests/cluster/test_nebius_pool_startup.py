@@ -125,12 +125,21 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
                 checks=closed, history=history, api_server=configuration.host, ssl_context=tls, state_dir=state, anchor_dir=anchor) as parent:
             # The initial SQL closure/authority proof is the test's boundary.
             # Child CREATE/read and workload dry-run/default receipts are real.
+            stale_dry_runs = []
+
             def default_workload(key, before, desired):
                 assert before == closed.documents[key]
                 current = parent.read_workload(key)
                 value = _snapshot(desired)
                 value['metadata']['resourceVersion'] = current['metadata']['resourceVersion']
+                if not stale_dry_runs:
+                    # Exercise the real API-server rejection of a stale fixture
+                    # read before testing startup's separate CAS protocol.
+                    assert current['metadata']['resourceVersion'] != '1'
+                    value['metadata']['resourceVersion'] = '1'
                 response = parent.client.put(parent._workload_path(key) + '?dryRun=All', json=value)
+                if response.status_code == 409:
+                    stale_dry_runs.append(key)
                 response.raise_for_status()
                 return response.json()
 
@@ -145,6 +154,7 @@ async def test_actual_startup_preserves_uid_templates_and_resolves_lost_committe
             closed.resources = parent
             assert (await asyncio.to_thread(stage_pool_cutover, request=request, tokens=tokens,
                 api=closed, state_dir=state, anchor_dir=anchor))['status'] == 'pool_runtime_staged_closed'
+            assert stale_dry_runs
             for row in closed.documents.values():
                 await install(row, replace_existing=True)
             for row in closed.fencing.roles.values():
