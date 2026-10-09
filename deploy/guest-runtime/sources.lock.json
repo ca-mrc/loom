@@ -562,7 +562,7 @@
       "name": "libpng16-16t64",
       "version": "1.6.43-5ubuntu0.6",
       "architecture": "amd64",
-      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libp/libpng1.6/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260928T000000Z/pool/main/libp/libpng1.6/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb",
       "bytes": 188776,
       "sha256": "ac0163f58b8aa52dfdd17cdc10a83f3db084cb91a62686023f5c983d6ff89f8b"
     },
