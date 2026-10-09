@@ -201,3 +201,71 @@ def test_evidence_network_failure_guides_read_only_retry(application_http, capsy
     assert "read-only" in output.err
     assert "printed retry command" not in output.err
     assert "private upstream detail" not in output.err
+
+
+def capabilities():
+    return {"schema_version": "loom.nebius-application-capabilities.v1", "scope": "management_process",
+            "application_lifecycle": "worker_healthy", "source_upload": "configured",
+            "image_builds": "not_configured", "execution": "not_checked"}
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_capabilities_show_partial_configuration_with_one_read_only_request(application_http, capsys, as_json):
+    responses, requests = application_http
+    responses["GET", "/api/v1/application-capabilities"] = httpx.Response(200, json=capabilities())
+    assert main(["dev", "app", "capabilities", *(["--json"] if as_json else [])]) == 0
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/application-capabilities"),
+    ]
+    output = capsys.readouterr()
+    if as_json:
+        assert json.loads(output.out) == capabilities()
+    else:
+        assert "Source upload: configured" in output.out
+        assert "Image builds: not configured" in output.out
+        assert "Task execution: not checked" in output.out
+    assert "Retry:" not in output.err
+
+
+@pytest.mark.parametrize("damage", ["unsupported_execution", "missing_builds", "secret_field"])
+def test_capabilities_reject_malformed_or_overclaiming_server_responses(application_http, capsys, damage):
+    responses, requests = application_http
+    body = capabilities()
+    if damage == "unsupported_execution":
+        body["execution"] = "ready"
+    elif damage == "missing_builds":
+        del body["image_builds"]
+    else:
+        body["credential"] = "must-not-print"
+    responses["GET", "/api/v1/application-capabilities"] = httpx.Response(200, json=body)
+    assert main(["dev", "app", "capabilities", "--json"]) == 1
+    assert len(requests) == 1
+    output = capsys.readouterr()
+    assert output.out == "" and "must-not-print" not in output.err
+
+
+def test_capabilities_network_failure_recommends_read_only_retry(application_http, capsys):
+    responses, requests = application_http
+    responses["GET", "/api/v1/application-capabilities"] = httpx.ReadTimeout("private upstream detail")
+    assert main(["dev", "app", "capabilities"]) == 1
+    assert len(requests) == 1 and requests[0].method == "GET"
+    output = capsys.readouterr()
+    assert output.out == "" and "read-only" in output.err
+    assert "printed retry command" not in output.err and "private upstream detail" not in output.err
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 500])
+def test_capabilities_http_errors_never_print_arbitrary_server_material(application_http, capsys, status):
+    responses, requests = application_http
+    responses["GET", "/api/v1/application-capabilities"] = httpx.Response(status, json={
+        "detail": {"credential": "fixture-must-not-print"},
+    })
+    assert main(["dev", "app", "capabilities", "--json"]) == 1
+    assert len(requests) == 1 and requests[0].method == "GET"
+    output = capsys.readouterr()
+    assert output.out == "" and "fixture-must-not-print" not in output.err
+    assert f"HTTP {status}" in output.err
+    if status == 404:
+        assert "management context" in output.err
+    elif status in {401, 403}:
+        assert "read:own" in output.err

@@ -582,7 +582,7 @@ describe("Monitor human-readable labels", () => {
     expect(screen.getByText("1/10")).toBeInTheDocument();
     expect(screen.getByText("2/2")).toBeInTheDocument();
     expect(screen.getByText("Nebius service execution")).toBeInTheDocument();
-    expect(screen.getByText("nebius-cpu · development · eu-north1")).toBeInTheDocument();
+    expect(screen.getByText("eu-north1 · Shared compute pool")).toBeInTheDocument();
     expect(screen.getByText("12 slots")).toBeInTheDocument();
     expect(screen.getByText("42 slots")).toBeInTheDocument();
     expect(screen.getByText(/128 \/ 200 vCPU/)).toBeInTheDocument();
@@ -734,7 +734,7 @@ describe("Monitor human-readable labels", () => {
     });
     renderWithProviders(<Monitor />, { route: "/monitor?view=batches" });
     await userEvent.click(await screen.findByText("Nodes, scheduling and capacity diagnostics"));
-    expect(await screen.findByText("Inactive regions")).toBeInTheDocument();
+    expect(await screen.findByText("Inactive execution environments")).toBeInTheDocument();
     expect(screen.queryByText("blocked/stale")).not.toBeInTheDocument();
     expect(screen.getAllByText("Unknown")).toHaveLength(3);
     expect(screen.getByText(/eu-west1 · Disabled/)).toBeInTheDocument();

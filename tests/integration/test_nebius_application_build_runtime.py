@@ -174,12 +174,32 @@ async def test_real_lifespan_starts_builder_for_closed_registered_pool_and_super
         async with asyncio.timeout(5):
             while not runtime.ready:
                 await asyncio.sleep(0.01)
+        owner, team = uuid4(), uuid4()
+        async with app.state.session_factory.begin() as session:
+            session.add(Team(id=team, name="capability-owners"))
+            session.add(User(id=owner, username="capability-alice", username_normalized="capability-alice",
+                status="active", password_hash=hash_password("fixture-capability-passphrase")))
+            await session.flush()
+            session.add(TeamMembership(team_id=team, user_id=owner, role="owner"))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://management.example.com") as client:
             assert (await client.get("/api/v1/health/ready")).status_code == 200
+            login = await client.post("/api/v1/auth/login", json={
+                "username": "capability-alice", "password": "fixture-capability-passphrase"})
+            assert login.status_code == 200, login.text
+            capabilities = await client.get("/api/v1/application-capabilities")
+            assert capabilities.status_code == 200, capabilities.text
+            assert capabilities.json()["application_lifecycle"] == "worker_healthy"
+            assert capabilities.json()["source_upload"] == "configured"
+            assert capabilities.json()["image_builds"] == "worker_healthy"
+            assert capabilities.json()["execution"] == "not_checked"  # This pool is closed.
             runtime.build_task.cancel()
             await asyncio.gather(runtime.build_task, return_exceptions=True)
             response = await client.get("/api/v1/health/ready")
             assert response.status_code == 503 and response.json()["application_provisioner"] == "not-ready"
+            capabilities = await client.get("/api/v1/application-capabilities")
+            assert capabilities.json()["image_builds"] == "worker_unhealthy"
+            assert capabilities.json()["application_lifecycle"] == "worker_healthy"
+            assert capabilities.json()["execution"] == "not_checked"
     assert drained.is_set() and sdk.closed
     assert runtime.build_worker.management._closed and runtime.build_worker.management._client.is_closed
     assert runtime.task.done() and runtime.build_task.done() and not runtime.ready

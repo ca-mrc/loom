@@ -1,4 +1,4 @@
-"""Personal environments on the explicitly selected management server."""
+"""Personal applications and legacy isolated environments on the management server."""
 
 from __future__ import annotations
 
@@ -88,26 +88,31 @@ def _run(args: argparse.Namespace) -> int:
 def add_dev_subparser(sub: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     from loom_cli.application_cmd import add_application_subparser
 
-    parser = sub.add_parser("dev", help="Manage personal Nebius environments on your logged-in management server")
+    parser = sub.add_parser(
+        "dev", help="Personal development: use loom dev app on your management server",
+        description=("Recommended: loom dev app manages personal frontend/API applications sharing development data. "
+                     "Direct create/list/status and other commands below are legacy isolated-environment controls; "
+                     "they retain their original behavior and do not redirect to application commands."),
+    )
+    parser.set_defaults(handler=_run)
     commands = parser.add_subparsers(dest="dev_command", required=True)
-    create = commands.add_parser("create", help="Request an isolated personal environment from an approved candidate")
+    add_application_subparser(commands)
+    create = commands.add_parser("create", help="Legacy: request an isolated environment from an approved candidate")
     create.add_argument("slug")
     create.add_argument("--candidate", required=True, help="Approved candidate UUID from the management installation")
     create.add_argument("--idempotency-key", help="Reuse this key when retrying the same create")
-    commands.add_parser("list", help="List your retained environment identities")
-    destroy = commands.add_parser("destroy", help="Stop your personal environment, retaining database/object data and names")
+    commands.add_parser("list", help="Legacy: list your retained isolated-environment identities")
+    destroy = commands.add_parser("destroy", help="Legacy: stop an isolated environment, retaining data and names")
     destroy.add_argument("environment_id")
     destroy.add_argument("--expected-generation", type=int, help="Fence this exact generation; otherwise read current status")
     destroy.add_argument("--idempotency-key", help="Reuse with the printed generation after a lost response")
-    login = commands.add_parser("login", help="Sign into your child environment without replacing management credentials")
+    login = commands.add_parser("login", help="Legacy: sign into an isolated environment with separate credentials")
     login.add_argument("environment_id")
     login.add_argument("--browser", action="store_true", help="Also open a separate, short-lived browser sign-in")
-    status = commands.add_parser("status", help="Read desired state and current provisioning operation")
+    status = commands.add_parser("status", help="Legacy: read isolated-environment state and provisioning operation")
     status.add_argument("environment_id")
-    retry = commands.add_parser("retry", help="Explicitly retry a blocked operation without changing its identities or plan")
+    retry = commands.add_parser("retry", help="Legacy: retry a blocked isolated-environment operation")
     retry.add_argument("operation_id")
-    wait = commands.add_parser("wait", help="Wait for an operation; timeout does not cancel it")
+    wait = commands.add_parser("wait", help="Legacy: wait for an isolated-environment operation without cancelling")
     wait.add_argument("operation_id")
     wait.add_argument("--timeout", type=float, default=300)
-    parser.set_defaults(handler=_run)
-    add_application_subparser(commands)

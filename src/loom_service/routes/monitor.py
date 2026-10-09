@@ -156,6 +156,11 @@ def _public_execution_capacity(
                     public_profile[field] = None
         public: dict[str, object] = {
             "target_id": row.get("target_id"),
+            **{
+                field: row[field]
+                for field in ("execution_class_id", "capacity_owner_target_id")
+                if field in row
+            },
             "provider": "nebius",
             "pool_id": row.get("pool_id"),
             "environment": row.get("environment"),

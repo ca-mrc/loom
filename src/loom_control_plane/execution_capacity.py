@@ -1004,8 +1004,9 @@ async def fetch_execution_capacity_status(
         rows.append(
             {
                 "target_id": target.id,
-                **({"capacity_owner_target_id": group.owner.id,
-                    "target_scope": group.scope.model_dump(mode="json")} if group.scope is not None else {}),
+                "execution_class_id": target.execution_class_id,
+                "capacity_owner_target_id": group.owner.id,
+                **({"target_scope": group.scope.model_dump(mode="json")} if group.scope is not None else {}),
                 "pool_id": target.logical_pool_id,
                 "environment": target.environment,
                 "region": target.region,

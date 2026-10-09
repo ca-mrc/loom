@@ -658,11 +658,12 @@ separate [admin recovery operation](../runbooks/operator-runbook.md#historical-c
 It is bounded to one terminal Trial's committed canonical Artifact, 32 exact
 objects and 256 MiB. Preview binds the complete published metadata and ownership
 state to a plan digest. Single-version inventory is the default. An explicit
-complete set of 2–8 equivalent versions per key permits adoption of its sole
+complete set of 2–32 equivalent versions per key permits adoption of its sole
 latest version only after every copy matches the registered size and SHA-256.
-The complete set is part of the audited plan; all copies count toward the same
-256 MiB verification budget. Delete markers, incomplete or changing inventories
-and differing bytes remain conflicts. Unselected versions are left untouched,
+The complete set is part of the audited plan. Each request permits at most
+256 version copies, including single-version and empty objects; all copies also
+count toward the same 256 MiB verification budget. Delete markers, incomplete or
+changing inventories and differing bytes remain conflicts. Unselected versions are left untouched,
 without new deletion authority or claims about the original upload receipt.
 Apply independently verifies the surviving versions'
 full bytes and exact-key inventories before acquiring bounded database locks.
@@ -673,7 +674,20 @@ Replay requires an identical request and unchanged recorded post-state. This
 adopts verified surviving versions without inventing original write receipts,
 changing Trial outcomes or retention, or restarting execution. The storage
 observation and database transaction are separate; no storage IO occurs while
-the repair holds database locks.
+the repair holds lifecycle row or table locks.
+
+An installed operator can explicitly select `single_large_object_v1` for one
+object with at most two complete copies and at most 4 GiB across those copies.
+The ordinary HTTP model rejects this mode and keeps its 256 MiB limit. The
+operator request additionally binds the team, installed candidate and schema;
+the same ownership, retention, full-hash and final-state checks still apply.
+The command holds shared rollout admission and a separate database-wide
+nonblocking advisory lock through verification and commit. Apply uses the same
+connection that owns those locks, so connection loss cannot leave a later
+unfenced commit. Cancellation drains the read worker before releasing its
+locks, bounded by a 150-second dedicated-process deadline. A separate read-only
+audit command establishes the exact operation's committed state without
+replaying repair. See the [large-object operator procedure](../runbooks/operator-runbook.md#single-large-object-operator-recovery).
 It derives typed Loom events plus ATIF 1.7 from the lossless call trace and
 commits Trial events, Artifact locations, the trajectory index, and the final
 Trial state in one database transaction. Temporary database or object-store
@@ -725,6 +739,24 @@ an Artifact audit and preserve the Trial outcome and source retention. This stop
 automatic archive retry and removes the archive from rollout activity accounting;
 it does not establish canonical acceptance. Cancellation retains claim ownership
 until its TTL, after which ordinary materializer recovery rules apply.
+
+The isolated Job requires literal `LOOM_ENV` and `LOOM_NAMESPACE` from the
+installed Control Plane. It verifies the existing Trial lifecycle authority,
+including owner, environment, namespace and retention, before claiming or copying
+and again at commit. It cannot substitute a default namespace or create a missing
+Trial authority during qualification.
+
+Migration `0175` permits one distinct, audited storage requeue for a bounded
+Oracle recovery parked with `recovery_incomplete`. The original recovery request,
+claim and failure remain historical evidence. The retry request binds that exact
+request digest and failed claim to the current candidate/schema. Qualification
+requires unchanged source and Oracle projection, a materializing Trial with one
+successful execution, completed execution cleanup and no canonical acknowledgement.
+It changes only archive state, next retry time, recovery timestamp and update time;
+the database rejects broader terminal reopening. The ordinary worker repeats
+source, lifecycle and projection qualification before copying and under commit
+locks, and requires immutable versions for every published object. A failed retry
+preserves the original Trial outcome and never admits another storage requeue.
 
 Each Control Plane runs the configured number of materialization workers
 (default eight); `FOR UPDATE SKIP LOCKED` claims keep those workers and multiple
@@ -872,6 +904,15 @@ running, succeeded, failed, OOM-killed, evicted, node-lost, active-deadline,
 terminating, missing, and deleted states have explicit mappings. A stuck Job
 remains visible as observed failure/debt; the actuator never fabricates a Loom
 success or changes retry policy outside the fenced control-plane transition.
+
+Native failure evidence for the same lease generation and Job/Pod identity
+survives delayed nonterminal observations, including a Job deadline with no
+remaining Pod. Exact terminal duplicates can repair an older regressed active
+projection under refreshed lease and Trial locks. Repair preserves every event,
+ordinal, observation timestamp, committed output and the original late-output
+deadline; normal reconciliation performs finalization and cleanup. Revoked,
+superseded or closed leases cannot be reopened. Missing resources and transient
+scheduling failures alone do not establish a permanent native outcome.
 
 Execution start means the `execution` container's actual running/terminated
 start timestamp, not kubelet acknowledgement (`Pod.status.startTime`) or a

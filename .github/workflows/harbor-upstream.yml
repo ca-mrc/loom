@@ -1,0 +1,196 @@
+name: Harbor upstream candidate
+
+# GitHub schedules and initial workflow_dispatch require the workflow on the
+# default branch. qianyi-sun/loom currently uses dev, so merging there activates
+# this workflow; no production promotion is needed.
+on:
+  schedule:
+    - cron: "41 9 * * *"
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: "Report upstream drift without creating or updating a candidate PR"
+        type: boolean
+        default: true
+
+concurrency:
+  group: harbor-upstream-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: github.repository == 'qianyi-sun/loom'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANDIDATE_BRANCH: bot/harbor-upstream
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: dev
+          fetch-depth: 0
+      - name: Discover latest Harbor source and package version
+        id: upstream
+        run: |
+          set -euo pipefail
+          python3 scripts/ops/harbor_upstream.py check --check-pins \
+            --github-output "$GITHUB_OUTPUT" > "$RUNNER_TEMP/harbor-upstream.json"
+          cat "$RUNNER_TEMP/harbor-upstream.json"
+          {
+            echo '### Harbor upstream discovery'
+            echo '```json'
+            cat "$RUNNER_TEMP/harbor-upstream.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check candidate publication activation
+        if: steps.upstream.outputs.aligned == 'false' && !inputs.check_only
+        env:
+          PR_ENABLED: ${{ vars.LOOM_HARBOR_UPSTREAM_PR_ENABLED }}
+        run: |
+          set -euo pipefail
+          if [[ "$PR_ENABLED" != 'true' ]]; then
+            {
+              echo '### Candidate publication is disabled'
+              echo 'Read-only Harbor discovery completed. No candidate branch was pushed.'
+              echo 'A repository administrator must separately approve GitHub Actions PR creation,'
+              echo 'then set repository variable LOOM_HARBOR_UPSTREAM_PR_ENABLED=true.'
+              echo 'The combined GitHub setting also permits PR approvals; this workflow only creates Drafts.'
+              echo 'Use workflow_dispatch with check_only=true for discovery while publication is disabled.'
+              echo 'Activation is tracked in issue #2390.'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo 'Harbor candidate publication requires explicit repository activation; see the run summary.' >&2
+            exit 1
+          fi
+      - name: Prepare one Draft candidate
+        id: candidate
+        if: steps.upstream.outputs.aligned == 'false' && !inputs.check_only
+        env:
+          UPSTREAM_REVISION: ${{ steps.upstream.outputs.revision }}
+          UPSTREAM_VERSION: ${{ steps.upstream.outputs.version }}
+          COMPARE_URL: ${{ steps.upstream.outputs.compare_url }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          gh pr list --repo "$GITHUB_REPOSITORY" --base dev \
+            --head "$CANDIDATE_BRANCH" --state open --json number,isDraft,url \
+            > "$RUNNER_TEMP/harbor-pr.json"
+          PR_NUMBER="$(jq -r '.[0].number // empty' "$RUNNER_TEMP/harbor-pr.json")"
+          if [[ -n "$PR_NUMBER" ]]; then
+            if [[ "$(jq -r '.[0].isDraft' "$RUNNER_TEMP/harbor-pr.json")" != 'true' ]]; then
+              echo 'Candidate is Ready; leave its reviewed head unchanged until it merges or returns to Draft.' \
+                >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            git switch --track "origin/$CANDIDATE_BRANCH"
+            # Preserve human amendments and never force-push a reviewed branch.
+            # Conflicts leave the existing Draft untouched and fail this run.
+            git merge --no-edit origin/dev
+          else
+            if git show-ref --verify --quiet "refs/remotes/origin/$CANDIDATE_BRANCH"; then
+              # A merged candidate may leave its branch behind. Reuse it only
+              # when the branch still has exactly the recorded merged PR head.
+              MERGED_HEAD="$(gh pr list --repo "$GITHUB_REPOSITORY" --base dev \
+                --head "$CANDIDATE_BRANCH" --state merged --limit 1 \
+                --json headRefOid --jq '.[0].headRefOid // empty')"
+              if [[ -z "$MERGED_HEAD" ]] || \
+                 [[ "$(git rev-parse "origin/$CANDIDATE_BRANCH")" != "$MERGED_HEAD" ]]; then
+                echo 'Candidate branch has unmerged changes without an open Draft PR; inspect before reuse.' >&2
+                exit 1
+              fi
+              git switch --track "origin/$CANDIDATE_BRANCH"
+              git merge --no-edit origin/dev
+            else
+              git switch -c "$CANDIDATE_BRANCH"
+            fi
+          fi
+          python3 scripts/ops/harbor_upstream.py update \
+            --revision "$UPSTREAM_REVISION" --version "$UPSTREAM_VERSION"
+          python3 scripts/ops/harbor_upstream.py pins
+          git add config/harbor-runtime.json deploy/Dockerfile.worker \
+            deploy/Dockerfile.harbor-runtime src/loom/agent/terminus2/provenance.py
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: prepare Harbor $UPSTREAM_VERSION at ${UPSTREAM_REVISION:0:12}"
+          fi
+          if [[ -n "$PR_NUMBER" ]] && \
+             [[ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json isDraft,state \
+               --jq '.state == "OPEN" and .isDraft')" != 'true' ]]; then
+            echo 'Candidate became Ready or closed during preparation; no changes pushed.' >&2
+            exit 1
+          fi
+          git push --set-upstream origin "$CANDIDATE_BRANCH"
+          cat > "$RUNNER_TEMP/harbor-pr-body.md" <<EOF
+          Prepare Harbor Terminus-2 at source \`$UPSTREAM_REVISION\` (package \`$UPSTREAM_VERSION\`).
+
+          Refs #2390.
+
+          [Upstream changes]($COMPARE_URL). Runtime pins are synchronized; the existing compatibility
+          patch and dependency requirements are preserved. This Draft is an upgrade candidate,
+          with validation and dependency regeneration still outstanding.
+
+          [Offline qualification run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          builds this candidate's production Harbor image and runs the real-Harbor conformance
+          and continuation probes after publication. Inspect its result before marking Ready.
+
+          Verification before Ready:
+          - [ ] Build the candidate Harbor controller and run the real Harbor differential suite.
+          - [ ] Verify existing compatibility patches still apply and behavior regressions pass.
+          - [ ] Rebuild the worker and regenerate its frozen dependency evidence using
+            \`scripts/ops/update_worker_image_lock.sh\`; review resolved dependencies and run provenance tests.
+          - [ ] Record focused developer verification and rebase onto the latest \`dev\`.
+
+          This PR uses \`GITHUB_TOKEN\`, whose PR writes do not trigger normal pull-request checks.
+          After developer verification, a collaborator must mark this Draft Ready. That human
+          \`ready_for_review\` event starts the existing four source-workflow gates. A trusted
+          collaborator may then enable GitHub-native squash auto-merge under the existing rules.
+          The updater pauses while this PR is Ready. No automatic merge or deployment is performed.
+          EOF
+          if [[ -z "$PR_NUMBER" ]]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$CANDIDATE_BRANCH" \
+              --draft --title "chore: upgrade Harbor Terminus-2 to $UPSTREAM_VERSION" \
+              --body-file "$RUNNER_TEMP/harbor-pr-body.md"
+          else
+            gh pr edit "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+              --title "chore: upgrade Harbor Terminus-2 to $UPSTREAM_VERSION" \
+              --body-file "$RUNNER_TEMP/harbor-pr-body.md"
+          fi
+          gh pr view "$CANDIDATE_BRANCH" --repo "$GITHUB_REPOSITORY" --json url --jq .url \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo 'prepared=true' >> "$GITHUB_OUTPUT"
+      - name: Qualify prepared candidate with real Harbor offline
+        if: steps.candidate.outputs.prepared == 'true'
+        run: |
+          set -Eeuo pipefail
+          qualification_failed() {
+            {
+              echo '### Candidate offline qualification failed'
+              echo 'Candidate is incompatible or could not be qualified; see the build/probe logs.'
+              echo 'The candidate remains Draft and has not been accepted.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+          trap qualification_failed ERR
+          python3 scripts/ops/harbor_upstream.py pins
+          image="loom-harbor-upstream:${GITHUB_RUN_ID}"
+          docker build --file deploy/Dockerfile.harbor-runtime --tag "$image" \
+            --build-arg "LOOM_BUILD_SHA=$(git rev-parse HEAD)" .
+          for probe in terminus_conformance_probe.py terminus_continuation_probe.py; do
+            docker run --rm --network none --cap-drop ALL \
+              --security-opt no-new-privileges --memory 1g --cpus 1 \
+              -e LITELLM_LOCAL_MODEL_COST_MAP=True \
+              -v "$PWD/tests/support/$probe:/probe.py:ro" \
+              --entrypoint python "$image" -I -B /probe.py
+          done
+          {
+            echo '### Candidate offline qualification passed'
+            echo 'The production Harbor image passed real-Harbor conformance and continuation probes.'
+            echo 'The candidate remains Draft. Frozen worker dependencies must still be rebuilt and regenerated.'
+            echo 'Real model execution, verifier/artifact checks, resource release, and the existing four gates remain required.'
+            echo 'Offline scripted-model evidence does not establish runtime acceptance or deployment.'
+          } >> "$GITHUB_STEP_SUMMARY"

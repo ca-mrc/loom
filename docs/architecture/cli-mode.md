@@ -49,6 +49,59 @@ launch leaves the CLI login saved and requests a fresh browser login. This requi
 the managed child protocol in the deployed candidate; login alone is not proof
 that shared task execution or installed multi-owner acceptance is enabled.
 
+## Personal development applications
+
+`loom dev app` manages independently versioned frontend/API applications sharing
+development data. Use a management context for these commands; personal API
+instances do not expose management routes. The older `loom dev create` and
+`loom dev login` commands above use the separate isolated-environment contract.
+
+Before uploading source or requesting a build, inspect the selected manager:
+
+```sh
+loom --context management dev app capabilities
+loom --context management dev app capabilities --json
+```
+
+The authenticated, read-only report distinguishes application lifecycle, source
+upload, and image-build configuration. Lifecycle and build workers independently
+report healthy, unhealthy, or unavailable. A manager can support source upload
+without an installed builder. Missing capabilities or unhealthy workers require
+the platform operator's attention; the command does not configure or restart them.
+
+The report covers the management process only. It does not probe object storage,
+cloud permissions, pool admission, application readiness, or task execution.
+`execution` remains `not_checked`, including when a healthy builder is connected
+to a closed pool. A successful command means the report was read successfully,
+not that every capability is configured. `--json` returns the versioned
+`loom.nebius-application-capabilities.v1` contract for automation.
+
+Use `loom dev app status APPLICATION_ID` for retained application/operation state
+and `loom dev app build-status BUILD_ID` for a particular build. Personal
+application versions select frontend/API images; they do not replace shared
+controllers or select a task's execution image. See the
+[application contract](nebius-primary-platform.md#personal-application-control).
+
+The [personal development workflow](../runbooks/personal-development.md) walks
+through source capture, building, deployment, login, tasks and retained teardown.
+`loom dev app check-release RELEASE_ID` checks a qualified release against the
+manager's configured shared schema before deployment (exit 0 for a match, 1 for
+a mismatch or request failure). It does not probe live database state or grant
+migration authority. Schema-changing experiments use a disposable local database.
+
+`loom dev app versions APPLICATION_ID` reports source and frontend/API image
+digests for the requested release and the last completed deployment. Pending
+updates can show different versions; suspended/destroyed applications retain
+history. These are owner-scoped journal observations, not live Pod readiness.
+Both commands support `--json`; the existing `status` response stays unchanged.
+
+Trial detail and `loom eval trial show TRIAL_ID` expose `execution_provenance`
+for the current attempt. It reports frozen task, agent and runtime image digests
+with `planned`, `execution_started`, or `runtime_reported` evidence; absent or
+unqualified evidence is `unavailable`. A runtime report must match that attempt's
+lease, generation and committed output. These fields do not infer execution from
+the personal API version or claim independent container imageID observation.
+
 ## Watching hosted trials
 
 `loom eval trial show TRIAL_ID --timeline` displays the public progress stage,

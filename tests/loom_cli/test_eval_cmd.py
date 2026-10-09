@@ -4130,3 +4130,58 @@ def test_trial_show_reports_uncompiled_execution_selection(
     assert "requested_harness: direct-completion@default" in out
     assert "requested_isolation: auto" in out
     assert "effective: (not compiled yet)" in out
+
+
+@pytest.mark.parametrize("state, label", [
+    ("planned", "frozen plan; execution not observed"),
+    ("execution_started", "frozen plan; execution start observed"),
+    ("runtime_reported", "frozen plan; committed runtime report matched"),
+])
+def test_trial_show_explains_execution_image_evidence(state, label, mock_server, capsys):
+    digest = "sha256:" + "b" * 64
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "running", "execution_provenance": {
+            "state": state, "image_source": "frozen_runtime_plan", "attempt": 2,
+            "resource_generation": 3, "task_image_digest": digest,
+            "runtime_image_digest": "sha256:" + "c" * 64,
+            "agent_image_digest": None, "candidate_sha": "d" * 40,
+            "runtime_contract_sha256": "sha256:" + "e" * 64,
+            "runtime_binary_sha256": "sha256:" + "f" * 64,
+            "private_extra": "secret",
+        },
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert label in out
+    assert "attempt=2 resource_generation=3" in out
+    assert digest in out and "d" * 40 in out
+    assert "private_extra" not in out and "secret" not in out
+
+
+@pytest.mark.parametrize("provenance", [None, {}, {"state": "unavailable"}, {"state": []}])
+def test_trial_show_does_not_infer_execution_images_from_other_fields(provenance, mock_server, capsys):
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "succeeded", "execution_provenance": provenance,
+        "result": {"runtime_result": {"task_image_ref": "private/prior-attempt@sha256:" + "a" * 64}},
+        "task_environment_preparation": [{"image_ref": "private/current-default"}],
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "execution_images: (unavailable)" in out
+    assert "private" not in out
+
+
+def test_trial_show_omits_malformed_provenance_values(mock_server, capsys):
+    mock_server.canned[("GET", f"/api/v1/trials/{_TRIAL_ID}")] = httpx.Response(200, json={
+        "id": _TRIAL_ID, "state": "running", "execution_provenance": {
+            "state": "planned", "attempt": "secret", "resource_generation": {"private": "secret"},
+            "task_image_digest": "private/image@sha256:" + "a" * 64,
+            "candidate_sha": "secret", "runtime_image_digest": ["secret"],
+        },
+    })
+    capsys.readouterr()
+    assert main(["eval", "trial", "show", _TRIAL_ID]) == 0
+    out = capsys.readouterr().out
+    assert "private" not in out and "secret" not in out

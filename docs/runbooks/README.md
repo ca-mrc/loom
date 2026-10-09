@@ -32,8 +32,9 @@ Begin with the [operator runbook](operator-runbook.md). Use the architecture
 - [Harbor90 x86 sources](nebius-harbor90-migration.md): preserve benchmark identity while publishing x86 inputs.
 - [TerminalGen corpus publication](terminalgen-corpus-publication.md): publication and read contracts.
 
-## Local development
+## Personal and local development
 
+- [Personal application workflow](personal-development.md): build your frontend/API, run a smoke task, inspect results and manage your application.
 - [Local workflow](local-dev-workflow.md): disposable Compose stack, checks and reset.
 
 Create a runbook for a repeatable procedure with distinct safety or recovery

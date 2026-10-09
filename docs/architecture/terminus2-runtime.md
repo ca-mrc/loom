@@ -19,10 +19,14 @@ the Terminus harness. See
 
 ## Pins and runtime images
 
+The canonical pin is [`config/harbor-runtime.json`](../../config/harbor-runtime.json).
+Use [the upgrade workflow](../contributing/terminus2-upgrades.md) to discover
+upstream drift, synchronize active pins and run real Harbor differential checks.
+
 | Constant | Value |
 |---|---|
-| Harbor compat SHA | `527d50deb63a5d279e8c20593c18a2cbc7f61f9e` |
-| Harbor runtime version | `0.18.0` |
+| Harbor compat SHA | See `source_revision` in the canonical manifest |
+| Harbor runtime version | See `version` in the manifest; runtime reports installed version |
 | Loom bridge revision | `1.0` |
 
 Harbor is installed in `deploy/Dockerfile.worker` for the local/worker path and
@@ -35,7 +39,10 @@ installed by a task-authored script. Worker Gate 1 evidence includes:
   worker dependency changes
 
 Worker provenance is emitted at trial start via `terminus2_runtime_provenance`
-events and `loom.agent.terminus2.worker_provenance`.
+events and `loom.agent.terminus2.worker_provenance`. New events also record
+effective runtime options. Loom currently disables summaries and defaults to
+50 turns; conformance with the same effective options does not establish
+upstream-default parity.
 
 This runtime identity is independent of benchmark identity. A TB2.1 trial must
 record both the Harbor Hub rev-6 package/profile provenance and the Terminus-2

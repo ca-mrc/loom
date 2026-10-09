@@ -120,6 +120,8 @@ async def test_manager_freezes_ready_owner_build_and_replays_without_builder(
         request = requests[0]
         payload = ApplicationCreateRequestV1(slug="alice", release_id=request.build.build_id)
         with pytest.raises(ManagementError, match="application_build_not_ready"):
+            await service.check_release(alice, request.build.build_id)
+        with pytest.raises(ManagementError, match="application_build_not_ready"):
             await service.create(alice, payload, idempotency_key="deploy-build")
         await worker.reconcile_once(request.build.build_id, attempt=1)
         reader.job = await observed_build(factory, request)
@@ -127,6 +129,13 @@ async def test_manager_freezes_ready_owner_build_and_replays_without_builder(
         await worker.reconcile_once(request.build.build_id, attempt=1)
         await cleanup(factory, request)
         await worker.reconcile_once(request.build.build_id, attempt=1)
+        compatibility = await service.check_release(alice, request.build.build_id)
+        assert compatibility.compatibility == "compatible"
+        assert compatibility.release.service_image_ref == publication["registry_images"]["service"]
+        assert not await registry.list_applications(principal=alice)
+        for caller in (bob, replace(alice, team_id=uuid4()), replace(alice, scopes=["submit"])):
+            with pytest.raises(ManagementError):
+                await service.check_release(caller, request.build.build_id)
         with pytest.raises(ManagementError, match="application_build_forbidden"):
             await service.create(bob, payload.model_copy(update={"slug": "bob"}), idempotency_key="steal")
         operation = await service.create(alice, payload, idempotency_key="deploy-build")

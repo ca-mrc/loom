@@ -62,6 +62,14 @@ async def test_separate_trial_exposes_agent_wait_and_verifier_phases(postgres_ur
         }
         async with httpx.AsyncClient(**client_kwargs) as client:
             waiting = (await client.get(f"/api/v1/trials/{trial_id}")).json()
+        provenance = waiting["execution_provenance"]
+        # This fixture commits handoff bookkeeping without a runtime result or
+        # container start observation. Completion alone cannot prove execution.
+        assert provenance["state"] == "planned"
+        assert provenance["lease_id"] == str(parent.id)
+        assert provenance["task_image_digest"] == "sha256:" + "a" * 64
+        assert provenance["runtime_image_digest"] == "sha256:" + "b" * 64
+        assert "registry" not in str(provenance)
         phases = waiting["execution_phases"]
         assert phases["verifier_execution"] == "separate_execution"
         assert [item["phase"] for item in phases["phases"]] == ["agent", "awaiting_verifier"]
@@ -85,6 +93,7 @@ async def test_separate_trial_exposes_agent_wait_and_verifier_phases(postgres_ur
             )
         for response in (detail, batch, monitor):
             assert response.status_code == 200, response.text
+        assert detail.json()["execution_provenance"] == provenance
         phases = detail.json()["execution_phases"]
         assert [item["phase"] for item in phases["phases"]] == ["agent", "awaiting_verifier", "verifier"]
         agent, wait, child = phases["phases"]
