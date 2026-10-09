@@ -204,13 +204,13 @@ def test_ci_requires_real_locked_install_on_nebius_server_architecture() -> None
     ):
         assert f"import {package}" in script
 
-    assert "locked-environments" in jobs["fast-checks"]["needs"]
+    assert "locked-environments" in jobs["repository-checks"]["needs"]
     validation = next(
         step
-        for step in jobs["fast-checks"]["steps"]
-        if step.get("name") == "Validate parallel check results"
+        for step in jobs["repository-checks"]["steps"]
+        if step.get("name") == "Enforce selected validation results"
     )["run"]
-    assert "needs.locked-environments.result" in validation
+    assert '"$LOCKED_RESULT"' in validation
 
     setup_uv = next(
         step

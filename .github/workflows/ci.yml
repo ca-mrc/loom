@@ -134,6 +134,9 @@ jobs:
       nebius_iac: ${{ steps.plan.outputs.nebius_iac || steps.event.outputs.nebius_iac }}
       locked_environments: ${{ steps.plan.outputs.locked_environments || steps.event.outputs.locked_environments }}
       test_changes: ${{ steps.plan.outputs.test_changes || '[]' }}
+      tests_root_matrix: ${{ steps.plan.outputs.tests_root_matrix || '[]' }}
+      integration_matrix: ${{ steps.plan.outputs.integration_matrix || '[]' }}
+      integration_docker_matrix: ${{ steps.plan.outputs.integration_docker_matrix || '[]' }}
     steps:
       - name: Classify filtered event before checkout
         id: event
@@ -372,23 +375,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard: 1-of-8
-            shard_index: 0
-          - shard: 2-of-8
-            shard_index: 1
-          - shard: 3-of-8
-            shard_index: 2
-          - shard: 4-of-8
-            shard_index: 3
-          - shard: 5-of-8
-            shard_index: 4
-          - shard: 6-of-8
-            shard_index: 5
-          - shard: 7-of-8
-            shard_index: 6
-          - shard: 8-of-8
-            shard_index: 7
+        include: ${{ fromJSON(needs.workflow-plan.outputs.tests_root_matrix) }}
     env:
       COVERAGE_FILE: .coverage.root-${{ matrix.shard }}
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
@@ -397,6 +384,22 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+
+      - name: Select nonempty tests-root manifest
+        id: manifest
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          set -euo pipefail
+          manifest_paths_file="${RUNNER_TEMP}/tests-root-manifest.txt"
+          python3 scripts/component_ownership.py test-paths --lane tests-root --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
+            > "$manifest_paths_file"
+          test -s "$manifest_paths_file"
+          echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -419,19 +422,11 @@ jobs:
         shell: bash
         env:
           SHARD_INDEX: ${{ matrix.shard_index }}
-          SHARD_COUNT: 8
+          SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           set -euo pipefail
-          manifest_paths_file="${RUNNER_TEMP}/tests-root-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane tests-root --test-scope "${CI_TEST_SCOPE:-all}" \
-            --changed-paths-json "$TEST_CHANGED_PATHS" \
-            --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
-            > "${manifest_paths_file}"
-          mapfile -t test_paths < "${manifest_paths_file}"
-          if [[ ${#test_paths[@]} -eq 0 ]]; then
-            echo "No independent test edits belong to this shard."
-            exit 0
-          fi
+          mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
+          [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
             coverage_args=(--cov=src --cov=packages --cov-report=)
@@ -659,51 +654,18 @@ jobs:
           terraform -chdir=deploy/terraform/nebius/modules/regional-execution test
           terraform -chdir=deploy/terraform/nebius/platform test
 
-  # The fast Python checks run in parallel above; this aggregator owns
-  # their result validation and the final fast-tier coverage gate. Docs-only
-  # changes have no coverage inputs, so their final repository gate validates
-  # the skipped result directly instead of starting this no-op queue hop.
-  fast-checks:
-    name: fast-checks
+  # Coverage instrumentation is optional. Ordinary PRs validate each selected
+  # source job directly in repository-checks, without an intermediate runner.
+  fast-coverage:
+    name: fast-coverage
     runs-on: ubuntu-latest
-    needs:
-      - workflow-plan
-      - locked-environments
-      - lint-and-static
-      - runtime-payload
-      - nebius-iac
-      - tests-root
-      - tests-packages
+    needs: [workflow-plan, tests-root, tests-packages]
     timeout-minutes: 10
     if: >-
-      always() &&
-      needs.workflow-plan.outputs.gate_mode == 'full' &&
-      needs.workflow-plan.outputs.docs_only != 'true'
+      needs.workflow-plan.outputs.coverage_summary == 'true' &&
+      needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-
-      - name: Validate parallel check results
-        run: |
-          set -euo pipefail
-          docs_only="${{ needs.workflow-plan.outputs.docs_only }}"
-          if [[ "${docs_only}" == "true" ]]; then
-            echo "Only docs/repo metadata changed; heavy checks skipped."
-            exit 0
-          fi
-          require_selected() {
-            local selected="$1" name="$2" result="$3"
-            case "$selected:$result" in
-              true:success|false:skipped|false:success) ;;
-              *) echo "FAIL: ${name} selected=${selected} result=${result}" >&2; exit 1 ;;
-            esac
-          }
-          require_selected true workflow-plan "${{ needs.workflow-plan.result }}"
-          require_selected true lint-and-static "${{ needs.lint-and-static.result }}"
-          require_selected "${{ needs.workflow-plan.outputs.locked_environments }}" locked-environments "${{ needs.locked-environments.result }}"
-          require_selected "${{ needs.workflow-plan.outputs.runtime_payload }}" runtime-payload "${{ needs.runtime-payload.result }}"
-          require_selected "${{ needs.workflow-plan.outputs.nebius_iac }}" nebius-iac "${{ needs.nebius-iac.result }}"
-          require_selected "${{ needs.workflow-plan.outputs.tests_root }}" tests-root "${{ needs.tests-root.result }}"
-          require_selected "${{ needs.workflow-plan.outputs.tests_packages }}" tests-packages "${{ needs.tests-packages.result }}"
 
       - name: Install exact uv
         if: needs.workflow-plan.outputs.coverage_summary == 'true'
@@ -803,7 +765,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-  # Go binary checks (#78 Phase B). This stays separate from fast-checks
+  # Go binary checks (#78 Phase B). This stays separate from Python coverage
   # because Go is its own toolchain; the final repository-checks job waits
   # for both toolchains without increasing Python CI latency.
   go-checks:
@@ -954,21 +916,38 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard: 1-of-4
-            shard_index: 0
-          - shard: 2-of-4
-            shard_index: 1
-          - shard: 3-of-4
-            shard_index: 2
-          - shard: 4-of-4
-            shard_index: 3
+        include: ${{ fromJSON(needs.workflow-plan.outputs.integration_matrix) }}
     env:
       COVERAGE_FILE: .coverage.integration-${{ matrix.shard }}
       COVERAGE_ENABLED: ${{ needs.workflow-plan.outputs.coverage_summary }}
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Select nonempty integration manifest
+        id: manifest
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          set -euo pipefail
+          manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
+          python3 scripts/component_ownership.py test-paths --lane integration --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
+            > "$manifest_paths_file"
+          test -s "$manifest_paths_file"
+          echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
+          minio_cache_key=$(python3 -m tests.support.minio_images --test-paths-file "$manifest_paths_file" --cache-key)
+          echo "minio_cache_key=$minio_cache_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore verified MinIO fixtures
+        if: steps.manifest.outputs.minio_cache_key != 'none'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/minio-fixtures
+          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -987,26 +966,32 @@ jobs:
           uv sync --locked --all-packages --extra dev --python 3.11
           uv pip check --python .venv/bin/python
 
-      - name: Prepare pinned MinIO fixture images
-        run: uv run --no-sync python -m tests.support.minio_images
+      - name: Prepare selected pinned MinIO fixtures
+        if: steps.manifest.outputs.minio_cache_key != 'none'
+        run: >-
+          uv run --no-sync python -m tests.support.minio_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
+          --cache-dir "${{ runner.temp }}/minio-fixtures"
+          --save-cache "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
+
+      - name: Save verified MinIO fixtures from trusted runs
+        if: >-
+          steps.manifest.outputs.minio_cache_key != 'none' &&
+          github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/minio-fixtures
+          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Pytest — integration (fast tier, no docker)
         shell: bash
         env:
           SHARD_INDEX: ${{ matrix.shard_index }}
-          SHARD_COUNT: 4
+          SHARD_COUNT: ${{ matrix.shard_count }}
         run: |
           set -euo pipefail
-          manifest_paths_file="${RUNNER_TEMP}/integration-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration --test-scope "${CI_TEST_SCOPE:-all}" \
-            --changed-paths-json "$TEST_CHANGED_PATHS" \
-            --shard-index "${SHARD_INDEX}" --shard-count "${SHARD_COUNT}" \
-            > "${manifest_paths_file}"
-          mapfile -t test_paths < "${manifest_paths_file}"
-          if [[ ${#test_paths[@]} -eq 0 ]]; then
-            echo "No independent test edits belong to this shard."
-            exit 0
-          fi
+          mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
+          [[ ${#test_paths[@]} -gt 0 ]]
           coverage_args=(-p no:cov)
           if [[ "$COVERAGE_ENABLED" == "true" ]]; then
             coverage_args=(--cov=src --cov=packages --cov-report=)
@@ -1034,17 +1019,46 @@ jobs:
   # spins up dozens of containers, so the planner limits it to relevant
   # paths, the `ci:integration-docker` label, or a workflow_dispatch input.
   integration-docker:
-    name: integration-docker
+    name: integration-docker (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     needs: [workflow-plan]
     timeout-minutes: 40
     if: >-
       needs.workflow-plan.outputs.gate_mode == 'full' &&
       needs.workflow-plan.outputs.integration_docker == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.workflow-plan.outputs.integration_docker_matrix) }}
     env:
       TEST_CHANGED_PATHS: ${{ needs.workflow-plan.outputs.test_changes }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Select nonempty integration-docker manifest
+        id: manifest
+        shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+        run: |
+          set -euo pipefail
+          manifest_paths_file="${RUNNER_TEMP}/integration-docker-manifest.txt"
+          python3 scripts/component_ownership.py test-paths --lane integration-docker --test-scope "${CI_TEST_SCOPE:-all}" \
+            --changed-paths-json "$TEST_CHANGED_PATHS" \
+            --shard-index "$SHARD_INDEX" --shard-count "$SHARD_COUNT" \
+            > "$manifest_paths_file"
+          test -s "$manifest_paths_file"
+          echo "paths_file=$manifest_paths_file" >> "$GITHUB_OUTPUT"
+          minio_cache_key=$(python3 -m tests.support.minio_images --test-paths-file "$manifest_paths_file" --cache-key)
+          echo "minio_cache_key=$minio_cache_key" >> "$GITHUB_OUTPUT"
+
+      - name: Restore verified MinIO fixtures
+        if: steps.manifest.outputs.minio_cache_key != 'none'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/minio-fixtures
+          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -1063,10 +1077,25 @@ jobs:
           uv sync --locked --all-packages --extra dev --python 3.11
           uv pip check --python .venv/bin/python
 
-      - name: Prepare pinned MinIO fixture images
-        run: uv run --no-sync python -m tests.support.minio_images
+      - name: Prepare selected pinned MinIO fixtures
+        if: steps.manifest.outputs.minio_cache_key != 'none'
+        run: >-
+          uv run --no-sync python -m tests.support.minio_images
+          --test-paths-file "${{ steps.manifest.outputs.paths_file }}"
+          --cache-dir "${{ runner.temp }}/minio-fixtures"
+          --save-cache "${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}"
+
+      - name: Save verified MinIO fixtures from trusted runs
+        if: >-
+          steps.manifest.outputs.minio_cache_key != 'none' &&
+          github.event_name != 'pull_request' && github.event_name != 'merge_group'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/minio-fixtures
+          key: ${{ runner.os }}-${{ steps.manifest.outputs.minio_cache_key }}
 
       - name: Build and extract the admitted software-guest payload
+        if: matrix.guest_payload
         shell: bash
         run: |
           set -euo pipefail
@@ -1081,20 +1110,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest_paths_file="${RUNNER_TEMP}/integration-docker-manifest.txt"
-          uv run --no-sync python scripts/component_ownership.py test-paths --lane integration-docker --test-scope "${CI_TEST_SCOPE:-all}" \
-            --changed-paths-json "$TEST_CHANGED_PATHS" > "$manifest_paths_file"
-          mapfile -t test_paths < "$manifest_paths_file"
-          if [[ ${#test_paths[@]} -eq 0 ]]; then
-            echo "No selected tests belong to this lane."
-            exit 0
-          fi
+          mapfile -t test_paths < "${{ steps.manifest.outputs.paths_file }}"
+          [[ ${#test_paths[@]} -gt 0 ]]
           uv run --no-sync pytest -m "${CI_PYTEST_MARKERS:-not legacy_pool}" "${test_paths[@]}" \
             --durations=15
 
   # Optional combined coverage summary for PRs and manual diagnostics.
   # The default fast-tier
-  # summary is written by fast-checks so ordinary PRs do not
+  # summary is written by fast-coverage so ordinary PRs do not
   # start another runner only for summary text. Apply ci:coverage-summary
   # or use the manual coverage_summary input for combined coverage details.
   # This used to post a PR comment via `gh pr comment`; step summary
@@ -1102,12 +1125,12 @@ jobs:
   coverage-summary:
     name: coverage-summary
     runs-on: ubuntu-latest
-    needs: [workflow-plan, fast-checks, integration]
+    needs: [workflow-plan, fast-coverage, integration]
     if: >-
       always() &&
       needs.workflow-plan.outputs.coverage_summary == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full' &&
-      needs.fast-checks.result == 'success' &&
+      needs.fast-coverage.result == 'success' &&
       needs.workflow-plan.outputs.docs_only != 'true'
     permissions:
       contents: read
@@ -1196,7 +1219,13 @@ jobs:
       needs.workflow-plan.outputs.gate_mode != 'filtered'
     needs:
       - workflow-plan
-      - fast-checks
+      - locked-environments
+      - lint-and-static
+      - runtime-payload
+      - nebius-iac
+      - tests-root
+      - tests-packages
+      - fast-coverage
       - go-checks
       - integration
       - integration-docker
@@ -1207,7 +1236,18 @@ jobs:
         env:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
-          FAST_RESULT: ${{ needs.fast-checks.result }}
+          LINT_RESULT: ${{ needs.lint-and-static.result }}
+          LOCKED_SELECTED: ${{ needs.workflow-plan.outputs.locked_environments }}
+          LOCKED_RESULT: ${{ needs.locked-environments.result }}
+          ROOT_SELECTED: ${{ needs.workflow-plan.outputs.tests_root }}
+          ROOT_RESULT: ${{ needs.tests-root.result }}
+          PACKAGES_SELECTED: ${{ needs.workflow-plan.outputs.tests_packages }}
+          PACKAGES_RESULT: ${{ needs.tests-packages.result }}
+          PAYLOAD_SELECTED: ${{ needs.workflow-plan.outputs.runtime_payload }}
+          PAYLOAD_RESULT: ${{ needs.runtime-payload.result }}
+          IAC_SELECTED: ${{ needs.workflow-plan.outputs.nebius_iac }}
+          IAC_RESULT: ${{ needs.nebius-iac.result }}
+          FAST_COVERAGE_RESULT: ${{ needs.fast-coverage.result }}
           GO_SELECTED: ${{ needs.workflow-plan.outputs.go_checks }}
           GO_RESULT: ${{ needs.go-checks.result }}
           DOCS_ONLY: ${{ needs.workflow-plan.outputs.docs_only }}
@@ -1260,13 +1300,23 @@ jobs:
           require_boolean coverage_summary "$COVERAGE_SELECTED"
           require_boolean web_checks "$WEB_SELECTED"
           require_success workflow-plan "$PLAN_RESULT"
+          require_boolean locked_environments "$LOCKED_SELECTED"
+          require_boolean tests_root "$ROOT_SELECTED"
+          require_boolean tests_packages "$PACKAGES_SELECTED"
+          require_boolean runtime_payload "$PAYLOAD_SELECTED"
+          require_boolean nebius_iac "$IAC_SELECTED"
           if [[ "$DOCS_ONLY" == "true" ]]; then
-            require_selected false fast-checks "$FAST_RESULT"
-            require_selected false go-checks "$GO_RESULT"
+            require_selected false lint-and-static "$LINT_RESULT"
           else
-            require_success fast-checks "$FAST_RESULT"
-            require_selected "$GO_SELECTED" go-checks "$GO_RESULT"
+            require_success lint-and-static "$LINT_RESULT"
           fi
+          require_selected "$LOCKED_SELECTED" locked-environments "$LOCKED_RESULT"
+          require_selected "$ROOT_SELECTED" tests-root "$ROOT_RESULT"
+          require_selected "$PACKAGES_SELECTED" tests-packages "$PACKAGES_RESULT"
+          require_selected "$PAYLOAD_SELECTED" runtime-payload "$PAYLOAD_RESULT"
+          require_selected "$IAC_SELECTED" nebius-iac "$IAC_RESULT"
+          require_selected "$GO_SELECTED" go-checks "$GO_RESULT"
+          require_selected "$COVERAGE_SELECTED" fast-coverage "$FAST_COVERAGE_RESULT"
           require_selected "$WEB_SELECTED" web-checks "$WEB_RESULT"
           require_selected "$INTEGRATION_SELECTED" integration "$INTEGRATION_RESULT"
           require_selected "$DOCKER_SELECTED" integration-docker "$DOCKER_RESULT"

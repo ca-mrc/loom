@@ -1,6 +1,6 @@
 import { expect, test, waitForReady } from "./fixtures/guardedTest";
 
-test("generic override ledger and caller readiness are exact", async ({
+test("generic override ledger and caller readiness are exact", { tag: "@protocol" }, async ({
   apiHarness,
   browserHarness,
   page,

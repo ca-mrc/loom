@@ -15,10 +15,10 @@ from tests.ops.test_nebius_pool_startup_live import fencing_inputs as fencing_in
 from tests.ops.test_nebius_pool_startup_live import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_startup_live import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_startup_live import retirement_inputs as retirement_inputs
-from tests.ops.test_nebius_pool_startup_live import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_startup_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
 )
+from tests.support.pool_transport import runtime_inputs as runtime_inputs
 
 
 class DispatchInterrupted(BaseException):
@@ -153,8 +153,9 @@ def test_fixed_reopening_dispatch_records_intent_and_uses_phase_aware_runtime_an
         if participant == second:
             raise OSError('private-lost-before')
         api.guards[participant] = 'open'
-        if participant == first:
-            raise OSError('private-lost-after')
+        # The first owner exercises a confirmed transport release, including
+        # fresh post-write readback. The second exercises an unknown reply;
+        # the pure reopening suite owns the before/after failure matrix.
         return 'open'
 
     api.parent = SimpleNamespace(history=SimpleNamespace(

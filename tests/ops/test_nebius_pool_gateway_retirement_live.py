@@ -19,7 +19,6 @@ from tests.ops.test_nebius_pool_activation_live import fencing_inputs as fencing
 from tests.ops.test_nebius_pool_activation_live import management_inputs as management_inputs
 from tests.ops.test_nebius_pool_activation_live import platform_inputs as platform_inputs
 from tests.ops.test_nebius_pool_activation_live import retirement_inputs as retirement_inputs
-from tests.ops.test_nebius_pool_activation_live import runtime_inputs as runtime_inputs
 from tests.ops.test_nebius_pool_activation_live import startup_http as startup_http
 from tests.ops.test_nebius_pool_activation_live import (
     unbound_cutover_inputs as unbound_cutover_inputs,
@@ -29,6 +28,7 @@ from tests.ops.test_nebius_pool_gateway_retirement import (
     gateway_retire,
     machine_retired,
 )
+from tests.support.pool_transport import runtime_inputs as runtime_inputs
 
 
 @pytest.fixture
@@ -111,8 +111,8 @@ def retirement_http(activation_http, closed_startup):
     return connect
 
 
-# Six namespace Roles plus repeated recovery traverse every retained-scope
-# barrier. The complete run measured 899.94s; retain assertions with CI headroom.
+# The full roster belongs to the pure retirement suite. Connected coverage
+# retains separate owners, real CAS/intent and effective permission readback.
 @pytest.mark.timeout(1200)
 def test_connected_role_retirement_preserves_cas_intent_and_effective_authority(retirement_http, closed_startup):
     with retirement_http() as (api, state, apply_role):
@@ -132,7 +132,9 @@ def test_connected_role_retirement_preserves_cas_intent_and_effective_authority(
         state.gateway_failure = 'after'
         result = gateway_retire(closed_startup, api)
         assert result['status'] == 'pool_gateway_roles_retired' and result['legacy_restore_allowed'] is False
-        assert len(state.gateway_writes) == len(set(state.gateway_writes)) == 6
+        roles = {key for key, row in before.items() if row['kind'] == 'Role'
+            and key in api.parent.documents}
+        assert set(state.gateway_writes) == roles and len(state.gateway_writes) == len(roles)
         assert not state.writes and not state.activation_writes
         for key, original in before.items():
             expected = copy.deepcopy(original)
@@ -155,4 +157,4 @@ def test_connected_role_retirement_preserves_cas_intent_and_effective_authority(
         key = state.gateway_writes[0]
         with pytest.raises(ValueError):
             api.restrict_gateway_role(key, before[key], {**before[key], 'rules': READER_RULES})
-        assert len(state.gateway_writes) == 6
+        assert len(state.gateway_writes) == len(roles)

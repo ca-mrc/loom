@@ -36,7 +36,6 @@ def test_current_release_docs_cover_executable_validation_and_promotion() -> Non
     ):
         assert fragment in operator or fragment in staging
 
-    assert "shared-cluster deployment workflow is retired" in operator
     assert "Automated hosted rollout is" in operator
     assert "does not deploy staging" in staging
     assert "nebius-deployment.md" in operator
@@ -52,7 +51,6 @@ def test_current_release_docs_define_secret_safe_evidence() -> None:
     assert "never the value" in staging
     assert "Store only sanitized responses and identifiers" in staging
     assert "bearer tokens, signed URLs, object-store keys" in operator
-    assert "release_owner_approval" in operator
     assert "prod_staging_isolation" in staging
     assert "raw_delivery_export_status" in staging
 

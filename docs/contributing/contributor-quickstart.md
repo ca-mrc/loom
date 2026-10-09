@@ -146,10 +146,10 @@ isolation commands run only in main or manual compatibility scope. These checks
 are credential-free candidate evidence; real model-backed tasks and live
 environment readiness require deployment acceptance rather than PR jobs.
 
-Changed paths select static checks, eight root-test shards and package tests as
-needed, in parallel on GitHub-hosted runners. Web-only changes skip backend
-baseline jobs; dependency, shared and unknown changes retain them.
-`fast-checks` verifies every selected result. Coverage instrumentation and
+Changed paths select static checks, up to eight nonempty root-test shards and
+package tests as needed, in parallel on GitHub-hosted runners. Web-only changes
+skip backend baseline jobs; dependency, shared and unknown changes retain them.
+`repository-checks` verifies every selected result. Coverage instrumentation and
 aggregation run when requested with `ci:coverage-summary` or
 `coverage_summary=true`, and in the daily full Nebius regression. Nebius coverage
 is reported without the historical all-platform 70% floor; main and manual
@@ -158,12 +158,11 @@ test-only edits select their owning files; shared fixtures and runtime changes
 retain full lanes. Root shards have a 40-minute budget and integration shards
 have a 75-minute budget; selection does not relax per-test timeouts or failures.
 `repository-checks` enforces every selected result after the independent lanes
-finish. Docs-only PRs skip the no-input `fast-checks` job and let
-`repository-checks` validate that skipped result directly, avoiding a no-op
-runner queue hop while preserving the same stable required context. CI restores
-only uv's package/download cache and
-never restores `.venv` or `.mypy_cache`; PR and merge-group runs cannot save
-cache entries. Every job creates a clean environment with `uv sync --locked`,
+finish. Docs-only PRs preserve the stable required contexts while unselected
+functional lanes remain skipped. Python jobs restore uv's package/download cache
+and selected pinned MinIO fixture archives, never `.venv` or `.mypy_cache`;
+PR and merge-group runs cannot save cache entries. Every job creates a clean
+environment with `uv sync --locked`,
 then uses `uv run --no-sync` so a test command cannot silently resolve a new
 environment. The uv executable version and official per-platform archive
 SHA256 values are reviewed in `config/uv-toolchain.toml`; every setup step must
@@ -408,8 +407,9 @@ For Nebius coverage, select `--test-scope nebius`, keep `-m "not legacy_pool"`,
 replace `-p no:cov` with the coverage arguments shown there, and report without
 `--fail-under=70`. The second command needs `--cov-append`; reporting before both
 root and package tests finish gives an incomplete total. CI combines these
-parallel results in `fast-checks`; `repository-checks` validates that result
-without recomputing coverage.
+parallel results in the optional `fast-coverage` job; `coverage-summary` adds
+integration coverage. `repository-checks` validates the selected results without
+recomputing coverage.
 
 ## Workflow
 

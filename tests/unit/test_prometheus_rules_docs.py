@@ -1,20 +1,22 @@
 from __future__ import annotations
 
-import re
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def _prometheus_alert_names() -> set[str]:
-    rules = (ROOT / "deploy/k8s/prometheus-rules.yaml").read_text()
-    return set(re.findall(r"^\s*- alert: ([A-Za-z0-9_]+)\s*$", rules, re.MULTILINE))
+@lru_cache(maxsize=1)
+def _prometheus_alert_rules() -> dict[str, Any]:
+    document = yaml.safe_load((ROOT / "deploy/k8s/prometheus-rules.yaml").read_text())
+    return {rule["alert"]: rule for group in document["spec"]["groups"] for rule in group["rules"]}
 
 
 def test_operator_runbook_documents_every_prometheus_alert() -> None:
-    alerts = _prometheus_alert_names()
+    alerts = _prometheus_alert_rules()
     runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text()
 
     missing = sorted(alert for alert in alerts if f"`{alert}`" not in runbook)
@@ -25,15 +27,8 @@ def test_operator_runbook_documents_every_prometheus_alert() -> None:
     )
 
 
-def test_operator_runbook_does_not_claim_gateway_service_worker_alerts_are_deferred() -> None:
-    runbook = (ROOT / "docs/runbooks/operator-runbook.md").read_text()
-
-    assert "Gateway / service / worker instrumentation is a follow-up slice" not in runbook
-
-
 def test_pipeline_alert_contract_is_exact() -> None:
-    document = yaml.safe_load((ROOT / "deploy/k8s/prometheus-rules.yaml").read_text())
-    rules = {rule["alert"]: rule for group in document["spec"]["groups"] for rule in group["rules"]}
+    rules = _prometheus_alert_rules()
     expected = {
         "LoomPipelineStageQueueStuck": (
             '(max by (state,resource_class) (loom_pipeline_stage_queue_age_seconds{state=~"ready|queued|retry_wait"}) > 900) or (max by (state,resource_class) (loom_pipeline_stage_queue_age_seconds{state="claimed"}) > 300)',

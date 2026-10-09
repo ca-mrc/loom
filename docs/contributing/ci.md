@@ -7,7 +7,7 @@ boundary while retaining the four protected admission contexts.
 
 ## Workflow inventory
 
-The repository retains twelve workflows. Low run frequency or no recorded runs
+The repository retains eleven workflows. Low run frequency or no recorded runs
 does not make an operator entry point obsolete: promotion, retry, and catalog
 publication run when needed. In particular, `main-promotion-gate` remains the
 required check protecting promotion into `main`. The GitHub-managed Dependency
@@ -103,6 +103,8 @@ heavy validation follows the changed files:
 | Deployment/render operator scripts and `deploy/nebius/` configuration | Integration, Kubernetes |
 | Restore verifier operator script | Integration |
 | Nebius Terraform and its checker | Integration, the IaC checks |
+| Action-pin, upgrade-policy and CI selection tooling | Python root contracts and static checks |
+| Retained Go runtime modules | Go checks and their affected Docker/image contracts |
 | Candidate workflow/publisher, registry authentication, shared scan validator | Full validation |
 | Unknown runtime or operator files | Full validation |
 
@@ -125,29 +127,35 @@ measurement; the removed instrumentation and artifact work is deterministic.
 ## Test-only changes
 
 An edit consisting only of independent Python test modules runs those files in
-their owning lanes. Any external reference to an edited test module name keeps
-full validation because test modules can provide shared fixtures. Shared or deleted
+their owning lanes. Imports, executable references and ambiguous references to an
+edited test module retain its consumer coverage. Exact path literals in the
+audited CI metadata tests do not make a test a shared fixture. Shared or deleted
 test inputs select their possible consumer jobs as well as retaining all files
 inside those jobs, including when mixed with source changes. Runtime,
 migration, configuration, fixture, deleted-file and unknown changes stay full
 unless a suite explicitly declares an audited unaffected component.
 CI selector labels and manual runs request full regression within the active scope; ordinary labels such
 as `bug` do not change test selection. Sharding happens before filtering,
-so ownership and paired-fixture ordering remain stable. Empty selections do not
-invoke pytest, and selector errors fail the job.
+so ownership and paired-fixture ordering remain stable. The planner emits only
+nonempty root/integration/Docker/cluster shards before runners are allocated. Each
+runner writes its selected-path manifest before dependency or fixture setup;
+selector errors fail the job. Empty selections do not invoke pytest.
 
 Go checks validate the retained execution runtime, gateway sandbox, and sandbox
-runtime. Removed host controllers and builder supervisors are not restored by
+runtime. JWT and execution-materialization producer contracts also retain Go
+coverage; unrelated Python changes do not allocate a Go runner. Removed host
+controllers and builder supervisors are not restored by
 manual compatibility selection.
 
 ## Test shard balance
 
 The root Python lane uses eight complete, non-overlapping file shards with the
-existing manifest-owned stable hash salt. The long gateway retirement and two
-restoration files are assigned to separate shards, retaining the previous pins.
-Both previous two-shard jobs
-exhausted their 40-minute limits at approximately 35–36% in PR #2305. The job and
-per-test limits remain unchanged. Each shard stops on its first failing test to
+existing manifest-owned stable hash salt. Explicit pins distribute the slow
+connected recovery modules using the October 2026 duration sample. Connected
+transport tests use independent two-owner fixtures and share only immutable
+inputs; full roster tests retain all environments. Duplicate mode-independent
+qualification cases run once, while mode-specific grants and failure cases remain.
+The job and per-test limits remain unchanged. Each shard stops on its first failing test to
 retain the underlying failure report before its deadline; successful shards run
 every selected test. Other shards are not cancelled, and `repository-checks`
 still requires the aggregate result. This repartitions the expanded lane without
@@ -156,25 +164,41 @@ excluding tests; its new duration balance requires measurement on CI runners.
 The fast integration lane uses four complete, non-overlapping file shards.
 `config/component-ownership.toml` owns the stable hash salt and the paired
 username/password fixture ordering. New files do not reshuffle existing files.
-Docker integration remains a separate lane, and every required gate still waits
-for all selected shards. Required platform tests are retained.
+Docker integration uses two non-overlapping file shards, with duration-based
+pins separating the guest runtime and build-cache tests. Guest payloads are built
+only when the selected files consume them. Every required gate still waits for
+all selected shards. Required platform tests are retained.
+
+MinIO preparation follows selected fixture imports and parent conftests. Fast
+integration normally needs only the testcontainers release; TLS storage tests
+also need the newer release. Source-built fallback images retain their pinned
+commit, compiler and recipe and are cached as Docker archives. PR and merge-group
+runs only restore caches; trusted pushes, dispatches and scheduled runs may save
+them. Recipe or release changes get a new cache key, and invalid archives fall
+back to normal pinned-image preparation. The lazy per-fixture resolver remains
+available for local tests.
+
+The final repository gate checks individual lane results directly. Coverage
+aggregation runners are allocated only when optional Python coverage is requested.
+Frontend protocol-only browser cases run once on Desktop Chrome; responsive,
+layout and accessibility coverage still runs on all four projects. Production
+and browser-test builds both remain because they compile different branches.
 
 The cluster-contract lane also uses four complete, non-overlapping file shards,
 with its stable hash policy in the same manifest. Each shard owns an independent
 disposable Kubernetes runtime, preserves within-file fixture order, and retains
-the 35-minute job limit and existing per-test deadlines. Selector failure stops
+the 35-minute job limit and existing per-test deadlines. Independent cluster-test
+edits allocate only their nonempty shards, and select the manifest before
+dependency and Skopeo preparation. Selector failure stops
 the shard even if it emitted partial paths; test failure remains a failed job.
 `cluster-smoke-gate` waits for the aggregate result of all selected shards, with
 fail-fast cancellation disabled. This replaces a serial run that exhausted its
 35-minute limit after completing only 61% of 77 tests; it removes no test paths
 or protected checks. Per-shard duration reporting supports later balance review.
 
-The successful PR #1973 head `69359261` ran its two integration shards in
-66 and 90 minutes. Timestamped progress for 518 modules accounts for about
-155 minutes of test work. Repartitioning that same work projects approximately
-39.0, 38.2, 38.8 and 39.1 minutes across four runners, before setup, queueing and
-new tests. This is a planning estimate, not a measured speedup. The 75-minute
-job budget retains room for optional coverage and runner variation.
+The 75-minute integration budget retains room for optional coverage and runner
+variation. File counts alone do not measure shard balance; use the per-shard
+duration reports from the current head.
 
 All four source workflows use GitHub-hosted runners directly. The OLDLAB route
 action, lease broker, controller, custom CheckRun publisher and dedicated KVM
@@ -217,9 +241,11 @@ unrelated changes; full compatibility and coverage requests still run it.
 Docker test-only changes use the same selection and failure propagation as
 ordinary integration.
 
-The pre-change integration sample (run `35485701767`, shard 3) spent 41m55s in
-pytest and about 22s preparing the runner and dependencies. This identifies test
-work as the dominant cost; it is not a measurement of this change's speedup.
+The October 2–4, 2026 sample of twelve successful full CI runs had a median
+repository-gate wait of 25m20s. Docker job execution was 24m26s and the slowest
+root shard was 21m02s at the median. Eleven matched four-workflow runs all finished
+CI last. These are the optimization baseline, not a measured speedup; compare
+current full runs separately from narrow PR selection and exclude cancelled runs.
 
 
 ## Daily tests and manual compatibility

@@ -6,6 +6,8 @@ These explicitly named local rebuilds are not byte-identical upstream images.
 Nothing here contacts Docker or the network at import time.
 """
 
+import argparse
+import ast
 import hashlib
 import json
 import subprocess
@@ -169,11 +171,120 @@ def prepare_test_image(image: str) -> str:
     return image
 
 
-def prepare_test_images() -> None:
+def selected_fixture_images(paths: list[str], *, root: Path | None = None) -> tuple[str, ...]:
+    """Follow test fixture imports without importing tests or contacting Docker.
+
+    Parent conftests participate in collection, even when a test does not name
+    their fixtures. Unreadable/invalid selected Python files retain both images.
+    """
+    root = root or Path(__file__).resolve().parents[2]
+    pending = [root / path for path in paths]
+    for path in tuple(pending):
+        for parent in path.parents:
+            if not parent.is_relative_to(root):
+                break
+            conftest = parent / "conftest.py"
+            if conftest.exists():
+                pending.append(conftest)
+    seen: set[Path] = set()
+    images: set[str] = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            source = path.read_text()
+            tree = ast.parse(source)
+        except (OSError, SyntaxError, UnicodeError):
+            return tuple(spec.image for spec in SOURCE_FIXTURES)
+        if path.name == "minio_tls.py" or "MINIO_TLS_IMAGE" in source:
+            images.add(MINIO_TLS_IMAGE)
+        if any(name in source for name in ("MinioContainer", "MINIO_TEST_IMAGE", "MINIO_TESTCONTAINERS_IMAGE")):
+            images.add(MINIO_TESTCONTAINERS_IMAGE)
+        for node in ast.walk(tree):
+            modules: list[str] = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level:
+                    package = list(path.relative_to(root).parent.parts)
+                    module = ".".join(package[:len(package) - node.level + 1] + ([module] if module else []))
+                modules = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+            for module in modules:
+                # The resolver defines both releases; importing its lazy API is
+                # not itself a request to prepare both images.
+                if module == "tests.support.minio_images":
+                    continue
+                candidate = root.joinpath(*module.split("."))
+                for dependency in (candidate.with_suffix(".py"), candidate / "__init__.py"):
+                    if dependency.is_file() and dependency.is_relative_to(root):
+                        pending.append(dependency)
+    return tuple(spec.image for spec in SOURCE_FIXTURES if spec.image in images)
+
+
+def fixture_cache_key(images: tuple[str, ...]) -> str:
+    if not images:
+        return "none"
+    recipes = [_source_tag(spec) for spec in SOURCE_FIXTURES if spec.image in images]
+    return "minio-source-" + hashlib.sha256("\n".join(recipes).encode()).hexdigest()[:24]
+
+
+def _restore_source_fixture(spec: SourceFixture, directory: Path) -> None:
+    archive = directory / (_source_tag(spec).replace(":", "-") + ".tar")
+    if not archive.is_file() or _source_fixture_cached(spec):
+        return
+    try:
+        subprocess.run(["docker", "load", "--input", str(archive)], check=True, timeout=120)
+        if not _source_fixture_cached(spec):
+            raise ValueError("Cached MinIO fixture labels do not match the pinned recipe")
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        print(f"MinIO fixture cache miss: {error}", file=sys.stderr)
+        archive.unlink(missing_ok=True)
+
+
+def _save_source_fixture(spec: SourceFixture, directory: Path) -> None:
+    if not _source_fixture_cached(spec):
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / (_source_tag(spec).replace(":", "-") + ".tar")
+    if archive.exists():
+        return
+    temporary = archive.with_suffix(".partial")
+    try:
+        subprocess.run(["docker", "save", "--output", str(temporary), _source_tag(spec)], check=True, timeout=120)
+        temporary.replace(archive)
+    except (OSError, subprocess.SubprocessError) as error:
+        # The image is already prepared and validated. An optional cache write
+        # must not turn a usable fixture into a test failure.
+        print(f"MinIO fixture cache export skipped: {error}", file=sys.stderr)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_test_images(images: tuple[str, ...] | None = None, *, cache_dir: Path | None = None,
+                        save_cache: bool = False) -> None:
     """CI setup only: cold downloads/builds run before individual test deadlines."""
-    for image in (MINIO_TESTCONTAINERS_IMAGE, MINIO_TLS_IMAGE):
+    for image in images if images is not None else (MINIO_TESTCONTAINERS_IMAGE, MINIO_TLS_IMAGE):
+        spec = next(spec for spec in SOURCE_FIXTURES if spec.image == image)
+        if cache_dir is not None:
+            _restore_source_fixture(spec, cache_dir)
         prepare_test_image(image)
+        if cache_dir is not None and save_cache:
+            _save_source_fixture(spec, cache_dir)
 
 
 if __name__ == "__main__":
-    prepare_test_images()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--test-paths-file", type=Path)
+    parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--cache-key", action="store_true")
+    parser.add_argument("--save-cache", choices=("true", "false"), default="false")
+    arguments = parser.parse_args()
+    selected = (selected_fixture_images(arguments.test_paths_file.read_text().splitlines())
+                if arguments.test_paths_file else tuple(spec.image for spec in SOURCE_FIXTURES))
+    if arguments.cache_key:
+        print(fixture_cache_key(selected))
+    else:
+        prepare_test_images(selected, cache_dir=arguments.cache_dir, save_cache=arguments.save_cache == "true")
