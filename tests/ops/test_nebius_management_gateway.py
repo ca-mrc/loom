@@ -5,6 +5,9 @@ import hashlib
 import importlib
 import io
 import json
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -14,6 +17,32 @@ from tests.ops.test_nebius_ingress_bootstrap import archive
 
 def module():
     return importlib.import_module("scripts.ops.nebius_management_gateway")
+
+
+def test_bundled_management_entries_import_without_checkout(tmp_path):
+    """Catch missing transitive ops modules before the locked-wheel CI lane."""
+    root = Path(__file__).resolve().parents[2]
+    for name in module().SOURCES:
+        target = tmp_path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((root / name).read_bytes())
+    code = """
+import importlib, sys
+sys.path.insert(0, sys.argv[1])
+for name in (
+    'nebius_management_entry', 'nebius_management_retirement_entry',
+    'nebius_management_retirement_diagnostic_entry',
+    'nebius_management_retirement_recovery_entry',
+    'nebius_management_refresh_entry', 'nebius_management_refresh_connected',
+    'nebius_pool_cutover_entry', 'nebius_pool_repair_entry', 'nebius_pool_image_entry',
+):
+    importlib.import_module('scripts.ops.' + name)
+print('bundle entries imported')
+"""
+    result = subprocess.run([sys.executable, '-I', '-B', '-c', code, str(tmp_path)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'bundle entries imported'
 
 
 def operation(tmp_path):
