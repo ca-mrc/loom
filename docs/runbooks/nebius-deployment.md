@@ -632,8 +632,12 @@ old workload specifications or writes.
 `writer_migration_complete: false`. It is **not operational acceptance**: the
 gateway remains stopped, actuator Kubernetes grants remain read-only and the build namespace
 remains restricted. Sole-writer qualification, constrained build activation,
-worker trust, real source/build/deployment/task/result and concurrent-owner
-acceptance are separate prerequisites. This operation never clears staging
+authenticated worker/API identity, real source/build/deployment/task/result and
+concurrent-owner acceptance are separate prerequisites. Detailed kubelet samples
+retain the optional telemetry semantics described below: unavailable samples are
+not zero usage and do not require a certificate-refresh project before execution.
+API, identity and local trust-configuration failures remain blocking; TLS checks
+must not be disabled. This operation never clears staging
 guards or takes over another environment's capacity writer.
 
 Subsequent lifecycle changes use the same management context:

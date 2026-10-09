@@ -2805,6 +2805,11 @@ relaxes build-namespace PSA, starts the gateway or proves sole physical-writer
 authority. Those activation steps must not interfere with staging. The installed
 source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
 remain the operational readiness criteria.
+Authenticated Kubernetes/worker identity and capacity observations remain
+mandatory. Detailed kubelet samples retain the existing optional-telemetry
+contract; unavailable samples are not zero usage or evidence of certificate trust.
+Do not make a new kubelet certificate-refresh mechanism an execution prerequisite,
+and do not weaken TLS or identity validation to obtain samples.
 
 The migration's initial closure stage binds every qualified data participant and
 its retained control-plane Deployment/namespace identity. Environment classes do
