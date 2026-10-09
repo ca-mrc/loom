@@ -67,6 +67,16 @@ exports use that same contract. `loom_service.delivery_export_errors` owns the
 shared error types; routes retain visibility checks and error redaction.
 Archive construction and object publication remain in `delivery_export`.
 
+The authenticated complete Trial bundle download builds and verifies the archive
+in a worker thread before sending response headers. Object reads, hashing and
+compression leave the API event loop available for health probes and unrelated
+requests. The archive uses a temporary spool that spills to disk beyond 64 MiB;
+large bundles can therefore take longer to produce than a client's read timeout.
+Cancellation drains an active archive worker before closing its result. Response
+cleanup closes the spool on completion, disconnect or send failure, including a
+failure before the first response-body read. Authorization, object identity and
+integrity validation still precede delivery.
+
 Within the producing team, `safe` or `verified_internal` outputs may be reused
 while sharing/redaction scans are pending. Explicitly blocked, unsafe, unknown,
 or redaction-blocked content is not reusable. This does not change the stored

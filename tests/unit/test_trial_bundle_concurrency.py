@@ -18,8 +18,8 @@ from starlette.requests import Request
 
 from loom.auth import AuthContext
 from loom.db.schema import Trial
-from loom_service.dependencies import authed_session
 from loom_service.delivery_export import ArchiveBuildResult
+from loom_service.dependencies import authed_session
 from loom_service.routes import trials
 from loom_service.trial_bundles import CanonicalTrialBundle, CanonicalTrialBundleFile, ObjectRef
 
