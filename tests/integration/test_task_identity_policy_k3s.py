@@ -17,7 +17,10 @@ from tests.unit.test_task_sandbox_identity import _identity_task
 
 def _pod(namespace: str, *, user: str = "root", home: str | None = None, deferred: bool = False) -> dict:
     from loom.execution_runtime_contract import RuntimeHandoffInputV1
-    from loom.service_execution_materialization import compile_deferred_verifier_plan, compile_service_execution_plan
+    from loom.service_execution_materialization import (
+        compile_deferred_verifier_plan,
+        compile_service_execution_plan,
+    )
 
     lease = _lease(namespace)
     job = render_execution_job(lease, target=ExecutionTargetRuntime(target_id=lease.target_id, namespace=namespace))
