@@ -658,7 +658,7 @@ def runtime_workload_options(runtime, request, state):
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_live_options_follow_anchored_successors_not_original_installation(completed_pool, publisher_cloud):
-    from scripts.ops.nebius_ingress_stage import _snapshot
+    from scripts.ops.nebius_management_switch import _stable
 
     runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
@@ -669,13 +669,13 @@ def test_runtime_live_options_follow_anchored_successors_not_original_installati
     choices = runtime_workload_options(runtime, request, state)
     assert len(choices) == 5
     for key, (expected,) in choices.items():
-        assert _snapshot(expected) == _snapshot(api.store.resources[key])
+        assert _stable(expected) == _stable(api.store.resources[key])
         assert expected['metadata']['uid'] == api.store.resources[key]['metadata']['uid']
     api.catalog_complete = True
     assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'development_runtime_installed_closed'
     choices = runtime_workload_options(runtime, request, state)
     for key, (expected,) in choices.items():
-        assert _snapshot(expected) == _snapshot(api.store.resources[key])
+        assert _stable(expected) == _stable(api.store.resources[key])
         assert expected['spec'].get('replicas', 1) == 1 and expected['spec'].get('suspend', False) is False
     # A live observer must not accept a changed child hidden under a completed parent.
     path = state / 'control/transition.json'
