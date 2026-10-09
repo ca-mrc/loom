@@ -2,7 +2,7 @@
 
 Loom directly imports Harbor's `Terminus2`. Upstream owns prompts, parsing,
 Chat and the agent loop; Loom connects the environment, Gateway, deadlines,
-durable events and artifacts. Track remaining alignment in [#2390](https://github.com/qianyi-sun/loom/issues/2390).
+durable events and artifacts. Track remaining alignment in [#2390](https://github.com/ca-mrc/loom/issues/2390).
 
 ## Discover and prepare an upgrade
 
@@ -54,16 +54,20 @@ before any branch push. The workflow maintains one Draft at
 PR. After creating/updating the Draft, it builds the candidate production image
 and runs both real-Harbor probes offline. A failed patch/build/probe leaves the
 Draft and an actionable run summary. Success still requires real worker
-dependency regeneration and runtime acceptance before Ready. Conflicts fail
-visibly. It never force-pushes, enables auto-merge or changes a deployed runtime.
+dependency regeneration and offline runtime verification before Ready. Live
+runtime acceptance is required before selecting a deployed default below.
+Conflicts fail visibly. It never force-pushes, enables auto-merge or changes a
+deployed runtime.
 
-The repository currently disables Actions-created PRs. GitHub's setting combines
-creating and approving PRs, so changing it is an operator decision; this workflow
-only creates/updates candidates. No alternative token is copied into CI.
+GitHub's setting combines creating and approving PRs, so changing it is an
+operator decision; this workflow only creates/updates candidates. An organization
+policy can prevent enabling this setting at repository level after a transfer.
+No alternative token is copied into CI.
 
 `GITHUB_TOKEN` writes do not trigger ordinary PR checks. After developer
 verification, a collaborator marks the candidate Ready, starting the existing
-four source-workflow gates, and may enable GitHub-native squash auto-merge.
+four source-workflow gates, and may enable GitHub-native squash auto-merge and
+merge-queue admission.
 This adds no branch-required context.
 
 ## Behavior and existing differences
@@ -77,6 +81,12 @@ detect. It reuses the image build and adds only short offline probes.
 New runtime provenance events record the effective `max_turns`,
 `enable_summarize`, recording, continuation and multi-model options, excluding
 credentials. Version equality and effective-configuration equality are separate.
+
+Harbor 0.24 stores constructor configuration in `agent.options`. The model
+router reads those options when creating a teacher, then replaces the trajectory
+metadata's credential dictionary without mutating the live student's authentication.
+The real-constructor probe checks credential reuse before and after redaction;
+the differential probes still check the same explicit compatibility options.
 
 These differences remain under #2390; passing conformance does not erase them:
 

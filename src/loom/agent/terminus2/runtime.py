@@ -278,8 +278,8 @@ def _scrub_harbor_trajectory_llm_kwargs(path: Path) -> None:
 
     Harbor Terminus2 persists constructor ``llm_kwargs`` into trajectory.json.
     Loom passes the step JWT as ``api_key`` there; multi-model already redacts
-    ``agent._llm_kwargs`` before dump, but single-model did not. Scrub the file
-    as defense in depth so a late dump cannot publish the JWT.
+    constructor metadata before dump, but single-model did not. Scrub the file
+    so a late dump cannot publish the JWT.
     """
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -641,7 +641,7 @@ class LoomTerminus2Runtime:
             assert self._attempt_deadline is not None
             _install_continuation_policy(agent, self._attempt_deadline)
         # Student LiteLLM already received the step JWT via constructor kwargs.
-        # Multi-model invariant (all policies): never redact agent._llm_kwargs
+        # Multi-model invariant (all policies): never redact constructor metadata
         # before install_role_router. Teacher construction copies gateway auth
         # from those kwargs (and can recover from student._llm_kwargs).
         # install_role_router redacts the dump field only after the teacher

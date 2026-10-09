@@ -469,11 +469,20 @@ def _student_llm_for_auth(agent: Any) -> Any:
     return llm
 
 
+def _agent_option(agent: Any, name: str, default: Any = None) -> Any:
+    """Read Harbor 0.24 options; retain 0.18 support for existing adapters."""
+    options = getattr(agent, "options", None)
+    if options is not None:
+        return getattr(options, name)
+    return getattr(agent, f"_{name}", default)
+
+
 def gateway_llm_kwargs_for_teacher(agent: Any) -> dict[str, Any]:
     """Resolve LiteLLM kwargs for the teacher, including the step JWT.
 
-    Harbor dumps ``agent._llm_kwargs`` into trajectory.json, so Loom redacts
-    ``api_key`` there. The live student LiteLLM keeps the same JWT in
+    Harbor dumps ``agent.options.llm_kwargs`` (``agent._llm_kwargs`` in 0.18)
+    into trajectory.json, so Loom redacts ``api_key`` there. The live student
+    LiteLLM keeps the same JWT in
     ``student._llm_kwargs`` (constructor kwargs). Teacher construction must
     reuse that credential even if the dump field was already scrubbed.
 
@@ -481,7 +490,7 @@ def gateway_llm_kwargs_for_teacher(agent: Any) -> dict[str, Any]:
         AgentError: if no step JWT / api_key can be recovered. Fail closed so
         multi-model never boots a teacher that will 401 at first call.
     """
-    llm_kwargs = dict(getattr(agent, "_llm_kwargs", None) or {})
+    llm_kwargs = dict(_agent_option(agent, "llm_kwargs") or {})
     api_key = llm_kwargs.get("api_key")
     if isinstance(api_key, str) and api_key:
         return llm_kwargs
@@ -497,7 +506,7 @@ def gateway_llm_kwargs_for_teacher(agent: Any) -> dict[str, Any]:
     raise AgentError(
         "multi-model teacher construction missing gateway api_key / step JWT; "
         "refusing to install a teacher LiteLLM without credentials "
-        "(do not redact agent._llm_kwargs before construct_teacher_llm; "
+        "(do not redact agent LLM options before construct_teacher_llm; "
         "student LiteLLM also lacked a recoverable api_key)",
     )
 
@@ -512,18 +521,22 @@ def construct_teacher_llm(agent: Any, *, teacher_model_name: str) -> Any:
     return agent._init_llm(
         llm_backend=LLMBackend.LITELLM,
         model_name=teacher_model_name,
-        temperature=getattr(agent, "_temperature", None),
+        temperature=_agent_option(agent, "temperature"),
         collect_rollout_details=bool(
-            getattr(agent, "_collect_rollout_details", False),
+            _agent_option(agent, "collect_rollout_details", False),
         ),
         llm_kwargs=llm_kwargs,
-        api_base=getattr(student, "_api_base", None),
+        api_base=_agent_option(agent, "api_base", getattr(student, "_api_base", None)),
         session_id=getattr(agent, "_session_id", None)
         or getattr(student, "_session_id", None),
-        max_thinking_tokens=getattr(student, "_max_thinking_tokens", None),
-        reasoning_effort=getattr(agent, "_reasoning_effort", None),
+        max_thinking_tokens=_agent_option(
+            agent, "max_thinking_tokens", getattr(student, "_max_thinking_tokens", None),
+        ),
+        reasoning_effort=_agent_option(agent, "reasoning_effort"),
         model_info=resolved,
-        use_responses_api=bool(getattr(student, "_use_responses_api", False)),
+        use_responses_api=bool(_agent_option(
+            agent, "use_responses_api", getattr(student, "_use_responses_api", False),
+        )),
     )
 
 
@@ -531,18 +544,23 @@ def redact_agent_llm_kwargs(agent: Any) -> None:
     """Strip credentials from Harbor's trajectory dump field, not from LiteLLM.
 
     Must run only *after* teacher construction (see ``install_role_router``).
-    Scrubbing ``agent._llm_kwargs`` does not remove the JWT from the live
+    Scrubbing the agent options does not remove the JWT from the live
     student LiteLLM instance; ``gateway_llm_kwargs_for_teacher`` can still
     recover it as defense in depth.
     """
-    raw = getattr(agent, "_llm_kwargs", None)
+    raw = _agent_option(agent, "llm_kwargs")
     if not isinstance(raw, dict):
         return
-    agent._llm_kwargs = {
+    redacted = {
         key: value
         for key, value in raw.items()
         if key != "api_key" and "loom_step_" not in str(value)
     }
+    options = getattr(agent, "options", None)
+    if options is not None:
+        options.llm_kwargs = redacted
+    else:
+        agent._llm_kwargs = redacted
 
 
 def install_role_router(
@@ -569,9 +587,9 @@ def install_role_router(
     Order is load-bearing for every mix policy (STS / beta / turn schedule):
 
     1. Construct (or accept) the teacher LiteLLM while the step JWT is still
-       available via ``agent._llm_kwargs`` and/or ``student._llm_kwargs``.
+       available via agent LLM options and/or ``student._llm_kwargs``.
     2. Install the router as ``agent._llm``.
-    3. Redact ``agent._llm_kwargs`` so Harbor trajectory dumps omit the JWT.
+    3. Redact agent LLM options so Harbor trajectory dumps omit the JWT.
 
     Never redact before step 1.
     """
