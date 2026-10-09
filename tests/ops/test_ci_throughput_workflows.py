@@ -851,6 +851,7 @@ def test_images_gate_rejects_missing_builds_or_invalid_events(
 
 
 REPOSITORY_SELECTED_RESULTS = {
+    "LINT_SELECTED": "LINT_RESULT",
     "LOCKED_SELECTED": "LOCKED_RESULT",
     "ROOT_SELECTED": "ROOT_RESULT",
     "PACKAGES_SELECTED": "PACKAGES_RESULT",
@@ -866,7 +867,7 @@ REPOSITORY_SELECTED_RESULTS = {
 
 def _repository_result_environment(**overrides: str) -> dict[str, str]:
     env = {"PLAN_RESULT": "success", "GATE_MODE": "full", "DOCS_ONLY": "false",
-           "LINT_RESULT": "success", "FAST_COVERAGE_RESULT": "skipped"}
+           "FAST_COVERAGE_RESULT": "skipped"}
     for selected, result in REPOSITORY_SELECTED_RESULTS.items():
         env[selected], env[result] = "false", "skipped"
     return {**env, **overrides}
@@ -900,7 +901,7 @@ def test_repository_checks_preserves_result_semantics(selected: str, validation_
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "LINT_RESULT", "PLAN_RESULT"])
+@pytest.mark.parametrize("source", [*REPOSITORY_SELECTED_RESULTS, "FAST_COVERAGE_RESULT", "PLAN_RESULT"])
 @pytest.mark.parametrize("failed_result", ["failure", "cancelled", "skipped"])
 def test_repository_checks_rejects_each_missing_or_failed_selected_source(source: str, failed_result: str) -> None:
     if source in REPOSITORY_SELECTED_RESULTS:
@@ -911,19 +912,6 @@ def test_repository_checks_rejects_each_missing_or_failed_selected_source(source
         env = {source: failed_result}
     result = _run_repository_gate(**env)
     assert result.returncode != 0, (source, failed_result, result.stdout)
-
-
-@pytest.mark.parametrize("docs_only,lint_result,accepted", [
-    ("true", "skipped", True), ("true", "success", True),
-    ("true", "failure", False), ("true", "cancelled", False),
-    ("false", "success", True), ("false", "skipped", False),
-    ("false", "failure", False), ("false", "cancelled", False),
-])
-def test_repository_checks_enforces_docs_only_lint_result_semantics(
-    docs_only: str, lint_result: str, accepted: bool,
-) -> None:
-    result = _run_repository_gate(DOCS_ONLY=docs_only, LINT_RESULT=lint_result)
-    assert (result.returncode == 0) is accepted, result.stderr
 
 
 def test_optional_validation_workflows_have_stable_gate_contexts() -> None:
@@ -1045,6 +1033,7 @@ def test_repository_checks_context_is_parallel_aggregator() -> None:
     gate_env = aggregate_step["env"]
     assert gate_env["PLAN_RESULT"] == "${{ needs.workflow-plan.result }}"
     assert gate_env["LINT_RESULT"] == "${{ needs.lint-and-static.result }}"
+    assert gate_env["LINT_SELECTED"] == "${{ needs.workflow-plan.outputs.lint_and_static }}"
     assert gate_env["ROOT_RESULT"] == "${{ needs.tests-root.result }}"
     assert gate_env["FAST_COVERAGE_RESULT"] == "${{ needs.fast-coverage.result }}"
     for selected, result in REPOSITORY_SELECTED_RESULTS.items():
