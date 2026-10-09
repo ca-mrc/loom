@@ -78,6 +78,11 @@ image with networking disabled. This catches upstream API/behavior changes and
 trajectory projection loss that fake-agent tests or successful imports cannot
 detect. It reuses the image build and adds only short offline probes.
 
+Fixtures representing the current runtime should import `HARBOR_COMPAT_SHA`;
+historical runtime fixtures remain frozen. Run the delivery-export API tests too,
+so an outdated fixture does not mask the intended provenance or legacy-stream
+validation path after an upgrade.
+
 New runtime provenance events record the effective `max_turns`,
 `enable_summarize`, recording, continuation and multi-model options, excluding
 credentials. Version equality and effective-configuration equality are separate.
