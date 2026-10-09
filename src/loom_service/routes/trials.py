@@ -19,6 +19,7 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -1100,7 +1101,8 @@ async def download_trial_bundle(
         bundle = await canonical_bundle_for_trial(s, trial=trial)
         if bundle is None:
             raise HTTPException(status_code=409, detail="canonical Trial bundle is not ready")
-        archive = build_canonical_trial_bundle_archive(
+        archive = await asyncio.to_thread(
+            build_canonical_trial_bundle_archive,
             client=request.app.state.minio_client,
             bundle=bundle,
         )
