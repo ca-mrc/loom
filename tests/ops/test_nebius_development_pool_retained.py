@@ -886,7 +886,8 @@ def populate_runtime_pods(documents):
             'name': name + '-a12b34', 'namespace': namespace, 'uid': str(uuid4()), 'generation': 1,
             'labels': labels, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
                 'name': name, 'uid': current['metadata']['uid'], 'controller': True}]},
-            'spec': {'replicas': 1, 'selector': {'matchLabels': labels}, 'template': copy.deepcopy(template)},
+            'spec': {'replicas': 1, 'selector': {'matchLabels': {
+                **current['spec']['selector']['matchLabels'], 'pod-template-hash': 'a12b34'}}, 'template': copy.deepcopy(template)},
             'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
         pod = {'apiVersion': 'v1', 'kind': 'Pod', **copy.deepcopy(template), 'metadata': {
             **template['metadata'], 'name': name + '-a12b34-test', 'namespace': namespace, 'uid': str(uuid4()),
@@ -912,7 +913,10 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     from types import SimpleNamespace
 
     from scripts.ops import nebius_development_runtime_probes as module
-    from scripts.ops.nebius_pool_runtime_settings import BOUND_POOL_SETTINGS_COMMAND, expected_pool_runtime_settings
+    from scripts.ops.nebius_pool_runtime_settings import (
+        BOUND_POOL_SETTINGS_COMMAND,
+        expected_pool_runtime_settings,
+    )
 
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = parent.catalog_complete = True
@@ -925,7 +929,7 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
     roles = {(request.database.manager.retained.request.retained.binding.namespace, 'loom-service'): 'manager',
         ('loom-dev', 'loom-service'): 'service', ('loom-dev', 'loom-control-plane'): 'controller',
-        (participant.execution_namespace.name, participant.targets[0].target_id + '-actuator'): 'actuator'}
+        (participant.execution_namespace.name, 'loom-execution-actuator'): 'actuator'}
     commands, mode = [], {'damage': None}
 
     def execute(argv, **kwargs):
