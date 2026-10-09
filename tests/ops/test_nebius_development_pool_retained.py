@@ -764,6 +764,106 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
     assert calls and all(row.method == 'GET' for row in calls)
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_manager_process(
+        completed_pool, publisher_cloud, monkeypatch):
+    from types import SimpleNamespace
+
+    from loom.nebius_platform_render import digest
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    name = 'scripts.ops.nebius_development_runtime_probes'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('concrete development runtime database probe is missing')
+    module = importlib.import_module(name)
+    pool = completed_pool[3].server
+    namespace = request.database.manager.retained.request.retained.binding.namespace
+    spec = request.database.manager.retained.request.registration.spec
+    documents = copy.deepcopy(pool.store.resources)
+    database = documents['StatefulSet:loom-postgres']
+    database['status'].update(currentRevision='db-rev', updateRevision='db-rev', currentReplicas=1, updatedReplicas=1)
+    service = documents['Service:loom-postgres']
+    pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'loom-postgres-0', 'namespace': namespace,
+        'uid': str(uuid4()), 'labels': {'app': 'loom-postgres', 'controller-revision-hash': 'db-rev'},
+        'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
+            'uid': database['metadata']['uid'], 'controller': True}]},
+        'spec': copy.deepcopy(database['spec']['template']['spec']), 'status': {'phase': 'Running',
+            'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
+            'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
+    pod['spec'].setdefault('volumes', []).append({'name': 'data',
+        'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
+    endpoints = {'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList',
+        'metadata': {'resourceVersion': '1'}, 'items': [{'metadata': {'namespace': namespace,
+            'name': 'loom-postgres-test', 'uid': str(uuid4()),
+            'labels': {'kubernetes.io/service-name': 'loom-postgres'}, 'ownerReferences': [
+                {'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
+                    'uid': service['metadata']['uid'], 'controller': True}]},
+            'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0]['name'], 'port': 5432}],
+            'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True},
+                'targetRef': {'kind': 'Pod', 'namespace': namespace, 'name': 'loom-postgres-0', 'uid': pod['metadata']['uid']}}]}]}
+    calls, executions = [], []
+    mode = {'damage': None}
+
+    def handle(message):
+        calls.append(message)
+        assert message.method == 'GET' and '/namespaces/loom-staging/' not in message.url.path
+        path = message.url.path
+        if path == '/api/v1/namespaces/' + namespace + '/pods':
+            observed = copy.deepcopy(pod)
+            if mode['damage'] == 'post_exec_pod' and executions:
+                observed['metadata']['uid'] = str(uuid4())
+            return httpx.Response(200, json={'apiVersion': 'v1', 'kind': 'PodList',
+                'metadata': {'resourceVersion': '1'}, 'items': [observed]})
+        if path == '/apis/discovery.k8s.io/v1/namespaces/' + namespace + '/endpointslices':
+            value = copy.deepcopy(endpoints)
+            if mode['damage'] == 'backend':
+                value['items'][0]['endpoints'][0]['targetRef']['uid'] = str(uuid4())
+            return httpx.Response(200, json=value)
+        if path == '/apis/apps/v1/namespaces/' + namespace + '/statefulsets/loom-postgres':
+            return httpx.Response(200, json=database)
+        assert '/deployments/' not in path, 'closed SQL must not require a running manager'
+        return pool.handle(message)
+
+    def execute(argv, **kwargs):
+        executions.append(argv)
+        assert kwargs['env'] == {'PATH': module.os.defpath, 'LANG': 'C.UTF-8'}
+        config = json.loads(Path(argv[argv.index('--kubeconfig') + 1]).read_text())
+        assert config['clusters'][0]['cluster']['server'] == request.database.foundation.inputs.config['kubernetes_api_server']
+        assert set(config['users'][0]['user']) == {'token'}
+        assert config['users'][0]['user']['token'] == 'operator-test'
+        command = argv[argv.index('exec'):]
+        assert command[:7] == ['exec', '-n', namespace, 'pod/loom-postgres-0', '-c', 'loom-postgres', '--']
+        assert command[7:17] == ['psql', '-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-U', 'postgres', '-d', 'loom', '-c']
+        assert command[-1].startswith('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;')
+        assert command[-1].endswith('ROLLBACK;\n') and 'UPDATE ' not in command[-1]
+        assert 'operator-test' not in str(argv)
+        report = {'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True,
+            'qualified': mode['damage'] != 'report'}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(report).encode(), stderr=b'')
+
+    monkeypatch.setattr(module.subprocess, 'run', execute)
+    with module.HTTPSDevelopmentRuntimeProbes(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(), token='operator-test') as probes:
+        for connection in (probes, probes.manager, probes.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        probes.qualify_closed_pool()
+        assert len(executions) == 1
+        private_config = Path(executions[0][executions[0].index('--kubeconfig') + 1])
+        assert private_config.stat().st_mode & 0o077 == 0
+        for damage in ('backend', 'report', 'post_exec_pod'):
+            mode['damage'] = damage
+            executions.clear()
+            with pytest.raises(ValueError, match='development runtime closed database unqualified'):
+                probes.qualify_closed_pool()
+            assert len(executions) == (0 if damage == 'backend' else 1)
+    assert not private_config.exists()
+    assert calls
+
+
 def runtime_resources_api(request, phase, qualifier):
     name = 'scripts.ops.nebius_development_runtime_live'
     if importlib.util.find_spec(name) is None:
