@@ -729,60 +729,64 @@ def runtime_http_inventory(request, parent, pool, foundation):
     return calls, documents, handle
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
-        completed_pool, publisher_cloud, published_source):
+def protected_runtime_request(completed_pool, publisher_cloud, published_source):
     from dataclasses import replace
 
-    from httpx._client import AsyncClient
     from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
     from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
-    from tests.unit.test_nebius_candidate_catalog import github_transport
 
     from loom_service.environment_management.candidates import ProtectedPublication
     from loom_service.environment_management.manager import CandidateBundle
 
     _, request = runtime_install_request(completed_pool, publisher_cloud)
-    name = 'scripts.ops.nebius_development_runtime_external'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('connected runtime publication qualification is missing')
-    module = importlib.import_module(name)
     original = request.database.manager.retained.request.retained.inputs
     selected = ProtectedPublication.model_validate(published_source.reference)
     publication = DevelopmentRuntimePublication(
         PreparedDevelopmentSource(source_sha=selected.source_sha,
             source_archive_sha256=published_source.candidate['source_archive_sha256']),
         selected, CandidateBundle(selected.candidate_id, published_source.candidate, original.profile))
-    request = replace(request, database=database_runtime(completed_pool, publication=publication))
+    return replace(request, database=database_runtime(completed_pool, publication=publication))
+
+
+def runtime_github_transport(published_source):
+    from tests.unit.test_nebius_candidate_catalog import github_transport
+
     transport = github_transport(published_source.responses, published_source.payload)
     async def public_read(message):
         if message.url.host == 'api.github.com':
             assert message.headers['Authorization'] == 'Bearer scoped-publication-test-token'
             message.headers['Authorization'] = 'Bearer test-github-secret'
         return await transport.handle_async_request(message)
+    return httpx.MockTransport(public_read)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
+        completed_pool, publisher_cloud, published_source):
+    from httpx._client import AsyncClient
+    from scripts.ops import nebius_development_runtime_external as module
+
+    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
+    transport = runtime_github_transport(published_source)
     # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
-    async with AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+    async with AsyncClient(transport=transport) as http:
         await module.qualify_runtime_publication(request=request, http=http)
         request.database.manager.publication.bundle.candidate['images']['service']['image_ref'] += '-changed'
         with pytest.raises(ValueError, match='development runtime publication unqualified'):
             await module.qualify_runtime_publication(request=request, http=http)
     # Same immutable selection cannot become approved merely because its local
     # candidate was once resolved: a now-failed protected check is re-read.
-    publication.bundle.candidate['images']['service']['image_ref'] = published_source.candidate['images']['service']['image_ref']
-    request = replace(request, database=database_runtime(completed_pool, publication=publication))
+    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
     checks = published_source.responses['commits/' + 'b' * 40 + '/check-runs']['check_runs']
     checks[0]['conclusion'] = 'failure'
-    async with AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+    async with AsyncClient(transport=transport) as http:
         with pytest.raises(ValueError, match='development runtime publication unqualified') as error:
             await module.qualify_runtime_publication(request=request, http=http)
     assert 'test-github-secret' not in str(error.value)
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_pool_drift(
-        completed_pool, publisher_cloud, monkeypatch, tmp_path):
+def runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     from cryptography.hazmat.primitives import serialization
@@ -793,7 +797,6 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
     from nebius.api.nebius.registry import v1 as registry
     from nebius.sdk import SDK
     from scripts.ops import nebius_certificates as private_state
-    from scripts.ops import nebius_development_runtime_external as module
     from tests.unit.test_execution_capacity_collector import (
         _enum,
         _node_group_spec,
@@ -801,8 +804,6 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
         _quota,
     )
 
-    _, request = runtime_install_request(completed_pool, publisher_cloud)
-    assert hasattr(module, 'qualify_runtime_cloud'), 'concrete runtime cloud qualification is missing'
     cloud, scope = publisher_cloud, request.collector_scope
     config = request.database.foundation.inputs.config
     spec = request.database.manager.retained.request.registration.spec
@@ -864,6 +865,18 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
     monkeypatch.setattr(mk8s, 'NodeGroupServiceClient',
         lambda sdk: SimpleNamespace(get=lambda *args, **kwargs: group(sdk, *args, **kwargs)))
     monkeypatch.setattr(compute, 'PlatformServiceClient', lambda sdk: _platform_client())
+    return operator, sessions, reads, closed, mode
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_pool_drift(
+        completed_pool, publisher_cloud, monkeypatch, tmp_path):
+    from scripts.ops import nebius_development_runtime_external as module
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    operator, sessions, reads, closed, mode = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
+    cloud, scope = publisher_cloud, request.collector_scope
     await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
     assert reads == [('quotas', scope.account_id), ('nodegroup', scope.account_id)]
     assert sessions == closed and not sessions[-1].path.exists()
@@ -876,6 +889,78 @@ async def test_runtime_cloud_uses_observer_credentials_and_rejects_authority_or_
             await module.qualify_runtime_cloud(request=request, operator_credentials=operator)
         assert 'PRIVATE KEY' not in str(error.value) and 'private-test' not in str(error.value)
         assert sessions == closed
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql(
+        completed_pool, publisher_cloud, published_source, handoff, monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from httpx._client import AsyncClient, Client
+    from scripts.ops import nebius_development_runtime_install as runtime
+    from scripts.ops import nebius_development_runtime_probes as probes
+
+    from loom_service.pool_management.capacity import digest
+
+    name = 'scripts.ops.nebius_development_runtime_api'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('concrete phase-aware runtime parent is missing')
+    module = importlib.import_module(name)
+    request = protected_runtime_request(completed_pool, publisher_cloud, published_source)
+    plan = runtime.prepare_runtime_install(request)
+    parent = RuntimeParentAPI(request, plan)
+    manager = request.database.manager.retained.request.retained
+    state = Path(manager.operation['state_dir']).parent / 'runtime-installation'
+    operator, _, cloud_reads, _, _ = runtime_cloud_transport(request, publisher_cloud, monkeypatch, tmp_path)
+    calls, documents, get = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    populate_database_backends(documents)
+    writes, executions = [], []
+    def handle(message):
+        if message.method == 'GET':
+            if message.url.path.endswith('/pods') and message.url.params.get('labelSelector') == 'app=loom-postgres':
+                listing = copy.deepcopy(documents[message.url.path])
+                listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get('app') == 'loom-postgres']
+                return httpx.Response(200, json=listing)
+            return get(message)
+        assert message.method == 'POST' and 'staging' not in message.url.path
+        row = json.loads(message.content)
+        if message.url.params.get('dryRun') == 'All':
+            return httpx.Response(201, json=parent.store.default_resource(row))
+        writes.append(row)
+        parent.store.create_resource(row)
+        actual = parent.store.get_resource(row)
+        documents[message.url.path + '/' + row['metadata']['name']] = actual
+        return httpx.Response(201, json=actual)
+    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: Client(**kwargs, transport=httpx.MockTransport(handle)))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: AsyncClient(**kwargs,
+        transport=runtime_github_transport(published_source)))
+    spec = request.database.manager.retained.request.registration.spec
+    def execute(argv, **kwargs):
+        assert argv[-1].startswith('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;')
+        executions.append(argv)
+        return SimpleNamespace(returncode=0, stderr=b'', stdout=json.dumps({
+            'schema': 'loom.pool-startup-closed.v1', 'operation_id': str(spec.operation_id),
+            'installation_sha256': digest(spec.model_dump(mode='json')), 'read_only': True, 'qualified': True}).encode())
+    monkeypatch.setattr(probes.subprocess, 'run', execute)
+    arguments = dict(request=request, api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+        ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+        token='runtime-operator', operator_credentials=operator, private_files={operator: operator.read_bytes()})
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        assert runtime.install_development_runtime(request=request, api=api, execute=False)['status'] == 'development_runtime_preflight_qualified'
+        assert calls and cloud_reads and executions and not writes and not state.exists()
+        assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+        assert len(writes) == 4 and all(row['kind'] in {'Secret', 'ConfigMap', 'Job'} for row in writes)
+    # A new process can observe the pending Job but must not repeat any writes.
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+        assert len(writes) == 4
+    path = state / 'database/stage.json'
+    path.rename(path.with_name('stage-preserved.json'))
+    with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
+        with pytest.raises(ValueError, match='development runtime installation unqualified'):
+            runtime.install_development_runtime(request=request, api=api, execute=True)
+    assert len(writes) == 4, 'a fresh process cannot adopt lost child history'
 
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
