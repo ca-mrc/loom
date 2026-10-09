@@ -702,17 +702,7 @@ def test_runtime_live_options_preserve_both_sides_of_uncertain_patch_without_ret
     assert api.transition.patches == patches
 
 
-@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
-@pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff):
-    runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
-    parent.database_complete = True
-    assert runtime.install_development_runtime(request=request, api=parent, execute=True)['status'] == 'pending_catalog'
-    name = 'scripts.ops.nebius_development_runtime_observation'
-    if importlib.util.find_spec(name) is None:
-        pytest.fail('phase-aware HTTPS runtime observation is missing')
-    module = importlib.import_module(name)
-    foundation, pool = handoff[2], completed_pool[3].server
+def runtime_http_inventory(request, parent, pool, foundation):
     calls, documents = [], {}
     plurals = {'Secret': 'secrets', 'ConfigMap': 'configmaps', 'Namespace': 'namespaces',
         'ServiceAccount': 'serviceaccounts', 'Service': 'services', 'StatefulSet': 'statefulsets',
@@ -736,6 +726,21 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
         if message.url.path in {'/api/v1/namespaces/kube-system', '/api/v1/namespaces/loom-nebius-management-dev'}:
             return pool.handle(message)
         return httpx.Response(404)
+    return calls, documents, handle
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff):
+    runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    parent.database_complete = True
+    assert runtime.install_development_runtime(request=request, api=parent, execute=True)['status'] == 'pending_catalog'
+    name = 'scripts.ops.nebius_development_runtime_observation'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('phase-aware HTTPS runtime observation is missing')
+    module = importlib.import_module(name)
+    foundation, pool = handoff[2], completed_pool[3].server
+    calls, documents, handle = runtime_http_inventory(request, parent, pool, foundation)
     with module.HTTPSDevelopmentRuntimeObserver(request=request,
             api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
             ssl_context=ssl.create_default_context()) as observer:
@@ -863,6 +868,114 @@ def test_runtime_closed_database_probe_is_bound_readonly_and_independent_of_mana
             assert len(executions) == (0 if damage == 'backend' else 1)
     assert not private_config.exists()
     assert calls
+
+
+def populate_runtime_pods(documents):
+    """API-shaped running controller collections, without replacing production checks."""
+    for current in list(documents.values()):
+        if current['kind'] != 'Deployment' or current['spec']['replicas'] != 1:
+            continue
+        current['metadata']['generation'] = 1
+        current['status'] = {'observedGeneration': 1, 'replicas': 1, 'updatedReplicas': 1,
+            'readyReplicas': 1, 'availableReplicas': 1}
+        namespace, name = current['metadata']['namespace'], current['metadata']['name']
+        template = copy.deepcopy(current['spec']['template'])
+        labels = {**template['metadata']['labels'], 'pod-template-hash': 'a12b34'}
+        template['metadata']['labels'] = labels
+        replica = {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'metadata': {
+            'name': name + '-a12b34', 'namespace': namespace, 'uid': str(uuid4()), 'generation': 1,
+            'labels': labels, 'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'Deployment',
+                'name': name, 'uid': current['metadata']['uid'], 'controller': True}]},
+            'spec': {'replicas': 1, 'selector': {'matchLabels': labels}, 'template': copy.deepcopy(template)},
+            'status': {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1, 'availableReplicas': 1}}
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', **copy.deepcopy(template), 'metadata': {
+            **template['metadata'], 'name': name + '-a12b34-test', 'namespace': namespace, 'uid': str(uuid4()),
+            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'ReplicaSet', 'name': replica['metadata']['name'],
+                'uid': replica['metadata']['uid'], 'controller': True}]},
+            'status': {'phase': 'Running', 'conditions': [{'type': 'Ready', 'status': 'True'}],
+                'containerStatuses': [{'name': row['name'], 'ready': True, 'restartCount': 0,
+                    'state': {'running': {'startedAt': '2026-10-09T00:00:00Z'}}} for row in template['spec']['containers']],
+                'initContainerStatuses': [{'name': row['name'], 'restartCount': 0,
+                    'state': {'terminated': {'exitCode': 0}}} for row in template['spec'].get('initContainers', [])]}}
+        for version, plural, kind, row in (('apps/v1', 'replicasets', 'ReplicaSet', replica), ('v1', 'pods', 'Pod', pod)):
+            prefix = '/api/v1' if version == 'v1' else '/apis/' + version
+            path = prefix + '/namespaces/' + namespace + '/' + plural
+            documents.setdefault(path, {'apiVersion': version, 'kind': kind + 'List',
+                'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(row)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
+        completed_pool, publisher_cloud, handoff, monkeypatch):
+    import hmac
+    from types import SimpleNamespace
+
+    from scripts.ops import nebius_development_runtime_probes as module
+    from scripts.ops.nebius_pool_runtime_settings import BOUND_POOL_SETTINGS_COMMAND, expected_pool_runtime_settings
+
+    runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    parent.database_complete = parent.catalog_complete = True
+    runtime.install_development_runtime(request=request, api=parent, execute=True)
+    assert hasattr(module.HTTPSDevelopmentRuntimeProbes, 'qualify_runtime_settings'), 'concrete process settings probe is missing'
+    calls, documents, handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    populate_runtime_pods(documents)
+    spec = request.database.manager.retained.request.registration.spec
+    participant, = spec.participants
+    machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
+    roles = {(request.database.manager.retained.request.retained.binding.namespace, 'loom-service'): 'manager',
+        ('loom-dev', 'loom-service'): 'service', ('loom-dev', 'loom-control-plane'): 'controller',
+        (participant.execution_namespace.name, participant.targets[0].target_id + '-actuator'): 'actuator'}
+    commands, mode = [], {'damage': None}
+
+    def execute(argv, **kwargs):
+        commands.append(argv)
+        command = argv[argv.index('exec'):]
+        assert command[7:10] == ['python', '-c', BOUND_POOL_SETTINGS_COMMAND]
+        component, nonce, response = command[10:]
+        namespace = command[2]
+        pod_name = command[3].removeprefix('pod/')
+        pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items'] if row['metadata']['name'] == pod_name)
+        deployment_name = pod_name.removesuffix('-a12b34-test')
+        assert roles[(namespace, deployment_name)] == component
+        actual = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + deployment_name]
+        wanted = expected_pool_runtime_settings(component, actual,
+            token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+            catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+        assert hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest() == response
+        if mode['damage'] == 'pod-replaced':
+            pod['metadata']['uid'] = str(uuid4())
+        elif mode['damage'] == 'process-restarted':
+            pod['status']['containerStatuses'][0]['restartCount'] += 1
+        elif mode['damage'] == 'controller-lag':
+            actual['status']['observedGeneration'] = 0
+        return SimpleNamespace(returncode=0, stdout=b'{"status":"wrong"}' if mode['damage'] == 'report' else b'{"status":"qualified"}', stderr=b'')
+
+    monkeypatch.setattr(module.subprocess, 'run', execute)
+    with module.HTTPSDevelopmentRuntimeProbes(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context(cadata=request.database.foundation.bootstrap['material']['loom-platform-db']['ca.crt']),
+            token='operator-test') as probes:
+        for connection in (probes, probes.manager, probes.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        for namespace, name in roles:
+            probes.qualify_runtime_settings(key='Deployment:' + namespace + ':' + name, state_dir=state)
+        assert len(commands) == 4
+        assert len({row[-2] for row in commands}) == 4
+        manager_key = 'Deployment:' + request.database.manager.retained.request.retained.binding.namespace + ':loom-service'
+        for damage in ('pod-replaced', 'process-restarted', 'controller-lag', 'report'):
+            original = copy.deepcopy(documents)
+            mode['damage'] = damage
+            with pytest.raises(ValueError, match='development runtime process settings unqualified'):
+                probes.qualify_runtime_settings(key=manager_key, state_dir=state)
+            documents.clear()
+            documents.update(original)
+        count = len(commands)
+        with pytest.raises(ValueError):
+            probes.qualify_runtime_settings(key='Deployment:loom-staging:loom-service', state_dir=state)
+        assert len(commands) == count
+    assert calls and all(row.method == 'GET' for row in calls)
 
 
 def runtime_resources_api(request, phase, qualifier):
