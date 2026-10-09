@@ -1,6 +1,7 @@
 """Pure live rollout inspection; no credentials, mutations or admission claims."""
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from scripts.ops.nebius_ingress_stage import _snapshot, _uid
@@ -115,11 +116,20 @@ def qualify_started_deployment(*, current: dict[str, Any], children: dict[str, A
             if (not _matches_backup_template(observed, wanted)
                     or observed.get('serviceAccountName', 'default') != wanted.get('serviceAccountName', 'default')):
                 raise ValueError
+            comparable = copy.deepcopy(observed)
+            if observed is actual:
+                # The scheduler binds Pods to a node, not controller templates.
+                # _matches_backup_template already checked exact requested and
+                # standard NoExecute tolerations; don't check them a second
+                # time as if they were controller admission mutations.
+                if 'nodeName' not in wanted:
+                    comparable.pop('nodeName', None)
+                comparable['tolerations'] = copy.deepcopy(wanted.get('tolerations', []))
             # Reuse container/default/security qualification, including sidecar
             # rejection; Pod-only scheduler/token defaults are handled above.
             _qualified_defaulted(
                 {'kind': 'Deployment', 'metadata': {}, 'spec': {'template': {'spec': wanted}}},
-                {'kind': 'Deployment', 'metadata': {}, 'spec': {'template': {'spec': observed}}})
+                {'kind': 'Deployment', 'metadata': {}, 'spec': {'template': {'spec': comparable}}})
         status = pod.get('status', {})
         if (status.get('phase') != 'Running'
                 or not any(row.get('type') == 'Ready' and row.get('status') == 'True' for row in status.get('conditions', []))):
