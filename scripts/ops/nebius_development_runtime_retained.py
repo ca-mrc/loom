@@ -40,6 +40,31 @@ class CompletedDevelopmentRuntime:
     history_sha256: str
 
 
+def qualify_build_policy_spec(desired: dict[str, Any], observed: dict[str, Any]) -> None:
+    """Only exact rendered admission semantics plus inert API defaults.
+
+    Subset matching is unsafe here: an added match condition, parameter kind or
+    selector can disable an otherwise unchanged policy. Kubernetes v1's
+    SetDefaults_MatchResources adds only these three defaults.
+    """
+    try:
+        kind = desired['kind']
+        field = {'ValidatingAdmissionPolicy': 'matchConstraints',
+            'ValidatingAdmissionPolicyBinding': 'matchResources'}[kind]
+        if observed['kind'] != kind or observed['apiVersion'] != desired['apiVersion']:
+            raise ValueError
+        specs = [copy.deepcopy(row['spec']) for row in (desired, observed)]
+        for spec in specs:
+            match = spec[field]
+            match.setdefault('namespaceSelector', {})
+            match.setdefault('objectSelector', {})
+            match.setdefault('matchPolicy', 'Equivalent')
+        if specs[0] != specs[1]:
+            raise ValueError
+    except Exception:
+        raise ValueError('development build policy semantics differ') from None
+
+
 def load_completed_runtime(request: DevelopmentRuntimeInstallRequest) -> CompletedDevelopmentRuntime:
     """Require every anchored child and return pool/runtime successor identities.
 
@@ -84,6 +109,8 @@ def load_completed_runtime(request: DevelopmentRuntimeInstallRequest) -> Complet
                 if (key in resources or _key(actual) != key or _snapshot(actual) != item['observed']
                         or _comparison_snapshot(actual) != item['expected']):
                     raise ValueError
+                if actual['kind'] in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}:
+                    qualify_build_policy_spec(plan.fixed[phase][key], actual)
                 resources[key] = actual
         # Completed transitions have exactly one successor. Its UID is derived
         # from the original resource, not accepted from an arbitrary projection.

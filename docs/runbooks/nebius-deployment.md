@@ -647,6 +647,13 @@ API, identity and local trust-configuration failures remain blocking; TLS checks
 must not be disabled. This operation never clears staging
 guards or takes over another environment's capacity writer.
 
+The fresh activation preparation is currently an internal read-only projection,
+not an operator command. It requires the completed runtime anchor and child
+receipts, preserves their resource UIDs and rejects build-policy additions that
+could skip enforcement. Its generated gateway/namespace targets are not
+permission to apply them manually; the protected live activation and recovery
+composition must be connected and qualified first.
+
 Subsequent lifecycle changes use the same management context:
 
 ```bash
