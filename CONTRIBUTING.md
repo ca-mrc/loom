@@ -181,7 +181,7 @@ secrets.
 - For a completed non-draft `dev` PR, a trusted collaborator enables GitHub's
   native squash auto-merge. No workflow or custom controller enables or performs
   the merge. All four required gates must be visible and successful on the
-  current PR head before queue admission. GitHub's native merge queue then
+  current head SHA of the PR before queue admission. GitHub's native merge queue then
   requires those same four app-bound gates on its generated merge-group SHA,
   which includes the latest `dev` and any earlier queued changes. If another PR
   advances `dev`, GitHub rebuilds and validates the affected merge group;
