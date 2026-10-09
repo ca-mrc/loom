@@ -304,6 +304,7 @@ source_paths = [
   "deploy/Dockerfile.control-plane",
   "database/migrations/**",
   "packages/loom-bundle-checksum/**",
+  "packages/loom-launcher/**",
   "pyproject.toml",
   "src/**",
 ]
