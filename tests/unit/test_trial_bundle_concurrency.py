@@ -1,6 +1,7 @@
 """Canonical export must leave the API responsive while storage is blocked."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import tarfile
@@ -13,10 +14,12 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from loom.auth import AuthContext
 from loom.db.schema import Trial
 from loom_service.dependencies import authed_session
+from loom_service.delivery_export import ArchiveBuildResult
 from loom_service.routes import trials
 from loom_service.trial_bundles import CanonicalTrialBundle, CanonicalTrialBundleFile, ObjectRef
 
@@ -93,3 +96,84 @@ def test_bundle_storage_wait_does_not_block_other_requests(monkeypatch: pytest.M
             member = archive.extractfile('files/answer.txt')
             assert member is not None and member.read() == payload
         assert body.closed
+
+
+def _route_arguments(monkeypatch: pytest.MonkeyPatch) -> tuple[Request, Any, Any]:
+    team_id, trial_id = uuid4(), uuid4()
+    trial = Trial(id=trial_id, team_id=team_id)
+
+    class Session:
+        async def execute(self, _statement: Any) -> Any:
+            return SimpleNamespace(scalar_one_or_none=lambda: trial)
+
+    async def load_bundle(*_args: Any, **_kwargs: Any) -> Any:
+        return object()
+
+    monkeypatch.setattr(trials, 'canonical_bundle_for_trial', load_bundle)
+    request = Request({'type': 'http', 'app': SimpleNamespace(state=SimpleNamespace(minio_client=object()))})
+    ctx = AuthContext(token_hash=b'', type='team', scopes=['read:own'], team_id=team_id, expires_at=None)
+    return request, (Session(), ctx), trial_id
+
+
+@pytest.mark.parametrize('worker_fails', [False, True])
+async def test_cancelled_build_drains_worker_and_closes_result(
+    monkeypatch: pytest.MonkeyPatch, worker_fails: bool,
+) -> None:
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    body = io.BytesIO()
+
+    def build(**_kwargs: Any) -> ArchiveBuildResult:
+        entered.set()
+        try:
+            assert release.wait(5)
+            body.write(b'complete')
+            if worker_fails:
+                body.close()
+                raise ValueError('storage failed')
+            body.seek(0)
+            return ArchiveBuildResult(body=body, size_bytes=8, sha256='0' * 64)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', build)
+    task = asyncio.create_task(trials.download_trial_bundle(*_route_arguments(monkeypatch)))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        task.cancel()
+        await asyncio.sleep(0.01)
+        first_cancel_drained = not task.done()
+        task.cancel()
+        await asyncio.sleep(0.01)
+        second_cancel_drained = not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(finished.wait, 3)
+        closed = body.closed
+        body.close()
+    assert first_cancel_drained and second_cancel_drained, 'cancellation abandoned a live archive worker'
+    assert closed, 'cancelled build leaked its completed spool'
+
+
+@pytest.mark.parametrize('failure', [asyncio.CancelledError, RuntimeError])
+async def test_response_send_failure_closes_archive_before_first_body_read(
+    monkeypatch: pytest.MonkeyPatch, failure: type[BaseException],
+) -> None:
+    body = io.BytesIO(b'archive')
+    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
+    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
+    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+
+    async def receive() -> Any:
+        return {'type': 'http.disconnect'}
+
+    async def send(_message: Any) -> None:
+        raise failure()
+
+    try:
+        with pytest.raises(failure):
+            await response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, send)
+        assert body.closed, 'response failed before its iterator could close the spool'
+    finally:
+        body.close()
