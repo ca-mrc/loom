@@ -105,7 +105,8 @@ def prepare_database_runtime(reference: RetainedDevelopmentPoolReference, *,
 
         material = (secret('loom-dev', {'actuator-password': actuator_password, 'batch-runner-token': batch_runner_token}),
             secret(participant.execution_namespace.name, {
-                'actuator-url': admin.set(username='loom_actuator', password=actuator_password).render_as_string(hide_password=False),
+                'actuator-url': admin.set(drivername='postgresql+psycopg', username='loom_actuator',
+                    password=actuator_password).render_as_string(hide_password=False),
                 'ca.crt': original['ca.crt']}))
         config = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'immutable': True,
             'metadata': {'name': name, 'namespace': 'loom-dev', 'labels': dict(labels)},
