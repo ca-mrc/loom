@@ -649,6 +649,59 @@ def test_runtime_parent_refuses_lost_or_rewritten_evidence_before_further_writes
     assert api.store.creates == before and api.transition.patches == patches
 
 
+def runtime_workload_options(runtime, request, state):
+    if not hasattr(runtime, 'runtime_workload_options'):
+        pytest.fail('phase-aware development runtime workload observation is missing')
+    return runtime.runtime_workload_options(request=request, state_dir=state)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_live_options_follow_anchored_successors_not_original_installation(completed_pool, publisher_cloud):
+    from scripts.ops.nebius_ingress_stage import _snapshot
+
+    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
+    choices = runtime_workload_options(runtime, request, state)
+    assert choices == {key: (row,) for key, row in api.plan.originals.items()}
+    api.database_complete = True
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_catalog'
+    choices = runtime_workload_options(runtime, request, state)
+    assert len(choices) == 5
+    for key, (expected,) in choices.items():
+        assert _snapshot(expected) == _snapshot(api.store.resources[key])
+        assert expected['metadata']['uid'] == api.store.resources[key]['metadata']['uid']
+    api.catalog_complete = True
+    assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'development_runtime_installed_closed'
+    choices = runtime_workload_options(runtime, request, state)
+    for key, (expected,) in choices.items():
+        assert _snapshot(expected) == _snapshot(api.store.resources[key])
+        assert expected['spec'].get('replicas', 1) == 1 and expected['spec'].get('suspend', False) is False
+    # A live observer must not accept a changed child hidden under a completed parent.
+    path = state / 'control/transition.json'
+    path.write_bytes(path.read_bytes() + b' ')
+    with pytest.raises(ValueError, match='development runtime workload history unqualified'):
+        runtime_workload_options(runtime, request, state)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_live_options_preserve_both_sides_of_uncertain_patch_without_retry(completed_pool, publisher_cloud):
+    runtime, request, api, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    api.database_complete = True
+    api.transition.failure = 'before'
+    with pytest.raises(ValueError, match='development runtime installation unqualified'):
+        runtime.install_development_runtime(request=request, api=api, execute=True)
+    choices = runtime_workload_options(runtime, request, state)
+    key = api.transition.patches[0]
+    before, after = choices[key]
+    assert before['spec']['replicas'] == 1 and after['spec']['replicas'] == 0
+    assert before['metadata']['uid'] == after['metadata']['uid'] == api.plan.originals[key]['metadata']['uid']
+    patches = list(api.transition.patches)
+    assert runtime_workload_options(runtime, request, state) == choices
+    assert api.transition.patches == patches
+
+
 def runtime_resources_api(request, phase, qualifier):
     name = 'scripts.ops.nebius_development_runtime_live'
     if importlib.util.find_spec(name) is None:
