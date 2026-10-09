@@ -731,6 +731,55 @@ def runtime_http_inventory(request, parent, pool, foundation):
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+async def test_runtime_publication_resolves_protected_bytes_and_rejects_changed_bundle(
+        completed_pool, publisher_cloud, published_source):
+    from dataclasses import replace
+
+    from scripts.ops.nebius_development_preflight import PreparedDevelopmentSource
+    from scripts.ops.nebius_development_runtime_render import DevelopmentRuntimePublication
+    from tests.unit.test_nebius_candidate_catalog import github_transport
+
+    from loom_service.environment_management.candidates import ProtectedPublication
+    from loom_service.environment_management.manager import CandidateBundle
+
+    _, request = runtime_install_request(completed_pool, publisher_cloud)
+    name = 'scripts.ops.nebius_development_runtime_external'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('connected runtime publication qualification is missing')
+    module = importlib.import_module(name)
+    original = request.database.manager.retained.request.retained.inputs
+    selected = ProtectedPublication.model_validate(published_source.reference)
+    publication = DevelopmentRuntimePublication(
+        PreparedDevelopmentSource(source_sha=selected.source_sha,
+            source_archive_sha256=published_source.candidate['source_archive_sha256']),
+        selected, CandidateBundle(selected.candidate_id, published_source.candidate, original.profile))
+    request = replace(request, database=database_runtime(completed_pool, publication=publication))
+    transport = github_transport(published_source.responses, published_source.payload)
+    async def public_read(message):
+        if message.url.host == 'api.github.com':
+            assert message.headers['Authorization'] == 'Bearer scoped-publication-test-token'
+            message.headers['Authorization'] = 'Bearer test-github-secret'
+        return await transport.handle_async_request(message)
+    # Real GitHub approval, digest and signature validation; only HTTPS is replaced.
+    async with httpx.AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+        await module.qualify_runtime_publication(request=request, http=http)
+        request.database.manager.publication.bundle.candidate['images']['service']['image_ref'] += '-changed'
+        with pytest.raises(ValueError, match='development runtime publication unqualified'):
+            await module.qualify_runtime_publication(request=request, http=http)
+    # Same immutable selection cannot become approved merely because its local
+    # candidate was once resolved: a now-failed protected check is re-read.
+    publication.bundle.candidate['images']['service']['image_ref'] = published_source.candidate['images']['service']['image_ref']
+    request = replace(request, database=database_runtime(completed_pool, publication=publication))
+    checks = published_source.responses['commits/' + 'b' * 40 + '/check-runs']['check_runs']
+    checks[0]['conclusion'] = 'failure'
+    async with httpx.AsyncClient(transport=httpx.MockTransport(public_read)) as http:
+        with pytest.raises(ValueError, match='development runtime publication unqualified') as error:
+            await module.qualify_runtime_publication(request=request, http=http)
+    assert 'test-github-secret' not in str(error.value)
+
+
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
 def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff):
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = True
