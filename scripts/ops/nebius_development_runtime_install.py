@@ -243,6 +243,114 @@ def runtime_transition_inputs(plan: DevelopmentRuntimePlan, state: Path,
     return before, targets
 
 
+def _validate_runtime_child(request: DevelopmentRuntimeInstallRequest, plan: DevelopmentRuntimePlan,
+                            state: Path, phase: str, item: dict[str, Any]) -> None:
+    child = _read(_child_path(state, phase))
+    if phase in plan.fixed:
+        _validate_record(child, {'schema': 'loom.nebius-management-stage.v1',
+            'binding': asdict(request.database.manager.retained.request.retained.binding), 'revision': digest(plan.fixed[phase]),
+            'phase': 'development-runtime-' + phase}, plan.fixed[phase])
+        complete = all(row['status'] == 'created' for row in child['resources'].values())
+    else:
+        before, targets = runtime_transition_inputs(plan, state, phase)
+        validate_runtime_transition(child, originals=before, targets=targets,
+            input_digest=plan.input_digest, phase=phase)
+        complete = all(row['status'] == 'applied' for row in child['resources'].values())
+    if item['status'] == 'complete':
+        if not complete:
+            raise ValueError
+        if phase in {'database', 'catalog'}:
+            validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
+            validator(request.database, state / phase, item['proof'])
+    elif item['proof'] is not None:
+        raise ValueError
+
+
+def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: DevelopmentRuntimePlan,
+                    state: Path, anchor: Path) -> dict[str, Any]:
+    manager = request.database.manager.retained.request.retained
+    if (state != Path(manager.operation['state_dir']).parent / 'runtime-installation'
+            or anchor != Path(manager.operation['anchor_dir'])
+            or state != state.resolve() or anchor != anchor.resolve() or not anchor.is_dir()):
+        raise ValueError
+    identity = {'schema': 'loom.nebius-development-runtime-install.v1',
+        'operation_id': str(request.database.operation_id), 'state_dir': str(state), 'input_digest': plan.input_digest}
+    marker = anchor / 'runtime-installation.json'
+    if marker.exists() or marker.is_symlink():
+        if _read(marker) != identity:
+            raise ValueError
+        record = _read(state / 'installation.json')
+        if (set(record) != {*identity, 'phases'} or any(record[key] != value for key, value in identity.items())
+                or set(record['phases']) != set(_PHASES)):
+            raise ValueError
+        unfinished = False
+        for phase in _PHASES:
+            item = record['phases'][phase]
+            if (set(item) != {'status', 'sha256', 'proof'} or item['status'] not in {'prepared', 'started', 'complete'}
+                    or (unfinished and item['status'] != 'prepared')
+                    or (item['status'] == 'complete') != (item['sha256'] is not None)
+                    or (phase not in {'database', 'catalog'} and item['proof'] is not None)):
+                raise ValueError
+            path = _child_path(state, phase)
+            if item['status'] == 'prepared':
+                if path.parent.exists() or path.parent.is_symlink() or item['proof'] is not None:
+                    raise ValueError
+            else:
+                if item['status'] == 'complete' and _hash(path) != item['sha256']:
+                    raise ValueError
+                _validate_runtime_child(request, plan, state, phase, item)
+            unfinished |= item['status'] != 'complete'
+        return record
+    if state.exists() or state.is_symlink():
+        raise ValueError
+    return {**identity, 'phases': {phase: {'status': 'prepared', 'sha256': None, 'proof': None} for phase in _PHASES}}
+
+
+def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
+                             state_dir: Path) -> dict[str, tuple[dict[str, Any], ...]]:
+    """Read anchored original-or-successor options without replaying any phase.
+
+    Ambiguous writes retain both sides for observation only: this never grants a
+    retry or asserts readiness. Missing child history is not an empty operation.
+    The connected parent's pre-child callback uses its just-validated in-memory
+    frame until the first child journal exists; this reader cannot resume it.
+    """
+    try:
+        plan = prepare_runtime_install(request)
+        anchor = Path(request.database.manager.retained.request.retained.operation['anchor_dir'])
+        record = _runtime_record(request, plan, state_dir, anchor)
+        paths = {_child_path(state_dir, phase) for phase, item in record['phases'].items() if item['status'] != 'prepared'}
+        hashes = {path: _hash(path) for path in paths}
+        result: dict[str, tuple[dict[str, Any], ...]] = {key: (copy.deepcopy(row),) for key, row in plan.originals.items()}
+        for phase in _PHASES:
+            if record['phases'][phase]['status'] == 'prepared':
+                continue
+            child = _read(_child_path(state_dir, phase))
+            if phase == 'workloads':
+                for key, item in child['resources'].items():
+                    if item['status'] == 'created':
+                        original = copy.deepcopy(item['observed'])
+                        original['metadata']['uid'] = item['uid']
+                        _uid(original)
+                        result[key] = (original,)
+            elif phase not in plan.fixed:
+                before, _ = runtime_transition_inputs(plan, state_dir, phase)
+                for key, item in child['resources'].items():
+                    original = before[key]
+                    if item['status'] == 'prepared':
+                        result[key] = (original,)
+                    else:
+                        expected = copy.deepcopy(item['expected'])
+                        expected['metadata']['uid'] = _uid(original)
+                        result[key] = (expected,) if item['status'] == 'applied' else (original, expected)
+        if (_runtime_record(request, plan, state_dir, anchor) != record
+                or any(_hash(path) != value for path, value in hashes.items())):
+            raise ValueError
+        return result
+    except Exception:
+        raise ValueError('development runtime workload history unqualified') from None
+
+
 def install_development_runtime(*, request: DevelopmentRuntimeInstallRequest,
                                 api: DevelopmentRuntimeInstallAPI, execute: bool) -> dict[str, Any]:
     """Connected closed-runtime installation, not pool admission or migration.
@@ -268,55 +376,10 @@ or requiring superseded original workloads to remain installed forever.
             'namespace': manager.binding.namespace, 'admission_open': False, 'writer_migration_complete': False}
 
         def validate_child(phase: str, item: dict[str, Any]) -> None:
-            child = _read(_child_path(state, phase))
-            if phase in plan.fixed:
-                _validate_record(child, {'schema': 'loom.nebius-management-stage.v1',
-                    'binding': asdict(manager.binding), 'revision': digest(plan.fixed[phase]),
-                    'phase': 'development-runtime-' + phase}, plan.fixed[phase])
-                complete = all(row['status'] == 'created' for row in child['resources'].values())
-            else:
-                before, targets = runtime_transition_inputs(plan, state, phase)
-                validate_runtime_transition(child, originals=before, targets=targets,
-                    input_digest=plan.input_digest, phase=phase)
-                complete = all(row['status'] == 'applied' for row in child['resources'].values())
-            if item['status'] == 'complete':
-                if not complete:
-                    raise ValueError
-                if phase in {'database', 'catalog'}:
-                    validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
-                    validator(request.database, state / phase, item['proof'])
-            elif item['proof'] is not None:
-                raise ValueError
+            _validate_runtime_child(request, plan, state, phase, item)
 
         def read_record() -> dict[str, Any]:
-            if marker.exists() or marker.is_symlink():
-                if _read(marker) != identity:
-                    raise ValueError
-                record = _read(journal)
-                if (set(record) != {*identity, 'phases'} or any(record[key] != value for key, value in identity.items())
-                        or set(record['phases']) != set(_PHASES)):
-                    raise ValueError
-                unfinished = False
-                for phase in _PHASES:
-                    item = record['phases'][phase]
-                    if (set(item) != {'status', 'sha256', 'proof'} or item['status'] not in {'prepared', 'started', 'complete'}
-                            or (unfinished and item['status'] != 'prepared')
-                            or (item['status'] == 'complete') != (item['sha256'] is not None)
-                            or (phase not in {'database', 'catalog'} and item['proof'] is not None)):
-                        raise ValueError
-                    path = _child_path(state, phase)
-                    if item['status'] == 'prepared':
-                        if path.parent.exists() or path.parent.is_symlink() or item['proof'] is not None:
-                            raise ValueError
-                    else:
-                        if item['status'] == 'complete' and _hash(path) != item['sha256']:
-                            raise ValueError
-                        validate_child(phase, item)
-                    unfinished |= item['status'] != 'complete'
-                return record
-            if state.exists() or state.is_symlink():
-                raise ValueError
-            return {**identity, 'phases': {phase: {'status': 'prepared', 'sha256': None, 'proof': None} for phase in _PHASES}}
+            return _runtime_record(request, plan, state, anchor)
 
         def qualify(record: dict[str, Any]) -> None:
             api.qualify(plan=plan, state_dir=state, record=copy.deepcopy(record))
