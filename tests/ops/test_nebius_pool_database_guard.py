@@ -15,6 +15,8 @@ from tests.unit.test_nebius_application_image_renderer import build_inputs as bu
 from tests.unit.test_nebius_management_render import management_inputs as management_inputs
 from tests.unit.test_nebius_platform_render import platform_inputs as platform_inputs
 
+from loom.db.schema_startup import service_schema_head
+
 
 @pytest.fixture
 def database_guard(runtime_inputs, platform_inputs, tmp_path, monkeypatch):
@@ -279,7 +281,7 @@ def test_cutover_database_pages_bind_identity_and_reject_unsafe_receipts(databas
     participant = next(row for row in state.request.registration.spec.participants
         if row.participant_id == state.target.participant_id)
     identity = str(uuid4())
-    report = {'status': 'observed', 'schema_revision': '0175', 'rows': [{
+    report = {'status': 'observed', 'schema_revision': service_schema_head(), 'rows': [{
         'key': 'batch:' + identity, 'source_matches': True, 'origin': {
             'schema_version': 'loom.pool-work-origin.v1', 'data_environment_id': str(participant.environment_id),
             'submission_id': identity, 'kind': 'environment', 'application': None}}]}

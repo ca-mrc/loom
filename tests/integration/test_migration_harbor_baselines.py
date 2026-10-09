@@ -12,19 +12,19 @@ from sqlalchemy.exc import DBAPIError
 def test_baseline_migration_roundtrip_and_evidence_guard(isolated_migration_postgres_url):
     config = Config("database/migrations/alembic.ini")
     config.set_main_option("sqlalchemy.url", isolated_migration_postgres_url)
-    command.downgrade(config, "0174")
+    command.downgrade(config, "0175")
     engine = create_engine(isolated_migration_postgres_url)
     try:
         assert "baseline_session_id" not in {
             column["name"] for column in inspect(engine).get_columns("llm_calls")
         }
-        command.upgrade(config, "0175")
+        command.upgrade(config, "0176")
         assert "baseline_session_id" in {
             column["name"] for column in inspect(engine).get_columns("llm_calls")
         }
-        command.downgrade(config, "0174")
+        command.downgrade(config, "0175")
         assert "harbor_baseline_sessions" not in inspect(engine).get_table_names()
-        command.upgrade(config, "0175")
+        command.upgrade(config, "0176")
         team_id, provider_id, grant_id = uuid4(), uuid4(), uuid4()
         with engine.begin() as connection:
             connection.execute(
@@ -52,9 +52,9 @@ def test_baseline_migration_roundtrip_and_evidence_guard(isolated_migration_post
                 {"id": grant_id, "team": team_id, "provider": provider_id},
             )
         with pytest.raises(DBAPIError, match="retained Harbor baseline evidence"):
-            command.downgrade(config, "0174")
+            command.downgrade(config, "0175")
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0175"
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == "0176"
             assert connection.scalar(text("SELECT count(*) FROM harbor_baseline_sessions")) == 1
     finally:
         engine.dispose()

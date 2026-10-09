@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
+from loom.db.schema_startup import service_schema_head
 from loom_service.environment_management.registry import ManagementError
 from tests.integration.test_nebius_environment_management import (
     environment_registry as environment_registry,
@@ -447,7 +448,7 @@ async def test_upload_database_retains_immutable_identity_and_verified_receipt(e
             ).values(phase="awaiting_source", verified_at=None))
     assert await registry.status(first.upload_id, principal=alice) == verified
     async with factory() as session:
-        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == "0175"
+        assert await session.scalar(text("SELECT version_num FROM alembic_version")) == service_schema_head()
 
 
 async def test_expiry_uses_database_clock_without_erasing_completed_source(environment_registry):
