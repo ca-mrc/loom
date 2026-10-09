@@ -1625,6 +1625,89 @@ async def _execution_event_full_digest(
     return canonical_digest(await _resolve_execution_event_payload(session, event))
 
 
+async def _restore_native_failure_projection(
+    session: AsyncSession, *, lease: ServiceExecutionLease, generation: int,
+) -> bool:
+    """Preserve terminal evidence under the caller's refreshed lease row lock.
+
+    Delivery order and opaque Kubernetes resource versions do not establish
+    lifecycle order. Only retained, same-generation/UID native failures may
+    repair an active projection; event history and the output window are intact.
+    """
+    if (
+        lease.generation != generation
+        or lease.resource_generation != generation
+        or lease.revoked_at is not None
+        or lease.finalized_at is not None
+        or lease.deleted_at is not None
+        or lease.desired_state not in {"create", "start", "finalize"}
+        or lease.observed_state not in {"reserved", "creating", "running", "failed"}
+        or lease.job_uid is None
+    ):
+        return False
+    trial = await session.get(Trial, lease.trial_id, with_for_update=True, populate_existing=True)
+    if (
+        trial is None or trial.attempt_count != lease.attempt
+        or trial.team_id != lease.team_id or trial.state not in {"claimed", "running"}
+    ):
+        return False
+    events = (await session.scalars(
+        select(ServiceExecutionEvent).where(
+            ServiceExecutionEvent.lease_id == lease.id,
+            ServiceExecutionEvent.generation == generation,
+            ServiceExecutionEvent.ordinal <= lease.last_event_ordinal,
+            ServiceExecutionEvent.event_kind == "kubernetes_observed",
+            ServiceExecutionEvent.payload_json["job_uid"].astext == lease.job_uid,
+            or_(
+                ServiceExecutionEvent.payload_json["pod_uid"].astext.is_(None),
+                ServiceExecutionEvent.payload_json["pod_uid"].astext == lease.pod_uid,
+            ),
+            ServiceExecutionEvent.payload_json["normalized_state"].astext.in_(
+                _NATIVE_TERMINAL_FAILURES
+            ),
+        ).order_by(ServiceExecutionEvent.ordinal)
+    )).all()
+    if not events:
+        return False
+    if lease.observed_state == "failed" and lease.error_code in _NATIVE_TERMINAL_FAILURES:
+        return True  # An old duplicate must not replace a more specific diagnosis.
+    diagnostic: dict[str, Any] = {}
+    sandbox_loss = False
+    for event in events:
+        candidate = event.payload_json
+        if sandbox_loss:
+            continue
+        if (
+            candidate.get("normalized_state") == "failed"
+            and candidate.get("reason") == "BackoffLimitExceeded"
+            and candidate.get("pod_uid") is None
+            and lease.pod_uid is not None
+            and diagnostic.get("normalized_state") in _NATIVE_TERMINAL_FAILURES - {"failed"}
+        ):
+            continue
+        diagnostic = candidate
+        sandbox_loss = (
+            lease.pod_uid is not None and candidate.get("pod_uid") == lease.pod_uid
+            and candidate.get("reason") in {"SandboxRestarted", "SandboxTerminated"}
+        )
+    lease.observed_state = "failed"
+    lease.error_code = diagnostic["normalized_state"]
+    lease.error_class = (
+        "transient" if not sandbox_loss and lease.error_code in {"evicted", "node_lost"}
+        else "permanent"
+    )
+    lease.error_message = _bounded_optional_text(diagnostic.get("message"), 2000, "message")
+    from loom.execution_diagnosis_store import read_execution_failure
+
+    diagnosis = await read_execution_failure(session, lease)
+    if diagnosis is not None and diagnosis["reason"] == "oom_killed":
+        lease.error_class, lease.error_code = "permanent", "oom_killed"
+        lease.error_message = diagnosis["message"]
+    lease.updated_at = datetime.now(UTC)
+    await session.flush()
+    return True
+
+
 async def record_execution_event(
     session: AsyncSession,
     *,
@@ -1671,6 +1754,16 @@ async def record_execution_event(
             or await _execution_event_full_digest(session, existing) != payload_digest
         ):
             raise ServiceExecutionConflict("execution event replay changed")
+        if event_kind == "kubernetes_observed" and payload.get("normalized_state") in _NATIVE_TERMINAL_FAILURES:
+            lease = await session.get(
+                ServiceExecutionLease, lease_id, with_for_update=True, populate_existing=True,
+            )
+            if (
+                lease is not None and lease.job_uid is not None
+                and payload.get("job_uid") == lease.job_uid
+                and payload.get("pod_uid") in {None, lease.pod_uid}
+            ):
+                await _restore_native_failure_projection(session, lease=lease, generation=generation)
         SERVICE_EXECUTION_DUPLICATE_DELIVERIES_TOTAL.labels(command_type="event").inc()
         return existing, True
 
@@ -1937,6 +2030,10 @@ async def record_execution_event(
         ):
             lease.pod_terminated_at = lease.pod_started_at
         lease.last_reconciled_at = observed_at
+        preserved_native_failure = (
+            normalized_state in {"absent", "missing", "pending", "unschedulable", "image_pull_backoff", "running"}
+            and await _restore_native_failure_projection(session, lease=lease, generation=generation)
+        )
         # Native sidecars may restart repeatedly before the Pod is removed.
         # Keep the first observed loss for this exact Pod as the attempt cause;
         # later status events still retain their own complete diagnostics.
@@ -1970,7 +2067,9 @@ async def record_execution_event(
                 .limit(1)
             )
         projected_state = observed_states[normalized_state]
-        if first_sandbox_loss is not None and normalized_state not in {"terminating", "deleted"}:
+        if preserved_native_failure or (
+            first_sandbox_loss is not None and normalized_state not in {"terminating", "deleted"}
+        ):
             projected_state = "failed"
         if lease.finalized_at is not None:
             if lease.observed_state == "deleted" or normalized_state == "deleted":
@@ -1980,7 +2079,9 @@ async def record_execution_event(
             else:
                 projected_state = "finalized"
         lease.observed_state = projected_state
-        if first_sandbox_loss is not None:
+        if preserved_native_failure:
+            pass
+        elif first_sandbox_loss is not None:
             lease.error_class = "permanent"
             lease.error_code = first_sandbox_loss.payload_json["normalized_state"]
             lease.error_message = _bounded_optional_text(
