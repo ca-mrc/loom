@@ -124,7 +124,15 @@ def qualify_started_deployment(*, current: dict[str, Any], children: dict[str, A
                 # time as if they were controller admission mutations.
                 if 'nodeName' not in wanted:
                     comparable.pop('nodeName', None)
-                comparable['tolerations'] = copy.deepcopy(wanted.get('tolerations', []))
+                tolerations = comparable.get('tolerations', [])
+                requested = wanted.get('tolerations', [])
+                for key in ('not-ready', 'unreachable'):
+                    default = {'key': 'node.kubernetes.io/' + key, 'operator': 'Exists',
+                        'effect': 'NoExecute', 'tolerationSeconds': 300}
+                    if default not in requested and default in tolerations:
+                        tolerations.remove(default)
+                if tolerations != requested:
+                    raise ValueError
             # Reuse container/default/security qualification, including sidecar
             # rejection; Pod-only scheduler/token defaults are handled above.
             _qualified_defaulted(
