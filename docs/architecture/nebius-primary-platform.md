@@ -2805,6 +2805,18 @@ relaxes build-namespace PSA, starts the gateway or proves sole physical-writer
 authority. Those activation steps must not interfere with staging. The installed
 source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
 remain the operational readiness criteria.
+
+Fresh activation preparation now consumes that completed runtime's own anchor,
+all child journals and exact SQL/catalog proofs. It preserves original resource
+UIDs while projecting the actual completed workload successors; it never
+replays installation or invents migration/retirement history. Build policy and
+binding semantics must equal the fixed renderer, allowing only Kubernetes'
+inert match defaults. An extra condition or selector that could skip enforcement
+is rejected even when recorded child checksums agree. This internal, read-only
+preparation derives gateway grants, its startup target and the build-namespace
+PSA successor. It is not a protected activation command: live sole-writer,
+effective-policy, opening/fencing and installed acceptance remain unconnected.
+
 Authenticated Kubernetes/worker identity and capacity observations remain
 mandatory. Detailed kubelet samples retain the existing optional-telemetry
 contract; unavailable samples are not zero usage or evidence of certificate trust.
