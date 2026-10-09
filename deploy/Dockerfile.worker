@@ -2,7 +2,7 @@ FROM python:3.12-slim
 # Retry transient package-index timeouts during image builds.
 ENV PIP_RETRIES=10 PIP_DEFAULT_TIMEOUT=60
 # Pinned Harbor Terminus2 runtime for the built-in terminus-2 agent.
-ARG HARBOR_COMPAT_SHA=527d50deb63a5d279e8c20593c18a2cbc7f61f9e
+ARG HARBOR_COMPAT_SHA=d5ac1be17f575852eaf4fffc4072fd18481c209b
 WORKDIR /app
 # Worker uses the Docker SDK for Python (the `docker` PyPI package
 # already in pyproject.toml deps) to talk to the host daemon over the
