@@ -905,14 +905,47 @@ def populate_runtime_pods(documents):
                 'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(row)
 
 
+def populate_database_backends(documents):
+    for database in list(documents.values()):
+        if database['kind'] != 'StatefulSet' or database['metadata']['name'] != 'loom-postgres':
+            continue
+        namespace = database['metadata']['namespace']
+        database['metadata']['generation'] = 1
+        database['status'] = {'observedGeneration': 1, 'replicas': 1, 'readyReplicas': 1,
+            'currentReplicas': 1, 'updatedReplicas': 1, 'currentRevision': 'db-rev', 'updateRevision': 'db-rev'}
+        service = documents['/api/v1/namespaces/' + namespace + '/services/loom-postgres']
+        pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'loom-postgres-0', 'namespace': namespace,
+            'uid': str(uuid4()), 'labels': {'app': 'loom-postgres', 'controller-revision-hash': 'db-rev'},
+            'ownerReferences': [{'apiVersion': 'apps/v1', 'kind': 'StatefulSet', 'name': 'loom-postgres',
+                'uid': database['metadata']['uid'], 'controller': True}]},
+            'spec': copy.deepcopy(database['spec']['template']['spec']), 'status': {'phase': 'Running',
+                'podIP': '10.20.0.2', 'podIPs': [{'ip': '10.20.0.2'}],
+                'containerStatuses': [{'name': 'loom-postgres', 'ready': True, 'restartCount': 0}]}}
+        pod['spec'].setdefault('volumes', []).append({'name': 'data',
+            'persistentVolumeClaim': {'claimName': 'data-loom-postgres-0'}})
+        documents.setdefault('/api/v1/namespaces/' + namespace + '/pods', {'apiVersion': 'v1', 'kind': 'PodList',
+            'metadata': {'resourceVersion': '1'}, 'items': []})['items'].append(pod)
+        documents['/apis/discovery.k8s.io/v1/namespaces/' + namespace + '/endpointslices'] = {
+            'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSliceList', 'metadata': {'resourceVersion': '1'},
+            'items': [{'metadata': {'namespace': namespace, 'name': 'loom-postgres-test', 'uid': str(uuid4()),
+                'labels': {'kubernetes.io/service-name': 'loom-postgres'}, 'ownerReferences': [
+                    {'apiVersion': 'v1', 'kind': 'Service', 'name': 'loom-postgres',
+                        'uid': service['metadata']['uid'], 'controller': True}]},
+                'addressType': 'IPv4', 'ports': [{'name': service['spec']['ports'][0]['name'], 'port': 5432}],
+                'endpoints': [{'addresses': ['10.20.0.2'], 'conditions': {'ready': True}, 'targetRef': {
+                    'kind': 'Pod', 'namespace': namespace, 'name': 'loom-postgres-0', 'uid': pod['metadata']['uid']}}]}]}
+
+
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
+@pytest.mark.parametrize('probe_kind', ['settings', 'database'])
 def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_drift(
-        completed_pool, publisher_cloud, handoff, monkeypatch):
+        completed_pool, publisher_cloud, handoff, monkeypatch, probe_kind):
     import hmac
     from types import SimpleNamespace
 
     from scripts.ops import nebius_development_runtime_probes as module
+    from scripts.ops.nebius_pool_migration_guard import _BOUND_DATABASE_COMMAND
     from scripts.ops.nebius_pool_runtime_settings import (
         BOUND_POOL_SETTINGS_COMMAND,
         expected_pool_runtime_settings,
@@ -921,9 +954,20 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = parent.catalog_complete = True
     runtime.install_development_runtime(request=request, api=parent, execute=True)
-    assert hasattr(module.HTTPSDevelopmentRuntimeProbes, 'qualify_runtime_settings'), 'concrete process settings probe is missing'
-    calls, documents, handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
+    method = 'qualify_runtime_' + probe_kind
+    assert hasattr(module.HTTPSDevelopmentRuntimeProbes, method), 'concrete process probe is missing'
+    calls, documents, original_handle = runtime_http_inventory(request, parent, completed_pool[3].server, handoff[2])
     populate_runtime_pods(documents)
+    if probe_kind == 'database':
+        populate_database_backends(documents)
+
+    def handle(message):
+        if message.url.path.endswith('/pods') and message.url.params.get('labelSelector') == 'app=loom-postgres':
+            calls.append(message)
+            listing = copy.deepcopy(documents[message.url.path])
+            listing['items'] = [row for row in listing['items'] if row['metadata']['labels'].get('app') == 'loom-postgres']
+            return httpx.Response(200, json=listing)
+        return original_handle(message)
     spec = request.database.manager.retained.request.registration.spec
     participant, = spec.participants
     machine, = (row for row in spec.machines if row.participant_id == participant.participant_id and row.workload_scope == 'environment')
@@ -935,18 +979,31 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
     def execute(argv, **kwargs):
         commands.append(argv)
         command = argv[argv.index('exec'):]
-        assert command[7:10] == ['python', '-c', BOUND_POOL_SETTINGS_COMMAND]
+        assert command[7:10] == ['python', '-c', BOUND_POOL_SETTINGS_COMMAND if probe_kind == 'settings' else _BOUND_DATABASE_COMMAND]
         component, nonce, response = command[10:]
         namespace = command[2]
         pod_name = command[3].removeprefix('pod/')
         pod, = (row for row in documents['/api/v1/namespaces/' + namespace + '/pods']['items'] if row['metadata']['name'] == pod_name)
         deployment_name = pod_name.removesuffix('-a12b34-test')
-        assert roles[(namespace, deployment_name)] == component
+        role = roles[(namespace, deployment_name)]
+        assert ('service' if role == 'manager' and probe_kind == 'database' else role) == component
         actual = documents['/apis/apps/v1/namespaces/' + namespace + '/deployments/' + deployment_name]
-        wanted = expected_pool_runtime_settings(component, actual,
-            token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
-            catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
-        assert hmac.new(bytes.fromhex(nonce), json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode(), 'sha256').hexdigest() == response
+        if probe_kind == 'settings':
+            wanted = expected_pool_runtime_settings(component, actual,
+                token_sha256=machine.token_sha256 if component in {'controller', 'actuator'} else None,
+                catalog_sha256=hashlib.sha256(spec.profiles.model_dump_json().encode()).hexdigest() if component == 'manager' else None)
+            payload = json.dumps(wanted, sort_keys=True, separators=(',', ':')).encode()
+        else:
+            from pydantic import PostgresDsn
+
+            variable = {'controller': 'LOOM_CP_DB_URL', 'service': 'LOOM_SVC_DB_URL', 'actuator': 'LOOM_EXECUTION_ACTUATOR_DB_URL'}[component]
+            entry, = (row for row in actual['spec']['template']['spec']['containers'][0]['env'] if row['name'] == variable)
+            reference = entry['valueFrom']['secretKeyRef']
+            secret = documents['/api/v1/namespaces/' + namespace + '/secrets/' + reference['name']]
+            url = base64.b64decode(secret['data'][reference['key']]).decode()
+            payload = (url if component == 'actuator' else str(PostgresDsn(url))).encode()
+            assert url not in str(argv)
+        assert hmac.new(bytes.fromhex(nonce), payload, 'sha256').hexdigest() == response
         if mode['damage'] == 'pod-replaced':
             pod['metadata']['uid'] = str(uuid4())
         elif mode['damage'] == 'process-restarted':
@@ -964,20 +1021,20 @@ def test_runtime_process_settings_challenge_uses_actual_owned_pod_and_rejects_dr
             connection.client.close()
             connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
         for namespace, name in roles:
-            probes.qualify_runtime_settings(key='Deployment:' + namespace + ':' + name, state_dir=state)
+            getattr(probes, method)(key='Deployment:' + namespace + ':' + name, state_dir=state)
         assert len(commands) == 4
         assert len({row[-2] for row in commands}) == 4
         manager_key = 'Deployment:' + request.database.manager.retained.request.retained.binding.namespace + ':loom-service'
         for damage in ('pod-replaced', 'process-restarted', 'controller-lag', 'report'):
             original = copy.deepcopy(documents)
             mode['damage'] = damage
-            with pytest.raises(ValueError, match='development runtime process settings unqualified'):
-                probes.qualify_runtime_settings(key=manager_key, state_dir=state)
+            with pytest.raises(ValueError, match='development runtime process ' + probe_kind + ' unqualified'):
+                getattr(probes, method)(key=manager_key, state_dir=state)
             documents.clear()
             documents.update(original)
         count = len(commands)
         with pytest.raises(ValueError):
-            probes.qualify_runtime_settings(key='Deployment:loom-staging:loom-service', state_dir=state)
+            getattr(probes, method)(key='Deployment:loom-staging:loom-service', state_dir=state)
         assert len(commands) == count
     assert calls and all(row.method == 'GET' for row in calls)
 
