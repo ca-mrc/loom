@@ -157,8 +157,9 @@ async def test_cancelled_build_drains_worker_and_closes_result(
 
 
 @pytest.mark.parametrize('failure', [asyncio.CancelledError, RuntimeError])
-async def test_response_send_failure_closes_archive_before_first_body_read(
-    monkeypatch: pytest.MonkeyPatch, failure: type[BaseException],
+@pytest.mark.parametrize('failure_at', ['http.response.start', 'http.response.body'])
+async def test_response_send_failure_closes_archive(
+    monkeypatch: pytest.MonkeyPatch, failure: type[BaseException], failure_at: str,
 ) -> None:
     body = io.BytesIO(b'archive')
     archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
@@ -168,13 +169,14 @@ async def test_response_send_failure_closes_archive_before_first_body_read(
     async def receive() -> Any:
         return {'type': 'http.disconnect'}
 
-    async def send(_message: Any) -> None:
-        raise failure()
+    async def send(message: Any) -> None:
+        if message['type'] == failure_at:
+            raise failure()
 
     try:
         with pytest.raises(failure):
             await response({'type': 'http', 'asgi': {'spec_version': '2.4'}}, receive, send)
-        assert body.closed, 'response failed before its iterator could close the spool'
+        assert body.closed, 'response failure leaked its spool'
     finally:
         body.close()
 
@@ -227,3 +229,52 @@ async def test_response_cancellation_drains_active_spool_read(monkeypatch: pytes
     assert first_cancel_drained and second_cancel_drained, 'response abandoned an active spool read'
     assert not body.closed_while_reading, 'response closed the spool while its worker was reading'
     assert body.closed
+
+
+@pytest.mark.parametrize('disconnect', [False, True])
+async def test_response_completion_and_disconnect_close_spool(
+    monkeypatch: pytest.MonkeyPatch, disconnect: bool,
+) -> None:
+    body = io.BytesIO(b'archive')
+    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
+    monkeypatch.setattr(trials, 'build_canonical_trial_bundle_archive', lambda **_kwargs: archive)
+    response = await trials.download_trial_bundle(*_route_arguments(monkeypatch))
+    first_chunk = asyncio.Event()
+    chunks = []
+
+    async def receive() -> Any:
+        await first_chunk.wait()
+        return {'type': 'http.disconnect'}
+
+    async def send(message: Any) -> None:
+        if message['type'] == 'http.response.body':
+            chunks.append(message['body'])
+            first_chunk.set()
+            if disconnect:
+                await asyncio.Event().wait()
+
+    try:
+        version = '2.0' if disconnect else '2.4'
+        await response({'type': 'http', 'asgi': {'spec_version': version}}, receive, send)
+        assert b''.join(chunks) == b'archive'
+        assert body.closed
+    finally:
+        body.close()
+
+
+async def test_cancelled_build_closes_result_already_completed(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = io.BytesIO(b'archive')
+    archive = ArchiveBuildResult(body=body, size_bytes=7, sha256='0' * 64)
+
+    async def finish_then_cancel(*_args: Any, **_kwargs: Any) -> ArchiveBuildResult:
+        asyncio.get_running_loop().call_soon(task.cancel)
+        return archive
+
+    monkeypatch.setattr(trials.asyncio, 'to_thread', finish_then_cancel)
+    task = asyncio.create_task(trials.download_trial_bundle(*_route_arguments(monkeypatch)))
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert body.closed
+    finally:
+        body.close()

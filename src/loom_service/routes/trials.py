@@ -20,11 +20,12 @@ with legacy `Trial.config["agent"]` fallback for older rows.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
+from anyio import CancelScope
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -1074,14 +1075,35 @@ async def get_trial(
     return base
 
 
-def _trial_bundle_body(archive: ArchiveBuildResult) -> Iterator[bytes]:
+async def _drain_bundle_worker(worker: asyncio.Task[Any]) -> None:
+    # Starlette disconnects use level cancellation; raw task.cancel() can recur
+    # independently. Shield both while the thread still owns the spool.
+    with CancelScope(shield=True):
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+    if not worker.cancelled():
+        worker.exception()  # Retrieve a failure without masking cancellation.
+
+
+async def _trial_bundle_body(archive: ArchiveBuildResult) -> AsyncIterator[bytes]:
     try:
-        while chunk := archive.body.read(1024 * 1024):
+        while True:
+            worker = asyncio.create_task(asyncio.to_thread(archive.body.read, 1024 * 1024))
+            try:
+                chunk = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                await _drain_bundle_worker(worker)
+                raise
+            if not chunk:
+                break
             yield chunk
     finally:
-        close = getattr(archive.body, "close", None)
-        if callable(close):
-            close()
+        archive.body.close()
 
 
 async def _build_trial_bundle(client: Any, bundle: CanonicalTrialBundle) -> ArchiveBuildResult:
@@ -1093,13 +1115,7 @@ async def _build_trial_bundle(client: Any, bundle: CanonicalTrialBundle) -> Arch
     except asyncio.CancelledError:
         # Thread cancellation cannot interrupt storage reads or compression.
         # Retain ownership until the worker stops, including repeated cancellation.
-        while not worker.done():
-            try:
-                await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
+        await _drain_bundle_worker(worker)
         if not worker.cancelled() and worker.exception() is None:
             worker.result().body.close()
         raise
