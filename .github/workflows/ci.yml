@@ -127,6 +127,7 @@ jobs:
       staging_smoke: ${{ steps.plan.outputs.staging_smoke || steps.event.outputs.staging_smoke }}
       coverage_summary: ${{ steps.plan.outputs.coverage_summary || steps.event.outputs.coverage_summary }}
       web_checks: ${{ steps.plan.outputs.web_checks || steps.event.outputs.web_checks }}
+      lint_and_static: ${{ steps.plan.outputs.lint_and_static || steps.event.outputs.lint_and_static }}
       tests_root: ${{ steps.plan.outputs.tests_root || steps.event.outputs.tests_root }}
       tests_packages: ${{ steps.plan.outputs.tests_packages || steps.event.outputs.tests_packages }}
       go_checks: ${{ steps.plan.outputs.go_checks || steps.event.outputs.go_checks }}
@@ -162,6 +163,7 @@ jobs:
               echo 'staging_smoke=false'
               echo 'coverage_summary=false'
               echo 'web_checks=false'
+              echo 'lint_and_static=false'
               echo 'tests_root=false'
               echo 'tests_packages=false'
               echo 'go_checks=false'
@@ -317,7 +319,7 @@ jobs:
     needs: [workflow-plan]
     timeout-minutes: 12
     if: >-
-      needs.workflow-plan.outputs.docs_only != 'true' &&
+      needs.workflow-plan.outputs.lint_and_static == 'true' &&
       needs.workflow-plan.outputs.gate_mode == 'full'
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -1237,6 +1239,7 @@ jobs:
           PLAN_RESULT: ${{ needs.workflow-plan.result }}
           GATE_MODE: ${{ needs.workflow-plan.outputs.gate_mode }}
           LINT_RESULT: ${{ needs.lint-and-static.result }}
+          LINT_SELECTED: ${{ needs.workflow-plan.outputs.lint_and_static }}
           LOCKED_SELECTED: ${{ needs.workflow-plan.outputs.locked_environments }}
           LOCKED_RESULT: ${{ needs.locked-environments.result }}
           ROOT_SELECTED: ${{ needs.workflow-plan.outputs.tests_root }}
@@ -1294,6 +1297,7 @@ jobs:
             fi
           }
           require_boolean go_checks "$GO_SELECTED"
+          require_boolean lint_and_static "$LINT_SELECTED"
           require_boolean docs_only "$DOCS_ONLY"
           require_boolean integration "$INTEGRATION_SELECTED"
           require_boolean integration_docker "$DOCKER_SELECTED"
@@ -1305,11 +1309,7 @@ jobs:
           require_boolean tests_packages "$PACKAGES_SELECTED"
           require_boolean runtime_payload "$PAYLOAD_SELECTED"
           require_boolean nebius_iac "$IAC_SELECTED"
-          if [[ "$DOCS_ONLY" == "true" ]]; then
-            require_selected false lint-and-static "$LINT_RESULT"
-          else
-            require_success lint-and-static "$LINT_RESULT"
-          fi
+          require_selected "$LINT_SELECTED" lint-and-static "$LINT_RESULT"
           require_selected "$LOCKED_SELECTED" locked-environments "$LOCKED_RESULT"
           require_selected "$ROOT_SELECTED" tests-root "$ROOT_RESULT"
           require_selected "$PACKAGES_SELECTED" tests-packages "$PACKAGES_RESULT"
