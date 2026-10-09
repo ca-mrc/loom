@@ -62,6 +62,26 @@ def test_runtime_readiness_proves_actual_owned_pod_and_all_replicasets(running):
     assert observe(running) is True
 
 
+def test_runtime_readiness_accepts_scheduler_defaults_and_exact_service_account_projection(running):
+    controller, _, replica, pod = running
+    for row in (controller, replica):
+        row['spec']['template']['spec']['tolerations'] = []
+    pod['spec']['nodeName'] = 'development-platform-node'
+    pod['spec']['tolerations'] = [{'key': 'node.kubernetes.io/' + key, 'operator': 'Exists',
+        'effect': 'NoExecute', 'tolerationSeconds': 300} for key in ('not-ready', 'unreachable')]
+    pod['spec']['volumes'] = [{'name': 'kube-api-access-abc12', 'projected': {'defaultMode': 420, 'sources': [
+        {'serviceAccountToken': {'expirationSeconds': 3607, 'path': 'token'}},
+        {'configMap': {'name': 'kube-root-ca.crt', 'items': [{'key': 'ca.crt', 'path': 'ca.crt'}]}},
+        {'downwardAPI': {'items': [{'path': 'namespace', 'fieldRef': {'apiVersion': 'v1', 'fieldPath': 'metadata.namespace'}}]}},
+    ]}}]
+    pod['spec']['containers'][0]['volumeMounts'] = [{'name': 'kube-api-access-abc12', 'readOnly': True,
+        'mountPath': '/var/run/secrets/kubernetes.io/serviceaccount'}]
+    assert observe(running) is True
+    pod['spec']['volumes'][0]['projected']['sources'][1]['configMap']['name'] = 'foreign-trust'
+    with pytest.raises(ValueError, match='development runtime workload readiness unqualified'):
+        observe(running)
+
+
 @pytest.mark.parametrize('damage', ['controller-lag', 'replica-lag', 'old-pod', 'terminating-pod', 'unready', 'pending'])
 def test_runtime_readiness_waits_for_complete_current_rollout(running, damage):
     controller, collections, replica, pod = running
