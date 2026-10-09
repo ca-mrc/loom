@@ -267,3 +267,54 @@ def test_activation_preparation_limits_writes_to_retained_gateway_and_build_name
         'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}
     assert plan.input_digest.startswith('sha256:')
     assert not any(key in plan.authority for key in plan.runtime.resources)
+
+
+@pytest.mark.parametrize('damage', ['skip-policy', 'skip-binding', 'unbound-parameters'])
+def test_activation_refuses_semantically_widened_build_policy_receipt(completed_runtime, damage):
+    _, request, _, state, _ = completed_runtime
+    from scripts.ops.nebius_development_activation import prepare_development_activation
+
+    path = state / 'isolation/stage.json'
+    child = json.loads(path.read_bytes())
+    kind = 'ValidatingAdmissionPolicyBinding' if damage == 'skip-binding' else 'ValidatingAdmissionPolicy'
+    item = next(row for row in child['resources'].values() if row['desired']['kind'] == kind)
+    for field in ('expected', 'observed'):
+        spec = item[field]['spec']
+        if damage == 'skip-policy':
+            spec['matchConditions'] = [{'name': 'skip-all-builds', 'expression': 'false'}]
+        elif damage == 'skip-binding':
+            spec['matchResources']['namespaceSelector']['matchExpressions'] = [
+                {'key': 'loom.nebius/never-present', 'operator': 'Exists'}]
+        else:
+            spec['paramKind'] = {'apiVersion': 'v1', 'kind': 'ConfigMap'}
+    private_state._atomic_json(path, child)
+    parent = json.loads((state / 'installation.json').read_bytes())
+    parent['phases']['isolation']['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    private_state._atomic_json(state / 'installation.json', parent)
+    with pytest.raises(ValueError, match='development activation intent unqualified'):
+        prepare_development_activation(request)
+
+
+def test_activation_accepts_only_harmless_kubernetes_policy_defaults(completed_runtime):
+    _, request, _, state, _ = completed_runtime
+    from scripts.ops.nebius_development_activation import prepare_development_activation
+
+    path = state / 'isolation/stage.json'
+    child = json.loads(path.read_bytes())
+    for item in child['resources'].values():
+        kind = item['desired']['kind']
+        if kind not in {'ValidatingAdmissionPolicy', 'ValidatingAdmissionPolicyBinding'}:
+            continue
+        for field in ('expected', 'observed'):
+            # Kubernetes v1 SetDefaults_MatchResources, not arbitrary additions.
+            match = item[field]['spec']['matchConstraints' if kind == 'ValidatingAdmissionPolicy' else 'matchResources']
+            match.setdefault('namespaceSelector', {})
+            match.setdefault('objectSelector', {})
+            match.setdefault('matchPolicy', 'Equivalent')
+    private_state._atomic_json(path, child)
+    parent = json.loads((state / 'installation.json').read_bytes())
+    parent['phases']['isolation']['sha256'] = hashlib.sha256(path.read_bytes()).hexdigest()
+    private_state._atomic_json(state / 'installation.json', parent)
+    plan = prepare_development_activation(request)
+    assert len(plan.build_policy) == 2
+    assert plan.build_namespace_target['metadata']['labels']['pod-security.kubernetes.io/enforce'] == 'privileged'
