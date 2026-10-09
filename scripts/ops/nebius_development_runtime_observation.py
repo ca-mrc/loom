@@ -92,7 +92,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             raise ValueError
         return result
 
-    def inspect(self, *, state_dir: Path) -> dict[str, dict[str, Any]]:
+    def inspect(self, *, state_dir: Path, _prechild_phase: str | None = None) -> dict[str, dict[str, Any]]:
         """Exact namespace/storage/material roots with recorded workload successors.
 
         Never require a replaced API/manager to equal its old template. All
@@ -103,8 +103,9 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             database, manager = self.request.database, self.manager.retained
             foundation = database.foundation
             anchor = Path(manager.operation['anchor_dir'])
-            record = _runtime_record(self.request, self.plan, state_dir, anchor)
-            choices = runtime_workload_options(request=self.request, state_dir=state_dir)
+            record = _runtime_record(self.request, self.plan, state_dir, anchor, _prechild_phase=_prechild_phase)
+            choices = runtime_workload_options(request=self.request, state_dir=state_dir,
+                _prechild_phase=_prechild_phase, _plan=self.plan)
             # Reuse only namespace/storage predicates from the predecessor APIs,
             # never their original-only workload/readiness verification.
             HTTPSManagementStageAPI.verify_identity(self.manager, manager.binding)
@@ -144,7 +145,7 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
             for document in database.manager.retained.resources.values():
                 add(document, _uid(document))
             for phase in self.plan.fixed:
-                if record['phases'][phase]['status'] != 'prepared':
+                if record['phases'][phase]['status'] != 'prepared' and phase != _prechild_phase:
                     for item in _read(_child_path(state_dir, phase))['resources'].values():
                         if item['status'] == 'created':
                             add(item['observed'], item['uid'])
@@ -157,8 +158,9 @@ class HTTPSDevelopmentRuntimeObserver(ManagementKubernetesTransport):
                 if not any(_matches(actual, expected, _uid(expected)) for expected in options):
                     raise ValueError
                 observed[key] = actual
-            if (_runtime_record(self.request, self.plan, state_dir, anchor) != record
-                    or runtime_workload_options(request=self.request, state_dir=state_dir) != choices):
+            if (_runtime_record(self.request, self.plan, state_dir, anchor, _prechild_phase=_prechild_phase) != record
+                    or runtime_workload_options(request=self.request, state_dir=state_dir,
+                        _prechild_phase=_prechild_phase, _plan=self.plan) != choices):
                 raise ValueError
             self._private_inputs()
             return observed

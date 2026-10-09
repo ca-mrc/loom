@@ -2773,14 +2773,35 @@ to service/control-plane/gateway passwords. A single transaction binds its
 operation, database identity and token digest to the role. Replay authenticates
 the retained password and checks the exact current grants and token; it never
 rotates credentials or repairs drift. Delegable/default grants are rejected.
-This is a runtime-installation primitive, not a protected delivery entry or live
-readiness evidence; its caller must qualify the dev database and retain material
-before delivering the fixed Job.
+The protected closed-runtime parent delivers this fixed Job only after qualifying
+the dev database and retained private material. The primitive itself is not
+installed readiness evidence.
+
+The independent closed-runtime parent consumes the completed pool and original
+foundation/manager histories. Its protected entry freezes exact source-bound
+publication, fresh material and every fixed target before writes. Child resource
+creation and UID/resourceVersion/spec-checked transitions requalify the same
+namespace, storage, material and closed database bindings. Read-only IAM checks
+keep the tenant-viewer collector and registry-only publisher separate; a native
+pool read uses the actual collector credential. It neither publishes capacity nor
+creates cloud grants. Each durable phase checks current publication/cloud
+authority; repeated resource observations reuse the frozen plan while rechecking
+private bytes and live identities.
+
+SQL/catalog completion requires an exact owned successful Job/Pod and bounded
+receipt. Running manager, service, control-plane and actuator processes prove
+their typed settings and namespace-local database URLs through nonce-bound
+challenges. Pod replacement, restart, controller lag or a changed database route
+invalidates the observation. Anchored successor history permits interrupted
+transition readback without requiring replaced templates to match the original
+installer forever. A missing child journal after restart remains an error.
 
 `development_pool_installed_closed` means only that this stopped installation is
-retained and qualified. Catalog-bound manager/participant successors, build
-isolation and read grants, a qualified observer and sole physical-writer authority
-are still required before admission and runtime activation. The installed
+retained and qualified. `development_runtime_installed_closed` additionally
+qualifies the catalog-bound manager/participant successors, fixed build isolation,
+read grants and collector identity. Neither receipt grants Job-write authority,
+relaxes build-namespace PSA, starts the gateway or proves sole physical-writer
+authority. Those activation steps must not interfere with staging. The installed
 source-to-build-to-deploy-to-task/result and concurrent-owner acceptance tests
 remain the operational readiness criteria.
 

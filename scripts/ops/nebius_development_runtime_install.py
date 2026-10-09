@@ -261,13 +261,13 @@ def _validate_runtime_child(request: DevelopmentRuntimeInstallRequest, plan: Dev
             raise ValueError
         if phase in {'database', 'catalog'}:
             validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
-            validator(request.database, state / phase, item['proof'])
+            validator(request.database, state / phase, item['proof'], _documents=plan.fixed[phase])
     elif item['proof'] is not None:
         raise ValueError
 
 
 def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: DevelopmentRuntimePlan,
-                    state: Path, anchor: Path) -> dict[str, Any]:
+                    state: Path, anchor: Path, *, _prechild_phase: str | None = None) -> dict[str, Any]:
     manager = request.database.manager.retained.request.retained
     if (state != Path(manager.operation['state_dir']).parent / 'runtime-installation'
             or anchor != Path(manager.operation['anchor_dir'])
@@ -276,12 +276,20 @@ def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: Development
     identity = {'schema': 'loom.nebius-development-runtime-install.v1',
         'operation_id': str(request.database.operation_id), 'state_dir': str(state), 'input_digest': plan.input_digest}
     marker = anchor / 'runtime-installation.json'
+    if _prechild_phase is not None:
+        if _prechild_phase not in _PHASES or not marker.exists():
+            raise ValueError
+        child = _child_path(state, _prechild_phase)
+        if child.exists() or child.is_symlink() or child != child.resolve():
+            raise ValueError
     if marker.exists() or marker.is_symlink():
         if _read(marker) != identity:
             raise ValueError
         record = _read(state / 'installation.json')
         if (set(record) != {*identity, 'phases'} or any(record[key] != value for key, value in identity.items())
                 or set(record['phases']) != set(_PHASES)):
+            raise ValueError
+        if _prechild_phase is not None and record['phases'][_prechild_phase]['status'] != 'started':
             raise ValueError
         unfinished = False
         for phase in _PHASES:
@@ -298,7 +306,16 @@ def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: Development
             else:
                 if item['status'] == 'complete' and _hash(path) != item['sha256']:
                     raise ValueError
-                _validate_runtime_child(request, plan, state, phase, item)
+                if (phase == _prechild_phase and item['status'] == 'started'
+                        and not path.exists() and not path.is_symlink()):
+                    # Only the connected parent's same-invocation prepared→started
+                    # frame may select this GET-only observation window. Resuming
+                    # installation never passes this option.
+                    if item['proof'] is not None or (path.parent.exists()
+                            and any(item.name != 'operation.lock' for item in path.parent.iterdir())):
+                        raise ValueError
+                else:
+                    _validate_runtime_child(request, plan, state, phase, item)
             unfinished |= item['status'] != 'complete'
         return record
     if state.exists() or state.is_symlink():
@@ -307,7 +324,8 @@ def _runtime_record(request: DevelopmentRuntimeInstallRequest, plan: Development
 
 
 def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
-                             state_dir: Path) -> dict[str, tuple[dict[str, Any], ...]]:
+                             state_dir: Path, _prechild_phase: str | None = None,
+                             _plan: DevelopmentRuntimePlan | None = None) -> dict[str, tuple[dict[str, Any], ...]]:
     """Read anchored original-or-successor options without replaying any phase.
 
     Ambiguous writes retain both sides for observation only: this never grants a
@@ -316,14 +334,18 @@ def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
     frame until the first child journal exists; this reader cannot resume it.
     """
     try:
-        plan = prepare_runtime_install(request)
+        # The connected observer owns an already-frozen plan and rechecks every
+        # private input pin on each read. Re-rendering that same plan twice per
+        # observation recursively reloads all prior installation histories.
+        plan = prepare_runtime_install(request) if _plan is None else _plan
         anchor = Path(request.database.manager.retained.request.retained.operation['anchor_dir'])
-        record = _runtime_record(request, plan, state_dir, anchor)
-        paths = {_child_path(state_dir, phase) for phase, item in record['phases'].items() if item['status'] != 'prepared'}
+        record = _runtime_record(request, plan, state_dir, anchor, _prechild_phase=_prechild_phase)
+        paths = {_child_path(state_dir, phase) for phase, item in record['phases'].items()
+            if item['status'] != 'prepared' and phase != _prechild_phase}
         hashes = {path: _hash(path) for path in paths}
         result: dict[str, tuple[dict[str, Any], ...]] = {key: (copy.deepcopy(row),) for key, row in plan.originals.items()}
         for phase in _PHASES:
-            if record['phases'][phase]['status'] == 'prepared':
+            if record['phases'][phase]['status'] == 'prepared' or phase == _prechild_phase:
                 continue
             child = _read(_child_path(state_dir, phase))
             if phase == 'workloads':
@@ -343,7 +365,7 @@ def runtime_workload_options(*, request: DevelopmentRuntimeInstallRequest,
                         expected = copy.deepcopy(item['expected'])
                         expected['metadata']['uid'] = _uid(original)
                         result[key] = (expected,) if item['status'] == 'applied' else (original, expected)
-        if (_runtime_record(request, plan, state_dir, anchor) != record
+        if (_runtime_record(request, plan, state_dir, anchor, _prechild_phase=_prechild_phase) != record
                 or any(_hash(path) != value for path, value in hashes.items())):
             raise ValueError
         return result
@@ -373,7 +395,8 @@ or requiring superseded original workloads to remain installed forever.
         identity = {'schema': 'loom.nebius-development-runtime-install.v1',
             'operation_id': str(request.database.operation_id), 'state_dir': str(state), 'input_digest': plan.input_digest}
         base = {'operation_id': identity['operation_id'], 'installation_id': manager.binding.installation_id,
-            'namespace': manager.binding.namespace, 'admission_open': False, 'writer_migration_complete': False}
+            'namespace': manager.binding.namespace, 'pool_id': str(request.database.manager.retained.request.registration.spec.pool_id),
+            'admission_open': False, 'writer_migration_complete': False}
 
         def validate_child(phase: str, item: dict[str, Any]) -> None:
             _validate_runtime_child(request, plan, state, phase, item)
@@ -416,7 +439,7 @@ or requiring superseded original workloads to remain installed forever.
                             qualify(record)
                             return {**base, 'status': 'pending_' + phase}
                         validator = validate_database_runtime_proof if phase == 'database' else validate_catalog_runtime_proof
-                        validator(request.database, state / phase, proof)
+                        validator(request.database, state / phase, proof, _documents=plan.fixed[phase])
                 else:
                     before, targets = runtime_transition_inputs(plan, state, phase)
                     if not advance_runtime_workloads(originals=before, targets=targets, input_digest=plan.input_digest,

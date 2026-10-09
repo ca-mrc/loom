@@ -1102,6 +1102,13 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
         assert runtime.install_development_runtime(request=request, api=api, execute=False)['status'] == 'development_runtime_preflight_qualified'
         assert calls and cloud_reads and executions and not writes and not state.exists()
+        selected = documents['/api/v1/namespaces/loom-dev']
+        original_uid = selected['metadata']['uid']
+        selected['metadata']['uid'] = str(uuid4())
+        with pytest.raises(ValueError, match='development runtime installation unqualified'):
+            runtime.install_development_runtime(request=request, api=api, execute=True)
+        assert not writes and not state.exists()
+        selected['metadata']['uid'] = original_uid
         assert runtime.install_development_runtime(request=request, api=api, execute=True)['status'] == 'pending_database'
         assert len(writes) == 4 and all(row['kind'] in {'Secret', 'ConfigMap', 'Job'} for row in writes)
     # A new process can observe the pending Job but must not repeat any writes.
@@ -1140,6 +1147,7 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
         result = runtime.install_development_runtime(request=request, api=api, execute=True)
         assert result['status'] == 'development_runtime_installed_closed'
+        assert result['pool_id'] == str(spec.pool_id)
         assert result['admission_open'] is result['writer_migration_complete'] is False
     before = len(writes)
     with module.HTTPSDevelopmentRuntimeAPI(**arguments) as api:
@@ -1150,7 +1158,7 @@ def test_concrete_runtime_parent_qualifies_before_writes_and_resumes_pending_sql
 
 @pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
 @pytest.mark.parametrize('retained', [False], indirect=True)
-def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff):
+def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff, monkeypatch):
     runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
     parent.database_complete = True
     assert runtime.install_development_runtime(request=request, api=parent, execute=True)['status'] == 'pending_catalog'
@@ -1170,6 +1178,12 @@ def test_runtime_observer_checks_retained_data_and_successors_without_replaying_
         assert len(result) == 5
         assert result['Deployment:loom-dev:loom-control-plane']['spec']['replicas'] == 1
         assert result['Deployment:loom-dev:loom-service']['spec']['replicas'] == 0
+        # The observer has frozen its source-derived plan. Local proof checks
+        # must re-read/validate child bytes, not recursively re-render old installs.
+        from scripts.ops import nebius_development_runtime_setup
+        monkeypatch.setattr(nebius_development_runtime_setup, 'database_runtime_documents',
+            lambda *_: pytest.fail('read-only observation re-rendered the frozen plan'))
+        assert observer.inspect(state_dir=state) == result
         for path, field in (('/api/v1/namespaces/loom-dev/secrets/loom-platform-auth', 'data'),
                 ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'uid'),
                 ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'original'),

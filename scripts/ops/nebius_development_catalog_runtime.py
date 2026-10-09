@@ -99,7 +99,7 @@ def stage_catalog_runtime(*, request: DevelopmentDatabaseRuntime, api: Managemen
 
 
 def validate_catalog_runtime_proof(request: DevelopmentDatabaseRuntime, state_dir: Path,
-                                   proof: Any) -> None:
+                                   proof: Any, *, _documents: dict[str, dict[str, Any]] | None = None) -> None:
     """Bind the catalog receipt to the exact completed child stage and request.
 
     The connected HTTPS reader must independently prove the live Job/sole Pod,
@@ -107,7 +107,7 @@ def validate_catalog_runtime_proof(request: DevelopmentDatabaseRuntime, state_di
     This structural check grants neither activation nor live-readback authority.
     """
     try:
-        documents = catalog_runtime_documents(request)
+        documents = catalog_runtime_documents(request) if _documents is None else _documents
         record = _json(private_state._private_read(state_dir / 'stage.json', limit=4 * 1024**2))
         _validate_record(record, {'schema': 'loom.nebius-management-stage.v1',
             'binding': asdict(request.manager.retained.request.retained.binding),
