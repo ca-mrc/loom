@@ -702,6 +702,63 @@ def test_runtime_live_options_preserve_both_sides_of_uncertain_patch_without_ret
     assert api.transition.patches == patches
 
 
+@pytest.mark.parametrize('manager_entry', ['foundation-runtime-build-material'], indirect=True)
+@pytest.mark.parametrize('retained', [False], indirect=True)
+def test_runtime_observer_checks_retained_data_and_successors_without_replaying_originals(completed_pool, publisher_cloud, handoff):
+    runtime, request, parent, state, _ = parent_install_fixture(completed_pool, publisher_cloud)
+    parent.database_complete = True
+    assert runtime.install_development_runtime(request=request, api=parent, execute=True)['status'] == 'pending_catalog'
+    name = 'scripts.ops.nebius_development_runtime_observation'
+    if importlib.util.find_spec(name) is None:
+        pytest.fail('phase-aware HTTPS runtime observation is missing')
+    module = importlib.import_module(name)
+    foundation, pool = handoff[2], completed_pool[3].server
+    calls, documents = [], {}
+    plurals = {'Secret': 'secrets', 'ConfigMap': 'configmaps', 'Namespace': 'namespaces',
+        'ServiceAccount': 'serviceaccounts', 'Service': 'services', 'StatefulSet': 'statefulsets',
+        'Deployment': 'deployments', 'Job': 'jobs', 'CronJob': 'cronjobs', 'NetworkPolicy': 'networkpolicies',
+        'Role': 'roles', 'RoleBinding': 'rolebindings', 'ClusterRole': 'clusterroles', 'ClusterRoleBinding': 'clusterrolebindings',
+        'Ingress': 'ingresses', 'ResourceQuota': 'resourcequotas', 'LimitRange': 'limitranges',
+        'PersistentVolume': 'persistentvolumes', 'PersistentVolumeClaim': 'persistentvolumeclaims',
+        'ValidatingAdmissionPolicy': 'validatingadmissionpolicies', 'ValidatingAdmissionPolicyBinding': 'validatingadmissionpolicybindings'}
+    for row in (*pool.store.resources.values(), *foundation.stage.resources.values(),
+            *foundation.bootstrap.secrets.values(), foundation.bootstrap.namespace, *pool.namespaces.values(),
+            *request.database.manager.retained.resources.values(), *parent.store.resources.values()):
+        prefix = '/api/v1' if row['apiVersion'] == 'v1' else '/apis/' + row['apiVersion']
+        namespace = row['metadata'].get('namespace')
+        path = prefix + ('/namespaces/' + namespace if namespace else '') + '/' + plurals[row['kind']] + '/' + row['metadata']['name']
+        documents[path] = copy.deepcopy(row)
+    def handle(message):
+        calls.append(message)
+        assert message.method == 'GET' and '/namespaces/loom-staging/' not in message.url.path
+        if message.url.path in documents:
+            return httpx.Response(200, json=documents[message.url.path])
+        if message.url.path in {'/api/v1/namespaces/kube-system', '/api/v1/namespaces/loom-nebius-management-dev'}:
+            return pool.handle(message)
+        return httpx.Response(404)
+    with module.HTTPSDevelopmentRuntimeObserver(request=request,
+            api_server=request.database.foundation.inputs.config['kubernetes_api_server'],
+            ssl_context=ssl.create_default_context()) as observer:
+        for connection in (observer, observer.manager, observer.foundation):
+            connection.client.close()
+            connection.client = type(completed_pool[3].api.client)(base_url=connection.api_server, transport=httpx.MockTransport(handle))
+        result = observer.inspect(state_dir=state)
+        assert len(result) == 5
+        assert result['Deployment:loom-dev:loom-control-plane']['spec']['replicas'] == 1
+        assert result['Deployment:loom-dev:loom-service']['spec']['replicas'] == 0
+        for path, field in (('/api/v1/namespaces/loom-dev/secrets/loom-platform-auth', 'data'),
+                ('/apis/apps/v1/namespaces/loom-dev/deployments/loom-control-plane', 'uid')):
+            original = copy.deepcopy(documents[path])
+            if field == 'data':
+                documents[path]['data']['secret-store-master-key'] = 'Y2hhbmdlZA=='
+            else:
+                documents[path]['metadata']['uid'] = str(uuid4())
+            with pytest.raises(ValueError, match='development runtime live inventory unqualified'):
+                observer.inspect(state_dir=state)
+            documents[path] = original
+    assert calls and all(row.method == 'GET' for row in calls)
+
+
 def runtime_resources_api(request, phase, qualifier):
     name = 'scripts.ops.nebius_development_runtime_live'
     if importlib.util.find_spec(name) is None:
